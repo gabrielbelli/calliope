@@ -210,7 +210,16 @@ body{margin:0;background:var(--panel);color:var(--ink);
   font:var(--t-body)/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   font-optical-sizing:auto;
   min-height:100svh;display:flex;flex-direction:column;
-  justify-content:safe center}
+  justify-content:flex-start}
+/* THE MASTHEAD USED TO BE CENTRED WITH THE PANEL, so it moved whenever the
+   panel's height changed: the lamp sat at y=104 on Speak, 179 on Transcribe,
+   254 on Jobs, 275 on Vocabulary -- a 171px jump from switching tab, at one
+   width. Opening a disclosure moved it too. The mark and the page's title are
+   the two things that must not move, because they are what the eye returns to.
+   An auto margin on the panel absorbs the slack instead, and resolves to 0 the
+   moment free space goes negative -- so a tall panel still top-aligns and
+   still scrolls, which is exactly the `safe` behaviour this replaces. */
+main.wrap{margin-block:auto}
 /* width:100% IS NOT REDUNDANT BESIDE max-width AND margin:0 auto, and it cost
    a render to see. A flex item with an auto margin on the CROSS axis does not
    stretch -- the auto margin wins -- so the column stopped resolving against
@@ -242,7 +251,13 @@ code,.num{font-family:var(--mono)}
      the last control on every tab sits underneath the bar: 76px of dock, the
      22px it floats by, one --s6 of air, and whatever the phone reserves for
      its home indicator. */
-  padding:var(--s5) var(--s4) calc(var(--s6) + 98px + env(safe-area-inset-bottom))}
+  /* 124, NOT 98, AND THE DIFFERENCE IS THE BEAD. The comment used to budget
+     "76px of dock, the 22px it floats by" -- but the bead rides ON the
+     surface line with its centre at the plate's top edge, so half a diameter
+     of it (26px at the measured 52) sits ABOVE the bar. Reserving the bar
+     alone left the last control on a panel with 14px of real air under a
+     glowing disc rather than the --s6 the rule intends. */
+  padding:var(--s5) var(--s4) calc(var(--s6) + 124px + env(safe-area-inset-bottom))}
 
 /* ----------------------------------------------------------- masthead -- */
 /* THE BRAND IS NOT IN THE NAVIGATION ANY MORE, and that was the note: a mark
@@ -277,7 +292,19 @@ code,.num{font-family:var(--mono)}
 @font-face{font-family:"Calliope Display";font-style:normal;font-weight:700;
   font-display:swap;src:url(data:font/woff2;base64,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) format("woff2")}
 .word{margin:0;font-family:"Calliope Display",system-ui,-apple-system,sans-serif;
-  font-weight:700;font-size:clamp(2.75rem,9vw,6rem);line-height:.9;
+  /* THE vw TERM WON AT EVERY READER SIZE, so the heading measured 115.2px at
+     both a 20px and a 24px root while the tagline went 21.25 -> 25.5 and the
+     dock labels 13.75 -> 16.5. The largest object on the page was the one
+     thing the reader's own setting no longer moved (WCAG 1.4.4). */
+  /* 5vw PLUS A rem TERM, and the addition is the point. Both clamp(…,9vw,…)
+     and max(9vw,4.5rem) let the viewport term win at every reader size, so the
+     heading measured the same 115.2px at a 20px root and at a 24px one while
+     the tagline beneath it went 21.25 -> 25.5 and the dock labels 13.75 ->
+     16.5: the largest object on the page was the one thing the reader's own
+     setting could not move (WCAG 1.4.4). Added rather than compared, the two
+     terms cannot mask each other -- 96px at a 16px root, 104 at 20, 112 at 24,
+     with the viewport still carrying the fluid half. */
+  font-weight:700;font-size:clamp(2.75rem,5vw + 2rem,6rem);line-height:.9;
   letter-spacing:-.04em;color:var(--ink)}
 .tagline{margin:clamp(.5rem,1.4vh,.9rem) 0 0;font-size:var(--t-title);
   line-height:1.35;letter-spacing:-.011em;color:var(--dim);max-width:34em}
@@ -385,7 +412,7 @@ code,.num{font-family:var(--mono)}
 .tabs .count{position:absolute;left:50%;top:50%;
   margin:-22px 0 0 4px;min-width:1.25em;padding:0 .25em;
   border-radius:999px;background:var(--ink);color:var(--panel);
-  font-size:9px;font-weight:700;line-height:1.5;letter-spacing:0;
+  font-size:.5625rem;font-weight:700;line-height:1.5;letter-spacing:0;
   text-align:center;pointer-events:none;
   transform:translateY(calc(var(--t) * var(--rise) * -1))}
 .tabs .count:empty{display:none}
@@ -475,10 +502,26 @@ input[type=range]{accent-color:var(--accent);cursor:pointer;
      and took its whole group with it. Four pixels, invisible in the stylesheet
      and obvious on screen. */
   margin:0}
-input[type=range]:disabled{cursor:not-allowed}
+input[type=range]:disabled{cursor:not-allowed;opacity:1;accent-color:var(--dim)}
 /* The shared ring sits tight against a rectangle; a slider's thumb overhangs
    its own box at both ends, so the ring needs to stand off or it clips it. */
 input[type=range]:focus-visible{outline-offset:3px}
+/* THE EMPTY HALF OF THE TRACK WAS THE USER AGENT'S #EFEFEF, 1.08:1 against the
+   card in light -- a slider near its minimum was a thumb floating on nothing.
+   accent-color paints the FILLED portion and the thumb and stops there; the
+   groove behind them is still the browser's. Drawn explicitly, both halves are
+   ours and both clear 3:1. */
+input[type=range]::-webkit-slider-runnable-track{
+  height:4px;border-radius:2px;background:var(--field-line)}
+input[type=range]::-moz-range-track{
+  height:4px;border-radius:2px;background:var(--field-line)}
+/* AN ALPHA MULTIPLIER CANNOT DIM SOMETHING ON A NEAR-WHITE GROUND. opacity:.5
+   over --panel took the disabled speed slider to 1.14:1 -- no discernible
+   control at all -- while its label stayed at full strength, so the field read
+   as live and the control had simply gone. Disabled is carried by ink and edge
+   instead, both of which still clear 3:1. */
+input[type=range]:disabled::-webkit-slider-runnable-track{background:var(--line)}
+input[type=range]:disabled::-moz-range-track{background:var(--line)}
 
 /* The same one line for the two checkboxes, which were also raw. They are the
    only other controls on the page the browser paints itself. */
@@ -544,7 +587,13 @@ input:disabled,select:disabled,textarea:disabled,button:disabled{opacity:.5;curs
    unavailable thing. Pure CSS; the :disabled floor above still greys the
    control on its own if this markup nesting is ever restructured. */
 .grid2 > div:has(:disabled) > label,
-.grid2 > div:has(:disabled) > .hint{opacity:.55}
+.grid2 > div:has(:disabled) > .hint,
+/* AND THE SAME INSIDE A .row, which this did not reach. The synthesis speed
+   slider is disabled for every cloned voice, and its label sat at full
+   strength over a control the reader could not see. */
+.row > *:has(:disabled) > label,
+.row > *:has(:disabled) > .hint,
+.row > * > *:has(:disabled) > label{opacity:.55}
 /* The page had NO :focus-visible styling at all and relied on whatever the UA
    drew over a 1px border, which is close to invisible in several browsers.
    :where() so it costs no specificity, and scoped by tag so it can never reach
@@ -554,6 +603,16 @@ input:disabled,select:disabled,textarea:disabled,button:disabled{opacity:.5;curs
 label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
   margin-bottom:var(--s1);letter-spacing:.005em}
 .row{display:flex;gap:var(--s2) var(--s3);align-items:flex-end;flex-wrap:wrap}
+/* Anything sharing a row with a field matches its height: Jobs' Refresh was
+   30.6 against two 37.7 selects, agreeing at the centre and at neither edge. */
+.row > button.small{min-height:var(--control-h)}
+/* A <select> CANNOT ELLIPSIS, IT JUST CUTS. "default (no clip needed)" came
+   out as "default (no clip" at 360 and at 500 with the arrow over the last
+   glyph, and the full string appeared only from 768 up -- and it got NARROWER
+   going 360 -> 500 (156 -> 136.7), because the flex line packed three groups
+   where two would fit. A floor makes them stack rather than shrink below the
+   width their own content needs; above about 520px nothing changes. */
+.row > *:has(> select){min-width:min(100%,15rem)}
 .row>*{flex:1;min-width:8.125rem}
 .row>.tight{flex:0 0 auto;min-width:0}
 /* GROUPING: two field-level controls and one primary action used to sit on one
@@ -757,7 +816,20 @@ details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
      text, the control's bottom IS the group's bottom, which is what the row
      was aligning all along. */
   display:block}
-.slider output{font-family:var(--mono);font-size:var(--t-label);color:var(--dim)}
+.hint-title{margin:0 0 var(--s2);font-size:var(--t-label);line-height:1.45;
+  color:var(--dim)}
+/* A tick and its word on one line, at control height, so the cell lines up
+   with the fields beside it instead of floating on their label line. */
+.checkline{display:flex;align-items:center;gap:var(--s2);
+  min-height:var(--control-h);margin:0;color:var(--ink)}
+.checkline input{width:auto;flex:0 0 auto;margin:0}
+.slider output{font-family:var(--mono);font-size:var(--t-label);color:var(--dim);
+  /* PINNED, because grid-template-columns:1fr auto sized this column to the
+     TEXT in it: "0.50" measures 28.9 and "100" measures 21.7, so three sliders
+     in one row had three different track lengths -- and a track changed width
+     as its own value changed. */
+  min-width:4ch;text-align:right}
+.grid2.onecol{grid-template-columns:repeat(auto-fill,minmax(12.5rem,1fr))}
 .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(12.5rem,1fr));
   gap:var(--s3)}
 
@@ -1065,7 +1137,13 @@ details>summary:active{opacity:.72}
   .card,.job{border:1px solid var(--line)}
   .band span{background:#000;border:1px solid #fff}
   details{border:1px solid var(--line);border-radius:var(--radius);
-    padding:0 var(--s3)}
+    padding:0 var(--s3);
+    /* PULLED BACK BY WHAT THE PADDING ADDS, so the border is drawn outside the
+       content instead of pushing it in. Without this, asking for more contrast
+       moved every control inside a disclosure 13px right and narrowed it while
+       everything outside stayed put -- the card's left edge broke in exactly
+       the mode whose whole purpose is legibility. */
+    margin-inline:calc(-1 * (var(--s3) + 1px))}
   .note.flat{border:1px solid var(--line);border-left-width:2px;
     border-radius:var(--radius-s);padding:var(--s2) var(--s3)}
   /* A FILL THAT IS OVERRIDDEN LEAVES AN UNBOUNDED SLAB, and the primary action
@@ -1088,11 +1166,29 @@ details>summary:active{opacity:.72}
    forbidden to break on a 375px viewport -- the problem this design does not
    have, because the labels are icons and only the selected one is written
    out. */
+/* NOTHING ON THIS PAGE HAD A TOUCH TARGET FLOOR. At 390: the two links that
+   are the only way to pick a file measured 19.4px tall, Jobs' Refresh 30.6,
+   every select 37.7, the logprobs checkbox 13x13 -- all under the 24px WCAG
+   2.5.8 minimum and far under the 44px a thumb wants. pointer:coarse rather
+   than a width query, because the question is what is pointing at the screen
+   and not how wide it is: a tablet is wide and still has no cursor.
+   min-height, so existing padding and the dock's own sizing are untouched. */
+@media (pointer:coarse){
+  button:not(.link),select,input[type=range],input[type=text],input[type=password],
+  input[type=number]{min-height:44px}
+  /* A link inside a sentence has to keep reading as a word, so it grows
+     padding rather than a box and stays on the line. */
+  button.link{display:inline-block;padding-block:.8rem}
+  input[type=checkbox],input[type=radio]{width:24px;height:24px}
+}
 @media (max-width:30rem){
   /* Tracking is size-specific, including when the viewport forces the size. */
   .brand{letter-spacing:.14em}
   .tabs button svg{width:22px;height:22px}
-  .tabs .label{font-size:10px}
+  /* rem, NOT px. Below 30rem the dock IS the navigation, and an absolute
+     font-size made the tab names the one thing on a phone that ignored the
+     reader's text setting entirely. */
+  .tabs .label{font-size:.625rem}
   .masthead{padding-top:clamp(1.25rem,4vh,2rem)}
   .wrap{padding-top:var(--s4)}
 }
@@ -1330,7 +1426,12 @@ details>summary:active{opacity:.72}
               <!-- Parakeet honours include[]=logprobs. Which engine honours
                    which field is engine trivia: it changes nothing the person
                    ticking this box does next. -->
-              <label><input type="checkbox" id="x-logprobs" style="width:auto"> include[]=logprobs</label>
+              <!-- A LABEL LINE OF ITS OWN, so this cell has the same two-row
+                   shape as the two selects beside it. Without it the tick box
+                   sat on their LABEL line, 30.8px above the controls it shares
+                   a row with. -->
+              <label for="x-logprobs">include[]</label>
+              <label class="checkline"><input type="checkbox" id="x-logprobs"> logprobs</label>
               <div class="hint">Sets response_format to json.</div>
             </div>
             <div>
@@ -1754,7 +1855,12 @@ details>summary:active{opacity:.72}
               <div class="slider"><input type="range" id="x-exag" min="0" max="1" step="0.05" value="0.3"><output>0.30</output></div></div>
             <div><label for="x-cfg">cfg_weight <span class="hint">0–1, default 0.3</span></label>
               <div class="slider"><input type="range" id="x-cfg" min="0" max="1" step="0.05" value="0.3"><output>0.30</output></div></div>
-            <div><label>cross-language transfer</label>
+            <!-- NOT A <label>: there is no control here and there never was.
+                 It is advice about the Language control in the row above, so a
+                 label element promised an association a screen reader then
+                 could not follow, and on screen it read as a field whose input
+                 had failed to render. -->
+            <div><p class="hint-title">cross-language transfer</p>
               <!-- Resemble's own guidance for cross-language cloning. It names
                    the Language control, because "the one selected" makes the
                    reader work out which of two selects it means. -->
@@ -1768,7 +1874,11 @@ details>summary:active{opacity:.72}
                true of the two that existed. An engine that reads no
                temperature at all would have been left showing this one slider
                with its value refused by name at the server. -->
-          <div class="grid2" id="clone-temp">
+          <!-- auto-FILL, not auto-fit: this grid holds one slider, and
+               auto-fit collapses the empty tracks, so temperature rendered
+               633px wide against exaggeration and cfg_weight at 178 on the
+               panel directly above it. -->
+          <div class="grid2 onecol" id="clone-temp">
             <div><label for="x-temp">temperature <span class="hint">0.1–1.5, default 0.6</span></label>
               <div class="slider"><input type="range" id="x-temp" min="0.1" max="1.5" step="0.05" value="0.6"><output>0.60</output></div></div>
           </div>
@@ -1903,6 +2013,13 @@ details>summary:active{opacity:.72}
   <section id="tab-vocab" role="tabpanel" aria-labelledby="tab-btn-vocab" hidden>
     <div class="card">
       <h2 class="tight">Vocabulary profiles</h2>
+      <!-- A HEADING OVER NOTHING IS A BUG THE READER HAS TO DIAGNOSE. The
+           panel below is hidden until GET /glossaries answers, so on a
+           deployment without the vocabulary service this card rendered as a
+           title above 40px of empty ground. It says which of the two it is
+           now, and the standing rule applies: the reason sits beside the
+           absence rather than being left to be inferred. -->
+      <div class="hint" id="glossnone">Asking the transcription service for its vocabulary profiles…</div>
       <div id="glossman" hidden>
           <div class="row" style="align-items:center">
             <div class="seg tight" id="glossnames"></div>
@@ -3404,6 +3521,14 @@ function glossTarget() {
 
 function glossRender() {
   $("glossman").hidden = !GLOSS_SERVED;
+  /* The placeholder is the inverse of the panel, and it changes its mind once
+     the answer is in: "asking" before, "this deployment has none" after. */
+  const none = $("glossnone");
+  if (none) {
+    none.hidden = GLOSS_SERVED;
+    none.textContent = "This deployment has no vocabulary service, so there "
+      + "are no profiles to manage here.";
+  }
   if (!GLOSS_SERVED) return;
   const open = !$("glossform").hidden;
   const here = open ? glossTarget().name : "";

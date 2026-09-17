@@ -1691,7 +1691,11 @@ def test_the_navigation_is_one_object_and_the_labels_are_inside_it():
         "the labels do not fill the bar they sit inside"
     # And the content column is not glued to it any more -- it clears it, which
     # is what a fixed object at the foot of the viewport requires.
-    assert "98px" in rule(".wrap{"), "the last control on every tab is under the dock"
+    # 124 RESERVES THE BEAD, NOT JUST THE BAR. The bead rides ON the surface
+    # line -- its centre is the plate's top edge -- so half a diameter sits
+    # above the dock. Reserving 98 (76 of bar plus the 22 it floats by) left
+    # the last control on a panel with 14px of real air beneath a glowing disc.
+    assert "124px" in rule(".wrap{"), "the last control on every tab is under the dock"
 
 def test_the_biggest_thing_on_the_page_is_where_you_are():
     """It was the other way round twice. First the brand was --t-display at
@@ -1704,7 +1708,19 @@ def test_the_biggest_thing_on_the_page_is_where_you_are():
     are on is the largest. "I rather have things more bold" -- this is it."""
     brand, word = rule(".brand{"), rule(".word{")
     assert "font-size:var(--t-micro)" in brand and "text-transform:uppercase" in brand
-    assert "clamp(2.75rem,9vw,6rem)" in word, "the headline is not display size"
+    assert "clamp(2.75rem,5vw + 2rem,6rem)" in word, "the headline is not display size"
+    # THE READER'S SETTING HAS TO REACH IT, and for a while it did not. With a
+    # bare clamp(2.75rem,9vw,6rem) the viewport term won at every reader size:
+    # the heading measured 115.2px at BOTH a 20px and a 24px root, while the
+    # tagline beneath it went 21.25 -> 25.5 and the dock labels 13.75 -> 16.5.
+    # The largest object on the page was the one thing the reader could not
+    # resize (WCAG 1.4.4). max() against a rem term gives them back a floor
+    # that grows with them, without giving up the fluid behaviour.
+    # ADDED, NOT COMPARED. max(9vw,Nrem) still lets the viewport term win at
+    # every reader size -- measured 115.2px at both a 20px and a 24px root.
+    # A sum cannot mask either half.
+    assert "vw + " in word and "rem" in word, \
+        "the heading is pinned to the viewport and ignores the reader's text size"
     assert "font-weight:700" in word
     # A DISPLAY FACE, NOT THE UI FONT AT A LARGER SIZE, and self-hosted: this
     # service serves exactly one file, so the face is a data: URI in the sheet
@@ -1812,7 +1828,7 @@ def test_where_am_i_is_reachable_by_thumb_on_a_phone():
         "the tabs run to the plate's corners, where the socket cannot clear them"
     # And the column still has to end above it, or the last control on every
     # tab is behind the bar.
-    assert "padding:var(--s5) var(--s4) calc(var(--s6) + 98px + env(safe-area-inset-bottom))" \
+    assert "calc(var(--s6) + 124px + env(safe-area-inset-bottom))" \
         in rule(".wrap{"), "the dock covers the last rows of a scroll"
     block = CSS[CSS.index("@media (max-width:30rem)"):]
     block = block[:block.index("\n}\n") + 3]
@@ -1855,6 +1871,99 @@ def test_the_recess_is_carried_by_two_cues_and_not_by_a_1_14_step():
             "a theme lost the hairline and kept only the fill step"
     assert "inset" in rule(":root{")[rule(":root{").index("--lift"):], \
         "the light card is back on a drop shadow, which is the third tell"
+
+
+def test_a_thumb_has_something_to_hit():
+    """THE PAGE HAD NO TOUCH TARGET FLOOR AT ALL. Measured at 390: the two links
+    that are the only way to pick a file were 19.4px tall, Jobs' Refresh 30.6,
+    every select 37.7, the logprobs checkbox 13x13 -- all under the 24px WCAG
+    2.5.8 minimum and far under the 44px a thumb wants.
+
+    pointer:coarse RATHER THAN A WIDTH QUERY, because the question is what is
+    pointing at the screen and not how wide it is: a tablet is wide and still
+    has no cursor, and a narrow desktop window has one."""
+    block = CSS[CSS.index("@media (pointer:coarse)"):]
+    block = block[:block.index("\n}\n") + 3]
+    assert "min-height:44px" in block, "no touch target floor"
+    assert "min-height" in block and "height:44px" not in block.replace("min-height:44px", ""), \
+        "a fixed height would fight the padding and the dock's own sizing"
+    # A link inside a sentence has to keep reading as a word, so it grows
+    # padding rather than a box.
+    assert "button.link{display:inline-block;padding-block:" in block
+    assert "width:24px;height:24px" in block, "the tick is still a 13px target"
+
+
+def test_the_mark_does_not_move_when_you_change_tab():
+    """The masthead was centred together with the panel, so it moved whenever
+    the panel's height did: the lamp measured y=104 on Speak, 179 on
+    Transcribe, 254 on Jobs and 275 on Vocabulary -- a 171px jump from pressing
+    a tab, at one width. Opening a disclosure moved it too. The mark and the
+    page's title are the two things that must not move, because they are what
+    the eye comes back to.
+
+    An auto margin on the panel absorbs the slack instead, and it resolves to 0
+    once free space goes negative -- so a tall panel still top-aligns and still
+    scrolls, which is the `safe center` behaviour this replaced."""
+    assert "justify-content:flex-start" in rule("body{"), "the masthead is centred again"
+    assert "margin-block:auto" in rule("main.wrap{"), \
+        "nothing absorbs the slack, so short panels sit against the masthead"
+
+
+def test_a_field_is_never_narrower_than_the_value_it_shows():
+    """A <select> cannot draw an ellipsis; it just cuts. "default (no clip
+    needed)" rendered as "default (no clip" at 360 and at 500 with the arrow
+    over the final glyph, and the whole string appeared only from 768 up. It
+    also got NARROWER going 360 -> 500 (156 -> 136.7), because the flex line
+    packed three groups into a width where two fit. A floor makes them stack
+    rather than shrink below what their own content needs."""
+    assert "min-width:min(100%,15rem)" in rule(".row > *:has(> select){"), \
+        "a select can shrink below its own value again"
+    # AND A BUTTON SHARING THAT ROW MATCHES THE FIELDS. Jobs' Refresh was 30.6
+    # against two 37.7 selects: agreeing at the centre and at neither edge.
+    assert "min-height:var(--control-h)" in rule(".row > button.small{")
+
+
+def test_a_slider_track_is_ours_in_both_halves():
+    """accent-color paints the FILLED portion and the thumb and stops there.
+    The groove behind them stayed the user agent's #EFEFEF, which is 1.08:1
+    against the card in light -- a slider near its minimum was a thumb floating
+    on nothing. And opacity:.5 cannot dim a control on a near-white ground: the
+    disabled speed slider measured 1.14:1, no discernible control at all, while
+    its label stayed at full strength so the field read as live."""
+    for pseudo in ("input[type=range]::-webkit-slider-runnable-track{",
+                   "input[type=range]::-moz-range-track{"):
+        assert "background:var(--field-line)" in rule(pseudo), f"{pseudo} is the UA's grey"
+    assert "opacity:1" in rule("input[type=range]:disabled{"), \
+        "a disabled slider is dimmed by alpha again, which it cannot survive on --panel"
+    # And the whole field greys together, in a .row as well as a .grid2 -- the
+    # speed slider is disabled for every cloned voice and lives in a .row.
+    assert ".row > *:has(:disabled) > label" in BARE_CSS
+
+
+def test_a_label_element_always_has_a_control():
+    """<label>cross-language transfer</label> named nothing: no `for`, no
+    control inside it and none after it. It promised a screen reader an
+    association it could not follow, and on screen it rendered as a field group
+    whose input had failed to appear. It is advice, so it is a paragraph."""
+    assert "<p class=\"hint-title\">cross-language transfer</p>" in HTML
+    assert "<label>cross-language transfer</label>" not in HTML
+    # AND THE CHECKBOX CELL HAS A LABEL LINE OF ITS OWN, so it has the same
+    # two-row shape as the selects beside it. Without one the tick sat on their
+    # LABEL line, 30.8px above the controls it shared a row with.
+    assert '<label for="x-logprobs">include[]</label>' in HTML
+    assert "min-height:var(--control-h)" in rule(".checkline{")
+
+
+def test_a_card_never_renders_as_a_heading_over_nothing():
+    """#glossman is hidden until GET /glossaries answers, so on a deployment
+    with no vocabulary service the Vocabulary tab rendered a full-width card
+    holding a title and 40px of empty ground -- with nothing saying whether it
+    was still loading, broken, or simply not installed. The standing rule on
+    this page is that the reason sits beside the absence."""
+    assert 'id="glossnone"' in HTML, "the empty vocabulary card has no explanation"
+    assert "no vocabulary service" in SCRIPT, "the placeholder never says why"
+    assert 'none.hidden = GLOSS_SERVED' in SCRIPT, \
+        "the placeholder and the panel can be shown at the same time"
 
 
 def test_every_slider_is_sized_by_the_page_and_not_by_the_user_agent():
