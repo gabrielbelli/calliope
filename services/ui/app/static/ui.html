@@ -494,34 +494,53 @@ select:not([multiple]):hover:not(:disabled){border-color:var(--dim)}
    whatever height it is given -- so this aligns the control without making the
    slider itself fatter. --control-h is the shared figure: change it once and
    every field on the page still lines up. */
-input[type=range]{accent-color:var(--accent);cursor:pointer;
-  height:var(--control-h);
-  /* AND THE USER AGENT'S OWN 2px TOP AND BOTTOM. Chrome ships `margin: 2px 0`
-     on a range input and on nothing else in this row, so in a flex row aligned
-     on its children's bottoms the slider's box ended 2px short of the selects'
-     and took its whole group with it. Four pixels, invisible in the stylesheet
-     and obvious on screen. */
-  margin:0}
-input[type=range]:disabled{cursor:not-allowed;opacity:1;accent-color:var(--dim)}
-/* The shared ring sits tight against a rectangle; a slider's thumb overhangs
-   its own box at both ends, so the ring needs to stand off or it clips it. */
+/* THE WHOLE CONTROL, BOTH ENGINES, because half of it is not a thing you can
+   own. accent-color colours the filled half and the thumb and leaves the
+   groove to the user agent -- #EFEFEF, 1.08:1 on the light card, so a slider
+   near its minimum was a thumb floating on nothing. But styling the track
+   alone is worse: WebKit drops out of its default layout the moment
+   ::-webkit-slider-runnable-track is touched and stops centring the thumb, so
+   it hangs below the rail. There is no half-way here.
+
+   THE FILL IS A GRADIENT DRIVEN BY --fill, and that is the one thing
+   accent-color was doing for free. WebKit has no ::-webkit-range-progress, so
+   a filled track has to be painted: paintRange() writes the percentage on
+   every input event and after any programmatic set. Firefox has
+   ::-moz-range-progress and uses it. */
+input[type=range]:not(.seekbar){
+  -webkit-appearance:none;appearance:none;
+  background:transparent;cursor:pointer;margin:0;height:var(--control-h)}
+input[type=range]:not(.seekbar)::-webkit-slider-runnable-track{
+  height:6px;border-radius:3px;
+  background:linear-gradient(to right,
+    var(--accent) var(--fill,50%), var(--field-line) var(--fill,50%))}
+/* -6px is (6 - 18) / 2: WebKit aligns a thumb to the TOP of the track once the
+   track is styled, so the thumb has to be pulled back by half the difference
+   itself. This is the declaration whose absence put the thumb under the rail. */
+input[type=range]:not(.seekbar)::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;
+  width:18px;height:18px;border-radius:50%;margin-top:-6px;
+  background:var(--accent);border:2px solid var(--panel);
+  box-shadow:0 1px 2px rgba(0,0,0,.3)}
+input[type=range]:not(.seekbar)::-moz-range-track{
+  height:6px;border-radius:3px;background:var(--field-line)}
+input[type=range]:not(.seekbar)::-moz-range-progress{
+  height:6px;border-radius:3px;background:var(--accent)}
+input[type=range]:not(.seekbar)::-moz-range-thumb{
+  width:18px;height:18px;border-radius:50%;border:2px solid var(--panel);
+  background:var(--accent);box-shadow:0 1px 2px rgba(0,0,0,.3)}
+/* Disabled is ink and edge, never alpha: opacity:.5 over --panel took this
+   control to 1.14:1 and it simply vanished on the light theme. */
+input[type=range]:not(.seekbar):disabled{cursor:not-allowed;opacity:1}
+input[type=range]:not(.seekbar):disabled::-webkit-slider-runnable-track{
+  background:linear-gradient(to right,
+    var(--dim) var(--fill,50%), var(--line) var(--fill,50%))}
+input[type=range]:not(.seekbar):disabled::-webkit-slider-thumb{background:var(--dim)}
+input[type=range]:not(.seekbar):disabled::-moz-range-progress{background:var(--dim)}
+input[type=range]:not(.seekbar):disabled::-moz-range-thumb{background:var(--dim)}
+/* The shared ring sits tight against a rectangle; a thumb overhangs its own
+   box at both ends, so the ring stands off or it clips it. */
 input[type=range]:focus-visible{outline-offset:3px}
-/* THE EMPTY HALF OF THE TRACK WAS THE USER AGENT'S #EFEFEF, 1.08:1 against the
-   card in light -- a slider near its minimum was a thumb floating on nothing.
-   accent-color paints the FILLED portion and the thumb and stops there; the
-   groove behind them is still the browser's. Drawn explicitly, both halves are
-   ours and both clear 3:1. */
-input[type=range]::-webkit-slider-runnable-track{
-  height:4px;border-radius:2px;background:var(--field-line)}
-input[type=range]::-moz-range-track{
-  height:4px;border-radius:2px;background:var(--field-line)}
-/* AN ALPHA MULTIPLIER CANNOT DIM SOMETHING ON A NEAR-WHITE GROUND. opacity:.5
-   over --panel took the disabled speed slider to 1.14:1 -- no discernible
-   control at all -- while its label stayed at full strength, so the field read
-   as live and the control had simply gone. Disabled is carried by ink and edge
-   instead, both of which still clear 3:1. */
-input[type=range]:disabled::-webkit-slider-runnable-track{background:var(--line)}
-input[type=range]:disabled::-moz-range-track{background:var(--line)}
 
 /* The same one line for the two checkboxes, which were also raw. They are the
    only other controls on the page the browser paints itself. */
@@ -539,6 +558,16 @@ button:hover:not(:disabled){border-color:var(--dim)}
    the whole of the reference's response rule for three lines of CSS. The page
    had none: every button was visually inert until its handler finished. */
 button:active:not(:disabled){transform:scale(.975)}
+/* A BUTTON SAYS IT IS OFF IN ITS OWN COLOURS, NEVER IN ALPHA. opacity:.5 is
+   legible on a pale card and illegible on a dark one -- the Transcribe action
+   came out as a ghost the reader had to guess at. Ink and fill both still
+   clear their contrast floor, so a disabled button remains readable while
+   plainly not pressable, which is the whole point: you can see what it says
+   and see that it will not answer. */
+button:disabled{cursor:not-allowed;background:var(--sunk);
+  color:var(--dim);border-color:var(--line);box-shadow:none}
+.primary:disabled{background:var(--sunk);color:var(--dim);
+  border:1px solid var(--line)}
 /* .seg{overflow:hidden} clips a scaling child, so a pressed segment would eat
    its own edge inside the shared border. */
 .seg button:active:not(:disabled){transform:none}
@@ -579,7 +608,7 @@ button.link:active:not(:disabled){transform:none;opacity:.6}
    current route cannot carry is greyed WITH THE REASON beside it -- a control
    that vanishes takes its explanation with it. Fifteen defects of that shape
    were fixed once; this is the fence. */
-input:disabled,select:disabled,textarea:disabled,button:disabled{opacity:.5;cursor:not-allowed;
+input:disabled,select:disabled,textarea:disabled{opacity:.5;cursor:not-allowed;
   background:var(--sunk)}
 /* A GREYED CONTROL GREYS AS A WHOLE FIELD. syncTranscribeControls disables the
    control and left its label and hint at full strength above it, which reads
@@ -6160,6 +6189,32 @@ $("delvoice").addEventListener("click", async () => {
 });
 $("speed").addEventListener("input", () =>
   $("speedout").textContent = Number($("speed").value).toFixed(2));
+/* THE FILLED HALF OF A TRACK, WHICH WEBKIT WILL NOT DRAW. There is no
+   ::-webkit-range-progress -- Firefox has ::-moz-range-progress and uses it,
+   WebKit has nothing -- so the fill is a gradient stop written here on every
+   change. This is the one thing accent-color was doing for free, and it had to
+   be given up to own the track at all: styling the track alone stops WebKit
+   centring the thumb, which left it hanging below the rail.
+
+   A delegated listener rather than one per control, so a slider added later is
+   painted without anyone remembering to wire it, and paint() is exported for
+   the places that set .value directly and fire no event. */
+function paintRange(el) {
+  if (!el || el.classList.contains("seekbar")) return;
+  const min = Number(el.min) || 0;
+  const max = Number(el.max === "" ? 100 : el.max);
+  const span = max - min;
+  const pct = span > 0 ? ((Number(el.value) - min) / span) * 100 : 0;
+  el.style.setProperty("--fill", Math.max(0, Math.min(100, pct)).toFixed(2) + "%");
+}
+function paintAllRanges() {
+  document.querySelectorAll("input[type=range]").forEach(paintRange);
+}
+document.addEventListener("input", ev => {
+  if (ev.target instanceof HTMLInputElement && ev.target.type === "range") paintRange(ev.target);
+}, true);
+paintAllRanges();
+
 document.querySelectorAll(".slider input[type=range]").forEach(input => {
   const out = input.parentElement.querySelector("output");
   input.addEventListener("input", () => out.textContent =
@@ -6170,6 +6225,9 @@ $("resetclone").addEventListener("click", () => {
   $("x-temp").value = CLONE_DEFAULTS.temp;
   document.querySelectorAll("#tts-expert-clone .slider").forEach(s =>
     s.querySelector("output").textContent = Number(s.querySelector("input").value).toFixed(2));
+  /* .value set directly fires no input event, so the gradient would keep the
+     position the reader had dragged it to while the readout said 0.30. */
+  paintAllRanges();
 });
 
 /* ------------------------------------------------- the ETA, and the way out */

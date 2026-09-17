@@ -526,7 +526,7 @@ def test_a_greyed_field_greys_as_one_thing():
     # exchange -- it rendered byte-identical to an enabled one. #go-stt ships
     # with the attribute set, so the Transcribe tab's primary action looked
     # live on arrival and did nothing when pressed.
-    floor = rule("input:disabled,select:disabled,textarea:disabled,button:disabled{")
+    floor = rule("input:disabled,select:disabled,textarea:disabled{")
     assert "opacity:.5" in floor and "cursor:not-allowed" in floor
 
 
@@ -1930,11 +1930,25 @@ def test_a_slider_track_is_ours_in_both_halves():
     on nothing. And opacity:.5 cannot dim a control on a near-white ground: the
     disabled speed slider measured 1.14:1, no discernible control at all, while
     its label stayed at full strength so the field read as live."""
-    for pseudo in ("input[type=range]::-webkit-slider-runnable-track{",
-                   "input[type=range]::-moz-range-track{"):
-        assert "background:var(--field-line)" in rule(pseudo), f"{pseudo} is the UA's grey"
-    assert "opacity:1" in rule("input[type=range]:disabled{"), \
+    # OWNING HALF A SLIDER IS WORSE THAN OWNING NONE OF IT. accent-color left
+    # the groove to the user agent (#EFEFEF, 1.08:1 on the light card), but
+    # styling only ::-webkit-slider-runnable-track takes WebKit out of its
+    # default layout and it stops centring the thumb, which then hangs below
+    # the rail. Track, fill and thumb are all ours now, on both engines.
+    track = rule("input[type=range]:not(.seekbar)::-webkit-slider-runnable-track{")
+    assert "var(--fill" in track, "the filled half is not painted"
+    assert "var(--field-line)" in track, "the empty half is the UA's grey"
+    thumb = rule("input[type=range]:not(.seekbar)::-webkit-slider-thumb{")
+    assert "-webkit-appearance:none" in thumb
+    assert "margin-top:-6px" in thumb, \
+        "without the pull-back WebKit aligns the thumb to the TOP of the track"
+    assert "background:var(--accent)" in rule("input[type=range]:not(.seekbar)::-moz-range-progress{")
+    assert "opacity:1" in rule("input[type=range]:not(.seekbar):disabled{"), \
         "a disabled slider is dimmed by alpha again, which it cannot survive on --panel"
+    # WebKit has no ::-webkit-range-progress, so the fill has to be written.
+    assert "function paintRange(" in SCRIPT
+    assert 'ev.target.type === "range"' in SCRIPT, "a slider added later paints nothing"
+    assert "paintAllRanges();" in SCRIPT, "values set in code leave the fill stale"
     # And the whole field greys together, in a .row as well as a .grid2 -- the
     # speed slider is disabled for every cloned voice and lives in a .row.
     assert ".row > *:has(:disabled) > label" in BARE_CSS
@@ -1998,8 +2012,18 @@ def test_every_control_the_page_disables_looks_disabled():
     renders, #go-stt (which ships with the attribute set) was byte-identical to
     an enabled button: rgb(178,191,201) either way. The Transcribe tab's primary
     action looked live on arrival and did nothing when pressed."""
-    floor = rule("input:disabled,select:disabled,textarea:disabled,button:disabled{")
+    floor = rule("input:disabled,select:disabled,textarea:disabled{")
     assert "opacity:.5" in floor and "cursor:not-allowed" in floor
+    # A BUTTON IS NOT IN THAT LIST, AND THAT IS THE SECOND HALF OF THIS FIX.
+    # Putting it there made a disabled button legible on the pale card and a
+    # ghost on the dark one: alpha cannot say "off" on both grounds. A button
+    # says it in its own fill and ink, both of which still clear their floor,
+    # so it stays readable while plainly not pressable -- you can see what it
+    # says AND see that it will not answer.
+    off = rule("button:disabled{")
+    assert "opacity" not in off, "a disabled button is dimmed by alpha again"
+    assert "background:var(--sunk)" in off and "color:var(--dim)" in off
+    assert "cursor:not-allowed" in off
 
 
 def test_every_slider_says_what_it_is():
@@ -2088,7 +2112,10 @@ def test_no_control_is_left_wearing_the_operating_system():
     """
     claimed = {
         "select:not([multiple]){": ("-webkit-appearance:none", "appearance:none"),
-        "input[type=range]{": ("accent-color:var(--accent)",),
+        # accent-color is deliberately gone from the sliders -- see
+        # test_a_slider_track_is_ours_in_both_halves. They are claimed by
+        # owning the track outright, which is the stronger form of the rule.
+        "input[type=range]:not(.seekbar){": ("-webkit-appearance:none", "appearance:none"),
         "input[type=checkbox],input[type=radio]{": ("accent-color:var(--accent)",),
     }
     for selector, needles in claimed.items():
