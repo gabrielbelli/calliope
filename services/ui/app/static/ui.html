@@ -48,6 +48,9 @@
      being a lid over a separate slab. */
   --panel:#F8F5EE; --bg:#EAE6DD; --sunk:#DFD9CB;
   --line:#C6BEAE; --ink:#1A1714; --dim:#565049;
+  /* 3.36:1 on --bg. The edge of anything you can type in, choose from or
+     press -- never the edge of a card. See the split above. */
+  --field-line:#837B6D;
   /* THE INSTRUMENT IS NEUTRAL AND THE SIGNAL IS RED. A hundred years of
      recording hardware agrees and there is no counter-example: the VU face is
      creme with black lettering, the PPM is white on black, the Neve chassis is
@@ -79,6 +82,10 @@
      as a literal is a radius that drifts the first time one of them is
      touched. */
   --radius:10px; --radius-s:7px; --radius-l:14px;
+  /* THE HEIGHT EVERY FIELD SHARES. A select resolves to 38px from its padding
+     and line-height; a range input would otherwise be 16. Written down once so
+     a row of mixed controls cannot drift apart again. */
+  --control-h:2.375rem;
   /* SURFACE 1, BOTH THEMES: A RECESS, NOT A SLAB. The light theme used to lift
      the card off the page with a drop shadow; a glow under every card is the
      third tell, after the cyan and the cool ground. A card is now a hole cut
@@ -149,6 +156,7 @@
        chassis the same red reads as a filament. */
     --panel:#201D18; --bg:#141210; --sunk:#0E0C0A;
     --line:#423D33; --ink:#EBE5DA; --dim:#A69D8E;
+    --field-line:#8F8779;   /* 5.26:1 on --bg */
     /* The same graphite, one step up out of the chassis, because #33404C on
        #201D18 is a hole rather than a control. 8.95:1 on --panel. */
     --accent:#B2BFC9; --accent-ink:#12181D;
@@ -171,6 +179,11 @@
     --bloom-a:.20; --bloom-top:#31211B;
   }
 }
+/* THE BROWSER PAINTS ITS OWN WIDGETS FROM THIS, and without it every one
+   of them is drawn light: a pure white checkbox on a near-black card, a
+   light scrollbar, a light date picker. The page has had two themes since
+   it was written and never told the engine about either. */
+:root{color-scheme:light dark}
 *{box-sizing:border-box}
 /* THE WELD, IN ONE DECLARATION. The page was --bg with a --panel header
    floating on it and --panel cards stacked under that, so the head read as a
@@ -391,9 +404,12 @@ input,select,textarea,button{font:inherit;color:inherit}
    carries a border: in dark the border is the cue and the fill is the
    reinforcement, not the other way round. */
 input[type=text],input[type=password],input[type=number],select,textarea{
-  background:var(--sunk);border:1px solid var(--line);
+  background:var(--sunk);border:1px solid var(--field-line);
   border-radius:var(--radius-s);padding:.4375rem .5625rem;width:100%}
 textarea{resize:vertical;min-height:7.5rem;font-family:inherit;line-height:1.55}
+/* Never declared, so it was whatever the engine felt like -- and both
+   engines pick a grey that fails AA on this ground. */
+::placeholder{color:var(--dim);opacity:1}
 /* A <select> WAS THE ONE FIELD STILL WEARING THE OPERATING SYSTEM. It was in
    the shared rule above, so it had this page's fill, border, radius and
    padding -- and then macOS drew its own control on top of all of it: its own
@@ -442,7 +458,23 @@ select:not([multiple]):hover:not(:disabled){border-color:var(--dim)}
    hit target and keyboard behaviour that a rebuilt track has to re-earn.
    .seekbar is untouched by this: it sets appearance:none and paints its own
    track, and accent-color has no effect on a control that does. */
-input[type=range]{accent-color:var(--accent);cursor:pointer}
+/* A RANGE INPUT IS 16px TALL AND A SELECT IS 38, and in a row aligned on its
+   children's bottoms that difference lands on the screen as a control sitting
+   lower than the two beside it. Measured on Speak at 1132x910: the selects'
+   centres at 526 and 534, the slider's at 539.
+
+   The BOX is 38 and the track stays 16 -- a range input centres its track in
+   whatever height it is given -- so this aligns the control without making the
+   slider itself fatter. --control-h is the shared figure: change it once and
+   every field on the page still lines up. */
+input[type=range]{accent-color:var(--accent);cursor:pointer;
+  height:var(--control-h);
+  /* AND THE USER AGENT'S OWN 2px TOP AND BOTTOM. Chrome ships `margin: 2px 0`
+     on a range input and on nothing else in this row, so in a flex row aligned
+     on its children's bottoms the slider's box ended 2px short of the selects'
+     and took its whole group with it. Four pixels, invisible in the stylesheet
+     and obvious on screen. */
+  margin:0}
 input[type=range]:disabled{cursor:not-allowed}
 /* The shared ring sits tight against a rectangle; a slider's thumb overhangs
    its own box at both ends, so the ring needs to stand off or it clips it. */
@@ -504,7 +536,7 @@ button.link:active:not(:disabled){transform:none;opacity:.6}
    current route cannot carry is greyed WITH THE REASON beside it -- a control
    that vanishes takes its explanation with it. Fifteen defects of that shape
    were fixed once; this is the fence. */
-input:disabled,select:disabled,textarea:disabled{opacity:.5;cursor:not-allowed;
+input:disabled,select:disabled,textarea:disabled,button:disabled{opacity:.5;cursor:not-allowed;
   background:var(--sunk)}
 /* A GREYED CONTROL GREYS AS A WHOLE FIELD. syncTranscribeControls disables the
    control and left its label and hint at full strength above it, which reads
@@ -531,6 +563,14 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
    the action stands alone below. */
 .row.fields{gap:var(--s5);align-items:flex-start}
 .row.fields label{margin-bottom:var(--s2)}
+/* AN EMPTY HINT IS NOT ZERO HIGH -- it is zero high and still carries its
+   margin, which is the second half of the same defect. #langsaid sits under
+   the Language select and is empty unless an engine has something to say about
+   the language control, so Language measured 67px against Voice's 59 and its
+   select sat 8px higher than the one next to it. The page already makes this
+   argument for #jobcount: a chip with nothing in it is a dot that means
+   nothing. Same for a gap. */
+.hint:empty{display:none}
 .actions{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center}
 .seg{display:inline-flex;border:1px solid var(--line);
   border-radius:var(--radius-s);overflow:hidden}
@@ -550,9 +590,31 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
   .dock{background:ButtonFace;border:1px solid ButtonBorder}
   .tabs button svg{transform:translate(-50%,-50%)}
   .tabs .label{opacity:1;color:ButtonText}
-  .tabs button[aria-selected=true]{background:Highlight}
-  .tabs button[aria-selected=true] svg{color:HighlightText}
-  .tabs button[aria-selected=true] .label{color:HighlightText}
+  /* NOT Highlight/HighlightText, AND THAT PAIR WAS UNREADABLE. HighlightText
+     resolves to black in the common high-contrast schemes, and Chromium paints
+     a Canvas-coloured backplate behind text that sits over a background-image
+     -- which the dock has. Black text on a black backplate: the selected tab's
+     own name rendered as a solid filled rectangle, measured 36x12 CSS px of
+     unbroken rgb(0,0,0) with no glyph in it. The one tab you cannot read was
+     the one you are on. An outline carries the selection instead; it is
+     non-chromatic, it cannot collide with a backplate, and every label then
+     paints the same ButtonText on the same Canvas. */
+  .tabs button[aria-selected=true]{background:Canvas;
+    outline:2px solid Highlight;outline-offset:-4px}
+  .tabs button[aria-selected=true] svg,
+  .tabs button[aria-selected=true] .label{color:ButtonText}
+  /* THE CHEVRON IS TWO currentColor GRADIENTS, and Chromium paints no
+     background-image in forced colours -- while appearance:none has already
+     taken the native arrow away. A select lost both cues at once and became
+     indistinguishable from a text input, all nineteen of them. Hand the
+     control back to the platform in the one mode where the platform draws it
+     better than we can. */
+  select:not([multiple]){-webkit-appearance:auto;appearance:auto;
+    background-image:none;padding-right:.5625rem}
+  /* THE LAMP IS A background-color, so it vanished entirely: the page's mark
+     and its only activity signal, gone. A border survives forced colours. */
+  .brand .lamp{border:1px solid ButtonText;background:Canvas}
+  .brand.lit .lamp{background:Highlight;border-color:Highlight}
   .primary{background:ButtonFace;color:ButtonText;border:1px solid ButtonBorder}
 }
 
@@ -678,7 +740,23 @@ details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
 #glosstext{font-family:var(--mono);min-height:12em}
 .slider{display:grid;grid-template-columns:1fr auto;gap:var(--s2);
   align-items:center}
-.slider input[type=range]{width:100%}
+/* #speedwrap IS NOT .slider, AND THAT WAS WORTH 129 PIXELS. The synthesis
+   speed slider sits in a wrapper of its own because a Delete-this-voice
+   button shares the slot, so this rule never matched it: measured at the
+   user agent's default 129px in all 26 captured states while #x-temp beside
+   it measured 633. At 24px reader text every other control on the page grew
+   by half and this one did not move at all. */
+.slider input[type=range],#speedwrap input[type=range]{width:100%;
+  /* AND display:block, WHICH IS THE LAST 5.7 PIXELS OF THE STAGGER. A range
+     input is inline-block, so it sits on a text baseline and the line box
+     reserves descender space UNDER it -- 5.7px of nothing between the slider
+     and the bottom of its wrapper. .row aligns its children's bottoms, so that
+     phantom space lifted the whole control above the two selects beside it,
+     and no amount of matching heights or stripping margins could reach it
+     because the gap is not margin, it is a line box. Taken out of the flow of
+     text, the control's bottom IS the group's bottom, which is what the row
+     was aligning all along. */
+  display:block}
 .slider output{font-family:var(--mono);font-size:var(--t-label);color:var(--dim)}
 .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(12.5rem,1fr));
   gap:var(--s3)}
@@ -689,7 +767,7 @@ details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
 /* ARMING IS "PRESS THIS", NOT "LIVE", so the armed border is --accent and
    never --live: nothing is being captured yet. background:var(--bg) now means
    the well fills TOWARD the card face as the file comes over it. */
-.drop{border:2px dashed var(--line);border-radius:var(--radius);
+.drop{border:2px dashed var(--field-line);border-radius:var(--radius);
   padding:var(--s5) var(--s3);text-align:center;background:var(--sunk);
   transition:border-color .12s ease,background-color .12s ease}
 .drop.over{border-color:var(--accent);background:var(--bg)}
@@ -1301,11 +1379,11 @@ details>summary:active{opacity:.72}
                Parakeet. loadGlossaries() carries the WER figures. -->
           <h3 style="margin-top:14px">Voice activity detection</h3>
           <div class="grid2">
-            <div><label>threshold</label>
+            <div><label for="x-vad-t">threshold</label>
               <div class="slider"><input type="range" id="x-vad-t" min="0" max="1" step="0.01" value="0.5"><output>0.50</output></div></div>
-            <div><label>prefix_padding_ms</label>
+            <div><label for="x-vad-p">prefix_padding_ms</label>
               <div class="slider"><input type="range" id="x-vad-p" min="0" max="5000" step="10" value="100"><output>100</output></div></div>
-            <div><label>silence_duration_ms</label>
+            <div><label for="x-vad-s">silence_duration_ms</label>
               <div class="slider"><input type="range" id="x-vad-s" min="0" max="30000" step="50" value="300"><output>300</output></div></div>
           </div>
         </div>
@@ -1672,9 +1750,9 @@ details>summary:active{opacity:.72}
                CLONE_DEFAULTS still holds all three, because the panel comes
                back whole the moment the engine that has them is chosen. -->
           <div class="grid2" id="clone-expressive">
-            <div><label>exaggeration <span class="hint">0–1, default 0.3</span></label>
+            <div><label for="x-exag">exaggeration <span class="hint">0–1, default 0.3</span></label>
               <div class="slider"><input type="range" id="x-exag" min="0" max="1" step="0.05" value="0.3"><output>0.30</output></div></div>
-            <div><label>cfg_weight <span class="hint">0–1, default 0.3</span></label>
+            <div><label for="x-cfg">cfg_weight <span class="hint">0–1, default 0.3</span></label>
               <div class="slider"><input type="range" id="x-cfg" min="0" max="1" step="0.05" value="0.3"><output>0.30</output></div></div>
             <div><label>cross-language transfer</label>
               <!-- Resemble's own guidance for cross-language cloning. It names
@@ -1691,7 +1769,7 @@ details>summary:active{opacity:.72}
                temperature at all would have been left showing this one slider
                with its value refused by name at the server. -->
           <div class="grid2" id="clone-temp">
-            <div><label>temperature <span class="hint">0.1–1.5, default 0.6</span></label>
+            <div><label for="x-temp">temperature <span class="hint">0.1–1.5, default 0.6</span></label>
               <div class="slider"><input type="range" id="x-temp" min="0.1" max="1.5" step="0.05" value="0.6"><output>0.60</output></div></div>
           </div>
           <div class="row" style="margin-top:12px">

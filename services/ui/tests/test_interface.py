@@ -56,7 +56,15 @@ BARE_CSS = bare_css(CSS)
 # The guard, because the failure mode above is silent by construction: if the
 # stripper ever eats the sheet again, this says so at import rather than
 # letting forty assertions quietly stop scanning anything.
-assert len(BARE_CSS) > len(CSS) * 0.5, "the comment stripper ate the stylesheet"
+# NOT A LENGTH RATIO, and the first version of this guard was one. This sheet
+# is more than half explanatory comment by design, so stripping them legitimately
+# removes ~50% and the threshold fired on an honest edit. What the guard is
+# actually for is TRUNCATION -- the base64 display face contains `//`, and a
+# stripper that treats that as a line comment silently deleted 19 KB and every
+# rule after it. So assert the LAST rule in the sheet survived: nothing can be
+# truncated without taking it.
+assert "@media (max-width:30rem)" in BARE_CSS, "the stripper truncated the stylesheet"
+assert BARE_CSS.rstrip().endswith("}"), "the stripped sheet ends mid-rule"
 assert BARE_CSS.count("{") == BARE_CSS.count("}"), "the stripped sheet is unbalanced"
 
 
@@ -512,7 +520,14 @@ def test_a_greyed_field_greys_as_one_thing():
     assert ".grid2 > div:has(:disabled) > label" in BARE_CSS
     # And a floor underneath it, because the :has() rule is coupled to that
     # nesting and stops matching silently if the markup is ever restructured.
-    assert "input:disabled,select:disabled,textarea:disabled{opacity:.5" in BARE_CSS
+    # AND button IS IN THE LIST, which it was not. button:hover:not(:disabled)
+    # and button:active:not(:disabled) both existed, so a disabled button lost
+    # its hover and its press feedback and gained no disabled styling in
+    # exchange -- it rendered byte-identical to an enabled one. #go-stt ships
+    # with the attribute set, so the Transcribe tab's primary action looked
+    # live on arrival and did nothing when pressed.
+    floor = rule("input:disabled,select:disabled,textarea:disabled,button:disabled{")
+    assert "opacity:.5" in floor and "cursor:not-allowed" in floor
 
 
 def test_the_focus_ring_cannot_reach_the_transcript_spans():
@@ -1840,6 +1855,111 @@ def test_the_recess_is_carried_by_two_cues_and_not_by_a_1_14_step():
             "a theme lost the hairline and kept only the fill step"
     assert "inset" in rule(":root{")[rule(":root{").index("--lift"):], \
         "the light card is back on a drop shadow, which is the third tell"
+
+
+def test_every_slider_is_sized_by_the_page_and_not_by_the_user_agent():
+    """A REAL DEFECT, AND THE ONLY CONTROL ON THE PAGE THE OWNER COULD NOT
+    RESIZE. #speed lives in #speedwrap rather than in a .slider, because a
+    Delete-this-voice button shares its slot, so `.slider input[type=range]`
+    never matched it. It measured the user agent's default 129px in all 26
+    captured states -- every width from 360 to 1920, both themes, and at 24px
+    reader text where every other control on the page grew by half and this one
+    did not move. #x-temp beside it measured 633.
+
+    display:block is the other half and it is not cosmetic. A range input is
+    inline-block, so it sits on a text baseline and the line box reserves
+    descender space beneath it: 5.7px of nothing between the control and the
+    bottom of its wrapper. .row aligns its children's BOTTOMS, so that phantom
+    space lifted the slider above the two selects beside it, and no amount of
+    matching heights or stripping margins could reach it -- the gap is a line
+    box, not a margin. Measured after: control tops within 0.3px across light,
+    dark, 1280 and 24px text.
+    """
+    body = rule(".slider input[type=range],#speedwrap input[type=range]{")
+    assert "width:100%" in body, "a slider is back at the user agent's default width"
+    assert "display:block" in body, \
+        "an inline-block slider reserves descender space and breaks bottom alignment"
+    assert "#speedwrap" in body, "the speed slider is outside the rule again"
+
+
+def test_every_control_the_page_disables_looks_disabled():
+    """button was absent from the disabled floor while button:hover:not(:disabled)
+    and button:active:not(:disabled) both existed -- so a disabled button lost
+    its hover and its press feedback and gained nothing. Sampled from the
+    renders, #go-stt (which ships with the attribute set) was byte-identical to
+    an enabled button: rgb(178,191,201) either way. The Transcribe tab's primary
+    action looked live on arrival and did nothing when pressed."""
+    floor = rule("input:disabled,select:disabled,textarea:disabled,button:disabled{")
+    assert "opacity:.5" in floor and "cursor:not-allowed" in floor
+
+
+def test_every_slider_says_what_it_is():
+    """Six of seven range inputs had a <label> sitting directly above them with
+    no `for`, so nothing associated the two: a screen reader announced "slider,
+    0.3" and no name at all. The labels were already written; only the
+    attribute was missing."""
+    for ident in ("x-vad-t", "x-vad-p", "x-vad-s", "x-exag", "x-cfg", "x-temp", "speed"):
+        assert f'<label for="{ident}">' in HTML, f"the {ident} slider has no accessible name"
+
+
+def test_a_control_boundary_clears_three_to_one():
+    """SC 1.4.11 asks 3:1 of the boundary of anything you can operate. Measured
+    off the renders, every field edge was 1.31-1.81:1 in both themes -- the
+    border against the card AND the fill step against it, so neither cue
+    reached the bar. The values that DO clear it were already in this sheet,
+    reachable only by a reader who had already asked the OS for more contrast.
+
+    SPLIT RATHER THAN PROMOTED, deliberately. --line also draws card edges,
+    dividers and the seam under a summary; raising all of it would turn a quiet
+    faceplate into a wireframe. A card boundary is not a UI component in the
+    sense the criterion means. A field is."""
+    for theme in ("light", "dark"):
+        assert "--field-line" in tokens(theme), f"--field-line is undefined for {theme}"
+    fields = rule("input[type=text],input[type=password],input[type=number],select,textarea{")
+    assert "border:1px solid var(--field-line)" in fields, \
+        "fields are back on the decorative hairline"
+    assert "var(--field-line)" in rule(".drop{"), \
+        "the drop zone is a control and needs the same edge"
+
+
+def test_the_browser_is_told_which_theme_it_is_painting():
+    """Without color-scheme the engine draws every widget it owns in light: a
+    pure white checkbox on a near-black card, a light scrollbar, a light date
+    picker. The page has had two themes since it was written and never told the
+    engine about either. Placeholder text was the same omission -- never
+    declared, so whatever grey the engine chose, and both choices fail AA."""
+    assert "color-scheme:light dark" in BARE_CSS
+    assert "color:var(--dim)" in rule("::placeholder{"), \
+        "placeholder text is back to the user agent's grey"
+
+
+def test_forced_colours_does_not_paint_a_label_onto_its_own_backplate():
+    """THE WORST OF THE FORCED-COLOURS DEFECTS AND THE HARDEST TO SEE. The
+    selected tab used background:Highlight with color:HighlightText.
+    HighlightText resolves to black in the common high-contrast schemes, and
+    Chromium paints a Canvas-coloured backplate behind text that sits over a
+    background-image -- which the dock has. Black text on a black backplate:
+    the selected tab's own name rendered as a solid filled rectangle, measured
+    as 36x12 CSS px of unbroken rgb(0,0,0) with no glyph in it. The one tab you
+    could not read was the one you were on.
+
+    The selection is carried by an outline now: non-chromatic, incapable of
+    colliding with a backplate, and every label paints the same ButtonText on
+    the same Canvas.
+    """
+    block = CSS[CSS.index("@media (forced-colors:active)"):]
+    block = block[:block.index("}\n}") + 3]
+    assert "color:HighlightText" not in block, \
+        "a label is painted in HighlightText over a background-image again"
+    assert "outline:2px solid Highlight" in block, "the selection has no cue left"
+    # AND THE SELECT GETS ITS ARROW BACK. The chevron is two currentColor
+    # gradients; Chromium paints no background-image in forced colours, while
+    # appearance:none has already removed the native arrow -- so all nineteen
+    # selects lost both cues at once and became text inputs.
+    assert "appearance:auto" in block, "every select looks like a text input"
+    # AND THE LAMP SURVIVES. It is a background-color, so it vanished entirely:
+    # the page's mark and its only activity signal, gone.
+    assert ".brand .lamp{border:" in block, "the lamp disappears in forced colours"
 
 
 def test_no_control_is_left_wearing_the_operating_system():
