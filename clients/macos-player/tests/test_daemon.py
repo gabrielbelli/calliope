@@ -131,6 +131,28 @@ def test_the_daemon_is_built_and_explained_by_the_installer():
         "nothing tells the user the hotkey needs a permission"
 
 
+def test_the_daemon_and_the_player_agree_on_where_things_are():
+    """A REAL DEFECT, AND IT SURVIVED A GREEN SUITE. The daemon was written with
+    ".venv/bin/python" as "venv/bin/python3" -- from memory rather than from the
+    installer -- so it matched nothing, and the menu reported "not installed:
+    run install.sh" on a machine where install.sh had just succeeded. Every
+    other test passed, because they all read the source and none of them
+    compared one file's idea of a path with another's.
+
+    Three files name these paths and all three must agree: install.sh puts them
+    there, the player finds the interpreter, the daemon finds the interpreter
+    and the player.
+    """
+    for path in (".venv/bin/python", "server.py"):
+        assert path in INSTALL, f"install.sh no longer creates {path}"
+        assert path in DAEMON_CODE, f"the daemon does not look for {path}"
+    assert ".venv/bin/python" in PLAYER, "the player and the daemon disagree"
+    assert "calliope-player" in INSTALL and "calliope-player" in DAEMON_CODE, \
+        "the daemon cannot find the binary the installer builds"
+    # And nothing looks for the pre-rename layout.
+    assert "kokoro-tts" not in DAEMON_CODE, "the daemon points at the old runtime"
+
+
 def test_the_daemon_is_local_only_like_the_player():
     """GAB-635 removed the remote path from the reader. The daemon is a new
     surface on the same app and must not reintroduce it: the proxy to a Calliope

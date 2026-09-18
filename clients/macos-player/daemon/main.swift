@@ -48,7 +48,12 @@ final class ServerSupervisor {
     func start() {
         guard !isRunning else { return }
 
-        let python = runtimeURL.appendingPathComponent("venv/bin/python3")
+        // ".venv/bin/python", EXACTLY WHAT install.sh CREATES AND WHAT THE
+        // PLAYER ALREADY USES. Written from memory as "venv/bin/python3" this
+        // matched nothing, and the failure was quiet in the worst way: the menu
+        // said "not installed: run install.sh" on a machine where install.sh
+        // had just succeeded.
+        let python = runtimeURL.appendingPathComponent(".venv/bin/python")
         let script = runtimeURL.appendingPathComponent("server.py")
         guard FileManager.default.isExecutableFile(atPath: python.path),
               FileManager.default.fileExists(atPath: script.path) else {
