@@ -43,6 +43,39 @@ def test_the_page_has_no_external_reference_of_any_kind(client):
         assert marker not in clean, marker
 
 
+def test_translations_are_forwarded_like_transcriptions(client):
+    """A BEHAVIOURAL TEST FOR THE ROUTE THE GATEWAY NEVER CARRIED. services/stt
+    has answered POST /v1/audio/translations all along -- the gateway simply
+    had no entry for it, so it 404ed there, and this service's own PROXIED
+    table had the same hole. That is the third bug of this exact shape, after
+    DELETE /jobs/{id}/audio and the OmniRoute 404s: a route implemented at one
+    layer and unreachable from the next.
+
+    The source-level fence in services/gateway/tests catches a regression too,
+    but it asserts on an AST. This asserts on a request actually arriving."""
+    api, gateway, _ = client()
+    api.post("/v1/audio/translations",
+             files={"file": ("a.wav", b"RIFF0000WAVE", "audio/wav")},
+             data={"model": "whisper-1"})
+    assert gateway.seen, "the translation never reached the gateway"
+    assert gateway.seen[-1].url.path.endswith("/v1/audio/translations")
+
+
+def test_an_oversized_translation_is_refused_like_an_oversized_transcription(client):
+    """The size fence has to reach a route the day the route is added, not the
+    day somebody remembers. An upload cap that covers transcriptions and misses
+    translations is a cap that a caller routes around by changing one word in
+    the path."""
+    api, gateway, _ = client(UI_MAX_UPLOAD_BYTES="1024")
+    before = len(gateway.seen)
+    response = api.post("/v1/audio/translations",
+                        files={"file": ("big.wav", b"x" * 4096, "audio/wav")},
+                        data={"model": "whisper-1"})
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "upload_too_large"
+    assert len(gateway.seen) == before, "an oversized body was forwarded anyway"
+
+
 def test_a_forwarded_route_reaches_the_gateway_with_the_key_intact(client):
     api, gateway, _ = client()
     response = api.get("/voices", headers={"Authorization": "Bearer sk-x"})

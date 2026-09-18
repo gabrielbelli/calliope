@@ -143,28 +143,26 @@ MAX_INPUT_CHARS = 4096
 # to turn into a 202 with no explanation.
 RTF_SEED = float(os.getenv("TTS_REALTIME_FACTOR", "0.21"))
 
-# ONE SEED PER PLACE THE WORK CAN GO, and the third one is why they exist.
+# ONE SEED PER PLACE THE WORK CAN GO, and there are two places.
 #
 # Every backend used to be seeded from RTF_SEED, the local CPU constant. For a
-# GPU that is pessimistic and self-corrects on the first finished job. For the
-# RUNNER'S PROCESSOR it is a self-fulfilling refusal: the seed is
-# indistinguishable from local's, so a chooser comparing rates never picks it,
-# so it never finishes a job, so it is never measured, so the seed becomes
-# permanent. `backend_observations` in /health is the other half of the fix --
-# a count of zero says out loud that the figure beside it is a hypothesis.
+# GPU that is pessimistic and self-corrects on the first finished job, and
+# `backend_observations` in /health is the other half of the fix -- a count of
+# zero says out loud that the figure beside it is a hypothesis.
 #
 # The numbers are measurements, and each names the machine it came from:
-#   local       0.23x  the NAS, Xeon E5-2697 v4, Chatterbox at 8 threads
-#   runner      0.70x  a desktop RTX 3070, midpoint of a measured 0.644-0.746
-#   runner_cpu  0.24x  the same desktop's Ryzen 7 5700X3D, 8 threads, uncapped
-# The third is the unflattering one and it is not a typo: Chatterbox is
-# autoregressive at batch one, so it is bound by single-thread latency and a
-# 2022 desktop part beats a 2016 server part by about five per cent rather than
-# by the two or three times the core counts suggest. The runner's processor is
-# a fallback for when its card is busy, not a faster machine.
+#   local   0.23x  the NAS, Xeon E5-2697 v4, Chatterbox at 8 threads
+#   runner  0.70x  a desktop RTX 3070, midpoint of a measured 0.644-0.746
+#
+# THERE IS NO THIRD SEED ANY MORE. `RTF_SEED_RUNNER_CPU` held 0.24x -- the same
+# desktop's Ryzen 7 5700X3D, measured, five per cent above this host rather
+# than the two or three times its core count suggests, because Chatterbox is
+# autoregressive at batch one and bound by single-thread latency. It seeded a
+# lane that has not existed since the dispatcher was rebuilt on two, off an
+# environment key nothing else read. A seed for a lane that cannot be chosen is
+# a number on /health that describes no machine this deployment will ever use.
 RTF_SEED_LOCAL = float(os.getenv("TTS_REALTIME_FACTOR_LOCAL") or RTF_SEED)
 RTF_SEED_RUNNER = float(os.getenv("TTS_REALTIME_FACTOR_RUNNER") or 0.70)
-RTF_SEED_RUNNER_CPU = float(os.getenv("TTS_REALTIME_FACTOR_RUNNER_CPU") or 0.24)
 
 # WHICH LANES EXIST. It was an ORDER -- a ladder walked top to bottom -- and a
 # ladder is why `runner_cpu` never ran a single job: `local` is a rung, it is
@@ -172,11 +170,12 @@ RTF_SEED_RUNNER_CPU = float(os.getenv("TTS_REALTIME_FACTOR_RUNNER_CPU") or 0.24)
 # Lanes have no order, so this is now only a membership test: naming a lane
 # turns it on, leaving it out turns it off. "local" alone is local-only.
 #
-# `runner_cpu` IS NO LONGER A LANE and naming it does nothing. The server sets
-# TTS_RUNNER_CPU_SERVICE=chatterbox-cpu and the runner registers `echo` and
-# `chatterbox` and nothing else, so that rung has never been offered a job and
-# could not have been; at its measured 0.24x against this host's 0.23x the
-# arithmetic in dispatch.py refuses it anyway, without a special case.
+# `runner_cpu` IS NO LONGER A LANE and naming it does nothing. `_build_dispatch`
+# builds lanes from a fixed set and that name is not in it; the agent on spring
+# registers `echo` and `chatterbox` and nothing else, so the rung it named was
+# never offered a job and could not have been; and at its measured 0.24x
+# against this host's 0.23x the arithmetic in dispatch.py refuses it anyway,
+# without a special case.
 BACKEND_ORDER = tuple(x.strip() for x in
                       (os.getenv("TTS_BACKEND_ORDER") or "runner,local").split(",")
                       if x.strip())
@@ -387,12 +386,15 @@ class _Rate:
 # multilingual model on a 3070 -- to turbo would understate it by 2.36x, and an
 # understated rate is not a harmless one: it is the number that decides whether
 # a caller is answered synchronously or handed a 202.
+#
+# ONE ENTRY PER LANE THE DISPATCHER CAN BUILD, and that is now the whole of the
+# list. A third pair for `runner_cpu` sat here reading
+# TTS_REALTIME_FACTOR_RUNNER_CPU, so an operator who set that key got a number
+# accepted, stored and published on /health for a lane no job can be sent to.
 _LANE_ENV = {"local": ("TTS_REALTIME_FACTOR_LOCAL", "TTS_REALTIME_FACTOR"),
-             "runner": ("TTS_REALTIME_FACTOR_RUNNER",),
-             "runner_cpu": ("TTS_REALTIME_FACTOR_RUNNER_CPU",)}
+             "runner": ("TTS_REALTIME_FACTOR_RUNNER",)}
 _LANE_SEEDS = {"local": RTF_SEED_LOCAL,
-               "runner": RTF_SEED_RUNNER,
-               "runner_cpu": RTF_SEED_RUNNER_CPU}
+               "runner": RTF_SEED_RUNNER}
 
 
 def _seed_for(lane: str, engine: str) -> float:
@@ -1649,12 +1651,12 @@ async def lifespan(app: FastAPI):
     # and _backend_for returns the local Synth without importing anything else.
     runner_cfg = RunnerConfig.from_env()
     state["runner"] = RunnerClient(runner_cfg) if runner_cfg else None
-    # THE SAME MACHINE'S OTHER SERVICE, and a second client rather than a second
-    # host. It shares the certificate pin, the key and the port; only the
-    # service id and the wait differ. None when the runner has no processor rung
-    # configured, which is what TTS_RUNNER_CPU_SERVICE="" says.
-    cpu_cfg = runner_cfg.for_cpu() if runner_cfg else None
-    state["runner_cpu"] = RunnerClient(cpu_cfg) if cpu_cfg else None
+    # ONE CLIENT, AND A SECOND ONE IS NOT BUILT HERE ANY MORE. `runner_cfg
+    # .for_cpu()` used to build a second RunnerClient for `chatterbox-cpu` at
+    # every startup -- a whole TLS context and a pinned certificate for a
+    # service the agent on spring has never registered and a lane the
+    # dispatcher cannot construct. The engine-to-service mapping that IS live
+    # is `_runner_for`, which copies this client on demand. See RunnerConfig.
     if runner_cfg:
         log.info("a runner is configured at %s:%d; its card is service %s. "
                  "Lanes: %s.", runner_cfg.host, runner_cfg.port,

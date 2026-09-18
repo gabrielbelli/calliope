@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 
 __all__ = ["CHARS_PER_SECOND", "MAX_CHARS", "TARGET_CHARS", "chunk_text",
            "speech_seconds"]
@@ -160,7 +161,17 @@ def chunk_text(text: str, *, max_chars: int | None = None,
     limit = max_chars or MAX_CHARS
     target = min(target_chars or TARGET_CHARS, limit)
 
-    text = " ".join(text.split())
+    # NFC FIRST, FOR THE SAME REASON services/tts DOES IT (GAB-637) AND WITH A
+    # DIFFERENT MEASUREMENT BEHIND IT. macOS hands a selection over decomposed,
+    # so "ação" can arrive as a + U+0303 + ... rather than as the composed
+    # codepoints, and every client that forwards a pasteboard string can carry
+    # that here. The espeak-ng evidence from services/tts does NOT transfer:
+    # Chatterbox tokenises text itself and its failure mode on a lone combining
+    # mark has not been measured, so the claim made here is only the safe half
+    # -- NFC is the canonical composed form, no tokeniser handles it worse than
+    # NFD, and normalising costs nothing. Somebody should still measure what
+    # Chatterbox does with a bare combining mark before claiming more.
+    text = " ".join(unicodedata.normalize("NFC", text).split())
     if not text:
         return []
 

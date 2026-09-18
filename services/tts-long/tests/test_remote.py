@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 from app.remote import (RemoteSynth, RemoteUnavailable, RemoteYield,
-                        RunnerConfig, _pinned_context)
+                        RunnerClient, RunnerConfig, _pinned_context)
 from app.synth import SAMPLE_RATE
 
 
@@ -587,7 +587,7 @@ def _wait(client, job_id: str, timeout: float = 30.0) -> dict:
 
 
 @contextmanager
-def runner(client, cpu=None):
+def runner(client):
     """Attach a fake runner to the running app for the length of one test.
 
     TWO THINGS HAVE TO HAPPEN AND BOTH ARE THE POINT OF LANES.
@@ -611,7 +611,6 @@ def runner(client, cpu=None):
     import app.main as main
 
     main.state["runner"] = client
-    main.state["runner_cpu"] = cpu
     lane = main.dispatch.lanes["runner"]
     hop = lane.hop
     lane.hop = 0.0
@@ -620,7 +619,6 @@ def runner(client, cpu=None):
         yield main
     finally:
         main.state["runner"] = None
-        main.state["runner_cpu"] = None
         lane.hop = hop
         lane.probe.once()
 
@@ -756,11 +754,15 @@ def test_the_local_path_is_untouched_when_no_runner_is_configured(speech,
     assert finished["backend"] == "local", "an unconfigured job must say local"
     assert "runner_host" not in finished, "nothing remote was involved"
     assert "fell_back" not in finished, "there was nothing to fall back from"
-    # AND THE SECOND CLIENT IS NOT CONSTRUCTED EITHER. The processor rung is a
-    # second RunnerClient over the same host, so a chooser that built one
-    # unconditionally would open a socket on a stack that has no runner at all
-    # -- and would do it from the module every other test depends on being inert.
-    assert main.state.get("runner_cpu") is None
+    # AND NO SECOND CLIENT IS CONSTRUCTED ANYWHERE, under any name. `lifespan`
+    # built one for the processor rung out of `runner_cfg.for_cpu()` at every
+    # startup; both are gone, and this asserts the SHAPE rather than the one
+    # key, so reintroducing the rung under a different spelling fails here too.
+    remote_clients = {k: v for k, v in main.state.items()
+                      if k != "runner" and isinstance(v, RunnerClient)}
+    assert not remote_clients, (
+        "a RunnerClient was built on a stack with no runner configured: "
+        + repr(sorted(remote_clients)))
 
 
 def test_the_two_backends_speak_through_exactly_the_same_signature():
@@ -1048,19 +1050,29 @@ def test_the_processor_rung_is_not_a_lane_and_naming_it_does_not_make_one(speech
     assert set(main.dispatch.lanes) <= {"local", "runner"}
 
 
-def test_the_processors_rate_never_enters_the_cards_average_or_this_hosts(speech):
-    """Three machines, three averages. Merging any two of them describes a
-    machine that does not exist, and `rate` is what decides whether a request is
-    answered synchronously or handed a 202."""
+def test_one_lanes_rate_never_enters_the_others_average(speech):
+    """Two machines, two averages. Merging them describes a machine that does
+    not exist, and `rate` is what decides whether a request is answered
+    synchronously or handed a 202.
+
+    ON THE TWO LANES THAT EXIST. This used to observe on `runner_cpu` and check
+    that the other two were untouched, which proved the separation of a lane no
+    job can be sent to -- true, and about nothing. A GPU at 20x entering the
+    average that decides whether THIS CPU can answer the next request
+    synchronously is the defect, and it needs two real lanes to state.
+    """
     import app.main as main
 
     local_before = main.rate.value
-    gpu_before = main.rate_for("runner").value
-    main.rate_for("runner_cpu").observe(audio_seconds=10.0, compute_seconds=50.0)
+    main.rate_for("runner").observe(audio_seconds=10.0, compute_seconds=0.5)
+    assert main.rate.value == local_before, (
+        "the runner's 20x entered the local average, which is the number "
+        "_sync_budget uses to promise this host can finish a request")
 
-    assert main.rate.value == local_before
-    assert main.rate_for("runner").value == gpu_before
-    assert main.rate_for("runner_cpu").value != main.rate_for("local").value
+    gpu_after = main.rate_for("runner").value
+    main.rate_for("local").observe(audio_seconds=10.0, compute_seconds=50.0)
+    assert main.rate_for("runner").value == gpu_after
+    assert main.rate_for("runner").value != main.rate_for("local").value
 
 
 def test_a_seed_is_a_hypothesis_and_health_says_which_numbers_are_measured(speech):
@@ -1074,51 +1086,11 @@ def test_a_seed_is_a_hypothesis_and_health_says_which_numbers_are_measured(speec
     """
     import app.main as main
 
-    main.rate_for("runner_cpu")            # seeded, never observed
+    main.rate_for("runner")                # seeded, never observed
     doc = speech.get("/health").json()
-    assert doc["backend_observations"]["runner_cpu"] == 0
-    assert doc["realtime_factor_by_backend"]["runner_cpu"] > 0
+    assert doc["backend_observations"]["runner"] == 0
+    assert doc["realtime_factor_by_backend"]["runner"] > 0
     assert doc["backend_order"] == list(main.BACKEND_ORDER)
-
-
-# ------------------------------------------------- configuring the rung ------
-
-
-def test_the_processor_rung_shares_the_pin_and_the_key_of_the_card():
-    """THE DEFECT THIS PREVENTS: a second client built by hand.
-
-    One host, one certificate, one key, one port. Building the second config by
-    `replace` is what stops the two drifting apart the day a field is added --
-    and a forgotten fingerprint is not an error anybody would ever see, because
-    the only visible symptom is a connection that works.
-    """
-    cfg = RunnerConfig(host="box", fingerprint="ab" * 32, api_key="secret",
-                       port=47601, max_wait=900.0)
-    cpu = cfg.for_cpu()
-    assert cpu is not None
-    assert cpu.service == "chatterbox-cpu" and cfg.service == "chatterbox"
-    assert cpu.fingerprint == cfg.fingerprint
-    assert cpu.api_key == cfg.api_key and cpu.port == cfg.port
-    # Shorter, and the asymmetry is the point: the rung below the card is about
-    # as fast as the card's machine, so waiting out a game is worth it. The rung
-    # below the processor is no slower than the processor, so it is not.
-    assert cpu.max_wait == 300.0 and cpu.max_wait < cfg.max_wait
-
-
-def test_an_empty_cpu_service_means_the_runner_sells_only_its_card():
-    """UNSET AND EMPTY ARE DIFFERENT ANSWERS. Unset is "the default id, which is
-    what the runner ships". Empty is "this machine has no processor rung", which
-    is how the two-backend behaviour is restored on purpose. `or` would have
-    collapsed them into one."""
-    assert RunnerConfig.from_env(
-        {"TTS_RUNNER_HOST": "box"}).cpu_service == "chatterbox-cpu"
-    assert RunnerConfig.from_env(
-        {"TTS_RUNNER_HOST": "box", "TTS_RUNNER_CPU_SERVICE": ""}).cpu_service == ""
-    assert RunnerConfig.from_env(
-        {"TTS_RUNNER_HOST": "box", "TTS_RUNNER_CPU_SERVICE": ""}).for_cpu() is None
-    assert RunnerConfig(host="box", service="only-one",
-                        cpu_service="only-one").for_cpu() is None, \
-        "one service id cannot be two rungs"
 
 
 def test_the_cap_is_read_from_the_row_in_force_and_not_from_a_service_field():

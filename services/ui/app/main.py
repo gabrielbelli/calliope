@@ -101,11 +101,19 @@ PAGE = Path(__file__).with_name("static") / "ui.html"
 # with the method it may use. Nothing else is forwarded; an unlisted path is a
 # 404 here exactly as it is at the gateway.
 #
-# /v1/audio/translations is absent because the gateway does not route it and
-# Parakeet refuses translation anyway. DELETE /jobs/{id} is present because
-# tts-long has had that route all along (main.py:580) and only the gateway's
-# route table was missing it -- which is why the Jobs tab can offer "stop and
-# keep what's done" rather than a job that cannot be called off.
+# /v1/audio/translations IS PRESENT NOW, AND THE ENTRY THIS REPLACES EXPLAINS
+# WHY IT WAS NOT: "the gateway does not route it and Parakeet refuses
+# translation anyway". Both halves were true and neither was a reason. stt-stack
+# has answered POST /v1/audio/translations all along, with the same field
+# validation the transcription route has, and a deployment running
+# STT_MODEL=whisper answers it for real -- so the table was hiding a working
+# feature on the strength of which checkpoint happened to be loaded. Under
+# Parakeet the request now reaches stt-stack's own 400, which names the engine
+# and the variable that changes it; that is an answer a caller can act on and a
+# 404 from this table is not. DELETE /jobs/{id} is present for the mirror-image
+# reason: tts-long has had that route all along (main.py:580) and only the
+# gateway's route table was missing it -- which is why the Jobs tab can offer
+# "stop and keep what's done" rather than a job that cannot be called off.
 #
 # CHOOSING THE SPEECH ENGINE ADDS NOTHING HERE, and that is a fact about this
 # table rather than an oversight in it. The engine is a `model` field in the
@@ -137,6 +145,7 @@ PAGE = Path(__file__).with_name("static") / "ui.html"
 # `health` below, and it must stay that and not a field list.
 PROXIED: tuple[tuple[str, str], ...] = (
     ("POST", "/v1/audio/transcriptions"),
+    ("POST", "/v1/audio/translations"),
     ("POST", "/transcribe"),
     ("POST", "/v1/audio/speech"),
     ("POST", "/speak"),
@@ -184,7 +193,18 @@ PROXIED: tuple[tuple[str, str], ...] = (
 
 # Routes whose request body is an upload and must therefore never be buffered
 # here, and whose Content-Length is checked before a byte is forwarded.
-UPLOAD_PATHS = frozenset({"/v1/audio/transcriptions", "/transcribe"})
+#
+# TRANSLATIONS BELONGS HERE THE MOMENT IT IS PROXIED AT ALL, and the two are
+# easy to add apart. The ceiling is the only one anywhere in the chain --
+# services/stt/app/openai_api.py:1001 is `await file.read()` and
+# services/stt/app/main.py:168 is a bare `file.file.read()`, both on an
+# UploadFile with no cap in front of them, so an oversized upload is an OOM
+# kill in a 6 GB container rather than a message -- and a route that carries an
+# audio file past this table without a line here is that container's failure
+# mode restored for one path. (Both line numbers were re-read against the
+# current tree; the ones this comment used to carry pointed 30 lines short.)
+UPLOAD_PATHS = frozenset({"/v1/audio/transcriptions", "/v1/audio/translations",
+                          "/transcribe"})
 
 # Where the page reaches the proxied routes from when this service is behind
 # the gateway. Both mounts are live at once: the bare paths still work for a
@@ -425,9 +445,10 @@ async def _forward(request: Request) -> Response:
 
     if path in UPLOAD_PATHS:
         # THE CEILING THAT DOES NOT EXIST ANYWHERE ELSE IN THE CHAIN.
-        # services/stt/app/main.py:138 is a bare `file.file.read()` on an
-        # UploadFile: no Content-Length check, no cap, no streaming, so a 4 GB
-        # MKV is buffered whole into a container with a 6 GB limit and the
+        # services/stt/app/main.py:168 is a bare `file.file.read()` on an
+        # UploadFile and services/stt/app/openai_api.py:1001 is `await
+        # file.read()`: no Content-Length check, no cap, no streaming, so a
+        # 4 GB MKV is buffered whole into a container with a 6 GB limit and the
         # failure is an OOM kill rather than a message. Rejecting here costs
         # one comparison and happens before a byte is forwarded.
         declared = request.headers.get("content-length")

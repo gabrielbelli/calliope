@@ -1,6 +1,7 @@
 """One door in front of three speech services.
 
     POST /v1/audio/transcriptions  ──────────────────────►  stt-stack:8000
+    POST /v1/audio/translations    ──────────────────────►  stt-stack:8000
     POST /transcribe               ──────────────────────►  stt-stack:8000
 
     POST /v1/audio/speech   model=kokoro|tts-1|…|absent  ►  tts-stack:8001
@@ -13,9 +14,14 @@
 
     POST /v1/audio/speech   a long-form name not enabled ►  404 model_not_found
 
-    GET  /v1/models    answered here, from its own table, with no backend call
-    GET  /health       all three, fanned out, unauthenticated
-    everything else    404 in the OpenAI envelope
+    POST /v1/chat/completions  input_audio part  ────────►  stt-stack:8000
+    POST /v1/chat/completions  no audio  ───────────────►  answered here, and
+                                                           NEVER by a model
+
+    GET  /v1/models        answered here, from its own table, no backend call
+    GET  /v1/models/{id}   the same table, one row, so the two cannot disagree
+    GET  /health           all three, fanned out, unauthenticated
+    everything else        404 in the OpenAI envelope
 
 This is a router, not a framework. It exists for two reasons and no others.
 
@@ -97,10 +103,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 
 from voice_common.engines import CATALOGUE
-from voice_common.errors import (error_response, http_error_response,
+from voice_common.errors import (ApiError, error_response, http_error_response,
                                  install_errors, v1_path)
 
-from . import auth
+from . import auth, chat
 from .openai_api import model_list
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -235,6 +241,23 @@ LONG_KNOWN = frozenset(
 # written out beside it. One read of GATEWAY_LONG_MODELS feeds both the branch
 # in `speech` and the advertised list, which is what stops the two drifting.
 MODEL_LIST = model_list(LONG_MODELS)
+
+# `GET /v1/models/{id}`, DERIVED FROM THE PUBLISHED LIST RATHER THAN BUILT
+# BESIDE IT. Retrieve-model and list-models are two endpoints over one table in
+# OpenAI's API, and the failure worth ruling out is the one this estate keeps
+# producing: two tables written by different hands that agree until the day a
+# row moves. Indexing the list that was already built makes a row that lists
+# but does not retrieve unrepresentable.
+#
+# KEYED LOWERCASED AND STRIPPED, BECAUSE THAT IS THE KEY `speech` ROUTES ON.
+# `model` is compared `.strip().lower()` twenty lines below, so a client that
+# sends "Chatterbox" gets audio from the long backend; a retrieve that answered
+# 404 for the same string would be this service disagreeing with itself about
+# what a model name is, and the whole reason /v1/models exists is to be the one
+# place a client learns the names. The row handed back carries the canonical
+# spelling, so a client that stores what it retrieved stores the id the list
+# published.
+MODEL_ROWS = {str(row["id"]).lower(): row for row in MODEL_LIST["data"]}
 
 # Hop-by-hop headers, per RFC 9110 §7.6.1. They describe a single connection
 # and must not be copied onto the next one; forwarding `transfer-encoding`
@@ -443,6 +466,41 @@ async def _body(upstream: httpx.Response, *, request: Request, backend: Backend,
              started=started, rtf=rtf)
 
 
+# The two answers a failed hop gets, written once. `_proxy` streams and the
+# chat route below buffers, so they cannot share a code path -- but a caller
+# who sees "stt-stack is not reachable" from one and something else worded
+# differently from the other is being told two things about one container.
+# 503, not 502, on an unreachable backend: 502 claims the upstream answered
+# badly and it did not answer at all. openai-python retries 5xx twice by
+# default, which for a container mid-restart is exactly right and costs nothing
+# -- a refused connection fails in microseconds. The service is named because
+# with four backends behind one URL "upstream failed" is unactionable.
+
+
+def _unreachable(backend: Backend) -> Response:
+    return error_response(
+        503,
+        f"{backend.name} is not reachable from the gateway; the container "
+        "may be restarting.",
+        type_="server_error", code="backend_unavailable",
+        headers={"Retry-After": "30"})
+
+
+def _failed(backend: Backend, exc: Exception) -> Response:
+    return error_response(
+        503, f"{backend.name} could not be reached: {type(exc).__name__}.",
+        type_="server_error", code="backend_unavailable",
+        headers={"Retry-After": "30"})
+
+
+def _too_slow(backend: Backend) -> Response:
+    return error_response(
+        504,
+        f"{backend.name} did not finish within {backend.read_timeout:.0f} s. "
+        f"{backend.timeout_help}",
+        type_="server_error", code="backend_timeout")
+
+
 async def _proxy(request: Request, backend: Backend, *,
                  content: bytes | AsyncIterator[bytes] | None,
                  model: str | None = None) -> Response:
@@ -468,28 +526,14 @@ async def _proxy(request: Request, backend: Backend, *,
     try:
         upstream = await client.send(upstream_request, stream=True)
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-        # 503, not 502: 502 claims the upstream answered badly and it did not
-        # answer at all. openai-python retries 5xx twice by default, which for
-        # a container mid-restart is exactly right and costs nothing — a
-        # refused connection fails in microseconds. The service is named
-        # because with three backends behind one URL "upstream failed" is
-        # unactionable.
+        # See _unreachable above for why this is 503 rather than 502.
         _log(request=request, backend=backend.name, model=model,
              status=f"unreachable:{type(exc).__name__}", started=started)
-        return error_response(
-            503,
-            f"{backend.name} is not reachable from the gateway; the container "
-            "may be restarting.",
-            type_="server_error", code="backend_unavailable",
-            headers={"Retry-After": "30"})
+        return _unreachable(backend)
     except httpx.TimeoutException:
         _log(request=request, backend=backend.name, model=model,
              status="timeout", started=started)
-        return error_response(
-            504,
-            f"{backend.name} did not finish within "
-            f"{backend.read_timeout:.0f} s. {backend.timeout_help}",
-            type_="server_error", code="backend_timeout")
+        return _too_slow(backend)
     except ClientDisconnect:
         # The client hung up while we were still reading its upload. Nothing
         # can be delivered; 499 is nginx's code for it and never leaves here.
@@ -499,11 +543,7 @@ async def _proxy(request: Request, backend: Backend, *,
     except httpx.RequestError as exc:
         _log(request=request, backend=backend.name, model=model,
              status=f"failed:{type(exc).__name__}", started=started)
-        return error_response(
-            503,
-            f"{backend.name} could not be reached: {type(exc).__name__}.",
-            type_="server_error", code="backend_unavailable",
-            headers={"Retry-After": "30"})
+        return _failed(backend, exc)
 
     content_type = upstream.headers.get("content-type", "")
 
@@ -552,6 +592,36 @@ async def _proxy(request: Request, backend: Backend, *,
 
 @app.post("/v1/audio/transcriptions")
 async def transcriptions(request: Request) -> Response:
+    return await _proxy(request, STT, content=request.stream())
+
+
+@app.post("/v1/audio/translations")
+async def translations(request: Request) -> Response:
+    """Speech in any language, English text out.
+
+    THE DELETE /jobs/{id}/audio DEFECT FOR THE THIRD TIME, AND ON THE SURFACE
+    THIS SERVICE EXISTS FOR. stt-stack has answered this route all along
+    (`@router.post("/audio/translations")`, openai_api.py:1061) with the full
+    field validation the transcription route has -- response_format, prompt,
+    temperature, glossary, and a refusal by name for everything else. The one
+    thing missing was a line in this table, so a request through the only
+    published port met Starlette's 404 `unknown_url` and an aggregator's
+    provider check read the whole /v1/audio surface as half-implemented.
+
+    THE REASON IT WAS LEFT OUT HAS EXPIRED, and it is worth recording because
+    it was a good reason. The exemption said "Parakeet refuses translation, so
+    the route exists only to say so; routing it would publish a 400". That
+    argument makes this gateway's route table depend on which checkpoint the
+    STT container happens to have loaded -- and a deployment with
+    STT_MODEL=whisper answers this route for real. Not routing it there hides a
+    working feature; routing it under Parakeet publishes stt-stack's own 400,
+    which names the engine, names the variable that changes it, and points at
+    /v1/audio/transcriptions. A refusal a caller can act on is a better answer
+    than a 404 that says the route does not exist.
+
+    Streamed like its sibling above: an hour of wav is 100 MB+ and there is no
+    routing decision in it -- stt-stack is the only STT backend.
+    """
     return await _proxy(request, STT, content=request.stream())
 
 
@@ -643,6 +713,243 @@ async def speech(request: Request) -> Response:
 
     return await _proxy(request, backend, content=raw,
                         model=model if isinstance(model, str) else None)
+
+
+# ------------------------------------------------------------ chat, honestly --
+#
+# The route an aggregator probes before it will list this stack at all, and the
+# one place in the estate where a plausible answer would be worse than an
+# error. app/chat.py holds the whole argument and the two strings that can
+# reach a caller; everything here is the hop to stt-stack.
+
+
+# THE ONE BODY THIS PROCESS HOLDS THAT CARRIES AUDIO, AND THEREFORE THE ONE
+# PLACE IT CAN BE OOM-KILLED. compose.yaml gives this container 512 MB, and the
+# comment beside that number is the reason it is that small: "this process
+# moves bytes between two sockets and never holds them: uploads and audio
+# responses stream through, and the single buffered body is /v1/audio/speech's
+# JSON, which is kilobytes". Every other audio route here is `content=
+# request.stream()`. This one cannot be — the clip is base64 INSIDE a JSON
+# object and the transcript has to be wrapped before anything is sent — so
+# without a ceiling the sentence above stops being true and the memory limit
+# stops being a budget.
+#
+# MEASURED, NOT GUESSED: 3.8x the body, linear over 5.3 / 10.7 / 21.3 / 32.0 MB
+# bodies (tracemalloc peak over baseline, mock backend, one request in flight).
+# The base64 string, the bytes it arrived as, the decoded clip and the
+# multipart body built for the next hop are all resident at once. So 16 MiB
+# costs about 61 MB of a 512 MB container and several can be in flight without
+# touching the limit, where an uncapped 400 MB body is 1.5 GB and the container
+# dies -- taking every other request through the only published port with it.
+#
+# 16 MiB of base64 is 12 MB of audio: roughly six minutes of 16 kHz mono wav or
+# twenty-five of a 64 kbps mp3. Anything longer belongs on
+# POST /v1/audio/transcriptions, which streams and has no ceiling here at all,
+# and the refusal below says so rather than leaving a caller to guess.
+CHAT_MAX_BYTES = int(os.getenv("GATEWAY_CHAT_MAX_BYTES", str(16 * 1024 * 1024)))
+
+
+class _Transcript(NamedTuple):
+    """Either the text, or the backend's own answer to hand straight back."""
+
+    text: str | None
+    engine: str | None
+    failure: Response | None
+
+
+async def _transcribe(audio: chat.Audio, *, model: str, request: Request,
+                      started: float) -> _Transcript:
+    """One clip to stt-stack's own OpenAI route, buffered.
+
+    NOT `_proxy`, AND IT CANNOT BE. _proxy forwards the caller's request and
+    streams the backend's answer out untouched; here the request is SYNTHESISED
+    from a JSON body and the answer has to be READ before anything can be sent,
+    because the transcript goes inside a chat envelope this service builds.
+    What keeps that from being the 100 MB wav problem the transcription route
+    above is streamed to avoid is CHAT_MAX_BYTES, enforced on the way in — not
+    the shape of the request, which bounds nothing.
+
+    `model` is forwarded rather than replaced. stt-stack requires the field and
+    cannot choose an engine with it, so passing the caller's string keeps the
+    run record honest: its listing shows what was asked for beside what ran.
+    """
+    client: httpx.AsyncClient = state["client"]  # type: ignore[assignment]
+    try:
+        upstream = await client.post(
+            STT.url + "/v1/audio/transcriptions",
+            files={"file": (audio.filename, audio.data, audio.content_type)},
+            data={"model": model, "response_format": "json"},
+            timeout=httpx.Timeout(STT.read_timeout, connect=CONNECT_TIMEOUT))
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        _log(request=request, backend=STT.name, model=model,
+             status=f"unreachable:{type(exc).__name__}", started=started)
+        return _Transcript(None, None, _unreachable(STT))
+    except httpx.TimeoutException:
+        _log(request=request, backend=STT.name, model=model, status="timeout",
+             started=started)
+        return _Transcript(None, None, _too_slow(STT))
+    except httpx.RequestError as exc:
+        _log(request=request, backend=STT.name, model=model,
+             status=f"failed:{type(exc).__name__}", started=started)
+        return _Transcript(None, None, _failed(STT, exc))
+
+    engine = upstream.headers.get("x-stt-engine")
+    if upstream.status_code != 200:
+        # THE BACKEND'S OWN ENVELOPE, FORWARDED RATHER THAN REWORDED. stt-stack
+        # says which field was wrong, which engine is loaded and which variable
+        # changes it; anything this service wrote instead would be a worse
+        # version of that with a chat envelope round it. Status and body go
+        # back exactly as they arrived, which is the same promise
+        # test_a_backend_envelope_is_never_rewrapped holds _proxy to.
+        _log(request=request, backend=STT.name, model=model,
+             status=upstream.status_code, started=started)
+        return _Transcript(None, engine, Response(
+            content=upstream.content, status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type",
+                                            "application/json")))
+
+    try:
+        text = upstream.json()["text"]
+    except (ValueError, KeyError, TypeError):
+        _log(request=request, backend=STT.name, model=model,
+             status="200-unreadable", started=started)
+        log.warning("%s answered 200 with no `text` field: %r", STT.name,
+                    upstream.content[:4096])
+        return _Transcript(None, engine, error_response(
+            502,
+            f"{STT.name} answered 200 to a transcription with a body that "
+            "carries no `text` field, so there is nothing to put in the "
+            "assistant message.",
+            type_="server_error", code="backend_error"))
+
+    _log(request=request, backend=STT.name, model=model,
+         status=upstream.status_code, started=started,
+         rtf=upstream.headers.get("x-realtime-factor"))
+    return _Transcript(str(text), engine, None)
+
+
+async def _chat_body(request: Request) -> bytes | None:
+    """The whole request body, or None when it is over CHAT_MAX_BYTES.
+
+    COUNTED WHILE READING RATHER THAN TRUSTED FROM Content-Length, which is the
+    difference between a ceiling and a request to please stay under one. The
+    header is checked first because it lets an honest client be refused before
+    it uploads anything, but a chunked request carries no Content-Length at all
+    and `curl -H 'Transfer-Encoding: chunked'` is one flag away -- so a check
+    that stopped at the header would be bypassed by the one caller who meant
+    to. voice-ui's own cap stops at the header and is right to: it forwards a
+    stream it never holds, so the bytes it does not count cost it nothing. This
+    route holds every byte it reads.
+
+    Returning None rather than raising, because the refusal has to be logged
+    with the duration of the read that led to it, and that is the caller's
+    wait: a 400 MB upload refused at the end still took as long as a 400 MB
+    upload.
+    """
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > CHAT_MAX_BYTES:
+        return None
+
+    size = 0
+    chunks: list[bytes] = []
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > CHAT_MAX_BYTES:
+            # Stop reading. What has arrived is dropped rather than parsed:
+            # half a JSON body is not a smaller request, it is a different one.
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request) -> Response:
+    """Transcribe through the chat surface, or say what this stack is.
+
+    THE ANSWER IS NEVER COMPOSED HERE. See app/chat.py: the assistant message
+    is a transcript stt-stack produced or the constant NO_MODEL_REPLY, and the
+    reason that matters is not politeness -- it is that a tool added later must
+    not be able to conclude from a plausible reply that the NAS runs a language
+    model and start routing real traffic to it.
+    """
+    started = time.monotonic()
+
+    try:
+        raw = await _chat_body(request)
+    except ClientDisconnect:
+        # The same case /v1/audio/speech handles, logged for the same reason:
+        # one line per request, or the 499s are invisible to grep.
+        _log(request=request, backend="-", model=None,
+             status="client-disconnect", started=started)
+        return Response(status_code=499)
+
+    if raw is None:
+        # THE ONE REFUSAL THIS ROUTE MAKES BEFORE READING ANYTHING. See
+        # CHAT_MAX_BYTES: 413 rather than 400 because the payload is the
+        # problem, which is the code services/stt already answers for an
+        # oversized glossary and the one voice-ui answers for an oversized
+        # upload -- `upload_too_large` is that same vocabulary, so a client
+        # branching on `code` learns the same thing everywhere in the estate.
+        _log(request=request, backend="-", model=None, status="413-too-large",
+             started=started)
+        return error_response(
+            413,
+            f"a chat body is buffered whole here to find the audio inside it, "
+            f"so it is capped at {CHAT_MAX_BYTES / 1024**2:.0f} MB and this "
+            "one is larger. POST /v1/audio/transcriptions takes the clip as a "
+            "file upload, streams it through this gateway rather than holding "
+            "it, and has no ceiling here.",
+            code="upload_too_large")
+
+    try:
+        body = json.loads(raw)
+    except ValueError as exc:
+        _log(request=request, backend="-", model=None, status="400-badjson",
+             started=started)
+        return error_response(400, f"request body is not valid JSON: {exc}",
+                              code="invalid_value")
+
+    try:
+        ask = chat.read(body)
+    except ApiError as exc:
+        # Raised rather than returned so install_errors renders it, and caught
+        # on the way past ONLY to write the line. A refusal that leaves no log
+        # entry is the one shape of failure this service cannot be asked about
+        # afterwards, and a body full of unhonourable fields is exactly what an
+        # unfamiliar client sends first.
+        _log(request=request, backend="-",
+             model=body.get("model") if isinstance(body, dict) else None,
+             status=f"{exc.status}-{exc.code}", started=started)
+        raise
+
+    engine: str | None = None
+    if ask.audio is None:
+        text = chat.NO_MODEL_REPLY
+        _log(request=request, backend="-", model=ask.model, status="200-noaudio",
+             started=started)
+    else:
+        result = await _transcribe(ask.audio, model=ask.model, request=request,
+                                   started=started)
+        if result.failure is not None:
+            return result.failure
+        text, engine = str(result.text), result.engine
+
+    # The engine that actually ran, on the response, exactly as stt-stack puts
+    # it on its own. `model` in the body echoes what the caller sent because the
+    # specification says it is their model string; the header is where this
+    # stack is honest about which checkpoint produced the words.
+    headers = {"x-stt-engine": engine} if engine else {}
+    ident = chat.identifier()
+    if ask.stream:
+        return StreamingResponse(
+            chat.stream(model=ask.model, text=text, ident=ident),
+            media_type="text/event-stream; charset=utf-8",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no",
+                     **headers})
+    return Response(
+        content=json.dumps(chat.completion(model=ask.model, text=text,
+                                           ident=ident)),
+        media_type="application/json", headers=headers)
 
 
 @app.post("/speak")
@@ -877,6 +1184,47 @@ async def models() -> Response:
     """
     return Response(content=json.dumps(MODEL_LIST),
                     media_type="application/json")
+
+
+@app.get("/v1/models/{model_id:path}")
+async def model(model_id: str) -> Response:
+    """Retrieve one model, off the same rows GET /v1/models publishes.
+
+    THE STANDARD CALL THAT WAS A 404, AND THE CLIENTS THAT DEPEND ON IT are not
+    hypothetical: an aggregator walks the list and then retrieves each row to
+    confirm it is really there, so a 404 here reads as a provider advertising
+    models it does not have. MODEL_ROWS is an index OF the published list rather
+    than a second table, so the two cannot come to disagree.
+
+    `{model_id:path}` rather than a plain parameter because OpenAI's own ids
+    carry slashes -- `ft:gpt-4o:acme::abc` does not, but a HuggingFace-style
+    `owner/name` does, and this estate's catalogue is checkpoint names that may
+    yet grow one. A bare parameter would answer 404 for the front half of such
+    a name, which is the confusing failure rather than the clear one.
+
+    A LONG-FORM NAME THIS DEPLOYMENT HAS NOT ENABLED GETS THE SAME SENTENCE THE
+    SPEECH ROUTE GIVES IT. Two endpoints saying "no such model" and "add it to
+    GATEWAY_LONG_MODELS" about one string would send an operator looking for
+    two different faults.
+    """
+    key = model_id.strip().lower()
+    row = MODEL_ROWS.get(key)
+    if row is not None:
+        return Response(content=json.dumps(row),
+                        media_type="application/json")
+    if key in LONG_KNOWN:
+        return error_response(
+            404,
+            f"model '{model_id}' is a long-form model this gateway knows but "
+            f"this deployment has not enabled. Add it to GATEWAY_LONG_MODELS "
+            f"(and to TTS_ENGINES on tts-long). Enabled: "
+            f"{', '.join(sorted(LONG_MODELS))}.",
+            code="model_not_found", param="model")
+    return error_response(
+        404,
+        f"model '{model_id}' does not exist. GET /v1/models lists the names "
+        "this gateway routes.",
+        code="model_not_found", param="model")
 
 
 async def _probe(backend: Backend) -> dict[str, object]:

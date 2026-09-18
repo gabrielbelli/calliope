@@ -774,7 +774,7 @@ async def test_a_json_body_that_is_not_an_object_still_reaches_the_backend(monke
 
 
 @pytest.mark.parametrize("path", ["/docs", "/openapi.json", "/redoc",
-                                  "/v1/audio/translations", "/anything"])
+                                  "/anything"])
 async def test_everything_outside_the_table_is_404(monkeypatch, backends, path):
     """No catch-all pass-through.
 
@@ -1276,9 +1276,13 @@ HTTP_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH"})
 # and a new backend route arriving with its exemption already recorded is the
 # outcome this whole section is for.
 NOT_ROUTED: dict[tuple[str, str, str], str] = {
-    ("stt", "POST", "/v1/audio/translations"):
-        "Parakeet refuses translation, so the route exists only to say so in "
-        "the OpenAI envelope. Routing it would publish a 400.",
+    # POST /v1/audio/translations WAS EXEMPT HERE AND THE EXEMPTION WAS WRONG.
+    # It read "Parakeet refuses translation, so the route exists only to say so
+    # in the OpenAI envelope. Routing it would publish a 400." That makes the
+    # route table depend on which checkpoint the STT container loaded: under
+    # STT_MODEL=whisper the route works, and the exemption hid it. It is routed
+    # now, in all three tables, and services/stt answers either the translation
+    # or its own 400 naming the engine.
     ("tts-long", "GET", "/voices"):
         "the voice list a caller wants is tts-stack's, and that is the one "
         "routed. Two backends answering the same path is why this table is "
@@ -1291,7 +1295,23 @@ NOT_ROUTED: dict[tuple[str, str, str], str] = {
 
 # What this service answers itself, with no backend behind it. Without these
 # the reverse test reads a correct allowlist entry as pointing at nothing.
-ANSWERED_HERE = frozenset({("GET", "/v1/models"), ("GET", "/health")})
+#
+# Spelled with real parameter names and run through `_pattern` at the point of
+# comparison, like both other tables. Writing `{p}` in here directly would work
+# and would be the one table in the fence whose entries could not be pasted from
+# a route declaration -- which is how a reader stops trusting it.
+ANSWERED_HERE = frozenset({
+    ("GET", "/v1/models"),
+    # Retrieve-model, indexed off the very list /v1/models publishes. No
+    # backend holds it, and no backend should: the names are a property of this
+    # service's routing contract.
+    ("GET", "/v1/models/{model_id}"),
+    # The chat surface. It reaches stt-stack for a transcription, but it is not
+    # a PROXY of any backend route -- the request is synthesised here and the
+    # answer is wrapped here -- so no backend declares a path that matches it.
+    ("POST", "/v1/chat/completions"),
+    ("GET", "/health"),
+})
 
 
 def _pattern(path: str) -> str:
@@ -1352,14 +1372,23 @@ def _declared_routes(service: str) -> set[tuple[str, str]]:
     return routes
 
 
-def _proxied_table() -> tuple[tuple[str, str], ...]:
+UI_MAIN = SERVICES / "ui" / "app" / "main.py"
+
+
+def _proxied_table(source: Path = UI_MAIN) -> tuple[tuple[str, str], ...]:
     """voice-ui's PROXIED, read from its source rather than imported.
 
     Same reason as _declared_routes, plus one of its own: voice-ui's config
     module reads the environment at import, so importing it here would make
     this fence depend on how the shell that ran pytest was set up.
+
+    `source` is a parameter ONLY so the reader itself can be tested. It read an
+    empty table once -- see the AnnAssign note below -- and the fence went green
+    while comparing against nothing, which is a failure no amount of reading the
+    real file can reproduce on purpose. A test that hands it a file it wrote
+    can. Nothing in production passes it.
     """
-    ui_main = SERVICES / "ui" / "app" / "main.py"
+    ui_main = source
     assert ui_main.exists(), (
         f"{ui_main} is missing from this checkout, so the table this service "
         "has to agree with cannot be read.")
@@ -1691,13 +1720,14 @@ def test_no_allowlist_entry_points_at_nothing():
                 for method, path in _declared_routes(service)}
     voice_ui = {(method, _pattern(path))
                 for method, path in _declared_routes("ui")}
+    answered = {(method, _pattern(path)) for method, path in ANSWERED_HERE}
 
     dangling = [f"this service routes {method} {path} and no backend answers it"
                 for method, path in sorted(_gateway_routes(gateway_main))
-                if (method, _pattern(path)) not in backends | ANSWERED_HERE]
+                if (method, _pattern(path)) not in backends | answered]
     dangling += [f"voice-ui proxies {method} {path} and no backend answers it"
                  for method, path in sorted(_proxied_table())
-                 if (method, _pattern(path)) not in backends | ANSWERED_HERE]
+                 if (method, _pattern(path)) not in backends | answered]
     # /ui/api is excluded by path: it is the prefixed mount of PROXIED, checked
     # on the lines above, and voice-ui declares no route by that name because
     # it strips the prefix before matching its own allowlist.
@@ -1707,6 +1737,125 @@ def test_no_allowlist_entry_points_at_nothing():
                  if not path.startswith("/ui/api/")
                  and (method, _pattern(path)) not in voice_ui]
     assert not dangling, "\n".join(dangling)
+
+
+def test_the_fence_is_reading_the_real_services_and_not_an_empty_set():
+    """THE FENCE'S OWN FAILURE MODE, WHICH IS SILENCE, AND BOTH INSTANCES OF IT.
+
+    Every assertion in this section is of the form "nothing is missing", and
+    that sentence is also what a reader that found nothing at all says. Two
+    readers here have already gone blind that way and neither cost a red test:
+
+      * the path level. `SERVICES` is `parents[2]`; the version this replaced
+        pointed one level off, could not find a sibling service, and called
+        `pytest.skip` -- which reads as a pass in every report and asserts
+        nothing. It is asserted here rather than left to the readers' own
+        guards, because a skip is the outcome nobody reads.
+      * the assignment node. PROXIED is declared `PROXIED: tuple[...] = (`,
+        which is an ast.AnnAssign; a reader matching only ast.Assign walked the
+        whole file, found no table, and compared the page's requests against an
+        empty set. Everything passed.
+
+    The second half is exercised against a file written here rather than against
+    voice-ui's own, because the point is the SHAPE of the declaration: pointing
+    the reader at the real file cannot demonstrate that the annotated form is
+    what it handles, only that today's file happens to parse.
+    """
+    assert SERVICES.name == "services", (
+        f"SERVICES resolved to {SERVICES}, which is not the services directory. "
+        "Every reader below would then find nothing and every assertion in this "
+        "section would pass by default.")
+    for service in ("gateway", "stt", "tts", "tts-long", "ui"):
+        assert (SERVICES / service / "app").is_dir(), (
+            f"services/{service}/app is not where this fence is looking")
+
+
+def test_the_proxied_reader_handles_an_annotated_assignment(tmp_path):
+    """The AnnAssign defect, reproducible on demand. See the test above."""
+    annotated = tmp_path / "annotated.py"
+    annotated.write_text(
+        'PROXIED: tuple[tuple[str, str], ...] = (\n'
+        '    ("POST", "/v1/audio/transcriptions"),\n'
+        '    ("DELETE", "/jobs/{job_id}/audio"),\n'
+        ')\n', encoding="utf-8")
+    assert _proxied_table(annotated) == (
+        ("POST", "/v1/audio/transcriptions"),
+        ("DELETE", "/jobs/{job_id}/audio"))
+
+    plain = tmp_path / "plain.py"
+    plain.write_text('PROXIED = (("GET", "/voices"),)\n', encoding="utf-8")
+    assert _proxied_table(plain) == (("GET", "/voices"),)
+
+    # And a file with no table at all fails loudly rather than returning (),
+    # which is the whole difference between a fence and a formality.
+    empty = tmp_path / "empty.py"
+    empty.write_text("SOMETHING_ELSE = ()\n", encoding="utf-8")
+    with pytest.raises(AssertionError):
+        _proxied_table(empty)
+
+
+@pytest.mark.parametrize("method,path", [
+    ("POST", "/v1/audio/translations"),
+])
+def test_a_route_the_backend_answers_is_in_every_table_in_front_of_it(
+        method, path):
+    """The pair-wise check for the routes added with this change, from both ends.
+
+    THREE TABLES AND THE BACKEND HAVE TO AGREE. POST /v1/audio/translations was
+    the third instance of one defect: the backend implements it, and the two
+    tables in front of it do not carry the pair -- which is a 404 or a 405 that
+    reproduces only against the deployed stack. It is asserted on the PAIR
+    rather than on the path, because the two earlier instances (PUT
+    /glossaries/{name}, DELETE /jobs/{id}/audio) both added a method to a path
+    that was already listed.
+    """
+    from app import main as gateway_main
+
+    pair = (method, _pattern(path))
+    assert pair in {(m, _pattern(p))
+                    for m, p in _declared_routes("stt")
+                    | _declared_routes("tts") | _declared_routes("tts-long")}, (
+        f"no backend answers {method} {path}")
+    assert pair in {(m, _pattern(p))
+                    for m, p in _gateway_routes(gateway_main)}, (
+        f"this service does not route {method} {path}")
+    assert pair in {(m, _pattern(p)) for m, p in _proxied_table()}, (
+        f"voice-ui's PROXIED does not carry {method} {path}")
+
+
+def test_a_proxied_upload_route_is_also_capped():
+    """voice-ui's PROXIED and its UPLOAD_PATHS are a second pair of tables that
+    have to agree, and they are easy to add apart.
+
+    UPLOAD_PATHS is where the only Content-Length ceiling on an upload lives --
+    services/stt/app/main.py:168 is a bare `file.file.read()` on an UploadFile
+    and services/stt/app/openai_api.py:1001 is `await file.read()`, so an
+    oversized upload is an OOM kill in a 6 GB container rather than a message. A
+    route that carries audio through that table without a line in this one
+    restores that failure for one path.
+    """
+    source = UI_MAIN.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    capped: set[str] = set()
+    for node in ast.walk(tree):
+        targets = ([node.target] if isinstance(node, ast.AnnAssign)
+                   else list(node.targets) if isinstance(node, ast.Assign)
+                   else [])
+        if not any(getattr(target, "id", "") == "UPLOAD_PATHS"
+                   for target in targets) or node.value is None:
+            continue
+        capped |= {item.value for item in ast.walk(node.value)
+                   if isinstance(item, ast.Constant)
+                   and isinstance(item.value, str)}
+    assert capped, "could not read voice-ui's UPLOAD_PATHS"
+
+    carries_audio = {"/v1/audio/transcriptions", "/v1/audio/translations",
+                     "/transcribe"}
+    proxied = {path for _, path in _proxied_table()}
+    missing = sorted(carries_audio & proxied - capped)
+    assert not missing, (
+        "voice-ui proxies these and UPLOAD_PATHS does not cap them, so an "
+        f"oversized upload is an OOM kill rather than a 413: {missing}")
 
 
 def test_a_second_model_string_adds_no_row_to_any_of_the_three_tables():

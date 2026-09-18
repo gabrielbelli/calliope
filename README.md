@@ -7,6 +7,7 @@ share, one repository, deployed as a single app.
                        :8080  services/gateway
                          │
   /v1/audio/transcriptions├───────────────────────►  services/stt       :8000
+  /v1/audio/translations  │
   /transcribe             │                          Parakeet, ONNX, no torch
                           │
   /v1/audio/speech  model=│kokoro tts-1 …       ──►  services/tts       :8001
@@ -15,7 +16,8 @@ share, one repository, deployed as a single app.
   /v1/audio/speech  model=│chatterbox tts-long  ──►  services/tts-long  :8002
   /jobs  /jobs/{id}[/audio]                          Chatterbox, a job queue
                           │
-  /v1/models              ├─ answered at the gateway
+  /v1/models  /v1/models/{id}
+  /v1/chat/completions    ├─ answered at the gateway
   /health                 └─ all three, fanned out, no key required
                           ▲
                           │  the gateway, and nothing else

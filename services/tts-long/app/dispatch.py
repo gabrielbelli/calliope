@@ -34,11 +34,14 @@ local jobs do not overlap -- they interleave at segment granularity for zero
 extra throughput and double the latency of each. Every concurrency this module
 delivers comes from the SECOND MACHINE, not from a second thread here.
 
-`runner_cpu` IS NOT A LANE. The server sets TTS_RUNNER_CPU_SERVICE=chatterbox-cpu
-and the runner registers only `echo` and `chatterbox`, so that rung has never
-been offered a job and never can be; at its measured 0.24x against this host's
+`runner_cpu` IS NOT A LANE, AND THE SERVER NO LONGER CONFIGURES ONE EITHER. The
+agent on that desktop registers only `echo` and `chatterbox`, so the rung was
+never offered a job and never can be; at its measured 0.24x against this host's
 0.23x the arithmetic below would refuse it anyway. A lane nothing can reach is
-a lane nothing tests.
+a lane nothing tests. The knobs that named it -- TTS_RUNNER_CPU_SERVICE,
+TTS_RUNNER_CPU_MAX_WAIT, TTS_REALTIME_FACTOR_RUNNER_CPU -- went on being parsed
+for two releases after the rung died, which is the same falsehood one level
+down; app/remote.py's `RunnerConfig` says where they went.
 """
 
 from __future__ import annotations

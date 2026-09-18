@@ -164,12 +164,28 @@ class RunnerConfig:
     ca_file: str = ""
     api_key: str = ""
     service: str = "chatterbox"
-    # THE SECOND RUNG ON THE SAME MACHINE. The runner sells its processor as
-    # well as its card, as two service ids over one host, port, pin and key --
-    # so the CPU client is `dataclasses.replace(cfg, service=cfg.cpu_service)`
-    # and nothing else. Set TTS_RUNNER_CPU_SERVICE to "" to switch the rung off
-    # and get exactly the two-backend behaviour that shipped before it existed.
-    cpu_service: str = "chatterbox-cpu"
+    # THERE IS NO `cpu_service` FIELD ANY MORE, AND ITS ABSENCE IS THE POINT.
+    #
+    # THE DEFECT THIS PREVENTS is a setting that reads as live, is parsed on
+    # every startup, and can route no work at all. `cpu_service` defaulted to
+    # `chatterbox-cpu`, `for_cpu()` built a second RunnerClient out of it in
+    # `lifespan`, and `snapshot()` published it on /health as
+    # `runner.cpu_service` -- while the agent on spring has only ever
+    # registered `echo` and `chatterbox`, so every offer to that id was
+    # `no_such_service` for the whole life of the rung, and `runner_cpu` has
+    # not been a lane since the dispatcher was rebuilt on two. A reader of
+    # /health was being told the name of a service that does not exist.
+    #
+    # ADR 0007 claimed this deletion and did not make it; compose.yaml and the
+    # README then both said in as many words that it was "still owed". It is
+    # made here. `tests/test_gap_dead_rung.py` is what stops it coming back:
+    # it asserts that no TTS_RUNNER_CPU_* key changes anything this service
+    # does, and that no /health field names a service nothing can be sent to.
+    #
+    # Measured, the rung was never worth reaching either: Chatterbox on that
+    # desktop's Ryzen 7 5700X3D ran 0.271x realtime against 0.230x on this
+    # container's eight Xeon threads -- five per cent, because the model is
+    # autoregressive at batch one and bound by single-thread latency.
     timeout: float = 30.0
     # THE OFFER GETS ITS OWN, MUCH SHORTER CLOCK. `timeout` is for a job -- an
     # upload, a submit, a poll -- and thirty seconds is right for those. Asking
@@ -189,38 +205,17 @@ class RunnerConfig:
     # so the trade is now fifteen minutes of a frozen progress bar against five.
     # Fifteen reads as a hang followed by an unexplained restart.
     max_wait: float = 300.0
-    # SHORTER FOR THE PROCESSOR RUNG, and the asymmetry is the point. A job
-    # waiting on the card falls back to a machine that is roughly as fast
-    # (0.230x here against 0.70x there, measured), so waiting out a game is
-    # usually cheaper than giving up. A job waiting on the runner's processor
-    # falls back to a machine that is no slower than it was going to be
-    # anyway, so a long wait buys nothing at all.
-    cpu_max_wait: float = 300.0
     poll: float = 2.0
-
-    def for_cpu(self) -> "RunnerConfig | None":
-        """The same machine, its other service, or None when it has none.
-
-        One host, one port, one pin, one key, one certificate: the processor
-        rung differs from the card by a service id and by how long it is worth
-        waiting for. Building it by `replace` rather than by hand is what stops
-        the two from drifting apart the day a field is added to one of them --
-        a second constructor call is a second place to forget the fingerprint,
-        and forgetting the fingerprint is not an error anybody would see.
-        """
-        if not self.cpu_service or self.cpu_service == self.service:
-            return None
-        return replace(self, service=self.cpu_service, max_wait=self.cpu_max_wait)
 
     def for_engine(self, service: str) -> "RunnerConfig":
         """The same machine, its other speech service.
 
         ONE host, ONE port, ONE pin, ONE key, ONE certificate: a second engine
         on that desktop differs from the first by a service id and by nothing
-        else. `replace` rather than a second constructor, for exactly the reason
-        `for_cpu` gives -- a second constructor call is a second place to forget
-        the fingerprint, and forgetting the fingerprint is not an error anybody
-        would see.
+        else. `replace` rather than a second constructor, because a second
+        constructor call is a second place to forget the fingerprint, and
+        forgetting the fingerprint is not an error anybody would see: the only
+        visible symptom is a connection that works.
 
         NOT A SECOND LANE. The runner starts at most one controller per device
         group, so believing there are two slots on that card is believing in a
@@ -257,16 +252,14 @@ class RunnerConfig:
             ca_file=(e.get("TTS_RUNNER_CA_FILE") or "").strip(),
             api_key=key,
             service=(e.get("TTS_RUNNER_SERVICE") or "chatterbox").strip(),
-            # Unset means the documented default, which is the id the runner
-            # ships. An explicitly EMPTY value is a different answer -- "this
-            # runner has no processor rung" -- and `or` would have collapsed
-            # the two, so the presence of the variable is what decides.
-            cpu_service=(e["TTS_RUNNER_CPU_SERVICE"].strip()
-                         if "TTS_RUNNER_CPU_SERVICE" in e else "chatterbox-cpu"),
             timeout=float(e.get("TTS_RUNNER_TIMEOUT") or 30.0),
             offer_timeout=float(e.get("TTS_RUNNER_OFFER_TIMEOUT") or 3.0),
             max_wait=float(e.get("TTS_RUNNER_MAX_WAIT") or 300.0),
-            cpu_max_wait=float(e.get("TTS_RUNNER_CPU_MAX_WAIT") or 300.0),
+            # TTS_RUNNER_CPU_SERVICE AND TTS_RUNNER_CPU_MAX_WAIT ARE NOT READ
+            # HERE ANY MORE, and an unknown key in `e` is ignored rather than
+            # refused, so anyone who still has either in their environment gets
+            # exactly what the rung always gave them: nothing. See the comment
+            # on `service` above for why they went.
             poll=float(e.get("TTS_RUNNER_POLL") or 2.0),
         )
 
@@ -416,7 +409,7 @@ class RunnerClient:
         ONE TLS CONTEXT, ONE PIN, ONE KEY. `_pinned_context` is rebuilt by the
         constructor, and building a second one for the same certificate is both
         wasted work and a second place for the fingerprint to be got wrong --
-        `for_cpu`'s comment says it and it applies here word for word.
+        `for_engine`'s comment says it and it applies here word for word.
 
         ITS OWN ASSET SET AND ITS OWN SNAPSHOT, because those are facts about a
         SERVICE rather than about a machine: the runner caches reference clips
@@ -794,9 +787,13 @@ class RunnerClient:
         snap["host"] = self.cfg.host
         snap["port"] = self.cfg.port
         snap["service"] = self.cfg.service
-        # Which of the listed services is the processor rung, so a panel can
-        # label the two without matching on a name it made up.
-        snap["cpu_service"] = self.cfg.cpu_service
+        # `cpu_service` IS NOT PUBLISHED HERE ANY MORE. It named
+        # `chatterbox-cpu`, which the agent on spring has never registered, so
+        # /health printed the id of a service that does not exist beside the
+        # one that does -- and `services` a few lines above is the runner's own
+        # answer to the same question, read off /v1/services rather than out of
+        # this host's configuration. A panel that wants to know what that
+        # machine sells reads the machine, never a field this end made up.
         self._snap, self._snap_at = snap, now
         return snap
 
@@ -1187,12 +1184,26 @@ class RemoteSynth:
                 # to mean "no patience at all" -- abandons a runner that is
                 # working perfectly. Nothing arrived this round is the
                 # question; how long ago the last thing arrived is the clock.
-                # UNAVAILABLE RATHER THAN A YIELD, and the difference is what
-                # is true rather than what happens next. A yield says a person
-                # is at that keyboard and the lease is still good; this says
-                # the runner is not going to finish this job -- so the lease
-                # goes with it, and the lane is retired rather than merely
-                # cooled for a minute.
+                # UNAVAILABLE RATHER THAN A YIELD, AND THE DIFFERENCE IS WHAT
+                # IS TRUE, NOT WHAT HAPPENS NEXT. This comment used to end "the
+                # lane is retired rather than merely cooled for a minute", and
+                # that sentence is the defect: dispatch.py has no retirement at
+                # all. `_execute_on_lane` hands BOTH exceptions to `_hand_back`,
+                # both return YIELDED, and the dispatcher's entire response to
+                # YIELDED is three lines -- the job goes back to the HEAD of the
+                # deque, this lane joins that job's refused set so it is never
+                # offered the same job twice, and the lane cools for
+                # TTS_RUNNER_COOLDOWN_S. Nothing else. A reader who believed the
+                # old sentence would go looking for a retirement path to change
+                # and would find the cooldown instead, which is the shape of
+                # wrong turn this file's comments exist to prevent. The lane is
+                # SHUT by LaneProbe, on its own clock, and never from here.
+                #
+                # What the two exceptions really carry apart is the sentence
+                # written on the job. A yield says a person is at that keyboard
+                # and the lease is still good; this says the runner is reachable
+                # and is not going to finish this job. The lease is withdrawn on
+                # the way out of both, one line below.
                 #
                 # The same `max_wait`, because it is the same trade measured
                 # from the other side: five minutes of a frozen progress bar

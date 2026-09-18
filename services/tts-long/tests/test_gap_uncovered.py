@@ -98,31 +98,42 @@ def _job() -> dict:
             "voice": "default", "stream": None}
 
 
-def test_two_lanes_handing_the_same_job_back_are_both_recorded(speech, monkeypatch):
-    """THE DEFECT THIS PREVENTS: a job that visited two machines reporting one.
+def test_a_lane_handing_the_same_job_back_twice_records_both(speech, monkeypatch):
+    """THE DEFECT THIS PREVENTS: a job handed back twice reporting one refusal.
 
     Every one of these three fields is written `prior + new` and every one of
     them says so in capitals, and no test had ever handed the same job back
     twice -- so a plain assignment on any of them passed the whole suite. What
     is lost is the only answer to "why did this take so long": that it started
-    on the card, was handed back, was handed back again, and finished here.
+    on the card, was handed back, was offered the card again after the cooldown,
+    was handed back again, and finished here.
+
+    TWICE ON THE ONE REMOTE LANE, because there is only one. This used to name
+    `runner` and then `runner_cpu`, which was a lane in neither the dispatcher
+    nor the deployment -- so the accumulation it pinned was pinned against a
+    shape production cannot produce. A second yield from the same lane is the
+    shape it can, several times an evening, and it is a strictly harder case:
+    a plain assignment of `fell_back_from` is invisible when the two names are
+    the same string, so the count in the reason is what catches it.
     """
     import app.main as main
     from app.dispatch import YIELDED
 
     job = _job()
+    delivered = iter((2, 3))
     monkeypatch.setattr(main, "_backend_for",
-                        lambda job, lane: _Yields(2 if lane == "runner" else 3))
+                        lambda job, lane: _Yields(next(delivered)))
 
     assert main._execute_on_lane(job, "runner") == YIELDED
-    assert main._execute_on_lane(job, "runner_cpu") == YIELDED
+    assert main._execute_on_lane(job, "runner") == YIELDED
 
     assert job["segments_from_runner"] == 5, (
         "two attempts delivered 2 and 3 segments and the job reports "
         + str(job.get("segments_from_runner")) + ": each attempt's work is "
         "ADDED, and a plain assignment reports only the last one")
-    assert job["fell_back_from"] == "runner, runner_cpu", (
-        "the job left two lanes and remembers " + repr(job.get("fell_back_from")))
+    assert job["fell_back_from"] == "runner, runner", (
+        "the job left the lane twice and remembers "
+        + repr(job.get("fell_back_from")))
     reason = job.get("fell_back_reason") or ""
     assert reason.count("taken back") == 2, (
         "both refusals are kept -- a record that holds only the last one "

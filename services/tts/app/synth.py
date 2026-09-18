@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import unicodedata
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -314,6 +315,32 @@ class Synth:
         would change /speak's audio, which this module's docstring promises is
         what `create()` returned.
         """
+        # ESPEAK DROPS A COMBINING MARK IT DOES NOT SEE ATTACHED, so the text
+        # is composed before it is read rather than after. Measured against
+        # this image's own espeak-ng, both spellings of the same word: "avó"
+        # as U+00F3 phonemises pt-br to `avˈɔ`, and o + U+0301 to `avˈo` —
+        # the open vowel closes and the word is spoken as "avô". en-us is
+        # worse than a wrong vowel: "café" gives `kæfˈeɪ` composed and
+        # `kˈeɪf` decomposed, with the accent and the syllable it carried
+        # gone. Portuguese "ação" loses both marks at once, `asˈɐ̃ʊ̃`
+        # becoming `ˌakˈaʊ`, which is not a mispronunciation but a
+        # different word. The tokenizer offers no protection either;
+        # kokoro_onnx.Tokenizer.normalize_text is `text.strip()` and nothing
+        # else.
+        #
+        # This is not a corner case reached by hand-written escapes. macOS
+        # hands pasteboard selections over in NFD as a matter of course, so
+        # every client forwarding a selection hit it, and hit it SILENTLY:
+        # the phonemes that come back are valid, the audio is clean, the
+        # realtime factor is normal, and no log line anywhere says a mark was
+        # lost. The macOS player already normalises on both of its own sides;
+        # this service never did.
+        #
+        # Here rather than in the routes because this is the single place text
+        # becomes phonemes — /speak, its per-segment text through `speak`, the
+        # buffered /v1 body and the SSE stream all arrive through this call,
+        # so one line covers four entry points and any caller added later.
+        text = unicodedata.normalize("NFC", text)
         if not text.strip():
             return []
         phonemes = self._k.tokenizer.phonemize(text, language)

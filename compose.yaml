@@ -562,18 +562,16 @@ services:
       #
       # BE EXACT ABOUT WHICH KEYS DIED, because this file got that wrong once
       # already and a rounded-up deletion is the same class of falsehood as the
-      # rung was. Gone from the code entirely: TTS_RUNNER_CPU_MIN_PCT and
-      # TTS_RUNNER_CPU_WHEN_BACKLOG_S. STILL PARSED, and still reaching a field
-      # nothing can route work to: TTS_RUNNER_CPU_SERVICE (app/remote.py, still
-      # defaulting to `chatterbox-cpu` and still building a second
-      # RunnerClient at startup), TTS_RUNNER_CPU_MAX_WAIT (app/remote.py) and
-      # TTS_REALTIME_FACTOR_RUNNER_CPU (app/main.py, still seeding a rate for a
-      # lane that cannot be chosen). None of the three is set here and none of
-      # them should be: setting one changes nothing a caller can observe except
-      # the `cpu_service` field app/remote.py still publishes on /health, which
-      # names a service the agent on spring has never registered. The honest
-      # fix is in the code, not in this file — see ADR 0007's consequences,
-      # which claimed the deletion that did not happen.
+      # rung was.
+      #
+      # THE DELETION HAS NOW HAPPENED, 2026-09-17, and this paragraph used to
+      # say the opposite. All five are gone from the code: TTS_RUNNER_CPU_MIN_PCT,
+      # TTS_RUNNER_CPU_WHEN_BACKLOG_S, TTS_RUNNER_CPU_SERVICE,
+      # TTS_RUNNER_CPU_MAX_WAIT and TTS_REALTIME_FACTOR_RUNNER_CPU. No second
+      # RunnerClient is built at startup, /health no longer publishes a
+      # `cpu_service` field, and setting any of the five changes nothing this
+      # service does. services/tts-long/tests/test_gap_dead_rung.py is what
+      # keeps that true — it fails if any of the names comes back.
       #
       # Every line below is its documented default, written out because the
       # numbers are the routing policy and a reader should not have to open

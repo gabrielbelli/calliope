@@ -1141,14 +1141,25 @@ lane turns it on — and naming `runner_cpu` now does nothing.
 
 `compose.yaml` no longer sets `TTS_RUNNER_CPU_SERVICE` and no longer recommends
 an order containing `runner_cpu`, and none of the four `TTS_RUNNER_CPU_*` keys
-appears in it as a live knob. **Be exact about which of them actually died**,
-because rounding that up is the same class of falsehood as the rung was:
-`TTS_RUNNER_CPU_MIN_PCT` and `TTS_RUNNER_CPU_WHEN_BACKLOG_S` are gone from the
-code. `TTS_RUNNER_CPU_SERVICE`, `TTS_RUNNER_CPU_MAX_WAIT` and
-`TTS_REALTIME_FACTOR_RUNNER_CPU` are **still parsed** and still reach fields
-nothing can route work to — including `runner.cpu_service` on `/health`, which
-names a service the agent on that machine has never registered. That deletion is
-still owed.
+appears in it as a live knob.
+
+**The deletion that was owed for two releases has now been made.** All five keys
+— `TTS_RUNNER_CPU_MIN_PCT`, `TTS_RUNNER_CPU_WHEN_BACKLOG_S`,
+`TTS_RUNNER_CPU_SERVICE`, `TTS_RUNNER_CPU_MAX_WAIT` and
+`TTS_REALTIME_FACTOR_RUNNER_CPU` — are gone from the code. Setting any of them
+now changes nothing at all, which is what every one of them already did in
+effect; the difference is that the service no longer parses them, no longer
+builds a second `RunnerClient` for `chatterbox-cpu` at every startup, and no
+longer publishes `runner.cpu_service` on `/health` naming a service the agent on
+that machine has never registered.
+
+Being exact about which of them died mattered while three of them were alive,
+because rounding a deletion up is the same class of falsehood as the rung was.
+The pin is now `tests/test_gap_dead_rung.py`, which asserts the property rather
+than the absence of a line: setting every one of those keys must produce a
+byte-identical `RunnerConfig`, `/health` must publish a rate only for a lane the
+dispatcher can build, and a runner snapshot must name only the services the
+runner itself reported.
 
 The decision, its measurements and the dated correction about what was and was
 not deleted are all in

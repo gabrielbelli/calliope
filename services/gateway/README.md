@@ -6,7 +6,10 @@ One port, one key, three speech services.
                         :8080  voice-gateway
                           │
   /v1/audio/transcriptions├──────────────────────────►  stt-stack:8000
-  /transcribe             │                             Parakeet, 8.5-10.4x
+  /v1/audio/translations  │                             Parakeet, 8.5-10.4x
+  /transcribe             │
+  /v1/chat/completions    │  an input_audio part is transcribed; nothing here
+                          │  ever invents an assistant message
                           │
   /v1/audio/speech  model=│kokoro tts-1 tts-1-hd …  ─►  tts-stack:8001
   /speak  /voices         │                             Kokoro, 1.2-1.5x
@@ -17,6 +20,7 @@ One port, one key, three speech services.
                           │                            turbo 1.54x on the card
                           │
   /v1/models              ├─  answered here, from a static table
+  /v1/models/{id}         ├─  one row of that same table
   /health                 └─  all three, fanned out, no key required
 ```
 
@@ -100,7 +104,9 @@ here would quietly undo that.
 | Route | Backend | Body |
 |---|---|---|
 | `POST /v1/audio/transcriptions` | stt-stack | streamed through |
+| `POST /v1/audio/translations` | stt-stack | streamed through |
 | `POST /transcribe` | stt-stack | streamed through |
+| `POST /v1/chat/completions` | stt-stack, or answered here | buffered — see below |
 | `POST /v1/audio/speech` | by `model` — see below | buffered, to read `model` |
 | `POST /speak` | tts-stack | streamed through |
 | `GET /voices` | tts-stack | — |
@@ -108,6 +114,7 @@ here would quietly undo that.
 | `GET /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/audio` | tts-long | — |
 | `DELETE /jobs/{id}` | tts-long | cancel a queued job, or discard a finished one |
 | `GET /v1/models` | answered here | — |
+| `GET /v1/models/{id}` | answered here, indexed off that same list | — |
 | `GET /health` | all three | — |
 
 **Native routes mount flat and unprefixed, and nothing is rewritten.** That is
@@ -123,6 +130,94 @@ it here would double resident memory on a host that already keeps 6.5 GB of
 Chatterbox around. `POST /v1/audio/speech` is the exception — the gateway must
 read `model` out of that body to route it, and that body is text measured in
 kilobytes. Responses stream in every case.
+
+## The chat route, and why it is not a chatbot
+
+`POST /v1/chat/completions` exists because an aggregator probes it before it
+will list a provider at all, and a `404` there fails the whole provider check —
+so the stack becomes invisible to everything behind that aggregator, including
+the routes that work perfectly.
+
+**It transcribes. It never answers a question.** There are exactly two strings
+that can reach a caller in an assistant message, and neither is composed at
+request time:
+
+| What you send | What comes back |
+|---|---|
+| a message whose content carries an `input_audio` part | that clip's transcript, from stt-stack |
+| plain text, no audio | a fixed sentence saying this is a speech gateway, not a language model, and where the real routes are |
+
+```bash
+curl -s http://nas:30080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"whisper-1","messages":[{"role":"user","content":[
+        {"type":"input_audio","input_audio":{"data":"<base64 wav>","format":"wav"}}]}]}'
+```
+
+The failure this design is built against is not a rude answer. It is a **silent
+promotion**: a router, an agent or a summariser added later sees a plausible
+reply, concludes this box runs a language model, and starts sending it real
+traffic — every request of which comes back wrong with a `200` on it. The NAS
+holds 6.5 GB of Chatterbox and 1.4 GB of Parakeet and not one parameter of
+anything that could answer a question, so the canned sentence has to be
+unmistakable.
+
+**Every field is honoured or refused by name**, the rule
+[services/stt](../stt/README.md) states and this estate is built on.
+`CreateChatCompletionRequest` is about thirty fields and this route can honour
+three — `model`, `messages`, `stream` — so the rest are a `400` naming the
+field and the reason in the terms of the thing that is missing. `temperature`
+is refused because there is no sampler; accepting it and returning the same
+fixed sentence would tell a caller their settings had landed on a model.
+
+`usage` is **omitted** rather than returned as zeroes: nothing in this process
+tokenises anything, so any count would be a measurement never taken.
+`stream_options.include_usage` says so by name.
+
+`stream: true` is honoured — role, one content delta, `finish_reason`,
+`[DONE]`. One delta and not many, deliberately: stt-stack's buffered
+transcription arrives whole, and slicing it into timed fragments would invent a
+latency profile a client then builds a progress bar on. The genuinely
+incremental surface is `stream=true` on `POST /v1/audio/transcriptions`, which
+faster-whisper can do and Parakeet cannot.
+
+Responses carry `x-stt-engine` naming the checkpoint that actually produced the
+words, exactly as stt-stack's own do. `model` in the body echoes what the caller
+sent, because the specification says it is theirs.
+
+**A chat body is capped at 16 MiB, and that is the only cap in this service.**
+Every other route that carries audio is streamed through and never held, which
+is why this container is given 512 MB in `compose.yaml`. A chat body cannot be
+streamed — the clip arrives base64 inside a JSON object, and the transcript has
+to be wrapped before anything can be sent — and one was measured at **3.8x its
+own size resident** while it is read, linear from 5 MB to 32 MB. So the ceiling
+is what keeps that 512 MB a budget rather than a lottery. It is counted while
+reading rather than read off `Content-Length`, because a chunked request
+declares no length at all. Over it:
+
+```json
+{"error": {"message": "a chat body is buffered whole here to find the audio inside it, so it is capped at 16 MB and this one is larger. POST /v1/audio/transcriptions takes the clip as a file upload, streams it through this gateway rather than holding it, and has no ceiling here.",
+           "type": "invalid_request_error", "param": null, "code": "upload_too_large"}}
+```
+
+16 MiB of base64 is about 12 MB of audio: six minutes of 16 kHz mono wav, or
+twenty-five of a 64 kbps mp3. Longer recordings belong on
+`POST /v1/audio/transcriptions`, which has no ceiling here.
+
+**Base64 is read the way tools emit it.** `base64 clip.wav` wraps at 76
+columns, `openssl base64` at 64, and a browser that built the part from a
+`FileReader` result sends a whole `data:audio/wav;base64,…` URI. The wrapping
+and the prefix are stripped; everything else is refused, because
+`base64.b64decode` in its lenient mode does not reject a stray character, it
+deletes it and closes the gap — which turns four mangled characters into a clip
+three bytes short that gets transcribed with a `200` on it.
+
+**A conversation handed back is not an error.** `messages.append(completion.
+choices[0].message.model_dump())` is how openai-python holds a conversation,
+and the message it appends carries `refusal: null` — a field this route puts in
+its own replies. That and `annotations` are read and ignored on any message, as
+`name` is. Only an `input_audio` part is ever acted on, wherever it appears, so
+a previous turn's assistant text is not an instruction here.
 
 ## Which TTS backend a request reaches
 
@@ -451,6 +546,7 @@ this in code.
 | `GATEWAY_TTS_LONG_TIMEOUT` | `240` | Must stay above tts-long's `TTS_OPENAI_SYNC_TIMEOUT` |
 | `GATEWAY_CONNECT_TIMEOUT` | `2` | |
 | `GATEWAY_HEALTH_TIMEOUT` | `5` | Per backend, fanned out concurrently |
+| `GATEWAY_CHAT_MAX_BYTES` | `16777216` | The only body this process holds that can carry audio — see below. Over it is a `413`, counted while reading rather than taken from `Content-Length` |
 
 ## Tests
 

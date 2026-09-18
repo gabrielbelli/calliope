@@ -207,6 +207,54 @@ def test_a_live_job_is_never_aged_out_from_under_itself(speech):
 # ------------------------------------------------------------- _recover ----
 
 
+def test_a_real_job_keeps_its_voice_across_a_restart(speech):
+    """GAB-629: a recovered job lost its voice, because only the audio was on
+    disk.
+
+    THE DEFECT THIS PREVENTS, AND WHY THE OTHER RECOVERY TESTS COULD NOT CATCH
+    IT. Every one of them hand-writes a sidecar and then calls `_recover`, so
+    they assert that a record CONTAINING `voice` recovers it -- and they stay
+    green if `voice` is dropped from `RECORD_KEYS`, because the file they wrote
+    never went through `_write_record`. The old shape had no record at all: the
+    walk was over audio files, what the filename carries is the id and the
+    format, and so every recovered row read "voice unknown".
+
+    This runs a real job through the real route, throws the process's memory
+    away exactly as a restart does, and recovers from what the service itself
+    chose to write down. It is the only shape that witnesses both halves --
+    that `voice` is written, and that it is read back.
+
+    A DECISION AS WELL AS A FIX: the voice belongs in the RECORD and not only
+    in the filename. The record is the index, it costs a few hundred bytes, and
+    it is the half that survives the audio -- the sweeper takes the file at
+    TTS_AUDIO_TTL and the row stays for TTS_RECORD_TTL, so a voice carried by
+    the audio would be lost a month early, every time, on purpose.
+    """
+    from app import main
+
+    created = speech.post("/jobs", json={"text": "One short line.",
+                                         "voice": "default"}).json()
+    done = _wait(speech, created["id"])
+    assert done["voice"] == "default"
+
+    # The record the SERVICE wrote, not one this test invented.
+    written = json.loads(main._sidecar(created["id"]).read_text())
+    assert written.get("voice") == "default", (
+        "the run record does not name the voice, so a restart cannot: "
+        + repr(sorted(written)))
+
+    # A restart: the dict is process memory and goes; the volume stays.
+    main.jobs.clear()
+    assert main._recover() >= 1
+
+    back = speech.get(f"/jobs/{created['id']}").json()
+    assert back["recovered"] is True
+    assert back["voice"] == "default", (
+        "the recovered row does not say which voice spoke it; that is the "
+        "whole of GAB-629 and the filename cannot answer it")
+    assert back["audio"]["state"] == "present", "the audio came back too"
+
+
 def test_recover_indexes_records_not_audio(speech, tmp_path, monkeypatch):
     """THE INVERSION, ASSERTED. A record with no audio behind it is a ROW, not
     rubbish -- and a clone record whose file has gone says `expired` rather
