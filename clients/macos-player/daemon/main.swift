@@ -45,8 +45,37 @@ final class ServerSupervisor {
 
     var isRunning: Bool { process?.isRunning == true }
 
+    /// Something is already answering on 47815.
+    ///
+    /// A SECOND SERVER WOULD LOSE THE PORT AND DIE, and the daemon would keep
+    /// restarting it into the same wall. The one already there is either an
+    /// orphan of a previous daemon or one the one-shot player started; either
+    /// way it is the same script serving the same model, so it is adopted. The
+    /// cost is honest and worth naming: an adopted server keeps whatever idle
+    /// timeout it was born with, so "kept warm" is only true of one this daemon
+    /// started itself.
+    private var somethingIsListening: Bool {
+        let socket = socket(AF_INET, SOCK_STREAM, 0)
+        guard socket >= 0 else { return false }
+        defer { close(socket) }
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = UInt16(47815).bigEndian
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let connected = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(socket, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+        return connected
+    }
+
     func start() {
         guard !isRunning else { return }
+        if somethingIsListening {
+            lastError = "adopted a server this daemon did not start"
+            return
+        }
 
         // ".venv/bin/python", EXACTLY WHAT install.sh CREATES AND WHAT THE
         // PLAYER ALREADY USES. Written from memory as "venv/bin/python3" this
@@ -120,6 +149,28 @@ final class ServerSupervisor {
     }
 }
 
+// MARK: - Saying why nothing happened
+
+/// A HOTKEY THAT DOES NOTHING IS UNDEBUGGABLE FROM THE OUTSIDE. There is no
+/// window to show an error in and no exit code to read, so every attempt at a
+/// selection says here which route it took and what it found.
+enum Log {
+    private static let url = runtimeURL.appendingPathComponent("daemon.log")
+
+    static func write(_ line: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let entry = "\(stamp) \(line)\n"
+        guard let data = entry.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+}
+
 // MARK: - Reading the selection
 
 /// The selected text in whatever application is frontmost.
@@ -140,8 +191,43 @@ enum Selection {
         _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
 
+    /// ASK THE ACCESSIBILITY API FIRST, AND ONLY THEN TOUCH THE CLIPBOARD.
+    /// kAXSelectedText is what the focused element already knows; it costs
+    /// nothing, disturbs nothing, and is instant. The synthetic Command-C is
+    /// the fallback for applications that do not answer -- and a terminal
+    /// running a full-screen program is exactly that case, because the text on
+    /// screen belongs to the program rather than to a text field the system
+    /// can read.
+    ///
+    /// Both need the same permission, so this is not a way to avoid the prompt.
+    /// It is a way to avoid overwriting somebody's clipboard when there was
+    /// never any need to.
+    static func readViaAccessibility() -> String? {
+        var focused: AnyObject?
+        let system = AXUIElementCreateSystemWide()
+        guard AXUIElementCopyAttributeValue(
+                system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let element = focused else { return nil }
+
+        var selected: AnyObject?
+        guard AXUIElementCopyAttributeValue(
+                element as! AXUIElement, kAXSelectedTextAttribute as CFString,
+                &selected) == .success,
+              let text = selected as? String,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return text
+    }
+
     static func read(completion: @escaping (String?) -> Void) {
         guard isPermitted else { completion(nil); return }
+
+        if let text = readViaAccessibility() {
+            Log.write("selection: accessibility, \(text.count) characters")
+            completion(text)
+            return
+        }
+
         let board = NSPasteboard.general
         let saved = board.pasteboardItems?.compactMap { item -> [NSPasteboard.PasteboardType: Data] in
             var copy: [NSPasteboard.PasteboardType: Data] = [:]
@@ -160,8 +246,12 @@ enum Selection {
             waited += 0.04
             if board.changeCount != before || waited >= 0.6 {
                 let text = board.string(forType: .string)
+                let copied = board.changeCount != before
                 restore(saved)
-                completion(board.changeCount != before ? text : nil)
+                Log.write(copied
+                    ? "selection: pasteboard, \(text?.count ?? 0) characters"
+                    : "selection: nothing -- no accessible selection and Command-C copied nothing")
+                completion(copied ? text : nil)
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: poll)
@@ -355,7 +445,10 @@ final class Daemon: NSObject, NSApplicationDelegate {
     }()
 
     @objc private func speakSelection() {
+        let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
+        Log.write("hotkey pressed, frontmost is \(front)")
         guard Selection.isPermitted else {
+            Log.write("no Accessibility permission; asking")
             Selection.requestPermission()
             return
         }
@@ -390,6 +483,9 @@ extension Daemon: NSMenuDelegate {
 // symptom is a hotkey that silently stops working rather than an error. The
 // check is by bundle-free process name because this is a bare executable rather
 // than an app bundle, so NSRunningApplication's bundle identifier is nil.
+/// Held for the life of the process: a cancelled source stops delivering.
+var signalSources: [DispatchSourceSignal] = []
+
 let mine = ProcessInfo.processInfo.processIdentifier
 let others = NSWorkspace.shared.runningApplications.filter {
     $0.processIdentifier != mine
@@ -403,4 +499,24 @@ if !others.isEmpty {
 let app = NSApplication.shared
 let daemon = Daemon()
 app.delegate = daemon
+
+// A BARE SIGTERM DOES NOT RUN applicationWillTerminate, AND THE SERVER IS THE
+// ONE THING THAT MUST NOT BE LEFT BEHIND. This daemon starts it with
+// CALLIOPE_IDLE_SECONDS=0, so a server orphaned by `pkill` or by a reinstall
+// never times itself out: it holds the port, the next daemon adopts it instead
+// of starting its own, and the model in memory is whichever build happened to
+// be current when it started. Measured the first time this daemon was replaced
+// on a running machine -- the daemon went, the server stayed.
+//
+// A DispatchSourceSignal, not signal(2): the handler runs on a real queue
+// rather than in a signal context, so it may touch Process and Foundation.
+// SIG_IGN first, because a source does not displace the default action.
+for number in [SIGTERM, SIGINT] {
+    signal(number, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+    source.setEventHandler { NSApp.terminate(nil) }
+    source.resume()
+    signalSources.append(source)
+}
+
 app.run()
