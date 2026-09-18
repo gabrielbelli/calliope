@@ -25,7 +25,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = 47815
-IDLE_SECONDS = 15 * 60
+# WHO IS HOLDING THIS OPEN DECIDES WHEN IT CLOSES. Started by the one-shot
+# player, the server has to time itself out or it would outlive every reason to
+# exist -- 15 minutes, measured against how long somebody keeps reading things
+# aloud in one sitting. Started by the daemon, the daemon IS the reason, and a
+# server that shuts itself down underneath it makes "kept warm" a claim rather
+# than a behaviour: the next press pays the load again.
+#
+# The load is 1.69-1.86 s, measured from this server's own log. Small, and
+# exactly the kind of small that is felt, because it lands between pressing the
+# key and hearing anything.
+#
+# 0 means never, and the environment is the seam because the daemon already
+# spawns this process and the player does not have to learn anything new.
+IDLE_SECONDS = int(os.environ.get("CALLIOPE_IDLE_SECONDS", 15 * 60))
 LANG_BY_VOICE_PREFIX = {
     "a": "en-us", "b": "en-gb", "e": "es", "f": "fr-fr", "h": "hi",
     "i": "it", "j": "ja", "p": "pt-br", "z": "cmn",
@@ -125,6 +138,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def exit_when_idle(server):
+    if IDLE_SECONDS <= 0:
+        print("idle exit disabled; something else owns this process", flush=True)
+        return
     while True:
         time.sleep(30)
         if time.time() - LAST_REQUEST[0] > IDLE_SECONDS:

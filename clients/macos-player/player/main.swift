@@ -807,6 +807,19 @@ final class ControlPanel: NSPanel {
 
 // MARK: - Main
 
+// A SESSION OF ITS OWN, WHOEVER STARTED IT. Stopping playback means signalling
+// the whole process group -- the player plus the audio work it spawned -- and
+// killpg(pid) only reaches it if this process is the group LEADER. That used to
+// be arranged by the caller: the OpenClip script passes start_new_session=True.
+// The daemon spawns players too, and Process has no equivalent, so a player
+// started by the hotkey was not a leader and the script's stop silently found
+// nothing to signal. Owning it here makes the two coordinators interchangeable
+// instead of making each of them remember.
+//
+// EPERM means somebody already did it, which is success. Mirrors what
+// server.py does for the same reason.
+_ = setsid()
+
 let arguments = CommandLine.arguments
 guard arguments.count >= 2, let rawText = try? String(contentsOfFile: arguments[1], encoding: .utf8) else {
     FileHandle.standardError.write(Data("usage: calliope-player <text-file>\n".utf8))

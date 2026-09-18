@@ -50,14 +50,34 @@ install -m 0644 "$here/server/server.py" "$runtime/server.py"
 echo "==> Player"
 swiftc -O -swift-version 5 "$here/player/main.swift" "$here/player/defaults.swift" -o "$runtime/calliope-player"
 
+echo "==> Daemon"
+swiftc -O -swift-version 5 "$here/daemon/main.swift" -o "$runtime/calliope-daemon"
+
 echo "==> OpenClip extension"
 mkdir -p "$extension"
 install -m 0644 "$here/openclip/openclip.json" "$extension/openclip.json"
 install -m 0755 "$here/openclip/calliope.py" "$extension/calliope.py"
 
-# A running server keeps the old code until it idles out; stop it so the next Speak starts the new one.
+# A running server keeps the old code until it idles out; stop it so the next
+# Speak starts the new one. The daemon goes with it: it holds the server open
+# now (CALLIOPE_IDLE_SECONDS=0), so a daemon left running would keep the OLD
+# server alive for ever and the upgrade would appear not to have happened.
+pkill -TERM -f "$runtime/calliope-daemon" || true
 pkill -TERM -f "$runtime/server.py" || true
 
 retire_old_install
 
-echo "Installed. Select text in any app and click Speak in OpenClip."
+echo
+echo "Installed."
+echo
+echo "  One-shot, as before:  select text, click Speak in OpenClip."
+echo
+echo "  Resident, new:        $runtime/calliope-daemon"
+echo "                        a menu bar icon, the model kept warm, and"
+echo "                        Option-Command-S to speak the selection."
+echo
+echo "  The hotkey needs Accessibility permission -- there is no way to read"
+echo "  another application's selection without it. The daemon asks the first"
+echo "  time you press it, and does nothing until you agree."
+echo
+echo "  To start it at login, add it in System Settings > General > Login Items."
