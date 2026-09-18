@@ -1,0 +1,58 @@
+#!/usr/bin/python3
+"""OpenClip action: read the selection aloud with calliope-player.
+
+Hands the text to ~/.local/share/calliope/calliope-player and returns at once, so OpenClip's
+60-second script watchdog never cuts speech off. A new Speak replaces whatever is playing.
+Installed into ~/.openclip/extensions/calliope.openclipext by ../install.sh.
+"""
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+
+RUNTIME = os.path.expanduser("~/.local/share/calliope")
+PLAYER = os.path.join(RUNTIME, "calliope-player")
+PID_FILE = os.path.join(RUNTIME, "player.pid")
+QUEUE_DIR = os.path.join(RUNTIME, "queue")
+LOG_FILE = os.path.join(RUNTIME, "player.log")
+
+
+def stop_current():
+    try:
+        with open(PID_FILE) as f:
+            pid = int(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        return
+    # Guard against a stale pid file whose pid now belongs to another program.
+    command = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(pid)],
+                             capture_output=True, text=True).stdout
+    if PLAYER in command:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+def main():
+    stop_current()
+    text = (os.environ.get("OPENCLIP_TEXT") or sys.stdin.read()).strip()
+    if not text:
+        sys.stdout.write(json.dumps({"type": "toast", "message": "No text to speak", "style": "error"}))
+        return
+
+    os.makedirs(QUEUE_DIR, exist_ok=True)
+    fd, text_path = tempfile.mkstemp(dir=QUEUE_DIR, suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    with open(LOG_FILE, "w") as log:
+        proc = subprocess.Popen([PLAYER, text_path], stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=log, start_new_session=True)
+    with open(PID_FILE, "w") as f:
+        f.write(str(proc.pid))
+    sys.stdout.write(json.dumps({"type": "success"}))
+
+
+if __name__ == "__main__":
+    main()
