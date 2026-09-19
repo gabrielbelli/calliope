@@ -1,7 +1,12 @@
 # ADR 0004 — Two long-lived branches: `prerelease` is where work happens, `main` is what was validated
 
-**Status:** accepted
+**Status:** superseded by [ADR 0012](0012-one-branch.md) on 2026-09-19
 **Date:** 2026-09-03
+
+> Kept because the reasoning below is still the reasoning, and because the
+> collision it documents is the kind of thing that is only learned once. What
+> expired is the premise in "Rules", not the observation in "The problem that
+> IS real" — that section carries forward unchanged into ADR 0012.
 
 ## Decision
 

@@ -255,9 +255,8 @@ and this file, nothing built at all.
 
 It keeps the conventions each of those five established: buildah, native
 per-architecture runners (`ubuntu-24.04` and `ubuntu-24.04-arm`) rather than
-qemu, `STORAGE_DRIVER=vfs`, a per-architecture tag then a manifest job,
-`prerelease` publishing `:pre` and never `:latest`, `main` publishing
-`:latest`.
+qemu, `STORAGE_DRIVER=vfs`, a per-architecture tag then a manifest job, and
+`main` publishing `:latest`.
 
 What is new is the filter. A change under `services/tts` builds `tts` and
 nothing else; a change under `packages/common` builds **all four**, because
@@ -348,8 +347,12 @@ extra hop in front of three ports that are still open to the LAN.
 
 ## Status
 
-`main` carries validated versions only. Work happens on `prerelease`, which
-publishes `:pre` and never `:latest`.
+One branch, `main`. A release is a `v*` tag cut from it, and **a tag is what
+the deployment pins** — `compose.yaml` names a version, so `git checkout v0.1.0`
+gives you the stack that is running. See [ADR 0012](docs/adr/0012-one-branch.md)
+for why the second branch went: it existed to keep an unvalidated build out of
+`:latest`, and a pinned version tag does that better, having first let a release
+report success and change nothing.
 
 All 42 commits from the five original repositories are intact — the import used
 `git subtree`, so `git log --follow` on any file reaches back through it.

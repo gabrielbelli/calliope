@@ -8,12 +8,13 @@ name: build
 # with the per-service conventions kept exactly and the differences between
 # them reconciled where they were accidental.
 #
-# Pre-release lives on `prerelease`; `main` carries only validated versions.
-# Images from `prerelease` are tagged :pre and :pre-<sha> and never :latest, so
-# pulling the default tag can never pick up an unvalidated build.
+# ONE BRANCH. `main` is the branch; a `v*` tag is a release. The two-branch
+# split this used to implement existed to keep an unvalidated build out of
+# :latest, and the deployment now pins a version tag rather than a moving one,
+# so the thing it protected against stopped being reachable. See ADR 0004.
 on:
   push:
-    branches: [main, prerelease]
+    branches: [main]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -534,9 +535,12 @@ jobs:
       - name: Log in to the registry
         run: buildah login -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}" "${REGISTRY}"
 
-      # Which moving tags this ref is allowed to publish. `main` owns :latest;
-      # `prerelease` owns :pre and must never touch :latest. A tag push
-      # publishes its own version and, being cut from main, :latest as well.
+      # Which tags this ref publishes. A branch build is a moving :latest and
+      # an immutable :main-<sha>; a `v*` tag publishes its own version and
+      # :latest with it. THE VERSION TAG IS THE ONE TO DEPLOY FROM, and
+      # compose.yaml does: a moving tag meant a redeploy for an unrelated
+      # reason silently swapped the running build, which cost this project a
+      # release that reported success and changed nothing.
       - name: Assemble the multi-architecture tags
         env:
           IMAGE: ${{ matrix.image }}
@@ -553,10 +557,6 @@ jobs:
             refs/heads/main)
               buildah manifest push --all m "docker://${dest}:latest"
               buildah manifest push --all m "docker://${dest}:main-${GITHUB_SHA}"
-              ;;
-            refs/heads/prerelease)
-              buildah manifest push --all m "docker://${dest}:pre"
-              buildah manifest push --all m "docker://${dest}:pre-${GITHUB_SHA}"
               ;;
             refs/tags/*)
               buildah manifest push --all m "docker://${dest}:${GITHUB_REF#refs/tags/}"
