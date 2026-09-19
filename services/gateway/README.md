@@ -6,15 +6,21 @@ One port, one key, three speech services.
                         :8080  voice-gateway
                           │
   /v1/audio/transcriptions├──────────────────────────►  stt-stack:8000
-  /transcribe             │                             Parakeet, 8.5-10.4x
+  /v1/audio/translations  │                             Parakeet, 8.5-10.4x
+  /transcribe             │
+  /v1/chat/completions    │  an input_audio part is transcribed; nothing here
+                          │  ever invents an assistant message
                           │
   /v1/audio/speech  model=│kokoro tts-1 tts-1-hd …  ─►  tts-stack:8001
   /speak  /voices         │                             Kokoro, 1.2-1.5x
                           │
-  /v1/audio/speech  model=│chatterbox tts-long      ─►  tts-long:8002
-  /jobs  /jobs/{id}[/audio]  DELETE /jobs/{id}           Chatterbox, 0.138x
+  /v1/audio/speech  model=│chatterbox chatterbox-turbo tts-long
+  /jobs  /jobs/{id}[/audio]  DELETE /jobs/{id}     ─►  tts-long:8002
+                          │                            Chatterbox 0.138x here,
+                          │                            turbo 1.54x on the card
                           │
   /v1/models              ├─  answered here, from a static table
+  /v1/models/{id}         ├─  one row of that same table
   /health                 └─  all three, fanned out, no key required
 ```
 
@@ -62,7 +68,7 @@ docker run -p 8080:8080 \
   -e GATEWAY_TTS_URL=http://tts-stack:8001 \
   -e GATEWAY_TTS_LONG_URL=http://tts-long:8002 \
   -e GATEWAY_API_KEYS=sk-workstation,sk-laptop \
-  ghcr.io/gabrielbelli/ai-voice-gateway:pre
+  ghcr.io/gabrielbelli/calliope-gateway:pre
 ```
 
 ```bash
@@ -98,7 +104,9 @@ here would quietly undo that.
 | Route | Backend | Body |
 |---|---|---|
 | `POST /v1/audio/transcriptions` | stt-stack | streamed through |
+| `POST /v1/audio/translations` | stt-stack | streamed through |
 | `POST /transcribe` | stt-stack | streamed through |
+| `POST /v1/chat/completions` | stt-stack, or answered here | buffered — see below |
 | `POST /v1/audio/speech` | by `model` — see below | buffered, to read `model` |
 | `POST /speak` | tts-stack | streamed through |
 | `GET /voices` | tts-stack | — |
@@ -106,6 +114,7 @@ here would quietly undo that.
 | `GET /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/audio` | tts-long | — |
 | `DELETE /jobs/{id}` | tts-long | cancel a queued job, or discard a finished one |
 | `GET /v1/models` | answered here | — |
+| `GET /v1/models/{id}` | answered here, indexed off that same list | — |
 | `GET /health` | all three | — |
 
 **Native routes mount flat and unprefixed, and nothing is rewritten.** That is
@@ -122,6 +131,94 @@ Chatterbox around. `POST /v1/audio/speech` is the exception — the gateway must
 read `model` out of that body to route it, and that body is text measured in
 kilobytes. Responses stream in every case.
 
+## The chat route, and why it is not a chatbot
+
+`POST /v1/chat/completions` exists because an aggregator probes it before it
+will list a provider at all, and a `404` there fails the whole provider check —
+so the stack becomes invisible to everything behind that aggregator, including
+the routes that work perfectly.
+
+**It transcribes. It never answers a question.** There are exactly two strings
+that can reach a caller in an assistant message, and neither is composed at
+request time:
+
+| What you send | What comes back |
+|---|---|
+| a message whose content carries an `input_audio` part | that clip's transcript, from stt-stack |
+| plain text, no audio | a fixed sentence saying this is a speech gateway, not a language model, and where the real routes are |
+
+```bash
+curl -s http://nas:30080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"whisper-1","messages":[{"role":"user","content":[
+        {"type":"input_audio","input_audio":{"data":"<base64 wav>","format":"wav"}}]}]}'
+```
+
+The failure this design is built against is not a rude answer. It is a **silent
+promotion**: a router, an agent or a summariser added later sees a plausible
+reply, concludes this box runs a language model, and starts sending it real
+traffic — every request of which comes back wrong with a `200` on it. The NAS
+holds 6.5 GB of Chatterbox and 1.4 GB of Parakeet and not one parameter of
+anything that could answer a question, so the canned sentence has to be
+unmistakable.
+
+**Every field is honoured or refused by name**, the rule
+[services/stt](../stt/README.md) states and this estate is built on.
+`CreateChatCompletionRequest` is about thirty fields and this route can honour
+three — `model`, `messages`, `stream` — so the rest are a `400` naming the
+field and the reason in the terms of the thing that is missing. `temperature`
+is refused because there is no sampler; accepting it and returning the same
+fixed sentence would tell a caller their settings had landed on a model.
+
+`usage` is **omitted** rather than returned as zeroes: nothing in this process
+tokenises anything, so any count would be a measurement never taken.
+`stream_options.include_usage` says so by name.
+
+`stream: true` is honoured — role, one content delta, `finish_reason`,
+`[DONE]`. One delta and not many, deliberately: stt-stack's buffered
+transcription arrives whole, and slicing it into timed fragments would invent a
+latency profile a client then builds a progress bar on. The genuinely
+incremental surface is `stream=true` on `POST /v1/audio/transcriptions`, which
+faster-whisper can do and Parakeet cannot.
+
+Responses carry `x-stt-engine` naming the checkpoint that actually produced the
+words, exactly as stt-stack's own do. `model` in the body echoes what the caller
+sent, because the specification says it is theirs.
+
+**A chat body is capped at 16 MiB, and that is the only cap in this service.**
+Every other route that carries audio is streamed through and never held, which
+is why this container is given 512 MB in `compose.yaml`. A chat body cannot be
+streamed — the clip arrives base64 inside a JSON object, and the transcript has
+to be wrapped before anything can be sent — and one was measured at **3.8x its
+own size resident** while it is read, linear from 5 MB to 32 MB. So the ceiling
+is what keeps that 512 MB a budget rather than a lottery. It is counted while
+reading rather than read off `Content-Length`, because a chunked request
+declares no length at all. Over it:
+
+```json
+{"error": {"message": "a chat body is buffered whole here to find the audio inside it, so it is capped at 16 MB and this one is larger. POST /v1/audio/transcriptions takes the clip as a file upload, streams it through this gateway rather than holding it, and has no ceiling here.",
+           "type": "invalid_request_error", "param": null, "code": "upload_too_large"}}
+```
+
+16 MiB of base64 is about 12 MB of audio: six minutes of 16 kHz mono wav, or
+twenty-five of a 64 kbps mp3. Longer recordings belong on
+`POST /v1/audio/transcriptions`, which has no ceiling here.
+
+**Base64 is read the way tools emit it.** `base64 clip.wav` wraps at 76
+columns, `openssl base64` at 64, and a browser that built the part from a
+`FileReader` result sends a whole `data:audio/wav;base64,…` URI. The wrapping
+and the prefix are stripped; everything else is refused, because
+`base64.b64decode` in its lenient mode does not reject a stray character, it
+deletes it and closes the gap — which turns four mangled characters into a clip
+three bytes short that gets transcribed with a `200` on it.
+
+**A conversation handed back is not an error.** `messages.append(completion.
+choices[0].message.model_dump())` is how openai-python holds a conversation,
+and the message it appends carries `refusal: null` — a field this route puts in
+its own replies. That and `annotations` are read and ignored on any message, as
+`name` is. Only an `input_audio` part is ever acted on, wherever it appears, so
+a previous turn's assistant text is not an instruction here.
+
 ## Which TTS backend a request reaches
 
 **The criterion is the `model` string and nothing else.**
@@ -130,12 +227,49 @@ kilobytes. Responses stream in every case.
 |---|---|
 | `kokoro`, `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` | tts-stack |
 | absent, empty, or **any unrecognised value** | tts-stack |
-| `chatterbox`, `tts-long` | tts-long |
+| every name in `GATEWAY_LONG_MODELS` — here `chatterbox`, `chatterbox-turbo`, `tts-long` | tts-long |
+| a catalogue name **tts-long owns** that this deployment has not enabled | **404**, naming `GATEWAY_LONG_MODELS` |
+| a catalogue name **another backend owns** | that backend, exactly as before |
 
 `GET /v1/models` returns that table as OpenAI's model list, with the backend in
 `owned_by`. It is answered from a static table with no backend call: the names
 are a property of the routing contract, not of any backend's state, and a
-client most wants to know what it can send while a backend is restarting.
+client most wants to know what it can send while a backend is restarting. The
+tts-long rows are generated from `GATEWAY_LONG_MODELS`, so what is advertised
+and what is routed cannot disagree.
+
+**The 404 row exists because the rule above it became a trap, and this
+deployment is now living in exactly the case it was built for.** "Everything
+else goes fast, including an unrecognised name" is right for a typo and was
+right while there was one long-form engine. With a catalogue of three, somebody
+types `voxtral` — which this deployment has **retired**, see
+[ADR 0010](../../docs/adr/0010-the-third-engine-was-measured-and-retired.md) —
+falls off the end of `GATEWAY_LONG_MODELS`, and **gets Kokoro**: a different
+engine, a different voice, no error anywhere. So the gateway knows every name
+tts-long could own, from the same catalogue tts-long reads
+(`voice_common.engines.CATALOGUE`), and refuses those by name:
+
+```json
+{"error": {"message": "model 'chatterbox-turbo' is a long-form model this gateway knows but this deployment has not enabled. Add it to GATEWAY_LONG_MODELS (and to TTS_ENGINES on tts-long). Enabled: chatterbox, tts-long.",
+           "type": "invalid_request_error", "param": "model", "code": "model_not_found"}}
+```
+
+A name in *neither* set still goes fast, unchanged. **Adding an engine adds no
+route**: the path and method allowlists are untouched, because a third model
+string is a field value and not an endpoint. Voxtral arrived that way — a
+catalogue row, a compose key and a README line, and not one entry in any of the
+three tables, and retiring it took the same two keys back out.
+
+**The last row of that table is why the refusal reads `owned_by` and not the
+whole catalogue.** `EngineFacts.owned_by` names which service in the stack owns
+a checkpoint, and every row written so far says `tts-long` — so "in the
+catalogue" and "tts-long's" have been the same set, and the code said the
+second by spelling the first. They stop being the same set the moment the fast
+path's own `kokoro` gets a row, which is work already scheduled: `model=kokoro`
+would then be answered **404**, telling the caller to add the default voice of
+the whole stack to `GATEWAY_LONG_MODELS` — which would route it to a backend
+that has never held those weights. The gateway filters on the owner instead, so
+a row for a checkpoint tts-stack owns keeps going to tts-stack.
 
 **Input length is not a routing key**, and that is the decisive rejection.
 Length is a proxy for a quality choice, and the cost of getting it wrong is not
@@ -170,8 +304,25 @@ send `chatterbox` or split the text.
 
 ### The deviation, stated plainly
 
-**With `model=chatterbox`, `POST /v1/audio/speech` may answer `202` with JSON
-instead of audio bytes.**
+**With any long-form model — `chatterbox`, `chatterbox-turbo` or `tts-long` —
+`POST /v1/audio/speech` may answer `202` with JSON instead of audio bytes.**
+
+**That is true of `chatterbox-turbo` too, and deliberately so.** Turbo runs at
+1.5426x realtime on the runner's card, measured, which is past the point where a
+short request could be answered down the socket — but that card belongs to
+somebody who is often using it, so the same request is nine seconds when they are
+away and four minutes when they are not. tts-long always answers with a job id
+rather than sometimes; see
+[ADR 0008](../../docs/adr/0008-two-engines-and-both-stay-jobs.md). Nothing here
+should be built to make turbo synchronous.
+
+**`voxtral` is not one of them any more.** It is in the catalogue and switched
+off on this deployment, so `model=voxtral` is the 404 above and never reaches
+tts-long at all. What it was — 0.104x realtime, no local lane, a **503**
+`engine_unavailable` from tts-long whenever the runner was away, forwarded
+untouched like every other backend envelope — is recorded in
+[ADR 0010](../../docs/adr/0010-the-third-engine-was-measured-and-retired.md)
+along with the three measurements that retired it.
 
 The synchronous OpenAI contract cannot be honoured by tts-long. At the
 orko-measured 0.138x realtime, a 200-word request is 80 s of speech and 580 s
@@ -198,7 +349,7 @@ checks can tell.
 
 ```bash
 docker run -p 8080:8080 -e GATEWAY_API_KEYS=sk-workstation,sk-laptop \
-  ghcr.io/gabrielbelli/ai-voice-gateway:pre
+  ghcr.io/gabrielbelli/calliope-gateway:pre
 ```
 
 ```bash
@@ -362,7 +513,21 @@ reason the single boundary is free: the containers already share a network.
    network. This is the step that makes the boundary real; without it this
    component is an extra hop and nothing else.
 2. Leave `STT_API_KEYS` and `TTS_API_KEYS` unset on all three backends.
-3. Set `GATEWAY_API_KEYS` here.
+3. **Do not set `GATEWAY_API_KEYS` yet.** Reproduced against the real app with
+   two keys set: the startup line prints "authentication enabled, 2 key(s);
+   unauthenticated: /health", and then `GET /`, `/ui`, `/ui/health`,
+   `/ui/config`, `/ui/clips` and `/ui/api/v1/models` all answer `401` with
+   `WWW-Authenticate: Bearer`. **Turning authentication on takes the web page
+   offline**, and there is nowhere in a browser to present a key: `voice-ui`
+   publishes no port of its own, Bearer raises no browser prompt, and the
+   page's API-key box was deliberately removed.
+
+   `UI_GATEWAY_API_KEY` does not help — it signs the voice-ui → gateway hop,
+   never the browser → gateway hop that is refused first.
+
+   Until the gateway can mint a browser credential of its own, keys and the
+   page are mutually exclusive. If you only use the API and never the page,
+   setting it is safe and correct.
 4. Leave each container's own healthcheck pointed at **its own** localhost
    `/health`, not at the gateway's aggregate. A container must not be
    restarted because a sibling is down.
@@ -389,11 +554,13 @@ this in code.
 | `GATEWAY_STT_URL` | `http://stt-stack:8000` | |
 | `GATEWAY_TTS_URL` | `http://tts-stack:8001` | |
 | `GATEWAY_TTS_LONG_URL` | `http://tts-long:8002` | |
+| `GATEWAY_LONG_MODELS` | `chatterbox,tts-long` | Comma-separated `model` values routed to tts-long, and the set `GET /v1/models` advertises for it. Must agree with tts-long's `TTS_ENGINES` minus the `tts-long` alias — `docs/tests/test_deployment.py` asserts it has not drifted. Adding an engine here without adding it there advertises a name that 400s; the other way round hides an engine the box can run |
 | `GATEWAY_STT_TIMEOUT` | `900` | Read timeout, seconds |
 | `GATEWAY_TTS_TIMEOUT` | `300` | Read timeout, seconds |
 | `GATEWAY_TTS_LONG_TIMEOUT` | `240` | Must stay above tts-long's `TTS_OPENAI_SYNC_TIMEOUT` |
 | `GATEWAY_CONNECT_TIMEOUT` | `2` | |
 | `GATEWAY_HEALTH_TIMEOUT` | `5` | Per backend, fanned out concurrently |
+| `GATEWAY_CHAT_MAX_BYTES` | `16777216` | The only body this process holds that can carry audio — see below. Over it is a `413`, counted while reading rather than taken from `Content-Length` |
 
 ## Tests
 

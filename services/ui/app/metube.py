@@ -154,6 +154,7 @@ class MeTube:
 
     async def add(self, url: str, *, auto_start: bool,
                   download_type: str = "audio",
+                  audio_format: str | None = None,
                   clip_start: float | None = None,
                   clip_end: float | None = None) -> None:
         body: dict[str, Any] = {
@@ -162,7 +163,20 @@ class MeTube:
             # MeTube 400s on any quality but "best" for opus and the m4a-shaped
             # choices, so this is not a knob and is not exposed as one.
             "quality": "best",
-            "format": config.METUBE_FORMAT,
+            # opus for transcription, because a two-hour podcast at ~1 MB a
+            # minute is the whole reason links are affordable. A reference clip
+            # asks for wav instead: it is twenty seconds, and services/ui has
+            # no ffmpeg and no audio library, so clips.save measures duration
+            # with the stdlib `wave` module and can read nothing else. An opus
+            # file reached it once and came back "that file is not a WAV this
+            # service can read", which was true and unhelpful.
+            #
+            # `audio_format` IS MeTube'S SINGLE `format` FIELD and the name is
+            # now half a lie: with download_type "video" the caller passes a
+            # CONTAINER (mp4) rather than an audio codec. Kept as one parameter
+            # anyway, because MeTube has one field -- a second keyword here
+            # would be two ways to fill it and a rule about which wins.
+            "format": audio_format or config.METUBE_FORMAT,
             # See config.METUBE_FOLDER: /download/ and /audio_download/ are the
             # same directory on this deployment, so without a folder our ingest
             # lands in the user's music library.
@@ -236,5 +250,29 @@ class MeTube:
         the default deployment, where files land at the root -- still produces
         the path it always did.
         """
+        return self._static_url("audio_download", filename, folder)
+
+    def video_url(self, filename: str, folder: str = "") -> str:
+        """The same file under MeTube's OTHER static route.
+
+        THERE ARE TWO DIRECTORIES AND THEY ARE ONLY ACCIDENTALLY THE SAME ONE.
+        MeTube serves DOWNLOAD_DIR at /download/ and AUDIO_DOWNLOAD_DIR at
+        /audio_download/; AUDIO_DOWNLOAD_DIR defaults to the literal string
+        "%%DOWNLOAD_DIR" and is unset on this deployment, so today both routes
+        resolve to one directory and audio_url() finds everything. See
+        config.METUBE_FOLDER, where that is written down and was verified.
+
+        A CAPTIONS DOWNLOAD IS THE ONE THAT DOES NOT FOLLOW. yt-dlp's captions
+        type sets skip_download and writes a .vtt or .srt beside the VIDEO, not
+        beside the audio, so on any deployment that does set AUDIO_DOWNLOAD_DIR
+        separately the subtitle file is at /download/<folder>/<name> and
+        /audio_download/<folder>/<name> is a 404. This is the fallback
+        /ui/captions tries second -- one extra request, only on the path that
+        already failed, rather than a 404 whose cause is a setting in someone
+        else's application.
+        """
+        return self._static_url("download", filename, folder)
+
+    def _static_url(self, route: str, filename: str, folder: str) -> str:
         prefix = f"{quote(folder.strip('/'), safe='/')}/" if folder else ""
-        return f"{self.base}/audio_download/{prefix}{quote(filename, safe='/')}"
+        return f"{self.base}/{route}/{prefix}{quote(filename, safe='/')}"

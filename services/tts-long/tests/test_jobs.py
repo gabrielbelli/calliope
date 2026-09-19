@@ -1,0 +1,564 @@
+
+
+# ------------------------------------------- surviving a restart --
+
+
+import json
+from pathlib import Path
+
+def test_finished_jobs_are_recovered_from_disk(tmp_path, monkeypatch):
+    """`jobs` is a dict in one process, so a restart forgets every job while
+    the audio sits in a volume and survives. Three things followed: a finished
+    job became unreachable though its file was right there, the page showed it
+    as pending for ever, and the sweeper could never expire a file it had no
+    job for -- so /output grew across restarts with nothing able to clean it.
+    """
+    from app import main
+
+    monkeypatch.setattr(main, "OUT_DIR", tmp_path)
+    monkeypatch.setattr(main, "jobs", {})
+    (tmp_path / "abc-123.wav").write_bytes(b"RIFF" + b"\0" * 100)
+
+    assert main._recover() == 1
+    job = main.jobs["abc-123"]
+    assert job["status"] == "done"
+    assert job["format"] == "wav"
+    assert job["recovered"] is True
+    assert job["finished_at"] > 0, "the sweeper needs this to expire the file"
+
+
+def test_recovery_says_what_it_does_not_know(tmp_path, monkeypatch):
+    """voice, language and the generation parameters lived only in the dict.
+    A recovered record must not invent plausible values for them."""
+    from app import main
+
+    monkeypatch.setattr(main, "OUT_DIR", tmp_path)
+    monkeypatch.setattr(main, "jobs", {})
+    (tmp_path / "abc-123.wav").write_bytes(b"RIFF" + b"\0" * 100)
+    main._recover()
+
+    job = main.jobs["abc-123"]
+    for unknown in ("voice", "language", "chunks", "realtime_factor"):
+        assert unknown not in job, f"{unknown} was invented"
+
+
+def test_recovery_ignores_files_it_cannot_serve(tmp_path, monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main, "OUT_DIR", tmp_path)
+    monkeypatch.setattr(main, "jobs", {})
+    (tmp_path / "notes.txt").write_text("not audio")
+    (tmp_path / "half.part").write_bytes(b"")
+    assert main._recover() == 0
+
+
+def test_recovery_never_overwrites_a_live_job(tmp_path, monkeypatch):
+    """A restart is not the only time this runs in a process's life -- and a
+    running job's record must win over a stale file with the same name."""
+    from app import main
+
+    monkeypatch.setattr(main, "OUT_DIR", tmp_path)
+    monkeypatch.setattr(main, "jobs", {"abc-123": {"id": "abc-123",
+                                                   "status": "running"}})
+    (tmp_path / "abc-123.wav").write_bytes(b"RIFF" + b"\0" * 100)
+    assert main._recover() == 0
+    assert main.jobs["abc-123"]["status"] == "running"
+
+
+# ------------------------------------------- what a restart used to lose --
+
+
+def _wait(client, job_id: str, timeout: float = 30.0) -> dict:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in {"done", "failed", "cancelled"}:
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} never finished")
+
+
+def test_a_recovered_job_still_knows_its_voice(speech, tmp_path):
+    """GAB-629, reported with a screenshot: every row after a restart read
+    "voice unknown".
+
+    `jobs` is a dict in one process. The audio survived in the volume and the
+    record did not, so _recover rebuilt each row from the only thing left --
+    the filename -- and the voice, the language, the parameters, the chunk
+    count and the realtime factor were gone. A list of jobs made with several
+    different cloned voices all read the same way.
+
+    This is the whole round trip: a real job through the real routes, the dict
+    emptied exactly as a restart empties it, and _recover run against the files
+    that survived.
+    """
+    from app import main
+
+    job = speech.post("/jobs", json={"text": "One short line, spoken once.",
+                                     "voice": "default", "language": "en"}).json()
+    finished = _wait(speech, job["id"])
+    assert finished["voice"] == "default"
+
+    main.jobs.clear()                                  # the restart
+    assert main._recover() == 1
+    back = main.jobs[job["id"]]
+
+    assert back["voice"] == "default", "the screenshot's 'voice unknown'"
+    assert back["language"] == "en"
+    assert back["chunks"] == finished["chunks"]
+    assert back["realtime_factor"] == finished["realtime_factor"]
+    assert back["audio_seconds"] == finished["audio_seconds"]
+    assert back["text"].startswith("One short line"), "and what was said"
+    assert back["status"] == "done"
+    assert back["recovered"] is True, "it did come back from disk, and says so"
+
+
+def test_a_recovered_cancelled_job_does_not_claim_to_be_done(speech):
+    """The status lived in the dict too, and every recovered row said "done".
+
+    A cancelled job keeps the audio it managed to make -- that is what "stop
+    and keep what's done" means -- so its file is on disk and indistinguishable
+    from a finished one by name.
+    """
+    from app import main
+
+    job = speech.post("/jobs", json={"text": "A line to cancel."}).json()
+    _wait(speech, job["id"])
+    main.jobs[job["id"]]["status"] = "cancelled"
+    main._write_record(main.jobs[job["id"]])
+
+    main.jobs.clear()
+    main._recover()
+    assert main.jobs[job["id"]]["status"] == "cancelled"
+
+
+def test_the_sidecar_is_removed_with_the_audio(speech):
+    """Both, or DELETE and the sweeper leave a {id}.json for every file they
+    remove -- the unbounded growth of /output the sweeper exists to stop, one
+    directory entry smaller. The sweeper calls the same _discard."""
+    from app import main
+
+    job = speech.post("/jobs", json={"text": "A line to discard."}).json()
+    _wait(speech, job["id"])
+    sidecar = main._sidecar(job["id"])
+    assert sidecar.exists(), "nothing was written to remove"
+
+    assert speech.delete(f"/jobs/{job['id']}").json()["status"] == "deleted"
+    assert not sidecar.exists()
+    assert not (main.OUT_DIR / f"{job['id']}.wav").exists()
+
+
+def test_a_sidecar_cannot_point_the_audio_route_somewhere_else(tmp_path, monkeypatch):
+    """/output is a writable volume and `path` is the argument to open() on
+    /jobs/{id}/audio, so the record is filtered through SIDECAR_KEYS on the way
+    in. The file describes a job; it does not get to say which file it is."""
+    import json
+
+    from app import main
+
+    monkeypatch.setattr(main, "OUT_DIR", tmp_path)
+    monkeypatch.setattr(main, "jobs", {})
+    (tmp_path / "abc-123.wav").write_bytes(b"RIFF" + b"\0" * 100)
+    (tmp_path / "abc-123.json").write_text(json.dumps({
+        "voice": "narrator", "path": "/etc/passwd", "id": "somebody-else",
+        "recovered": False, "format": "exe"}))
+
+    main._recover()
+    job = main.jobs["abc-123"]
+    assert job["voice"] == "narrator", "the part it is allowed to say"
+    assert job["path"] == str(tmp_path / "abc-123.wav")
+    assert job["id"] == "abc-123"
+    assert job["format"] == "wav"
+    assert job["recovered"] is True
+
+
+def test_a_corrupt_sidecar_still_recovers_the_audio(tmp_path, monkeypatch):
+    """A torn write must cost the row its voice, not its audio. That is the
+    state every job was in before the sidecar existed."""
+    from app import main
+
+    monkeypatch.setattr(main, "OUT_DIR", tmp_path)
+    monkeypatch.setattr(main, "jobs", {})
+    (tmp_path / "abc-123.wav").write_bytes(b"RIFF" + b"\0" * 100)
+    (tmp_path / "abc-123.json").write_text('{"voice": "narrator", trunca')
+
+    assert main._recover() == 1
+    assert "voice" not in main.jobs["abc-123"], "half a file is not a fact"
+
+
+def test_a_record_whose_audio_went_from_outside_is_kept_and_says_so(
+        tmp_path, monkeypatch):
+    """THE RULE THAT WAS INVERTED, and the reason it had to be.
+
+    This used to assert the opposite: a {id}.json with no audio behind it was
+    an ORPHAN and was deleted, because _recover walked audio files and a record
+    with no file described nothing anybody could play. That rule already needed
+    one exemption, for audio deleted on purpose -- and instant speech and
+    transcriptions keep no audio at all, so records with no file are now the
+    majority. A rule that needs a second exemption is the wrong rule.
+
+    The record is the index now. The row survives, with no player, and says
+    `expired` rather than `deleted`: nobody pressed anything, so saying they
+    did would be a lie about the reader's own actions.
+    """
+    from app import main
+
+    monkeypatch.setattr(main, "OUT_DIR", tmp_path)
+    monkeypatch.setattr(main, "jobs", {})
+    legacy = tmp_path / "gone-999.json"
+    legacy.write_text('{"voice": "narrator", "status": "done"}')
+
+    assert main._recover() == 1
+    row = main.jobs["gone-999"]
+    assert row["voice"] == "narrator", "the record went with the audio"
+    assert row["audio_expired"] is True
+    assert not row.get("audio_deleted"), "nobody pressed anything"
+    # Moved out of the audio directory on the way, once, so nothing has to look
+    # in two places for the same fact ever again.
+    assert not legacy.exists()
+    assert (tmp_path / "runs" / "gone-999.json").exists()
+
+
+def test_a_segments_only_job_does_not_break_the_whole_listing(speech):
+    """GET /jobs was a 500 whenever any job had been submitted as segments.
+
+    The worker holds segments as (text, pause_after) PAIRS, not as the Segment
+    models the request carried, and the preview read them as dicts:
+    `'tuple' object has no attribute 'get'`, raised inside the comprehension
+    that builds the response, so ONE such job took every other job's row with
+    it. The page sends segments whenever the text has paragraph pauses, which
+    made the Jobs tab go blank rather than degrade.
+    """
+    job = speech.post("/jobs", json={
+        "segments": [{"text": "First paragraph.", "pause_after": 0.4},
+                     {"text": "Second paragraph."}]}).json()
+
+    listing = speech.get("/jobs")
+    assert listing.status_code == 200, listing.text
+    row = next(j for j in listing.json()["jobs"] if j["id"] == job["id"])
+    assert row["text_preview"].startswith("First paragraph.")
+    # And the expandable row, which reads `text` and showed "the text was not
+    # kept for this job" for every one of them.
+    assert "Second paragraph." in speech.get(f"/jobs/{job['id']}").json()["text"]
+
+
+def test_the_listing_carries_the_estimate_the_202_promised(speech):
+    """The page sizes its progress bar from `job.estimated_seconds` in the
+    LISTING, and the listing never carried the field.
+
+    It was computed inside the POST handler, put in the 202 body and dropped.
+    So `job.estimated_seconds || 0` was 0 for every job read back, and the bar,
+    the elapsed-and-remaining line and the "past the estimate" state rendered
+    nothing at all -- for any client that polled, reloaded, or opened the page
+    on a second device, which is every client after the first render.
+
+    Both halves are asserted: the number is in the listing, and it is the SAME
+    number the caller was promised rather than a fresh reading of a drifting
+    average.
+    """
+    created = speech.post("/jobs", json={"text": "A line long enough to cost "
+                                                 "a measurable moment.",
+                                         "voice": "default",
+                                         "language": "en"}).json()
+    promised = created["estimated_seconds"]
+    assert promised > 0
+
+    listed = {j["id"]: j for j in speech.get("/jobs").json()["jobs"]}[created["id"]]
+    assert listed["estimated_seconds"] == promised, "the bar has a total again"
+    assert speech.get(f"/jobs/{created['id']}").json()["estimated_seconds"] == promised
+
+
+def test_the_estimate_survives_a_restart(speech):
+    """A recovered row is finished, so nothing reads its estimate -- but a
+    restart must not become the one way to lose a number a client was given.
+    """
+    from app import main
+
+    created = speech.post("/jobs", json={"text": "One short line, spoken once.",
+                                         "voice": "default",
+                                         "language": "en"}).json()
+    _wait(speech, created["id"])
+    main.jobs.clear()
+    assert main._recover() == 1
+    assert main.jobs[created["id"]]["estimated_seconds"] == created["estimated_seconds"]
+
+
+def test_chatterbox_is_the_slower_talker_and_the_constant_says_so(speech):
+    """449 characters of ordinary prose measured 37.4 s of Chatterbox audio on
+    the deployed stack: 12.0 chars/s, not the 15 this held.
+
+    15 was the middle of a spread of four samples, chosen when the spread was
+    all there was. It under-predicted the audio by a fifth, and the audio is
+    then divided by a realtime factor near 0.27 to reach the number a reader
+    sees -- so a 20% error arrives as roughly four times that in the wait.
+    """
+    from app import chunking
+
+    assert chunking.CHARS_PER_SECOND == 12.0
+    # The measurement this was taken from, within the rounding of one sample.
+    assert abs(chunking.speech_seconds(449) - 37.4) < 2.0
+
+
+def test_a_job_that_vanished_before_it_ran_does_not_kill_the_worker(speech):
+    """THE DEFECT THIS PREVENTS: one lost id silently stopping every later job.
+
+    `jobs` is read from the event loop and from the lane threads while DELETE
+    and the sweeper both pop from it. The old worker read `jobs[job_id]`
+    OUTSIDE its try block, so an id whose row had gone raised KeyError straight
+    out of the `while True` loop and ended the only thread that runs anything.
+    Nothing logged it and nothing restarted it: every job submitted afterwards
+    would sit at `queued` for ever, and the service would look alive.
+
+    With lanes the same mistake would kill ONE lane and leave the other, which
+    is worse -- the service would look half-well and nothing would say which
+    half. The id is dropped in the chooser, before any lane is given it.
+
+    So the failure is deliberately provoked, and then a real job has to prove
+    the queue still works.
+    """
+    from app import main
+
+    main.dispatch.submit("a-job-id-that-is-not-in-the-dict")
+
+    job = speech.post("/jobs", json={"text": "One short line, spoken once.",
+                                     "voice": "default"}).json()
+    assert _wait(speech, job["id"])["status"] == "done", \
+        "the worker thread died on the missing id and never ran this"
+
+
+def test_the_audio_can_go_without_the_record_going_with_it(speech, tmp_path):
+    """THE DEFECT THIS PREVENTS: reclaiming a gigabyte costs you the history.
+
+    Deleting used to mean both. The audio went and the row went with it, so
+    freeing disk also threw away what was said, which voice said it, how long
+    it took and which machine did the work -- a few hundred bytes that are the
+    only record any of it happened.
+    """
+    from app import main
+
+    created = speech.post("/jobs", json={"text": "One short line, spoken once.",
+                                         "voice": "default",
+                                         "language": "en"}).json()
+    done = _wait(speech, created["id"])
+    audio = Path(done["path"]) if done.get("path") else None
+    assert audio is not None and audio.exists()
+
+    r = speech.delete(f"/jobs/{created['id']}/audio")
+    assert r.status_code == 200, r.text
+    assert not audio.exists(), "the audio is still on disk"
+
+    row = speech.get(f"/jobs/{created['id']}").json()
+    assert row["audio_deleted"] is True
+    assert row["voice"] == "default", "the record went with the audio"
+    assert row["text"].startswith("One short line")
+    assert row["backend"] == "local", "and it still says where it ran"
+    assert not row.get("bytes")
+
+    # The whole point is that this survives a restart. _recover walks AUDIO
+    # files, so without the sidecar branch this row would be swept as an
+    # orphan and "keep the record" would be true only until the next restart.
+    main.jobs.clear()
+    assert main._recover() >= 1
+    back = main.jobs[created["id"]]
+    assert back["audio_deleted"] is True
+    assert back["voice"] == "default"
+    assert back["path"] is None
+
+
+def test_a_job_that_has_not_finished_cannot_have_its_audio_deleted(speech):
+    """There is no audio yet, and the honest answer is cancel it instead."""
+    from app import main
+
+    main.jobs["pending-1"] = {"id": "pending-1", "status": "running",
+                              "cancelled": False, "created_at": 0.0,
+                              "segments": [], "text": ""}
+    try:
+        r = speech.delete("/jobs/pending-1/audio")
+        assert r.status_code == 409, r.text
+    finally:
+        main.jobs.pop("pending-1", None)
+
+
+def test_deleting_the_record_still_takes_the_audio_with_it(speech):
+    """The other half stays exactly as it was: DELETE on the job removes both,
+    and leaves nothing behind for _recover to reason about."""
+    from app import main
+
+    created = speech.post("/jobs", json={"text": "Another short line.",
+                                         "voice": "default",
+                                         "language": "en"}).json()
+    done = _wait(speech, created["id"])
+    audio = Path(done["path"])
+    assert speech.delete(f"/jobs/{created['id']}").json()["status"] == "deleted"
+    assert not audio.exists()
+    assert not main._sidecar(created["id"]).exists(), "the sidecar was left behind"
+    assert speech.get(f"/jobs/{created['id']}").status_code == 404
+
+
+# ------------------------------------------- progress while it runs --
+
+
+def _paced(monkeypatch):
+    """Hold the synthesiser at the START of every segment after the first.
+
+    A clone job is minutes of compute and the interesting moment is the middle
+    of it, which no other test in this file can reach: `_wait` polls until the
+    job is over. This hands the test the middle by blocking the worker inside
+    the fake model, so a poll can be made while exactly one segment exists.
+
+    Returns (started, release): `started` counts segments the worker has begun,
+    `release` lets it past the block.
+    """
+    import threading
+
+    from app import synth as synth_module
+
+    original = synth_module.Synth._speak
+    started: list[str] = []
+    release = threading.Event()
+
+    def paced(self, text, language, controls, reference):
+        started.append(text)
+        if len(started) > 1:
+            assert release.wait(20), "the worker was never released"
+        return original(self, text, language, controls, reference)
+
+    monkeypatch.setattr(synth_module.Synth, "_speak", paced)
+    return started, release
+
+
+def _until(predicate, timeout: float = 20.0) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError("the worker never reached that state")
+
+
+def test_a_running_job_reports_the_boundaries_it_has_already_made(speech, monkeypatch):
+    """The boundaries existed from the first sentence and were published when
+    the job ENDED, so a poll during the twenty minutes that matter could not
+    say how much had been spoken.
+
+    `chunks` said how many segments there would be and nothing said how many
+    there were, so a client had elapsed / estimated_seconds -- a guess against
+    a guess -- while the exact answer sat in a local list in _run.
+
+    A mid-run poll now carries `offsets`: len() of it is the segments made and
+    its last entry is the seconds of audio made, both exact, because each one
+    is a running total of samples that were actually produced.
+    """
+    started, release = _paced(monkeypatch)
+    created = speech.post("/jobs", json={
+        "segments": [{"text": "The first sentence is spoken first."},
+                     {"text": "The second sentence follows it."},
+                     {"text": "The third sentence ends the reading."}],
+        "voice": "default", "language": "en"}).json()
+
+    _until(lambda: len(started) == 2)          # one made, one held
+    running = speech.get(f"/jobs/{created['id']}").json()
+    assert running["status"] == "running"
+    assert running["chunks"] == 3
+    assert running["offsets"] == [0.0], "the first boundary, mid-run"
+
+    release.set()
+    finished = _wait(speech, created["id"])
+    assert len(finished["offsets"]) == 3
+    assert finished["offsets"][0] == 0.0
+    assert finished["offsets"] == sorted(finished["offsets"])
+    assert finished["offsets"][-1] < finished["audio_seconds"], \
+        "the last segment STARTS before the audio ends"
+
+
+def test_the_published_boundaries_are_a_copy_of_the_workers_list(speech, monkeypatch):
+    """_public snapshots a job with dict(job), which copies the mapping and not
+    the values. Publishing the live list would therefore leave the JSON encoder
+    walking a list the worker thread is appending to, mid-request.
+
+    The visible symptom is a response whose `offsets` is longer than the
+    segments it describes, or shorter, depending on where the encoder was when
+    the next segment landed. Both are races that appear once in a hundred polls
+    and neither is reproducible from the response.
+
+    So the published value must be a copy at the moment it was published, and
+    this is what proves it: a list taken from the job mid-run must not grow
+    afterwards.
+    """
+    from app import main
+
+    started, release = _paced(monkeypatch)
+    created = speech.post("/jobs", json={
+        "segments": [{"text": "The first sentence is spoken first."},
+                     {"text": "The second sentence follows it."},
+                     {"text": "The third sentence ends the reading."}],
+        "voice": "default", "language": "en"}).json()
+
+    _until(lambda: len(started) == 2)
+    held = main.jobs[created["id"]]["offsets"]
+    assert held == [0.0]
+
+    release.set()
+    _wait(speech, created["id"])
+    assert held == [0.0], "the published list grew: it was the worker's own"
+    assert len(main.jobs[created["id"]]["offsets"]) == 3
+
+
+# ------------------------------------------------- honoured or refused ------
+
+
+def test_an_unknown_field_on_jobs_is_refused_not_dropped(speech):
+    """THE MOST DANGEROUS LINE IN THIS RELEASE, AND IT PREDATES IT.
+
+    `JobRequest` had no `model_config`, so POST /jobs accepted and SILENTLY
+    DISCARDED any unknown field -- `{"model": "chatterbox-turbo"}` included,
+    before a second engine existed. The page uses /jobs exclusively and always
+    will, so shipping the engine selector on /v1/audio/speech and not here would
+    ship a page that asks for turbo, gets the other engine, and reports no error
+    anywhere in the stack.
+    """
+    refused = speech.post("/jobs", json={"text": "hello", "voice": "default",
+                                         "totally_unknown_field": 123})
+    assert refused.status_code == 422, refused.text
+    said = json.dumps(refused.json())
+    assert "totally_unknown_field" in said
+
+
+def test_the_jobs_error_shape_is_still_detail(speech):
+    """/jobs has answered `{"detail": ...}` since before OpenAI's envelope
+    existed here and something out there parses it. One function decides WHAT is
+    refused; each route decides how its own callers are told, and unifying the
+    two would be a wire change nobody asked for."""
+    pydantic = speech.post("/jobs", json={"text": "hi", "voice": "default",
+                                          "nope": 1})
+    assert "detail" in pydantic.json() and "error" not in pydantic.json()
+
+    ours = speech.post("/jobs", json={"text": "hi", "voice": "no-such-voice"})
+    assert ours.status_code == 400
+    assert "detail" in ours.json() and "error" not in ours.json()
+
+
+def test_a_model_this_service_does_not_have_is_refused_by_name(speech):
+    """Named, listed, and with the OpenAI aliases explained -- because the
+    commonest reason to see this is a typo and the second commonest is a client
+    that assumed `tts-1-hd` meant something different here."""
+    refused = speech.post("/jobs", json={"text": "hi", "voice": "default",
+                                         "model": "chatterbox-ultra"})
+    assert refused.status_code == 400
+    said = refused.json()["detail"]
+    assert "chatterbox-ultra" in said and "chatterbox" in said
+
+
+def test_the_model_openai_names_resolve_to_this_services_default(speech):
+    """They have always meant this; the difference is that saying so is now a
+    decision with an alternative rather than a description of the only thing
+    there was."""
+    for name in ("tts-1", "tts-1-hd", "gpt-4o-mini-tts", "tts-long"):
+        created = speech.post("/jobs", json={"text": "hi", "voice": "default",
+                                             "model": name})
+        assert created.status_code == 202, (name, created.text)
+        assert created.json()["engine"] == "chatterbox"

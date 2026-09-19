@@ -1,4 +1,4 @@
-# ai-voice
+# Calliope
 
 Self-hosted speech-to-text and text-to-speech. Five images and the package they
 share, one repository, deployed as a single app.
@@ -7,6 +7,7 @@ share, one repository, deployed as a single app.
                        :8080  services/gateway
                          │
   /v1/audio/transcriptions├───────────────────────►  services/stt       :8000
+  /v1/audio/translations  │
   /transcribe             │                          Parakeet, ONNX, no torch
                           │
   /v1/audio/speech  model=│kokoro tts-1 …       ──►  services/tts       :8001
@@ -15,7 +16,8 @@ share, one repository, deployed as a single app.
   /v1/audio/speech  model=│chatterbox tts-long  ──►  services/tts-long  :8002
   /jobs  /jobs/{id}[/audio]                          Chatterbox, a job queue
                           │
-  /v1/models              ├─ answered at the gateway
+  /v1/models  /v1/models/{id}
+  /v1/chat/completions    ├─ answered at the gateway
   /health                 └─ all three, fanned out, no key required
                           ▲
                           │  the gateway, and nothing else
@@ -25,10 +27,14 @@ share, one repository, deployed as a single app.
   packages/common            the wire contract all five services import
 ```
 
-Two ports are published: **30080** for the gateway, which is the API, and
-**30081** for the page. 8000, 8001 and 8002 stay closed, which is what makes
-the single auth boundary real — `services/ui` is a client of the gateway, not a
-way round it.
+**One port is published: 30080.** It is the API and it is the page — the
+gateway serves `/ui` itself, and `/` redirects there. 8000, 8001, 8002 and the
+page's own 8090 stay closed, which is what makes the single auth boundary real:
+`services/ui` is a client of the gateway, not a way round it.
+
+> Earlier versions of this file described a second published port, 30081, for
+> the page. There is no such port; it was closed when the page moved behind the
+> gateway, and the sentence outlived it.
 
 Every service keeps its own README, and those are the reference: what each
 route accepts, every OpenAI deviation and the measurement forcing it, the
@@ -36,11 +42,11 @@ configuration table, the deployment notes. This file is about the repository.
 
 | | | |
 |---|---|---|
-| [`services/stt`](services/stt/README.md) | `ai-voice-stt` | Parakeet TDT 0.6B v3 by default, Whisper large-v3 on request |
-| [`services/tts`](services/tts/README.md) | `ai-voice-tts` | Kokoro-82M, 54 voices, six output formats |
-| [`services/tts-long`](services/tts-long/README.md) | `ai-voice-tts-long` | Chatterbox, a queue and an SSE stream |
-| [`services/gateway`](services/gateway/README.md) | `ai-voice-gateway` | One address, one key, one health answer |
-| [`services/ui`](services/ui/README.md) | `ai-voice-ui` | One page, no build step; links ingested through MeTube |
+| [`services/stt`](services/stt/README.md) | `calliope-stt` | Parakeet TDT 0.6B v3 by default, Whisper large-v3 on request |
+| [`services/tts`](services/tts/README.md) | `calliope-tts` | Kokoro-82M, 54 voices, six output formats |
+| [`services/tts-long`](services/tts-long/README.md) | `calliope-tts-long` | Chatterbox, a queue and an SSE stream |
+| [`services/gateway`](services/gateway/README.md) | `calliope-gateway` | One address, one key, one health answer |
+| [`services/ui`](services/ui/README.md) | `calliope-ui` | One page, no build step; links ingested through MeTube |
 | [`packages/common`](packages/common/README.md) | — | Auth, the error envelope, `/health`, the entrypoint |
 
 ## Why one repository
@@ -123,16 +129,49 @@ only port; 8000, 8001 and 8002 stay on the app-internal network. Measured over
 loopback with a trivial body, 300 requests: 0.32 ms direct against 1.17 ms
 through the gateway — **0.85 ms added**, under 1% of a 200 ms dictation turn.
 
+## The client that is not a service
+
+`clients/macos-player` is a macOS reader, and it is the one part of this
+repository that never talks to the rest of it. Select text in any application,
+press **Speak** in OpenClip, and a floating capsule reads it aloud; the capsule
+can grow into a reader that runs an underline across each word as it is spoken.
+
+**It is local only, deliberately.** It ran against this stack over HTTP for a
+while and that path has been removed: a reader for text you selected on your own
+Mac gains nothing from a NAS, and loses a URL to configure, a key to hold, a
+network that can be down and a second place a bug can live. Kokoro's full ONNX
+model measures about 4.9x realtime on an M2's own CPU, so the machine already in
+front of you is fast enough.
+
+It speaks the same contract `services/tts` does -- OpenAI's body with
+`response_format: "pcm"` -- against a small bundled server on 127.0.0.1, which
+also returns per-word timings the stack has no equivalent of. That is what the
+underline follows.
+
+```text
+OpenClip "Speak"  ->  openclip/calliope.py  ->  calliope-player (Swift)
+                                                      |
+                                       POST /v1/audio/speech
+                                                      v
+                                        server/server.py :47815
+                                          Kokoro-82M, ONNX, CPU
+```
+
+`install.sh` builds and installs everything into `~/.local/share/calliope`.
+Nothing in this directory is built by CI or shipped as an image: it is a Swift
+binary and a Python venv on one Mac, and `clients/macos-player/README.md` is
+where its behaviour and its measurements are written down.
+
 ## Build
 
 The build context is the **repository root** for every service, and each
 Containerfile is named by path:
 
 ```bash
-docker build -f services/stt/Containerfile      -t ai-voice-stt .
-docker build -f services/tts/Containerfile      -t ai-voice-tts .
-docker build -f services/tts-long/Containerfile -t ai-voice-tts-long .
-docker build -f services/gateway/Containerfile  -t ai-voice-gateway .
+docker build -f services/stt/Containerfile      -t calliope-stt .
+docker build -f services/tts/Containerfile      -t calliope-tts .
+docker build -f services/tts-long/Containerfile -t calliope-tts-long .
+docker build -f services/gateway/Containerfile  -t calliope-gateway .
 ```
 
 That is the whole cost of the path dependency: `packages/common` has to be

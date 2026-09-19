@@ -1,6 +1,6 @@
 """The transcription pipeline, separate from the shape it is returned in.
 
-    audio -> VAD -> recogniser -> glossary repair -> text
+    audio -> VAD -> windows -> recogniser -> glossary repair -> text
 
 Three routes share this: the native /transcribe, which returns everything the
 run measured, and /v1/audio/transcriptions and /v1/audio/translations, which
@@ -8,7 +8,15 @@ return the subset OpenAI's specification has fields for. The work lives here so
 the compatibility layer cannot slowly become a second pipeline that drifts from
 the first — which is the usual way these shims rot.
 
-Two things this file owns that the recogniser cannot:
+Three things this file owns that the recogniser cannot:
+
+  the windows    Parakeet's encoder attends over everything it is handed at
+                 once, O(n^2) in the length, and past about seven minutes of
+                 speech it does not slow down, it returns an ONNX Runtime
+                 failure out of the first layer's self-attention. So the speech
+                 is cut into passes at the VAD's pauses and the results are
+                 stitched. MAX_WINDOW_SECONDS carries the measurement;
+                 _windows carries the offsets argument.
 
   the timeline   The ASR sees speech runs, concatenated. Every timestamp it
                  reports is in that compacted timeline, and a subtitle needs
@@ -27,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 import threading
 import time
 import zlib
@@ -35,22 +44,75 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 from fastapi import HTTPException
+from voice_common.runlog import RunLog
 
-from . import asr, audio, glossary, vad
+from . import asr, audio, glossary, profiles, vad
 
 SAMPLE_RATE = 16_000
 
 MODEL = os.getenv("STT_MODEL", "parakeet")
-GLOSSARY_PATH = os.getenv("STT_GLOSSARY", "/etc/stt-stack/glossary.txt")
+# Profiles applied when a request selects none. UNSET BY DEFAULT, and that is a
+# deliberate behaviour change: this service used to compile one file at boot and
+# apply it to every transcript, which is both a public image carrying one
+# person's project names and a measured accuracy cost — a glossary whose terms
+# do NOT occur in the audio raised WER by 28% on Whisper, and nothing measurable on Parakeet
+# across 25 cells. Absent a selection, behaviour is now the
+# specification's: no glossary, no biasing.
+#
+# A deployment that wants the old always-on shape asks for it by name —
+# STT_GLOSSARY_DEFAULT=dictation,tech — and pays the cost knowingly.
+DEFAULT_PROFILES = os.getenv("STT_GLOSSARY_DEFAULT", "")
 # The one knob that matters on a shared host. ONNX Runtime and CTranslate2
 # both size their pools from the host core count, not the cgroup, so a
 # container CPU limit without this leaves threads fighting for their own
 # slice. See the README.
 THREADS = int(os.getenv("STT_THREADS", "4"))
 VAD_ENABLED = os.getenv("STT_VAD", "1") not in {"0", "false", "no"}
+# Ceiling on what reaches the recogniser in one pass, in seconds of SPEECH.
+# Speech, not audio: the VAD runs first, so the encoder never sees the silence
+# it removed, and a clip of any length is only as long as what is left.
+#
+# THIS EXISTS BECAUSE A LONG CLIP DID NOT DEGRADE, IT FAILED. Parakeet's
+# Conformer encoder computes self-attention over the whole sequence at once,
+# which is O(n^2) in its length. Bisected against the deployed service on
+# 2026-09-06, one recording looped to different lengths, 16 kHz mono wav:
+#
+#      5.0 min   200 in 45.2 s
+#      6.0 min   200 in 61.5 s
+#      6.6 min   200 in 71.2 s
+#      7.7 min   500 in  7.6 s
+#
+# and the 500 was
+#
+#   [ONNXRuntimeError] : 1 : FAIL : Non-zero status code returned while
+#   running Add node. Name:'/layers.0/self_attn/Add_2'
+#
+# Note that the failure arrives FASTER than the successes. It is not a timeout
+# and not a body-size limit — the encoder gives up in the first layer's
+# attention, before any decoding starts. The attention matrix is (n/0.08)^2
+# floats per head per layer, so the cost roughly quadruples for every doubling
+# of the clip and the exact cliff moves with whatever else is resident on the
+# host. That is why this is a configurable ceiling with margin rather than the
+# largest number observed to work.
+#
+# 300 s is a MEASURED success on the deployed host, not an interpolation
+# between one, and it sits at 0.65 of the shortest length measured to fail. A
+# smaller box should lower it; the cost of doing so is only that a rule or a
+# sentence spanning a cut cannot be seen whole, which is the same property
+# segment boundaries already have. 0 switches windowing off entirely and
+# restores the single pass that produced the 500 above.
+MAX_WINDOW_SECONDS = float(os.getenv("STT_MAX_WINDOW_SECONDS", "300"))
 # Off switch for decode-time biasing, so a benchmark can separate what the
-# vocabulary contributes from what the model does. Whisper only — Parakeet has
-# no such mechanism. Text repair is unaffected either way.
+# vocabulary contributes from what the model does. BOTH ENGINES: it used to say
+# "Whisper only — Parakeet has no such mechanism", which stopped being true
+# when boosting.py landed, and an off switch that covered one of the two
+# engines would have made this variable a lie on the default deployment.
+# Text repair is unaffected either way, and that includes the repair a
+# request's own `prompt` compiles into: this switch is about what the DECODER
+# is told, which is the only place a vocabulary changes what the model
+# produces. A benchmark measuring the model is not contaminated by a rewrite
+# applied to the model's finished output, and would be lied to by an off switch
+# that quietly dropped it.
 HOTWORDS_ENABLED = os.getenv("STT_HOTWORDS", "1") not in {"0", "false", "no"}
 # Requests allowed inside the recogniser at once, or 0 for no limit.
 #
@@ -66,6 +128,20 @@ log = logging.getLogger("stt-stack")
 state: dict[str, object] = {}
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT) if MAX_CONCURRENT > 0 else None
 
+# WHAT THIS CONTAINER HEARD, AFTER IT HAS FINISHED HEARING IT.
+#
+# A transcription leaves nothing behind: the text goes into the response and
+# the clip was never ours to keep, so "what did I dictate this morning" and
+# "how fast is this machine really" had no answer once the reply was closed.
+# tts-long has kept a record of every clone job all along; this posts the same
+# record to the same store, and the transcript is this kind's retrievable
+# artefact in the way the audio file is a clone job's.
+#
+# RUNLOG_URL IS UNSET BY DEFAULT AND THEN THIS IS A NO-OP, because the stack
+# has to work completely with tts-long stopped. See voice_common/runlog.py for
+# why nothing here runs on the request's clock. Replaced wholesale in tests.
+runlog = RunLog.from_env("stt", MODEL)
+
 
 class Busy(Exception):
     """Every recogniser slot is taken. The caller answers 429."""
@@ -79,6 +155,28 @@ class Tuning:
     min_silence_ms: int | None = None
     speech_pad_ms: int | None = None
     enabled: bool = True
+
+
+@dataclass(frozen=True)
+class Origin:
+    """Which route a run arrived on. Carried, never read, by the pipeline.
+
+    THE PIPELINE MUST NOT LEARN WHAT A ROUTE IS beyond passing this along.
+    Three routes share `run` exactly so the compatibility layer cannot quietly
+    become a second pipeline, and a branch on the route in here would be the
+    first crack in that. These three values reach the run record and nothing
+    else: a listing that also holds clone jobs from another service needs to
+    say which door a run came in by, and only the caller knows.
+    """
+
+    # NO DEFAULT ROUTE. Three routes reach run() and defaulting to one of
+    # their names would file the other two under a door they never came in by
+    # — silently, and only in the record, which is the one place nobody would
+    # look to find out. A caller that passes nothing records no route at all,
+    # which is a gap somebody can see.
+    route: str
+    client: str | None = None
+    model_requested: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,21 +197,42 @@ class Result:
     words: tuple[asr.Word, ...] = ()
     logprobs: tuple[asr.TokenLogprob, ...] | None = None
     task: str = "transcribe"
+    # Phrases that reached the decoder as a boost automaton, for
+    # x-boost-applied. Empty on every request that did not opt in, which is
+    # every request by default.
+    boosted: tuple[str, ...] = ()
 
 
 def start() -> None:
     """Load the glossary, the recogniser and, if enabled, the VAD."""
     os.environ.setdefault("OMP_NUM_THREADS", str(THREADS))
 
-    terms, hotword_list = glossary.load(GLOSSARY_PATH)
-    state["rules"] = glossary.compile_rules(terms)
-    # Whisper takes the glossary at decode time, which beats repairing the
-    # text afterwards. Parakeet cannot, so for it the glossary is repair only.
+    registry = profiles.load_registry()
+    state["glossaries"] = registry
+    log.info("glossary profiles: %s", ", ".join(
+        f"{name} ({registry.profiles[name].source})" for name in registry.names)
+        or "none")
+
+    # The default selection, which is EMPTY unless STT_GLOSSARY_DEFAULT names
+    # profiles. state["rules"] is what a request that selects nothing gets;
+    # everything else is compiled per selection and cached in the registry.
+    default = registry.select(profiles.split_selection(DEFAULT_PROFILES))
+    state["rules"] = default.rules
+
+    # Whisper takes the glossary at decode time, which beats repairing the text
+    # afterwards, and only the DEFAULT profiles can be baked in here because
+    # faster-whisper takes its hotwords when the model is constructed. A
+    # profile a request names reaches the decoder through asr.Options instead,
+    # on the same argument, so per-request selection is not second-class — see
+    # openai_api._glossary.
     #
-    # Note this is not free: measured on audio containing NONE of its terms, a
-    # glossary raised WER by 12% on Parakeet and 28% on Whisper. Keep the list
-    # relevant to what is actually being said.
-    hotwords = (", ".join(hotword_list) or None) if HOTWORDS_ENABLED else None
+    # Nothing is baked in for Parakeet, and that is deliberate rather than a
+    # gap. Its biasing is compiled per request from asr.Options.vocabulary and
+    # is off unless the request asked, because a deployment-wide always-on
+    # boost list is the shape the Whisper measurement above rules out. A
+    # deployment that wants it anyway sets STT_BOOST=1, which changes the
+    # DEFAULT the route applies rather than bypassing the route.
+    hotwords = default.hotwords if HOTWORDS_ENABLED else None
 
     state["asr"] = asr.build(THREADS, hotwords)
 
@@ -129,6 +248,31 @@ def stop() -> None:
 def loaded() -> object | None:
     """The recogniser, or None while it is still loading. For /health."""
     return state.get("asr")
+
+
+def registry() -> profiles.Registry:
+    """The glossary profiles this process serves.
+
+    Built at startup, but never frozen there: the four /glossaries routes and
+    every request that names a profile call refresh() first, which rescans only
+    when a stat() says a file changed. "Load once at boot" was the shape that
+    made per-request selection meaningless — changing one term needed a new
+    container.
+    """
+    existing = state.get("glossaries")
+    if existing is None:
+        # Only reachable before the lifespan has run — the /glossaries routes
+        # are as useful with no model loaded as with one, and refusing them
+        # with a 503 about the RECOGNISER would be answering a question nobody
+        # asked. A registry built here is replaced by start()'s.
+        existing = profiles.load_registry()
+        state["glossaries"] = existing
+    return existing  # type: ignore[return-value]
+
+
+def default_rules() -> list[tuple[re.Pattern[str], str]]:
+    """Rules for a request that selected no profile. Usually empty."""
+    return state.get("rules") or []  # type: ignore[return-value]
 
 
 def engine() -> asr.Parakeet | asr.Whisper:
@@ -202,6 +346,86 @@ def _speech(samples: np.ndarray, tuning: Tuning) -> vad.Speech:
     )
 
 
+def _windows(speech: vad.Speech, ceiling_seconds: float) -> tuple[vad.Speech, ...]:
+    """Split speech into passes the encoder survives, cutting at the pauses.
+
+    Returns one Speech per pass, each one a Speech in its own right: `samples`
+    is that pass's audio and `spans` are the offsets it came from IN THE
+    ORIGINAL CLIP. That is the whole trick, and it is worth being explicit
+    about because getting it wrong is invisible in the first pass and wrong
+    everywhere after it.
+
+    Speech.original walks the spans it is given, starting from a compacted time
+    of zero. A window's compacted timeline IS the timeline the recogniser will
+    report against for that window, because the window's samples are all the
+    recogniser was handed. So mapping a window time through the window's own
+    spans lands on the client's timeline directly, with the window's start
+    already inside the answer. Nothing downstream adds a window offset to a
+    timestamp, and nothing downstream should: the shift is carried by which
+    spans a window holds, and adding it a second time would double it.
+
+    Cuts land on the VAD's own boundaries — real pauses in the recording, which
+    is the same argument _segments_from_words makes for cutting segments there.
+    A word split down the middle is a word lost from both halves. The exception
+    is a single speech run longer than the ceiling, which by definition has no
+    pause inside it to cut at; that one is cut by length, and it is the only
+    place here that can land mid-word.
+    """
+    limit = int(ceiling_seconds * SAMPLE_RATE)
+    if limit <= 0 or speech.samples.size <= limit:
+        # THE SHORT-CLIP PATH, and it hands back the untouched object rather
+        # than a rebuilt copy of it. Everything after this behaves exactly as
+        # it did before windowing existed by construction, not by resemblance.
+        return (speech,)
+
+    # Each run as (offset into speech.samples, offset into the original clip,
+    # length in samples). Long runs are cut by length as they are collected.
+    runs: list[tuple[int, int, int]] = []
+    offset = 0
+    for start, end in speech.spans:
+        origin, length = start, end - start
+        while length > limit:
+            runs.append((offset, origin, limit))
+            offset += limit
+            origin += limit
+            length -= limit
+        if length > 0:
+            runs.append((offset, origin, length))
+            offset += length
+    if not runs:
+        return (speech,)
+
+    windows: list[vad.Speech] = []
+    batch: list[tuple[int, int, int]] = []
+
+    def flush() -> None:
+        if not batch:
+            return
+        first, last = batch[0], batch[-1]
+        windows.append(vad.Speech(
+            # A slice of the concatenated speech, which is contiguous because
+            # the runs were collected in order and a hard cut splits a run into
+            # adjacent pieces rather than reordering anything.
+            samples=speech.samples[first[0]:last[0] + last[2]],
+            spans=tuple((origin, origin + length) for _, origin, length in batch),
+            # Carried, not recomputed. `kept` is the fraction of the CLIP that
+            # was speech, which is a statement about the whole request; no
+            # reader of it wants a per-window number, and inventing one would
+            # be worse than passing the true one through.
+            kept=speech.kept))
+        batch.clear()
+
+    used = 0
+    for run in runs:
+        if batch and used + run[2] > limit:
+            flush()
+            used = 0
+        batch.append(run)
+        used += run[2]
+    flush()
+    return tuple(windows)
+
+
 def _compression_ratio(text: str) -> float:
     """Whisper's own measure, computed the same way for the other engine.
 
@@ -237,8 +461,12 @@ def _segments_from_words(words: tuple[asr.Word, ...], speech: vad.Speech,
     Two of the ten required fields have no equivalent on this engine and are
     written down here rather than left to a reader to discover:
 
-      seek            a Whisper 30 s window offset. There are no windows here;
-                      the encoder runs over the whole waveform. Always 0.
+      seek            a Whisper 30 s window offset. This engine has no such
+                      window — its encoder runs over everything it is handed in
+                      one pass, which is what MAX_WINDOW_SECONDS puts a ceiling
+                      on. The ceiling is not this field: a Whisper seek indexes
+                      a decoder window inside one pass, and a pipeline window
+                      is a whole pass. Always 0.
       no_speech_prob  a Whisper decoder output. A TDT decoder produces none.
                       Always 0.0 — and note the VAD has already removed what
                       it believed was silence, so a segment reaching this
@@ -343,13 +571,23 @@ def _place_segments(segments: tuple[asr.Segment, ...], speech: vad.Speech,
 
 
 def run(data: bytes, opts: asr.Options | None = None, *,
-        allow_resample: bool = False, tuning: Tuning | None = None) -> Result:
+        allow_resample: bool = False, tuning: Tuning | None = None,
+        rules: list[tuple[re.Pattern[str], str]] | None = None,
+        origin: Origin | None = None) -> Result:
     """Transcribe one clip. Blocking CPU work — never call this on the loop.
 
-    `opts.hotwords` extends the glossary's decode-time vocabulary for this
-    request. Whisper honours it; Parakeet has no mechanism for a vocabulary,
-    and the /v1 route refuses the field there rather than accepting it and
-    doing nothing.
+    `rules` is this request's compiled glossary, from the profiles it selected.
+    None means the deployment default, which is empty unless
+    STT_GLOSSARY_DEFAULT names profiles — an unselected request gets no
+    repair, which is the specification's behaviour and the measured one.
+
+    `opts.hotwords` and `opts.vocabulary` are one vocabulary in the two shapes
+    the two decoders take, and both are extended for this request. Whisper
+    reads the joined string as hotwords. Parakeet compiles the tuple into a
+    boosting automaton and fuses it into its TDT decoding loop, but only when
+    `opts.boost` is set — see boosting.py. This docstring used to say Parakeet
+    "has no mechanism for a vocabulary"; that was true of onnx-asr's argument
+    list and false about the decoder.
 
     STT_HOTWORDS=0 outranks the request: with biasing switched off, a request
     carrying a vocabulary is transcribed without it.
@@ -364,8 +602,13 @@ def run(data: bytes, opts: asr.Options | None = None, *,
     # without it — silently, and only on the requests that carried a prompt,
     # which is the worst way for a benchmark to be wrong. The route refuses the
     # field when biasing is off; this is the second lock on the same door.
-    if not HOTWORDS_ENABLED and opts.hotwords:
-        opts = replace(opts, hotwords=None)
+    #
+    # ALL THREE FIELDS, not just hotwords. Clearing the Whisper half and
+    # leaving the Parakeet half would make STT_HOTWORDS=0 a half-open door on
+    # the DEFAULT engine, which is worse than not having the switch: a
+    # benchmark would believe it had measured the model.
+    if not HOTWORDS_ENABLED and (opts.hotwords or opts.vocabulary or opts.boost):
+        opts = replace(opts, hotwords=None, vocabulary=(), boost=False)
 
     samples = decode(data, allow_resample=allow_resample)
     if samples.size == 0:
@@ -373,37 +616,143 @@ def run(data: bytes, opts: asr.Options | None = None, *,
     audio_seconds = samples.size / SAMPLE_RATE
 
     started = time.monotonic()
+    # The wall clock beside the monotonic one. The monotonic clock measures the
+    # run and means nothing outside this process; the record is read next to
+    # runs from two other services on two other machines, and only a wall clock
+    # can put those in one order.
+    started_at = time.time()
     speech = _speech(samples, tuning)
     speech_seconds = speech.samples.size / SAMPLE_RATE
+    if rules is None:
+        rules = default_rules()
 
-    recognition = model.transcribe(speech.samples, opts)
-    rules = state["rules"]
-    text, repaired = glossary.apply(recognition.text, rules)  # type: ignore[arg-type]
+    # One pass per window, and exactly one window for every clip short enough
+    # to have worked before this existed. There is deliberately no second code
+    # path for the short clip: _windows hands back the Speech untouched, this
+    # loop runs once, and every combining step below is the identity on one
+    # element. A short clip is not a special case, it is the general case with
+    # a length of one.
+    windows = _windows(speech, MAX_WINDOW_SECONDS)
+    parts: list[str] = []
+    collected: list[asr.Segment] = []
+    words: list[asr.Word] = []
+    logprobs: list[asr.TokenLogprob] = []
+    reported_logprobs = False
+    language: str | None = None
+    boosted: list[str] = []
 
-    if recognition.segments is not None:
-        segments, words = _place_segments(recognition.segments, speech, rules)
-    else:
-        segments, words = _segments_from_words(recognition.words, speech, rules)
+    for window in windows:
+        # opts is unchanged per window, so the glossary's decode-time half —
+        # Whisper's hotwords, Parakeet's boosting automaton — is compiled and
+        # applied to every window exactly as it is applied to a single pass
+        # today. Parakeet caches the automaton by term tuple, so the windows
+        # after the first pay nothing to compile it again. See boosting.py.
+        recognition = model.transcribe(window.samples, opts)
+        # `window` carries ORIGINAL-clip spans, so these two put this window's
+        # times onto the client's timeline themselves. This is the only place
+        # the shift happens; see _windows.
+        if recognition.segments is not None:
+            placed, mapped = _place_segments(recognition.segments, window, rules)
+        else:
+            placed, mapped = _segments_from_words(recognition.words, window, rules)
+        if recognition.text:
+            parts.append(recognition.text)
+        collected.extend(placed)
+        words.extend(mapped)
+        if recognition.logprobs is not None:
+            # None and empty are different answers: None is "this engine
+            # reports none", () is "asked for and there were none". Preserved
+            # rather than flattened, because include[]=logprobs is refused by
+            # name on the engine that reports None.
+            reported_logprobs = True
+            logprobs.extend(recognition.logprobs)
+        language = language or recognition.language
+        boosted.extend(recognition.boosted)
+
+    raw = " ".join(parts)
+    text, repaired = glossary.apply(raw, rules)  # type: ignore[arg-type]
+    # Renumbered so ids run 0..n-1 over the whole transcript instead of
+    # restarting at every window. Both mappers already number from 0 in order,
+    # so this is the identity when there is one window.
+    segments = tuple(replace(segment, id=index)
+                     for index, segment in enumerate(collected))
+    # Order-preserving, because it is the same automaton for every window and a
+    # caller reading x-boost-applied wants the phrases once.
+    applied = tuple(dict.fromkeys(boosted))
     compute = time.monotonic() - started
 
-    log.info("%.1fs audio, %.1fs speech, %.2fs compute (%.1fx), repaired=%s",
-             audio_seconds, speech_seconds, compute,
-             audio_seconds / compute if compute else 0.0, repaired or "none")
+    log.info("%.1fs audio, %.1fs speech in %d window(s), %.2fs compute (%.1fx), "
+             "repaired=%s, boosted=%s", audio_seconds, speech_seconds,
+             len(windows), compute,
+             audio_seconds / compute if compute else 0.0, repaired or "none",
+             ", ".join(applied) or "none")
+
+    # ONE RECORD PER LOG LINE, BESIDE IT, so "was this run recorded" and "is
+    # there a line in the log for it" have the same answer and grep can settle
+    # which. One point covers all three routes because all three come through
+    # here; `origin` is the only thing they do not share.
+    #
+    # THE TRANSCRIPT IS THE ARTEFACT. A clone job's record points at a wav file
+    # that can be played back; a transcription has no such file and never did,
+    # so the text is the thing a reader came to get back. It is the reason
+    # `text` is sent at all, and the reason RUNLOG_TEXT=0 exists for a
+    # deployment that would rather keep the timings and lose the content.
+    origin = origin or Origin(route="")
+    runlog.record(
+        kind="transcribe",
+        route=origin.route or None,
+        client=origin.client,
+        model_requested=origin.model_requested,
+        status="done",
+        created_at=started_at,
+        started_at=started_at,
+        finished_at=started_at + compute,
+        # THE CLIP'S LENGTH, NOT THE SPEECH'S. `audio_seconds` means the same
+        # thing on all three kinds of record — how much audio the run is about
+        # — and for a transcription that is what arrived, not what survived the
+        # VAD. `speech_seconds` carries the second number, which no other kind
+        # has.
+        audio_seconds=round(audio_seconds, 2),
+        speech_seconds=round(speech_seconds, 2),
+        compute_seconds=round(compute, 2),
+        realtime_factor=(round(audio_seconds / compute, 2) if compute
+                         else None),
+        chars=len(text),
+        chunks=len(windows),
+        text=text,
+        language=language,
+        # ALWAYS LOCAL, AND SENT ANYWAY. There is no Parakeet on the other
+        # machine to dispatch to, so this field has one value today and looks
+        # redundant from in here; it is not, because the reader is a listing
+        # that also holds clone jobs which ran across the LAN, and a row with
+        # no backend reads as a row whose backend is unknown. It is also the
+        # field that will tell anyone whether building the second lane is worth
+        # it: 8.81x here against 17.14x there only repays a round trip above
+        # about ninety seconds of audio, and this record is how we find out
+        # whether any clip is ever that long.
+        backend="local",
+    )
 
     return Result(
         text=text,
-        raw=recognition.text,
+        raw=raw,
         repaired=repaired,
         model=MODEL,
         audio_seconds=round(audio_seconds, 2),
         speech_seconds=round(speech_seconds, 2),
         compute_seconds=round(compute, 2),
+        # The WHOLE job against the WHOLE clip, not one window's share of
+        # either. `started` is taken before the VAD and `compute` after the
+        # last window, so every pass and the VAD that produced them are inside
+        # this number — which is what it claimed before windowing existed and
+        # the only reading under which a client can compare two requests.
         realtime_factor=round(audio_seconds / compute, 1) if compute else 0.0,
-        language=recognition.language,
+        language=language,
         segments=segments,
-        words=words,
-        logprobs=recognition.logprobs,
+        words=tuple(words),
+        logprobs=tuple(logprobs) if reported_logprobs else None,
         task=opts.task,
+        boosted=applied,
     )
 
 
@@ -419,17 +768,28 @@ class Stream:
 
 
 def open_stream(data: bytes, opts: asr.Options, *, allow_resample: bool = True,
-                tuning: Tuning | None = None) -> Stream:
+                tuning: Tuning | None = None,
+                rules: list[tuple[re.Pattern[str], str]] | None = None) -> Stream:
     """Start a streaming transcription. Decoding and VAD happen up front.
 
     Only the engine that can genuinely emit before it finishes reaches here —
     the route refuses stream=true on the other one by name rather than
     delivering one delta at the end and calling it a stream.
+
+    THIS PATH DOES NOT WINDOW, AND `run` DOES. `deltas` below hands
+    `speech.samples` whole to model.stream, so the ceiling that `_windows` and
+    MAX_WINDOW_SECONDS exist to enforce guards `run` alone. It costs nothing
+    today, because the only engine that reaches here is Parakeet and Parakeet
+    has no such ceiling. It is written down because the ceiling was added after
+    a 7.7-minute clip returned 500 from an encoder, and a deployment that gave
+    this route an engine with that limit would meet it again here with nothing
+    in the way. Fixing it means moving _windows into this function and turning
+    `can_stream` from a flag into a question about clip length.
     """
     model = engine()
     tuning = tuning or Tuning()
-    if not HOTWORDS_ENABLED and opts.hotwords:
-        opts = replace(opts, hotwords=None)
+    if not HOTWORDS_ENABLED and (opts.hotwords or opts.vocabulary or opts.boost):
+        opts = replace(opts, hotwords=None, vocabulary=(), boost=False)
 
     samples = decode(data, allow_resample=allow_resample)
     if samples.size == 0:
@@ -438,7 +798,8 @@ def open_stream(data: bytes, opts: asr.Options, *, allow_resample: bool = True,
 
     started = time.monotonic()
     speech = _speech(samples, tuning)
-    rules = state["rules"]
+    if rules is None:
+        rules = default_rules()
     stream = Stream(audio_seconds=audio_seconds, deltas=iter(()))
 
     def deltas() -> Iterator[str]:

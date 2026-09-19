@@ -69,3 +69,29 @@ def test_the_estimate_counts_characters_not_words():
     """A 5000-character string with no spaces was estimated at two seconds."""
     assert speech_seconds(5000) == speech_seconds(len("x" * 5000))
     assert speech_seconds(5000) > 100
+
+
+def test_a_decomposed_accent_is_composed_before_it_is_chunked():
+    """THE SAME GAP services/tts HAD (GAB-637), FOUND IN THE SAME REVIEW. macOS
+    hands a selection over decomposed, so a client forwarding a pasteboard
+    string can deliver "acao" with its marks as separate codepoints. Chunking is
+    the one seam every route reaches the model through, so it is where the text
+    becomes canonical.
+
+    The espeak measurement from services/tts does NOT transfer -- Chatterbox
+    tokenises text itself -- so this asserts only what is safely true: what
+    comes out is NFC, whatever went in. Two spellings of one word must not be
+    two different inputs to the model.
+    """
+    import unicodedata
+    composed = "A intenção está na entonação."
+    assert composed != unicodedata.normalize("NFC", composed), \
+        "the fixture is not actually decomposed, so this test proves nothing"
+    out = chunk_text(composed)
+    joined = " ".join(out)
+    assert joined == unicodedata.normalize("NFC", joined), "chunked text is not NFC"
+    assert unicodedata.normalize("NFC", composed).rstrip(".") in joined.rstrip(".") \
+        or "inten" in joined, "the words did not survive normalisation"
+    # And the two spellings must chunk identically, which is the property the
+    # model actually depends on.
+    assert chunk_text(composed) == chunk_text(unicodedata.normalize("NFC", composed))

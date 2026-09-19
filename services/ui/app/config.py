@@ -18,10 +18,13 @@ from __future__ import annotations
 import os
 
 __all__ = [
-    "GATEWAY_URL", "METUBE_URL", "METUBE_FOLDER", "METUBE_FORMAT",
-    "PROBE", "PROBE_TIMEOUT", "MAX_UPLOAD_BYTES", "CONFIRM_SECONDS",
-    "CONFIRM_BYTES", "STT_RTF_SEED", "STT_BUDGET_SECONDS", "VOICE_DIR",
-    "MAX_CLIP_BYTES", "MAX_CLIP_SECONDS", "RESOLVE_PER_MINUTE", "flag",
+    "GATEWAY_URL", "GATEWAY_VERIFY", "GATEWAY_API_KEY", "gateway_authorization",
+    "METUBE_URL", "METUBE_FOLDER", "METUBE_FORMAT", "METUBE_VIDEO_FORMAT",
+    "PROBE", "PROBE_TIMEOUT", "MAX_UPLOAD_BYTES", "MAX_CAPTION_BYTES",
+    "MAX_MEDIA_BYTES",
+    "CONFIRM_SECONDS", "CONFIRM_BYTES", "STT_RTF_SEED", "STT_BUDGET_SECONDS",
+    "VOICE_DIR", "MAX_CLIP_BYTES", "MAX_CLIP_SECONDS", "RESOLVE_PER_MINUTE",
+    "flag",
 ]
 
 
@@ -38,6 +41,65 @@ def flag(name: str, default: bool) -> bool:
 # laptop with all five containers and fail on the NAS, which is the exact bug
 # the port deletion was made to prevent.
 GATEWAY_URL = os.getenv("UI_GATEWAY_URL", "http://voice-gateway:8080").rstrip("/")
+
+# WHETHER TO VERIFY THE GATEWAY'S CERTIFICATE ON THE INTERNAL HOP.
+#
+# Default true, and it must stay true for anything crossing a network. It is
+# set to 0 in compose for one specific reason: once the gateway serves HTTPS it
+# serves ONLY HTTPS, including to this container, and this container reaches it
+# as `https://voice-gateway:8080` -- a compose service name, on the app's own
+# bridge network. No certificate for a public hostname can match that name, and
+# no certificate authority will issue one that does.
+#
+# The alternatives were considered and are worse: a second listener on plain
+# HTTP would be the second door this whole change removed, and a private CA
+# with `voice-gateway` in its SAN is a certificate authority to maintain,
+# renew and distribute for one hop between two processes on one host.
+#
+# What this does NOT do is weaken anything a client sees. The published port
+# still presents the real wildcard certificate and still validates. This is the
+# hop that never leaves the box.
+GATEWAY_VERIFY = flag("UI_GATEWAY_VERIFY", True)
+
+# THE KEY THIS SERVICE PRESENTS TO THE GATEWAY, and the reason the page no
+# longer has a box for one.
+#
+# It used to be the browser's: the page kept a key in localStorage, put it on
+# every XHR, and this service forwarded it untouched. That made :30080 the
+# trust boundary and this container a pipe. The user's decision is that this is
+# not a bring-your-own-key tool, so the credential moved here.
+#
+# WHAT THAT COSTS, AND IT IS NOT SMALL: the trust boundary moves from :30080 to
+# :30081. Anyone who can open the page is authenticated by it, because this
+# process signs their requests for them. That is a defensible trade for a tool
+# on a LAN behind a firewall and it is not defensible for anything reachable
+# from outside one. Publishing 30081 more widely than 30080 now means MORE
+# access, not less.
+#
+# UNSET BY DEFAULT, deliberately, exactly like GATEWAY_API_KEYS in
+# compose.yaml: a key invented in a file that gets deployed is how a
+# placeholder becomes production credentials. Unset means no header is added
+# and any inbound one is forwarded as before, so a deployment with
+# GATEWAY_API_KEYS also unset behaves precisely as it did.
+GATEWAY_API_KEY = (os.getenv("UI_GATEWAY_API_KEY") or "").strip()
+
+
+def gateway_authorization(inbound: str | None) -> str | None:
+    """The Authorization to put on a request to the gateway, or None.
+
+    One function rather than the same conditional at each of the four call
+    sites -- the proxy, the key probe, the ingest hand-off and the page's own
+    calls -- because "which credential goes on this hop" is exactly the kind of
+    question that gets answered three ways and then disagrees in production.
+
+    Ours WINS over an inbound header when it is configured. A caller who sends
+    their own must not be able to make this service present a different key
+    than the one it was given, and there is no case where a browser on this
+    page sends one at all.
+    """
+    if GATEWAY_API_KEY:
+        return f"Bearer {GATEWAY_API_KEY}"
+    return inbound
 
 # MeTube. Unset means the URL box is not rendered at all and the page says
 # "link ingestion not configured" -- not a broken button, not a spinner.
@@ -62,6 +124,18 @@ METUBE_FOLDER = os.getenv("UI_METUBE_FOLDER", "stt-ingest")
 # a knob here.
 METUBE_FORMAT = os.getenv("UI_METUBE_FORMAT", "opus")
 
+# THE CONTAINER ASKED FOR WHEN THE USER TICKS "keep the video", and only then.
+# Verified live against this deployment's MeTube: POST /add with
+# download_type:"video", format:"mp4", quality:"best" answers {"status":"ok"}
+# and writes "Me at the zoo.mp4" into the stt-ingest folder.
+#
+# mp4 rather than the source container, because the file is served straight
+# back to a <video> element: Matroska is what canPlayType answers "maybe" to
+# and then declines, and a picture that will not render is the one thing this
+# choice exists to produce. yt-dlp remuxes rather than re-encodes for mp4, so
+# it costs no compute on MeTube's side.
+METUBE_VIDEO_FORMAT = os.getenv("UI_METUBE_VIDEO_FORMAT", "mp4")
+
 # The metadata probe. On by default; UI_PROBE=0 gives a title-only confirm card
 # and never spawns yt-dlp. See app/probe.py for why a probe is not a downloader
 # and what it is still on the hook for.
@@ -76,6 +150,31 @@ PROBE_TIMEOUT = float(os.getenv("UI_PROBE_TIMEOUT", "20"))
 # is the real fix; this is the boundary behind it, because a client-side check
 # is a courtesy and not a boundary.
 MAX_UPLOAD_BYTES = int(os.getenv("UI_MAX_UPLOAD_BYTES", str(2 * 1024**3)))
+
+# 8 MiB, and it is a sanity bound rather than a real limit. A captions download
+# is a subtitle track and nothing else -- yt-dlp sets skip_download, so no media
+# stream is fetched at all -- and an hour of dense dialogue is on the order of
+# 100 KB of WebVTT. /ui/captions reads the whole file into memory to parse it,
+# which is the right call for something that size and the wrong one for
+# anything that is not, so the ceiling exists to catch the case where MeTube
+# hands back something that is NOT a subtitle file. Without it, a filename that
+# got past the suffix check would be buffered whole into a container with
+# mem_limit: 384m -- the same shape of bug as the clip route's, which is
+# documented at MAX_CLIP_BYTES and was an OOM kill rather than a message.
+MAX_CAPTION_BYTES = int(os.getenv("UI_MAX_CAPTION_BYTES", str(8 * 1024**2)))
+
+# THE CEILING ON WHAT /ui/media WILL RELAY, and it is deliberately NOT
+# MAX_UPLOAD_BYTES. That one bounds what is pushed INTO the stack -- a body
+# services/stt reads whole into a container with a 6 GB limit, which is why it
+# is a memory question. This bounds what is pulled OUT of it, down a domestic
+# connection, into a browser tab: nothing here is buffered, so it is not about
+# memory at all, and answering "how big a file may stt decode" with "how big a
+# file may this laptop stream" would tie two unrelated decisions together.
+#
+# 4 GiB is about two hours of 1080p. Past that the honest answer is to fetch
+# the audio, keep the transcript and open the file some other way -- and the
+# confirm card says what the video costs before anything is downloaded.
+MAX_MEDIA_BYTES = int(os.getenv("UI_MAX_MEDIA_BYTES", str(4 * 1024**3)))
 
 # WHEN TO NAG, and why these two numbers.
 #

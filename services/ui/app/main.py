@@ -25,8 +25,10 @@ says "if a second `ports` entry ever appears here, this file has stopped doing
 its job", and it is right about backend ports -- 8000, 8001 and 8002 are what
 that sentence was written about, and they stay closed. This one is a browser
 origin, not a bypass: it reaches the gateway and nothing else, it forwards the
-caller's Authorization untouched, and it can answer nothing the gateway would
-not have answered. The boundary is where it was.
+caller's Authorization or adds its own, and it can answer nothing the gateway
+would not have answered. It is still not a bypass -- but with
+UI_GATEWAY_API_KEY set it IS the authenticator, which is the paragraph further
+down.
 
 WHY THE PAGE'S XHRs COME BACK HERE RATHER THAN GOING STRAIGHT TO :30080. One
 origin means no CORS on the gateway, no preflight on every upload, and no
@@ -35,14 +37,30 @@ FIXED allowlist -- there is no wildcard and no catch-all, for the same reason
 the gateway has none: a wildcard would proxy /docs and /openapi.json to
 services that deliberately do not publish them.
 
-AUTHENTICATION IS THE GATEWAY'S, AND ONLY THE GATEWAY'S. This service holds no
-key list and compares no token. Proxied routes carry the caller's header
-through and the gateway answers 401 itself. The routes that are ours --
-ingestion, clips -- ask the gateway whether the presented key is good by making
-the cheapest authenticated call it has, `GET /v1/models`, which it answers from
-a static table without touching a backend. So there is exactly one place a key
-is configured, and when GATEWAY_API_KEYS is unset this service is exactly as
-open as the stack already is: no more, and not accidentally less.
+AUTHENTICATION, AND THE BOUNDARY THAT MOVED. This service still compares no
+token and holds no key LIST -- the gateway is the only thing that decides
+whether a credential is good. What changed is who presents one.
+
+It used to be the browser. The page kept a key in localStorage, put it on every
+XHR, and this service forwarded it untouched; :30080 was the trust boundary and
+this container was a pipe. It is now UI_GATEWAY_API_KEY on this container, and
+this process adds the header on the way past, because the user's decision is
+that this is not a bring-your-own-key tool. There is no key box on the page any
+more and nothing for a screenshot or a shared laptop to give away.
+
+STATE THE CONSEQUENCE RATHER THAN LET IT BE DISCOVERED: the trust boundary is
+now :30081. Anyone who can reach this port is authenticated by this service,
+because it signs their requests for them. On a LAN behind a firewall that is a
+reasonable trade for a tool one person uses. It is not one anywhere else, and
+publishing 30081 more widely than 30080 now grants MORE access rather than
+less. See services/ui/README.md's security section.
+
+UI_GATEWAY_API_KEY is unset by default, like GATEWAY_API_KEYS, and unset means
+no header is added and an inbound one is forwarded exactly as before -- so the
+current keyless deployment is byte-for-byte unchanged. The routes that are ours
+-- ingestion, clips -- still ask the gateway whether the credential in play is
+good, by making the cheapest authenticated call it has, `GET /v1/models`, which
+it answers from a static table without touching a backend.
 """
 
 from __future__ import annotations
@@ -83,13 +101,51 @@ PAGE = Path(__file__).with_name("static") / "ui.html"
 # with the method it may use. Nothing else is forwarded; an unlisted path is a
 # 404 here exactly as it is at the gateway.
 #
-# /v1/audio/translations is absent because the gateway does not route it and
-# Parakeet refuses translation anyway. DELETE /jobs/{id} is present because
-# tts-long has had that route all along (main.py:580) and only the gateway's
-# route table was missing it -- which is why the Jobs tab can offer "stop and
-# keep what's done" rather than a job that cannot be called off.
+# /v1/audio/translations IS PRESENT NOW, AND THE ENTRY THIS REPLACES EXPLAINS
+# WHY IT WAS NOT: "the gateway does not route it and Parakeet refuses
+# translation anyway". Both halves were true and neither was a reason. stt-stack
+# has answered POST /v1/audio/translations all along, with the same field
+# validation the transcription route has, and a deployment running
+# STT_MODEL=whisper answers it for real -- so the table was hiding a working
+# feature on the strength of which checkpoint happened to be loaded. Under
+# Parakeet the request now reaches stt-stack's own 400, which names the engine
+# and the variable that changes it; that is an answer a caller can act on and a
+# 404 from this table is not. DELETE /jobs/{id} is present for the mirror-image
+# reason: tts-long has had that route all along (main.py:580) and only the
+# gateway's route table was missing it -- which is why the Jobs tab can offer
+# "stop and keep what's done" rather than a job that cannot be called off.
+#
+# CHOOSING THE SPEECH ENGINE ADDS NOTHING HERE, and that is a fact about this
+# table rather than an oversight in it. The engine is a `model` field in the
+# body of POST /v1/audio/speech and POST /jobs, both already listed, so a
+# second engine reaches the page without this service being rebuilt. If an
+# engine ever moves into a path -- /v1/audio/speech/{engine}, a per-engine job
+# route -- it needs a line here, a route at the gateway and a route at the
+# backend, and missing any one of the three is a 405 in the browser and a line
+# in no log. services/gateway/tests/test_gateway.py asserts both halves of
+# that: the three speech paths are present, and no engine-shaped path is.
+#
+# A THIRD ENGINE PROVED IT, INCLUDING THE ONE WITH TWENTY FIXED VOICES. An
+# engine whose speakers are baked into the weights has a voice list this table
+# cannot serve, and the obvious move -- routing tts-long's own GET /voices --
+# is the wrong one twice over. `("GET", "/voices")` below is tts-stack's, one
+# path answered by two backends, so a second entry cannot be spelled at all
+# without inventing a prefix and the rewriting rule that goes with it. The
+# preset names arrive instead on the health body the page already polls:
+# /ui/health -> the gateway's /health -> tts-long's own, inlined at each hop by
+# `response.json()` and never summarised, so `engines[*].voices` reaches the
+# browser verbatim with no line here and no line in the gateway's table.
+# WHICHEVER HOP STARTS PICKING KEYS OUT OF THAT BODY BREAKS THE VOICE PICKER
+# AND NOTHING ELSE: no route 404s, no allowlist changes, no log line differs --
+# the engine's group simply renders empty and the page offers a shorter list
+# than the stack has. So neither hop may summarise `health`; it is the
+# backend's own document, inlined whole. The gateway's half of that is pinned
+# by test_the_engine_detail_tts_long_publishes_reaches_the_caller_verbatim in
+# services/gateway/tests/test_gateway.py; this half is `response.json()` in
+# `health` below, and it must stay that and not a field list.
 PROXIED: tuple[tuple[str, str], ...] = (
     ("POST", "/v1/audio/transcriptions"),
+    ("POST", "/v1/audio/translations"),
     ("POST", "/transcribe"),
     ("POST", "/v1/audio/speech"),
     ("POST", "/speak"),
@@ -99,20 +155,72 @@ PROXIED: tuple[tuple[str, str], ...] = (
     ("GET", "/jobs/{job_id}"),
     ("DELETE", "/jobs/{job_id}"),
     ("GET", "/jobs/{job_id}/audio"),
+    # THE SAME PATH, THE OTHER METHOD, AND THE SAME DEFECT ONE LINE LATER. The
+    # page has offered "delete the audio, keep the record" since the Jobs tab
+    # was written, tts-long has answered it since then
+    # (`@app.delete("/jobs/{job_id}/audio")`), and this table carried only the
+    # GET -- so the press died on Starlette's 405 here, before it reached
+    # either. Reproduced against the deployed stack.
+    #
+    # Adding a method to a path that is already listed is the move that keeps
+    # slipping through, because the path looks present at a glance and the
+    # allowlist is matched on the PAIR. It has now cost a PUT (glossaries) and
+    # a DELETE (this one); test_every_request_the_page_issues_has_a_route in
+    # services/gateway/tests reads this table against the page's own call
+    # sites so the third one fails a test instead of a button.
+    ("DELETE", "/jobs/{job_id}/audio"),
     ("GET", "/v1/models"),
+    # NO LONGER READ ONLY, and the entry it replaces said why it was: creating
+    # and deleting a profile was an operator action over curl. That was the
+    # defect rather than the design. The terms a transcript depends on were
+    # invisible to the person depending on them, and the one control on the
+    # Transcribe tab that only they can set offered a list they could not read,
+    # add to or correct.
+    #
+    # ON THE KEY, because the entry this replaces raised it: a request through
+    # this process is signed with UI_GATEWAY_API_KEY on the way past, which is
+    # exactly what already happens for POST /jobs and DELETE /jobs/{id}. So
+    # these three change WHAT the page may do with that key, not whether it
+    # holds one. Anybody who can reach this service could already start and
+    # cancel work on the stack; they can now also write a glossary file. The
+    # ceiling on that is the service's own: 64 KB, a validated name, and a 409
+    # on a built-in.
+    ("GET", "/glossaries"),
+    ("GET", "/glossaries/{name}"),
+    ("PUT", "/glossaries/{name}"),
+    ("DELETE", "/glossaries/{name}"),
 )
 
 # Routes whose request body is an upload and must therefore never be buffered
 # here, and whose Content-Length is checked before a byte is forwarded.
-UPLOAD_PATHS = frozenset({"/v1/audio/transcriptions", "/transcribe"})
+#
+# TRANSLATIONS BELONGS HERE THE MOMENT IT IS PROXIED AT ALL, and the two are
+# easy to add apart. The ceiling is the only one anywhere in the chain --
+# services/stt/app/openai_api.py:1001 is `await file.read()` and
+# services/stt/app/main.py:168 is a bare `file.file.read()`, both on an
+# UploadFile with no cap in front of them, so an oversized upload is an OOM
+# kill in a 6 GB container rather than a message -- and a route that carries an
+# audio file past this table without a line here is that container's failure
+# mode restored for one path. (Both line numbers were re-read against the
+# current tree; the ones this comment used to carry pointed 30 lines short.)
+UPLOAD_PATHS = frozenset({"/v1/audio/transcriptions", "/v1/audio/translations",
+                          "/transcribe"})
+
+# Where the page reaches the proxied routes from when this service is behind
+# the gateway. Both mounts are live at once: the bare paths still work for a
+# direct caller on this service's own port, and /ui/api works from the
+# gateway's origin. One allowlist serves both -- see _forward.
+UI_API_PREFIX = "/ui/api"
 
 HOP_BY_HOP = frozenset({
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailer", "trailers", "transfer-encoding", "upgrade",
 })
-# `host` because httpx sets the gateway's own. `authorization` is NOT dropped,
-# unlike in the gateway: there the next hop is a backend running with its keys
-# unset, and here the next hop is the process that checks the key.
+# `host` because httpx sets the gateway's own. `authorization` is NOT dropped
+# here, unlike in the gateway: there the next hop is a backend running with its
+# keys unset, and here the next hop is the process that checks the key. It is
+# REPLACED rather than dropped when UI_GATEWAY_API_KEY is set -- see
+# _request_headers, and config.gateway_authorization for why ours wins.
 DROP_FROM_REQUEST = HOP_BY_HOP | {"host"}
 
 
@@ -126,6 +234,10 @@ def new_client() -> httpx.AsyncClient:
     """
     return httpx.AsyncClient(
         timeout=httpx.Timeout(30.0, connect=5.0),
+        # See config.GATEWAY_VERIFY. False only for the container-to-container
+        # hop, where the gateway is reached by a compose service name that no
+        # public certificate can carry.
+        verify=config.GATEWAY_VERIFY,
         # A redirect from the gateway means something about the gateway's
         # routing and following it here would hide it.
         follow_redirects=False)
@@ -135,9 +247,19 @@ def new_client() -> httpx.AsyncClient:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.client = new_client()
     app.state.authorised = {}
-    log.info("ready: gateway=%s metube=%s probe=%s voices=%s",
-             config.GATEWAY_URL, config.METUBE_URL or "(unset)",
+    log.info("ready: gateway=%s key=%s metube=%s probe=%s voices=%s",
+             config.GATEWAY_URL,
+             # Whether, never which. A key in a log line is a key in a log
+             # aggregator, a screenshot and a support paste.
+             "set" if config.GATEWAY_API_KEY else "unset",
+             config.METUBE_URL or "(unset)",
              "on" if probe.available() else "off", config.VOICE_DIR)
+    if config.GATEWAY_API_KEY:
+        log.warning("UI_GATEWAY_API_KEY is set, so THIS PORT is the trust "
+                    "boundary: every request reaching it is signed with that "
+                    "key and forwarded. The page has no key box. Do not "
+                    "publish 30081 anywhere 30080 is not already reachable "
+                    "from.")
     if not metube.configured():
         log.warning("UI_METUBE_URL is unset: the link box is hidden and only "
                     "file upload is offered. Set it to the MeTube on this "
@@ -190,8 +312,15 @@ async def authorised(request: Request) -> Response | None:
     contacted -- so the check costs one loopback request a minute per key and
     the answer is always the CURRENT key list rather than a copy of it that
     drifts.
+
+    WHAT IT CHECKS NOW. With UI_GATEWAY_API_KEY set, the credential in play is
+    this container's own, so a 401 here is a MISCONFIGURED SERVICE and not a
+    caller who typed a key wrong -- the caller has no key to type. It is still
+    worth making: these routes spawn yt-dlp and write files, and running them
+    when the credential they will use is known-bad would only move the failure
+    to the far end of a download. The message says which case it is.
     """
-    header = request.headers.get("authorization")
+    header = config.gateway_authorization(request.headers.get("authorization"))
     cache: dict[str, float] = request.app.state.authorised
     key = _cache_key(header)
     now = time.monotonic()
@@ -216,6 +345,21 @@ async def authorised(request: Request) -> Response | None:
             headers={"Retry-After": "30"})
 
     if response.status_code == 401:
+        if config.GATEWAY_API_KEY:
+            # OURS was refused. Passing the gateway's "incorrect API key
+            # provided" through to a page with no key box would send someone
+            # looking for a field that does not exist.
+            log.error("the gateway refused UI_GATEWAY_API_KEY; ingestion and "
+                      "the clip store are unavailable until it matches an "
+                      "entry in GATEWAY_API_KEYS")
+            return error_response(
+                503, "this UI's own gateway credential was refused, so it "
+                     "cannot act on your behalf. UI_GATEWAY_API_KEY does not "
+                     "match any entry in the gateway's GATEWAY_API_KEYS. "
+                     "There is nothing to type here -- it is a deployment "
+                     "setting.",
+                type_="server_error", code="misconfigured_api_key",
+                headers={"Retry-After": "30"})
         return Response(content=response.content, status_code=401,
                         media_type=response.headers.get("content-type",
                                                         "application/json"),
@@ -238,8 +382,20 @@ async def authorised(request: Request) -> Response | None:
 
 
 def _request_headers(request: Request) -> list[tuple[str, str]]:
-    return [(k, v) for k, v in request.headers.items()
-            if k.lower() not in DROP_FROM_REQUEST]
+    """The caller's headers, minus the hop-by-hop ones, plus our credential.
+
+    The Authorization is REPLACED rather than appended when we have one: HTTP
+    allows a field name to repeat, httpx would put both on the wire, and a
+    gateway reading the first would be authenticating whichever one the caller
+    happened to send. When UI_GATEWAY_API_KEY is unset this is exactly the
+    passthrough it always was.
+    """
+    headers = [(k, v) for k, v in request.headers.items()
+               if k.lower() not in DROP_FROM_REQUEST]
+    if config.GATEWAY_API_KEY:
+        headers = [(k, v) for k, v in headers if k.lower() != "authorization"]
+        headers.append(("authorization", f"Bearer {config.GATEWAY_API_KEY}"))
+    return headers
 
 
 def _response_headers(upstream: httpx.Response) -> MutableHeaders:
@@ -271,13 +427,28 @@ async def _relay(upstream: httpx.Response, *, path: str,
 async def _forward(request: Request) -> Response:
     """Send this request to the gateway and stream the answer back."""
     started = time.monotonic()
+    # /ui/api is the SAME allowlist reached under a prefix, and the prefix is
+    # stripped here so everything downstream sees the real path. It exists
+    # because the gateway now fronts this service on one port: the page is
+    # served from the gateway's origin, so a relative call to /v1/... would
+    # land on the GATEWAY directly and skip this process -- and with it skip
+    # UI_GATEWAY_API_KEY, which is the only key the browser has since the key
+    # box was removed. Under /ui/api the call comes back here, is authenticated
+    # with the container's key, and goes on to the gateway as before.
+    #
+    # Stripping rather than rewriting: PROXIED is matched against the stripped
+    # path, so the allowlist is enforced on what is actually forwarded and a
+    # prefixed request cannot reach a route the unprefixed one could not.
     path = request.url.path
+    if path.startswith(UI_API_PREFIX + "/"):
+        path = path[len(UI_API_PREFIX):]
 
     if path in UPLOAD_PATHS:
         # THE CEILING THAT DOES NOT EXIST ANYWHERE ELSE IN THE CHAIN.
-        # services/stt/app/main.py:138 is a bare `file.file.read()` on an
-        # UploadFile: no Content-Length check, no cap, no streaming, so a 4 GB
-        # MKV is buffered whole into a container with a 6 GB limit and the
+        # services/stt/app/main.py:168 is a bare `file.file.read()` on an
+        # UploadFile and services/stt/app/openai_api.py:1001 is `await
+        # file.read()`: no Content-Length check, no cap, no streaming, so a
+        # 4 GB MKV is buffered whole into a container with a 6 GB limit and the
         # failure is an OOM kill rather than a message. Rejecting here costs
         # one comparison and happens before a byte is forwarded.
         declared = request.headers.get("content-length")
@@ -327,12 +498,16 @@ async def _forward(request: Request) -> Response:
         headers=_response_headers(upstream))
 
 
-# Registered from the table in a loop rather than as eleven near-identical
-# decorated functions. It is still an explicit allowlist -- FastAPI is handed
-# one route per entry and no wildcard exists -- and the loop is what keeps the
-# list readable as a list.
+# Registered from the table in a loop rather than as one near-identical
+# decorated function per entry. It is still an explicit allowlist -- FastAPI is
+# handed one route per entry and no wildcard exists -- and the loop is what
+# keeps the list readable as a list.
 for _method, _path in PROXIED:
     app.add_api_route(_path, _forward, methods=[_method], include_in_schema=False)
+    # The same route, prefixed. Registered from the same table so the two
+    # mounts cannot drift into offering different sets.
+    app.add_api_route(UI_API_PREFIX + _path, _forward, methods=[_method],
+                      include_in_schema=False)
 
 
 # ------------------------------------------------------------------- page --
@@ -353,11 +528,28 @@ async def page() -> Response:
     the syscall.
     """
     return HTMLResponse(PAGE.read_text(encoding="utf-8"), headers={
+        # NEVER CACHED. The page carried no Cache-Control at all, so browsers
+        # applied their own heuristic and served a stale copy -- a control
+        # added and deployed was reported as missing, and the diagnosis went
+        # through the markup, the boot order and the route table before
+        # reaching the cache.
+        #
+        # There is nothing to gain by caching it. It is one file from a local
+        # disk on a LAN, re-read per request by design (see above), and its
+        # whole content changes on every deploy. must-revalidate rather than
+        # no-store so a reload can still be a 304 if that is ever added.
+        "cache-control": "no-cache, must-revalidate",
         # The page makes requests to its own origin and nowhere else -- no CDN,
         # no external font, no analytics -- so the policy can say exactly that,
         # and it keeps working on a NAS with no internet.
         "Content-Security-Policy":
             "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; "
+            # THE DISPLAY FACE IS A data: URI IN THE STYLESHEET. This service
+            # serves exactly one file, so a sibling .woff2 would need a route of
+            # its own; inlined, the page stays one thing to copy. Without this
+            # line fonts fall back to default-src 'self' and the face is
+            # silently blocked -- the page still renders, in system-ui.
+            "font-src 'self' data:; "
             "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
             "connect-src 'self'; frame-ancestors 'none'",
         "Referrer-Policy": "no-referrer",
@@ -426,8 +618,13 @@ async def add_clip(request: Request, name: str = Form(...),
             f"to thirty seconds of clean speech, which is about 1.4 MB.",
             code="clip_too_large", param="file")
     data = await file.read()
+    # The browser converts to WAV when it can decode the file at all. When it
+    # cannot -- an ogg/opus voice note with no duration in its container is the
+    # case that prompted this -- it uploads the original bytes instead, and the
+    # suffix tells this route which of the two arrived.
+    suffix = Path(file.filename or "").suffix.lower() or clips.SUFFIX
     try:
-        saved = clips.save(name, data, replace=replace)
+        saved = clips.save(name, data, replace=replace, suffix=suffix)
     except clips.ClipError as exc:
         return error_response(400, str(exc), code="invalid_clip", param="file")
     return Response(media_type="application/json", status_code=201,
@@ -478,6 +675,14 @@ app.include_router(ingest.router)
 # ----------------------------------------------------------------- health --
 
 
+# ALSO AT /ui/health, and the page uses that one. The compose healthcheck
+# keeps calling /health -- it probes this container from inside it, where the
+# gateway is not involved. But once the gateway fronts this service, a page
+# served from the gateway's origin that asked for /health would get the
+# GATEWAY's health, which is a different shape: the page reads
+# HEALTH.gateway.health, and the gateway's own body has no `gateway` key, so
+# every status pill would silently read undefined.
+@app.get("/ui/health", include_in_schema=False)
 @app.get("/health", include_in_schema=False)
 async def health(request: Request) -> Response:
     """This container's own probe. Never a key, and always 200.

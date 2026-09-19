@@ -22,7 +22,7 @@
 # Build, from the repository root — the context is the root for every service
 # here, even this one, which has no path dependency to pull in. One context
 # rule beats a per-service exception nobody remembers:
-#   docker build -f services/gateway/Containerfile -t ai-voice-gateway .
+#   docker build -f services/gateway/Containerfile -t calliope-gateway .
 #
 # Run (compose or a TrueNAS app, on the network the three backends share):
 #   docker run -p 8080:8080 \
@@ -30,7 +30,7 @@
 #     -e GATEWAY_TTS_URL=http://tts-stack:8001 \
 #     -e GATEWAY_TTS_LONG_URL=http://tts-long:8002 \
 #     -e GATEWAY_API_KEYS=sk-workstation,sk-laptop \
-#     ai-voice-gateway
+#     calliope-gateway
 #
 # GATEWAY_API_KEYS unset means authentication is off and every request is
 # accepted — for all three backends, since this is the only thing checking a
@@ -71,7 +71,6 @@ COPY services/gateway/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY services/gateway/app/ ./app/
-COPY services/gateway/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # The backend URLs default to the service names the compose file uses. They are
 # named here rather than left to the application's defaults so that `docker
@@ -79,7 +78,17 @@ COPY services/gateway/entrypoint.sh /usr/local/bin/entrypoint.sh
 #
 # GATEWAY_API_KEYS is deliberately absent: keys do not belong baked into a
 # published image, and unset is the documented "authentication off" state.
-ENV GATEWAY_STT_URL=http://stt-stack:8000 \
+# THE SHARED ENTRYPOINT, and this service now has a reason to want it. Its own
+# copy said "there is no TLS handling, unlike the siblings ... point the proxy
+# that already terminates TLS at it" -- true while this was one of two doors on
+# a LAN, and false the moment it became the only one. A published port is the
+# port that carries bearer tokens.
+#
+# GATEWAY_CHOWN_DIRS is empty because this service mounts nothing: no model, no
+# output, no clips. The default is /models, which does not exist here.
+ENV VOICE_TLS_PREFIX=GATEWAY \
+    VOICE_CHOWN_DIRS="" \
+    GATEWAY_STT_URL=http://stt-stack:8000 \
     GATEWAY_TTS_URL=http://tts-stack:8001 \
     GATEWAY_TTS_LONG_URL=http://tts-long:8002 \
     PYTHONUNBUFFERED=1
@@ -117,5 +126,5 @@ EXPOSE 8080
 #
 # python rather than curl, which is not in this image and is not worth a layer.
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["voice-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -13,7 +13,7 @@ import wave
 
 import pytest
 
-from app import clips
+from app import clips, config
 
 
 def wav_bytes(seconds: float, rate: int = 24000) -> bytes:
@@ -82,16 +82,70 @@ def test_default_is_reserved_because_it_is_chatterboxs_own_speaker(store):
         clips.save("default", wav_bytes(12))
 
 
-def test_a_clip_over_the_duration_ceiling_is_refused_and_leaves_nothing(store):
-    with pytest.raises(clips.ClipError, match="ceiling"):
-        clips.save("long", wav_bytes(45))
-    assert list(store.iterdir()) == [], "a rejected upload must leave no partial file"
+def test_a_clip_over_the_duration_ceiling_is_trimmed_and_leaves_one_file(store):
+    """This asserted a REFUSAL until yt-dlp's keyframe seeking made the ceiling
+    unreachable from the link path -- see the trim tests at the end of this
+    file. What still matters is the half it was really guarding: exactly one
+    file in the directory afterwards, and no `.part` left behind.
+    """
+    saved = clips.save("long", wav_bytes(45))
+    assert saved["seconds"] <= config.MAX_CLIP_SECONDS + 0.01
+    files = sorted(p.name for p in store.iterdir())
+    assert files == ["long.wav"], f"expected one finished clip, got {files}"
 
 
-def test_a_clip_that_is_not_a_wav_is_refused_and_leaves_nothing(store):
-    with pytest.raises(clips.ClipError, match="not a WAV"):
+def test_bytes_claiming_to_be_a_wav_and_failing_are_refused(store):
+    """The suffix is the claim; this is the check on it.
+
+    Non-WAV formats are stored as they arrive now -- tts-long reads them with
+    librosa and this image has no decoder -- but a file SAVED as .wav must
+    still be one, because that is the one format the store measures.
+    """
+    with pytest.raises(clips.ClipError, match="cannot be read as one"):
         clips.save("junk", b"\x1a\x45\xdf\xa3 this is webm, not wav")
     assert list(store.iterdir()) == []
+
+
+def test_a_format_the_voice_service_cannot_read_is_refused(store):
+    with pytest.raises(clips.ClipError, match="not a format"):
+        clips.save("junk", b"anything", suffix=".aiff")
+    assert list(store.iterdir()) == []
+
+
+def test_an_opus_voice_note_is_stored_as_it_arrives(store):
+    """The case that prompted this: a WhatsApp voice note is ogg/opus, carries
+    no duration in its container, and decodeAudioData returned ONE SECOND of
+    audio with no error -- a useless reference clip that looked like a
+    successful upload. The browser is no longer required to convert it."""
+    saved = clips.save("note", b"OggS\x00\x02 not really opus, but named so",
+                       suffix=".opus")
+    assert saved["seconds"] is None, "duration is not knowable without a decoder"
+    assert (store / "note.opus").exists()
+    assert [c["name"] for c in clips.listing()] == ["note"]
+
+
+def test_one_voice_keeps_one_file_across_formats(store):
+    """Saving note.mp3 over note.opus must not leave two clips claiming the
+    name, with the registry picking by directory order."""
+    clips.save("note", b"OggS\x00\x02 x", suffix=".opus")
+    clips.save("note", b"ID3 x", suffix=".mp3", replace=True)
+    files = sorted(p.name for p in store.iterdir())
+    assert files == ["note.mp3"], files
+
+
+def test_the_accepted_formats_match_what_tts_long_reads(store):
+    """A format accepted here that tts-long cannot load would be a clip that
+    saves and then fails at generation time."""
+    import re as _re
+    from pathlib import Path as _Path
+
+    voices = (_Path(__file__).resolve().parents[3]
+              / "services" / "tts-long" / "app" / "voices.py").read_text()
+    block = voices[voices.index("_SUFFIXES = ("):]
+    backend = set(_re.findall(r'"(\.\w+)"', block[:block.index(")")]))
+    assert set(clips.SUFFIXES) == backend, (
+        f"ui-only {set(clips.SUFFIXES) - backend}, "
+        f"tts-long-only {backend - set(clips.SUFFIXES)}")
 
 
 def test_a_clip_over_the_size_cap_is_refused(store, monkeypatch):
@@ -134,3 +188,31 @@ def test_the_route_returns_the_refreshed_list(client, tmp_path):
     assert [v["name"] for v in response.json()["voices"]] == ["gabriel"]
     assert api.get("/ui/clips").json()["writable"] is True
     assert api.delete("/ui/clips/gabriel").json()["voices"] == []
+
+
+# ------------------------------------------ the ceiling is a trim, not a wall --
+
+
+def test_a_clip_over_the_ceiling_is_trimmed_not_refused(store):
+    """yt-dlp seeks to KEYFRAMES, so a requested window overshoots.
+
+    Measured against the deployed instance: twenty seconds requested came back
+    as 25.97, thirty came back as 36. That made the ceiling unreachable from
+    the link path -- asking for the maximum guaranteed exceeding it -- and the
+    error told the user their clip was too long for a length they had never
+    chosen. The browser's toWav has always trimmed rather than rejected; the
+    server refusing was the odd one out.
+    """
+    saved = clips.save("overshoot", wav_bytes(36))
+    assert saved["seconds"] <= config.MAX_CLIP_SECONDS + 0.01, saved
+
+
+def test_a_clip_under_the_ceiling_is_left_alone(store):
+    saved = clips.save("short", wav_bytes(12))
+    assert abs(float(saved["seconds"]) - 12) < 0.01
+
+
+def test_a_clip_that_is_too_short_is_still_refused(store):
+    """Trimming cannot invent audio, so the lower bound stays a refusal."""
+    with pytest.raises(clips.ClipError):
+        clips.save("tiny", wav_bytes(0.4))

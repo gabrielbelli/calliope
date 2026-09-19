@@ -1,4 +1,11 @@
-"""The page, the forwarding table, the key check and the upload ceiling."""
+"""The page, the forwarding table, the key check and the upload ceiling.
+
+On the key: this service used to forward a credential the BROWSER held and add
+none of its own. It now adds UI_GATEWAY_API_KEY when that is set, and the tests
+below are split accordingly — the ones with no `UI_GATEWAY_API_KEY` in their
+environment are there to prove the old behaviour is untouched when it is unset,
+which is the deployment this repository ships.
+"""
 
 from __future__ import annotations
 
@@ -12,9 +19,10 @@ def test_the_page_is_served_and_needs_no_key(client):
     gateway.keys = ("sk-real",)
     response = api.get("/ui")
     assert response.status_code == 200
-    assert "<title>ai-voice</title>" in response.text
-    # The page is static markup with no data in it, so it is public. Every XHR
-    # it makes carries the key from the box on it.
+    assert "<title>Calliope</title>" in response.text
+    # The page is static markup with no data and no credential in it, so it is
+    # public. Every XHR it makes goes back to this origin, and this process is
+    # what puts a key on the ones that leave it.
     assert "connect-src 'self'" in response.headers["content-security-policy"]
 
 
@@ -28,7 +36,44 @@ def test_the_page_has_no_external_reference_of_any_kind(client):
     api, _, _ = client()
     page = api.get("/ui").text
     for marker in ("http://", "https://cdn", "googleapis", "unpkg", "jsdelivr"):
-        assert marker not in page.replace("http://127.0.0.1", ""), marker
+        # AN XML NAMESPACE IS NOT A REQUEST. The favicon is an inline SVG data
+        # URI, and an SVG that does not declare xmlns="http://www.w3.org/2000/svg"
+        # does not render at all. Nothing is fetched from it.
+        clean = page.replace("http://127.0.0.1", "").replace("http://www.w3.org/2000/svg", "")
+        assert marker not in clean, marker
+
+
+def test_translations_are_forwarded_like_transcriptions(client):
+    """A BEHAVIOURAL TEST FOR THE ROUTE THE GATEWAY NEVER CARRIED. services/stt
+    has answered POST /v1/audio/translations all along -- the gateway simply
+    had no entry for it, so it 404ed there, and this service's own PROXIED
+    table had the same hole. That is the third bug of this exact shape, after
+    DELETE /jobs/{id}/audio and the OmniRoute 404s: a route implemented at one
+    layer and unreachable from the next.
+
+    The source-level fence in services/gateway/tests catches a regression too,
+    but it asserts on an AST. This asserts on a request actually arriving."""
+    api, gateway, _ = client()
+    api.post("/v1/audio/translations",
+             files={"file": ("a.wav", b"RIFF0000WAVE", "audio/wav")},
+             data={"model": "whisper-1"})
+    assert gateway.seen, "the translation never reached the gateway"
+    assert gateway.seen[-1].url.path.endswith("/v1/audio/translations")
+
+
+def test_an_oversized_translation_is_refused_like_an_oversized_transcription(client):
+    """The size fence has to reach a route the day the route is added, not the
+    day somebody remembers. An upload cap that covers transcriptions and misses
+    translations is a cap that a caller routes around by changing one word in
+    the path."""
+    api, gateway, _ = client(UI_MAX_UPLOAD_BYTES="1024")
+    before = len(gateway.seen)
+    response = api.post("/v1/audio/translations",
+                        files={"file": ("big.wav", b"x" * 4096, "audio/wav")},
+                        data={"model": "whisper-1"})
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "upload_too_large"
+    assert len(gateway.seen) == before, "an oversized body was forwarded anyway"
 
 
 def test_a_forwarded_route_reaches_the_gateway_with_the_key_intact(client):
@@ -122,3 +167,310 @@ def test_health_is_unauthenticated_and_200_even_when_the_gateway_is_down(client)
     # why. Read `status`, not the code.
     assert body["status"] == "degraded"
     assert body["ui"] == "ok"
+
+
+# ------------------------------------------ the key this container holds --
+#
+# The page has no key box any more. These cover the header this service adds in
+# its place, and the property that matters most: with UI_GATEWAY_API_KEY unset,
+# nothing above this line changes.
+
+
+def test_the_container_key_is_added_to_a_proxied_request(client):
+    """The browser sends no Authorization at all now, so this is the only one.
+
+    Without it every proxied route would be an anonymous request and the whole
+    page would be 401 on any deployment with GATEWAY_API_KEYS set.
+    """
+    api, gateway, _ = client(UI_GATEWAY_API_KEY="sk-container")
+    gateway.keys = ("sk-container",)
+    assert api.get("/voices").status_code == 200
+    assert gateway.seen[-1].headers["authorization"] == "Bearer sk-container"
+
+
+def test_a_caller_cannot_substitute_their_own_key(client):
+    """Ours replaces theirs; it does not join it.
+
+    HTTP allows a field name to repeat, so appending would put two
+    Authorization headers on the wire and leave the gateway authenticating
+    whichever one it read first — which is the caller's.
+    """
+    api, gateway, _ = client(UI_GATEWAY_API_KEY="sk-container")
+    gateway.keys = ("sk-container",)
+    response = api.get("/voices", headers={"Authorization": "Bearer sk-theirs"})
+    assert response.status_code == 200
+    sent = gateway.seen[-1].headers.get_list("authorization")
+    assert sent == ["Bearer sk-container"], sent
+
+
+def test_nothing_is_added_when_the_variable_is_unset(client):
+    """The shipped deployment, and it must behave exactly as it always has."""
+    api, gateway, _ = client()
+    assert api.get("/voices").status_code == 200
+    assert "authorization" not in gateway.seen[-1].headers
+
+
+def test_our_own_routes_are_checked_with_the_container_key(client):
+    """/ui/* spawns yt-dlp and writes files, and the caller presents nothing.
+
+    The check is still the gateway's answer to GET /v1/models; what changed is
+    whose credential is on it.
+    """
+    api, gateway, _ = client(UI_GATEWAY_API_KEY="sk-container")
+    gateway.keys = ("sk-container",)
+    response = api.post("/ui/abandon", json={"token": "https://example.com/x"})
+    assert response.status_code == 200
+    probe = [r for r in gateway.seen if r.url.path == "/v1/models"][-1]
+    assert probe.headers["authorization"] == "Bearer sk-container"
+
+
+def test_a_refused_container_key_is_a_503_and_never_a_401(client):
+    """A 401 tells the user to fix a key box that no longer exists.
+
+    UI_GATEWAY_API_KEY not matching GATEWAY_API_KEYS is a deployment fault, and
+    passing the gateway's "Incorrect API key provided" through would send
+    somebody looking for a field to correct it in.
+    """
+    api, gateway, _ = client(UI_GATEWAY_API_KEY="sk-wrong")
+    gateway.keys = ("sk-real",)
+    response = api.post("/ui/abandon", json={"token": "https://example.com/x"})
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "misconfigured_api_key"
+    assert "www-authenticate" not in response.headers
+    assert_four_field_envelope(response)
+
+
+def test_an_ingested_file_is_handed_over_with_the_container_key(client):
+    """The hand-off to the gateway is a request this service builds by hand.
+
+    It copied the caller's header verbatim, so with the key box gone it would
+    have carried nothing at all — and the failure would land as a 401 AFTER the
+    download had already been paid for, which is the worst place in the flow to
+    discover an auth problem.
+    """
+    url = "https://media.example/watch?v=abcdef"
+    api, gateway, tube = client(UI_GATEWAY_API_KEY="sk-container")
+    gateway.keys = ("sk-container",)
+    api.post("/ui/resolve", json={"url": url})
+    api.post("/ui/commit", json={"token": url})
+    tube.finish(url, "A Title #1.opus")
+
+    assert api.post("/ui/fetch", json={"token": url}).status_code == 200
+    sent = [r for r in gateway.seen
+            if r.url.path == "/v1/audio/transcriptions"][-1]
+    assert sent.headers["authorization"] == "Bearer sk-container"
+
+
+# ------------------------------------------- what was taken off the page --
+
+
+def test_the_page_has_no_key_box(client):
+    """It is not a bring-your-own-key tool; the container holds the key."""
+    page = client()[0].get("/ui").text
+    assert 'id="key"' not in page
+    assert 'id="keyshow"' not in page
+    assert 'store.get("key"' not in page, "a key is still kept in localStorage"
+
+
+def test_the_page_never_attaches_an_authorization_header(client):
+    """Every XHR goes through api(), which is now a bare fetch.
+
+    A header set here would be a credential typed into a browser, which is the
+    thing that was removed.
+    """
+    page = client()[0].get("/ui").text
+    assert "Bearer" not in page.replace("WWW-Authenticate", ""), (
+        "the page is building an Authorization header again")
+
+
+def test_the_page_has_no_global_expert_gate(client):
+    """One control per thing hidden. The <details> panels are the control.
+
+    The checkbox was a second, global way to hide the same three panels, so a
+    setting could be out of sight for two unrelated reasons and finding it
+    meant reasoning about both.
+    """
+    page = client()[0].get("/ui").text
+    assert 'id="expert"' not in page
+    assert 'class="expert-only"' not in page
+    assert "body:not(.expert)" not in page
+    assert 'store.get("expert"' not in page
+
+
+def test_the_three_expert_panels_are_still_on_the_page_and_openable(client):
+    """Removing the gate must not remove the panels behind it."""
+    page = client()[0].get("/ui").text
+    for panel in ("stt-expert", "tts-expert-fast", "tts-expert-clone"):
+        assert f'<details id="{panel}">' in page, f"{panel} is gone"
+
+
+def test_the_two_engine_panels_still_swap_with_the_chosen_voice(client):
+    """This is per-ENGINE, not per-expertise, and it is not what was removed.
+
+    onVoiceChange() shows Kokoro's panel for an instant voice and tts-long's
+    for anything that queues. Deleting the global gate must leave that alone,
+    or both panels appear at once and half the controls on screen belong to a
+    model that is not going to run.
+
+    THE TEST IS WHERE IT RUNS, NOT WHAT THE VOICE IS. It was `clone`, which
+    answered the same way only while every tts-long voice was a clone: a preset
+    voice is not a clone and is not instant either, and under the old test it
+    opened KOKORO's panel -- a synthesis-speed slider and a segments editor,
+    neither of which that request can carry.
+    """
+    page = client()[0].get("/ui").text
+    assert '$("tts-expert-fast").hidden = job;' in page
+    assert '$("tts-expert-clone").hidden = !job;' in page
+    # ANCHORED IN onVoiceChange, because `const job = isJob(voice);` also
+    # appears in estimate() -- so a search over the whole page passes while
+    # this function quietly goes back to reading the voice's kind.
+    body = page[page.index("function onVoiceChange()"):
+                page.index('$("voice").addEventListener')]
+    assert "const job = isJob(voice);" in body, "the panels swap on the voice again"
+
+
+# ------------------------------------------- the prefixed mount (one door) --
+#
+# The gateway now fronts this service on a single published port, so the page
+# is served from the gateway's origin. A bare relative call to /v1/... from
+# there lands on the GATEWAY and never reaches this process -- skipping
+# UI_GATEWAY_API_KEY, the only key a browser has since the key box was removed.
+# /ui/api/... comes back here first. These pin that both mounts exist and that
+# the prefixed one is not a way past the allowlist.
+
+
+def test_the_prefixed_mount_reaches_the_same_route(client):
+    api, gateway, _ = client()
+    gateway.json = {"text": "hello"}
+    assert api.post("/ui/api/v1/audio/transcriptions",
+                    files={"file": ("a.wav", b"RIFF", "audio/wav")},
+                    data={"model": "parakeet"}).status_code == 200
+    assert gateway.seen[-1].url.path == "/v1/audio/transcriptions", \
+        "the prefix must be stripped before the request leaves this service"
+
+
+def test_the_bare_mount_still_works_for_a_direct_caller(client):
+    """Both mounts are live: this service's own port is still a valid door."""
+    api, gateway, _ = client()
+    gateway.json = {"text": "hello"}
+    assert api.post("/v1/audio/transcriptions",
+                    files={"file": ("a.wav", b"RIFF", "audio/wav")},
+                    data={"model": "parakeet"}).status_code == 200
+    assert gateway.seen[-1].url.path == "/v1/audio/transcriptions"
+
+
+def test_the_prefix_is_not_a_way_past_the_allowlist(client):
+    """PROXIED is matched against the STRIPPED path, so a prefixed request
+    cannot reach a route the unprefixed one could not. /docs is the case that
+    matters: the gateway's own 404 handler exists because a wildcard would
+    proxy it to a service that deliberately does not publish it."""
+    api, _, _ = client()
+    for path in ("/ui/api/docs", "/ui/api/openapi.json", "/ui/api/health"):
+        assert api.get(path).status_code == 404, f"{path} should not be routed"
+
+
+def test_the_page_has_its_own_health_because_the_shapes_differ(client):
+    """The page reads HEALTH.gateway.health. The gateway's own /health has no
+    `gateway` key, so a page served from its origin asking for /health would
+    read undefined for every status pill."""
+    api, _, _ = client()
+    body = api.get("/ui/health").json()
+    assert "gateway" in body and "features" in body
+    assert api.get("/health").json() == body, \
+        "both paths are the same handler; only the URL differs"
+
+
+def test_the_media_route_is_behind_the_same_key_check_as_the_rest(client):
+    """It is a <video src>, so no XHR wrapper and no header is involved -- the
+    browser fetches it the way it fetches an image, on the page's own origin,
+    and the container's credential is added here as it is for every other
+    /ui/* route. A route that serves bytes off a download directory must not be
+    the one that opted out of the middleware."""
+    api, gateway, _ = client(UI_GATEWAY_API_KEY="sk-container")
+    gateway.keys = ("sk-container",)
+    response = api.get("/ui/media", params={"token": "https://example.com/x"})
+    # 404 rather than 401: the key was accepted and MeTube simply has no such
+    # record. What matters is that the check ran at all.
+    assert response.status_code == 404
+    probe = [r for r in gateway.seen if r.url.path == "/v1/models"][-1]
+    assert probe.headers["authorization"] == "Bearer sk-container"
+
+
+def test_the_page_may_load_media_from_its_own_origin(client):
+    """/ui/media is same-origin, so `media-src 'self'` covers it -- but a CSP
+    tightened to `media-src blob:` alone would block every link's playback with
+    a console message and no visible cause."""
+    api, _, _ = client()
+    policy = api.get("/ui").headers["Content-Security-Policy"]
+    directive = [d.strip() for d in policy.split(";") if d.strip().startswith("media-src")]
+    assert directive, "there is no media-src at all, so default-src decides"
+    assert "'self'" in directive[0], directive
+
+
+def test_the_page_is_never_cached(client):
+    """It carried no Cache-Control at all, so browsers applied their own
+    heuristic and served a stale copy. A control that had been added and
+    deployed was reported as missing, and the diagnosis went through the
+    markup, the boot order and the route table before reaching the cache.
+
+    There is nothing to gain by caching it: one file from a local disk on a
+    LAN, re-read per request by design, and its whole content changes on every
+    deploy.
+    """
+    api, _, _ = client()
+    for path in ("/ui", "/"):
+        response = api.get(path, follow_redirects=True)
+        assert response.status_code == 200
+        cache = response.headers.get("cache-control", "")
+        assert "no-cache" in cache, f"{path} served with cache-control={cache!r}"
+
+
+# --------------------------------------------- the glossary write routes --
+#
+# GET /glossaries was the only entry for these, and its comment said why:
+# creating and deleting a profile was an operator action over curl. That was
+# the defect rather than the design -- the page offered a Vocabulary control it
+# could not read, add to or correct -- so the other three are on the table now.
+# These pin that they forward, and that opening them opened nothing else.
+
+
+def test_one_profile_can_be_read_written_and_removed_through_this_service(client):
+    """All three carry the path parameter, and the PUT carries its body and its
+    query string. ?force=true is what lets a single-word left-hand side through,
+    and dropping it would make that rule unenterable while appearing to work."""
+    api, gateway, _ = client()
+
+    assert api.get("/glossaries/tech").status_code == 200
+    assert gateway.seen[-1].url.path == "/glossaries/tech"
+
+    assert api.put("/glossaries/mine?force=true",
+                   json={"text": "belly = Belli\n"}).status_code == 200
+    sent = gateway.seen[-1]
+    assert (sent.method, sent.url.path) == ("PUT", "/glossaries/mine")
+    assert sent.url.query == b"force=true", "the force flag was dropped"
+    assert json.loads(sent.content)["text"] == "belly = Belli\n"
+
+    assert api.delete("/glossaries/mine").status_code == 200
+    assert (gateway.seen[-1].method, gateway.seen[-1].url.path) == \
+        ("DELETE", "/glossaries/mine")
+
+
+def test_the_write_routes_are_on_the_allowlist_and_not_behind_a_wildcard(client):
+    """The table is an allowlist and stays one. A method it does not name is a
+    404 here, and nothing is forwarded to find that out."""
+    api, gateway, _ = client()
+    before = len(gateway.seen)
+    assert api.post("/glossaries/mine", json={"text": "x"}).status_code == 405
+    assert api.patch("/glossaries/mine", json={"text": "x"}).status_code == 405
+    assert api.put("/glossaries").status_code == 405
+    assert len(gateway.seen) == before, "an unlisted method reached the gateway"
+
+
+def test_the_prefixed_mount_carries_the_profile_name_too(client):
+    """The page is served from the gateway's origin, so it calls /ui/api/... .
+    A prefix that swallowed the path parameter would write to a profile called
+    something else, which is a silent wrong-file write."""
+    api, gateway, _ = client()
+    assert api.put("/ui/api/glossaries/mine",
+                   json={"text": "Catallaxy\n"}).status_code == 200
+    assert gateway.seen[-1].url.path == "/glossaries/mine"

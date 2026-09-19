@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 
 __all__ = ["CHARS_PER_SECOND", "MAX_CHARS", "TARGET_CHARS", "chunk_text",
            "speech_seconds"]
@@ -52,7 +53,17 @@ __all__ = ["CHARS_PER_SECOND", "MAX_CHARS", "TARGET_CHARS", "chunk_text",
 # Characters of ordinary prose per second of speech. Measured, not assumed —
 # see the table above, which spans 9.8 to 19.3 depending on how much of the
 # sample is the silence around a single utterance.
-CHARS_PER_SECOND = float(os.getenv("TTS_CHARS_PER_SECOND", "15"))
+#
+# 12.0, NOT THE 15 THIS HELD BEFORE. 15 was the middle of that spread, chosen
+# when the spread was all there was; a job run against the deployed stack put
+# 449 characters of ordinary prose at 37.4 seconds of Chatterbox audio, which
+# is 12.0 chars/s. 15 under-predicted the AUDIO by a fifth, and the audio is
+# then divided by a realtime factor near 0.27 to get the wait — so the error
+# arrives at the reader multiplied by about four. Kokoro measured 16.3 on the
+# same host and the same day, which is why the page now keeps one figure per
+# engine rather than sharing this one; this file only ever describes
+# Chatterbox, because only tts-long imports it.
+CHARS_PER_SECOND = float(os.getenv("TTS_CHARS_PER_SECOND", "12"))
 
 # Hard ceiling on a single generate() call. 40 s of audio is the model's own
 # limit (see the module docstring). 280 characters is 18.7 s at the rate above
@@ -150,7 +161,17 @@ def chunk_text(text: str, *, max_chars: int | None = None,
     limit = max_chars or MAX_CHARS
     target = min(target_chars or TARGET_CHARS, limit)
 
-    text = " ".join(text.split())
+    # NFC FIRST, FOR THE SAME REASON services/tts DOES IT (GAB-637) AND WITH A
+    # DIFFERENT MEASUREMENT BEHIND IT. macOS hands a selection over decomposed,
+    # so "ação" can arrive as a + U+0303 + ... rather than as the composed
+    # codepoints, and every client that forwards a pasteboard string can carry
+    # that here. The espeak-ng evidence from services/tts does NOT transfer:
+    # Chatterbox tokenises text itself and its failure mode on a lone combining
+    # mark has not been measured, so the claim made here is only the safe half
+    # -- NFC is the canonical composed form, no tokeniser handles it worse than
+    # NFD, and normalising costs nothing. Somebody should still measure what
+    # Chatterbox does with a bare combining mark before claiming more.
+    text = " ".join(unicodedata.normalize("NFC", text).split())
     if not text:
         return []
 
