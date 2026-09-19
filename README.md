@@ -27,10 +27,14 @@ share, one repository, deployed as a single app.
   packages/common            the wire contract all five services import
 ```
 
-Two ports are published: **30080** for the gateway, which is the API, and
-**30081** for the page. 8000, 8001 and 8002 stay closed, which is what makes
-the single auth boundary real — `services/ui` is a client of the gateway, not a
-way round it.
+**One port is published: 30080.** It is the API and it is the page — the
+gateway serves `/ui` itself, and `/` redirects there. 8000, 8001, 8002 and the
+page's own 8090 stay closed, which is what makes the single auth boundary real:
+`services/ui` is a client of the gateway, not a way round it.
+
+> Earlier versions of this file described a second published port, 30081, for
+> the page. There is no such port; it was closed when the page moved behind the
+> gateway, and the sentence outlived it.
 
 Every service keeps its own README, and those are the reference: what each
 route accepts, every OpenAI deviation and the measurement forcing it, the

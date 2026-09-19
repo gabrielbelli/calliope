@@ -1906,3 +1906,44 @@ def test_a_second_model_string_adds_no_row_to_any_of_the_three_tables():
         "an engine-shaped PATH appeared in voice-ui's PROXIED: the engine is a "
         "request field, and a path is three tables' worth of work -- this one, "
         f"the gateway's routes, and the backend's: {offenders}")
+
+
+async def test_an_upload_has_a_ceiling(monkeypatch, backends):
+    """"STREAMED, SO IT COSTS NOTHING HERE" WAS ONLY TRUE OF HERE. The gateway
+    hands the body straight to stt-stack, so its own memory stays flat whatever
+    arrives -- and the service at the other end reads the clip to decode it,
+    inside a container with 6 GB. An unauthenticated POST on the only published
+    port could take that container down, and every transcription with it.
+
+    This route's own 413 message used to say so, in the chat route's refusal:
+    "streams it through this gateway rather than holding it, and has no ceiling
+    here".
+    """
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, main):
+        for path in ("/v1/audio/transcriptions", "/v1/audio/translations", "/transcribe"):
+            answer = await client.post(
+                path, content=b"RIFF....",
+                headers={"content-length": str(main.UPLOAD_MAX_BYTES + 1)})
+            assert answer.status_code == 413, f"{path} accepts any declared size"
+            assert answer.json()["error"]["code"] == "upload_too_large"
+
+    assert not stt.seen, "an oversized upload was forwarded before being refused"
+
+
+async def test_the_ceiling_is_counted_and_not_merely_declared(monkeypatch, backends):
+    """content-length is a claim: omit it, send chunked, and the declared size
+    is no size at all. So the bytes are counted as they pass and the forward is
+    abandoned mid-flight, which costs the caller their upload and this stack
+    nothing."""
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, main):
+        monkeypatch.setattr(main, "UPLOAD_MAX_BYTES", 1024)
+
+        async def chunked():
+            for _ in range(4):
+                yield b"\0" * 512
+
+        answer = await client.post("/v1/audio/transcriptions", content=chunked())
+        assert answer.status_code == 413, \
+            "an upload with no content-length is unbounded, which is the whole hole"

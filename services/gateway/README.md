@@ -513,7 +513,21 @@ reason the single boundary is free: the containers already share a network.
    network. This is the step that makes the boundary real; without it this
    component is an extra hop and nothing else.
 2. Leave `STT_API_KEYS` and `TTS_API_KEYS` unset on all three backends.
-3. Set `GATEWAY_API_KEYS` here.
+3. **Do not set `GATEWAY_API_KEYS` yet.** Reproduced against the real app with
+   two keys set: the startup line prints "authentication enabled, 2 key(s);
+   unauthenticated: /health", and then `GET /`, `/ui`, `/ui/health`,
+   `/ui/config`, `/ui/clips` and `/ui/api/v1/models` all answer `401` with
+   `WWW-Authenticate: Bearer`. **Turning authentication on takes the web page
+   offline**, and there is nowhere in a browser to present a key: `voice-ui`
+   publishes no port of its own, Bearer raises no browser prompt, and the
+   page's API-key box was deliberately removed.
+
+   `UI_GATEWAY_API_KEY` does not help — it signs the voice-ui → gateway hop,
+   never the browser → gateway hop that is refused first.
+
+   Until the gateway can mint a browser credential of its own, keys and the
+   page are mutually exclusive. If you only use the API and never the page,
+   setting it is safe and correct.
 4. Leave each container's own healthcheck pointed at **its own** localhost
    `/health`, not at the gateway's aggregate. A container must not be
    restarted because a sibling is down.

@@ -590,9 +590,66 @@ async def _proxy(request: Request, backend: Backend, *,
 # make: stt-stack is the only STT backend.
 
 
+#: The largest upload this gateway will pass to stt-stack.
+#:
+#: "STREAMED, SO IT COSTS NOTHING HERE" WAS ONLY TRUE OF HERE. The gateway
+#: hands the body straight through, so its own memory is flat whatever arrives
+#: -- and stt-stack at the other end reads the clip to decode it, inside a
+#: container with 6 GB. An unauthenticated POST on the only published port
+#: could take that container down, and with it every transcription in flight.
+#:
+#: 512 MB is about five hours of 16-bit mono wav, which is past any clip this
+#: is for and short of what hurts. Raise it with GATEWAY_UPLOAD_MAX_BYTES if a
+#: real job needs more; the number is a guess about audio, not a law.
+UPLOAD_MAX_BYTES = int(os.getenv("GATEWAY_UPLOAD_MAX_BYTES", str(512 * 1024 * 1024)))
+
+
+class UploadTooLarge(Exception):
+    """Raised from inside the forwarded stream once the cap is passed."""
+
+
+async def _capped(request: Request) -> AsyncIterator[bytes]:
+    """The request body, counted, and abandoned if it runs over.
+
+    COUNTED RATHER THAN TRUSTED. content-length is checked first because it is
+    cheap and it is what every real client sends, but it is a claim: omit it,
+    send chunked, and the declared size is no size at all. So the bytes are
+    counted as they pass, and the forward is abandoned mid-flight if they run
+    over -- which costs the caller their upload and costs this stack nothing.
+    """
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > UPLOAD_MAX_BYTES:
+            raise UploadTooLarge
+        yield chunk
+
+
+async def _upload_to_stt(request: Request) -> Response:
+    started = time.monotonic()
+    declared = request.headers.get("content-length")
+    over = declared and declared.isdigit() and int(declared) > UPLOAD_MAX_BYTES
+    if not over:
+        try:
+            return await _proxy(request, STT, content=_capped(request))
+        except UploadTooLarge:
+            over = True
+    # `upload_too_large` is the vocabulary services/stt already answers for an
+    # oversized glossary and voice-ui for an oversized upload, so a client
+    # branching on `code` learns the same thing everywhere in the estate.
+    _log(request=request, backend="-", model=None, status="413-too-large", started=started)
+    return error_response(
+        413,
+        f"this gateway passes an upload straight to the transcription service, "
+        f"which reads it to decode it, so it is capped at "
+        f"{UPLOAD_MAX_BYTES / 1024**2:.0f} MB and this one is larger. Split the "
+        "audio, or raise GATEWAY_UPLOAD_MAX_BYTES on the gateway.",
+        code="upload_too_large")
+
+
 @app.post("/v1/audio/transcriptions")
 async def transcriptions(request: Request) -> Response:
-    return await _proxy(request, STT, content=request.stream())
+    return await _upload_to_stt(request)
 
 
 @app.post("/v1/audio/translations")
@@ -620,14 +677,15 @@ async def translations(request: Request) -> Response:
     than a 404 that says the route does not exist.
 
     Streamed like its sibling above: an hour of wav is 100 MB+ and there is no
-    routing decision in it -- stt-stack is the only STT backend.
+    routing decision in it -- stt-stack is the only STT backend. Capped like it
+    too; see UPLOAD_MAX_BYTES for why streaming was not enough on its own.
     """
-    return await _proxy(request, STT, content=request.stream())
+    return await _upload_to_stt(request)
 
 
 @app.post("/transcribe")
 async def transcribe(request: Request) -> Response:
-    return await _proxy(request, STT, content=request.stream())
+    return await _upload_to_stt(request)
 
 
 # ------------------------------------------------------------ text-to-speech --
@@ -897,8 +955,8 @@ async def chat_completions(request: Request) -> Response:
             f"a chat body is buffered whole here to find the audio inside it, "
             f"so it is capped at {CHAT_MAX_BYTES / 1024**2:.0f} MB and this "
             "one is larger. POST /v1/audio/transcriptions takes the clip as a "
-            "file upload, streams it through this gateway rather than holding "
-            "it, and has no ceiling here.",
+            "file upload and streams it through rather than holding it, so its "
+            f"ceiling is far higher at {UPLOAD_MAX_BYTES / 1024**2:.0f} MB.",
             code="upload_too_large")
 
     try:
