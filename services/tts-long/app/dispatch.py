@@ -211,7 +211,7 @@ class LaneProbe:
         self._said = what
         if warn:
             self._log.warning("the %s lane is shut: the runner has no usable "
-                              "speech service (%s). Fix it with `idlegpu "
+                              "speech service (%s). Fix it with `offpeak "
                               "service install` on that machine.",
                               self._name, what)
         else:

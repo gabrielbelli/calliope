@@ -561,7 +561,7 @@ def test_a_pinned_configuration_pins_the_digest_rather_than_the_name():
 
 
 def test_a_fingerprint_is_accepted_in_the_form_the_runner_prints_it():
-    """`idlegpu fingerprint` prints lower-case hex and also a colon-grouped
+    """`offpeak fingerprint` prints lower-case hex and also a colon-grouped
     form for reading aloud. Somebody will paste the grouped one."""
     grouped = ":".join(["AB"] * 32)
     cfg = RunnerConfig.from_env({"TTS_RUNNER_HOST": "h", "TTS_RUNNER_FINGERPRINT": grouped})

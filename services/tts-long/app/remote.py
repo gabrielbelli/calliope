@@ -7,7 +7,7 @@ CPU and neither wants a GPU. So there is exactly one reason to reach across a
 network, and this module is it.
 
 WHAT THIS IS NOT. It is not a client for a cluster, a broker or a scheduler.
-There is no central server, and the runner on the other end is an `idlegpu`
+There is no central server, and the runner on the other end is an `offpeak`
 agent listening on its own machine with a pinned self-signed certificate. If
 several runners ever exist, a chooser goes in front of this and nothing here
 changes.
@@ -270,7 +270,7 @@ def _pinned_context(cfg: RunnerConfig) -> ssl.SSLContext:
     THREE WAYS TO ESTABLISH TRUST AND NONE OF THEM IS "DO NOT CHECK".
 
     1. A pinned SHA-256 fingerprint. The runner mints a self-signed certificate
-       into its own directory on first run and prints the digest; `idlegpu
+       into its own directory on first run and prints the digest; `offpeak
        fingerprint` prints it again. This is the normal case.
     2. A private CA bundle, for anyone who has an internal PKI.
     3. The system trust store, if the runner somehow has a publicly trusted
@@ -729,7 +729,7 @@ class RunnerClient:
                     # is in session 0, console is session 1 and <account> is
                     # signed in: cannot observe the user" -- an account name
                     # and a continuously pollable signal of whether somebody is
-                    # sitting at that desk. The text comes from idlegpu, not
+                    # sitting at that desk. The text comes from offpeak, not
                     # from this repository, so what it says is not ours to
                     # bound. `machine_state` below is the same answer as an
                     # enum, which a page can render and a stranger learns

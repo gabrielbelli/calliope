@@ -199,7 +199,7 @@ def _engine_ids(env) -> list[str]:
 
 
 def _runner_service_for(env, facts: EngineFacts) -> str:
-    """Which idlegpu service id carries this engine, per engine.
+    """Which offpeak service id carries this engine, per engine.
 
     TTS_RUNNER_SERVICE IS STILL HONOURED and only for `chatterbox`. It is set
     in compose files and in people's shells, it has only ever meant the one
@@ -510,7 +510,7 @@ def check_config(env=None) -> tuple[dict[str, EngineSpec], str, int]:
 
 ENGINES, DEFAULT_ENGINE, LOCAL_RESIDENT_MAX = check_config()
 
-# {engine id: idlegpu service id}, so remote.py can name a service without
+# {engine id: offpeak service id}, so remote.py can name a service without
 # knowing what an engine is.
 RUNNER_SERVICE_FOR = {e: s.runner_service for e, s in ENGINES.items()}
 LOCAL_ENGINES = [e for e, s in ENGINES.items() if s.local]
@@ -858,7 +858,7 @@ def refuse_unavailable(spec: EngineSpec, probe) -> Refusal | None:
         503,
         f"{spec.id} is enabled but nothing here can run it right now: it is "
         f"not in TTS_LOCAL_ENGINES, and the runner reports '{why}' for service "
-        f"'{spec.runner_service}'. Install it with 'idlegpu service install "
+        f"'{spec.runner_service}'. Install it with 'offpeak service install "
         f"{spec.runner_service}' on that machine and restart the agent, or "
         f"send model='{DEFAULT_ENGINE}'.",
         "engine_unavailable", "model")

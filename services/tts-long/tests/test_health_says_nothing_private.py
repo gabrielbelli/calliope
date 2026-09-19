@@ -39,7 +39,7 @@ def test_the_runner_snapshot_carries_no_address():
 
 
 def test_the_runner_snapshot_carries_no_free_text_from_the_runner():
-    """`reason` and `machine_state_reason` are idlegpu's own words, written in
+    """`reason` and `machine_state_reason` are offpeak's own words, written in
     another repository, so what they say is not ours to bound. `machine_state`
     is the same answer as an enum: a page can render it and a stranger learns
     nothing."""

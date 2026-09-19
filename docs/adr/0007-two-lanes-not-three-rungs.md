@@ -47,7 +47,7 @@ The two-lane arithmetic therefore refuses it without needing a special case. On
 8 s hop — and 1108 × 1.25 is more than 1304, so it would stay here.
 
 **Two, and this is the one that settles it: the rung was never reachable.** The
-`idlegpu` agent on spring registers exactly two services, `echo` and
+`offpeak` agent on spring registers exactly two services, `echo` and
 `chatterbox`. It has never offered `chatterbox-cpu`. Every offer this service
 ever made to that rung was answered `no_such_service`, for the whole life of the
 rung, in the only deployment there is. Nothing failed and nothing was logged as

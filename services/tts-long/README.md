@@ -718,7 +718,7 @@ defaults, and know what the third switch buys:
 
 * **A `voxtral` request with the runner away is a 503 `engine_unavailable`,
   before a job id exists and before a queue slot is taken**, naming the engine,
-  the `idlegpu service install voxtral` command, and `model='chatterbox'`.
+  the `offpeak service install voxtral` command, and `model='chatterbox'`.
 * **An already-accepted job that has had no eligible lane for
   `TTS_RUNNER_ONLY_DEADLINE_SECONDS` (900) reaches a terminal `failed` record**
   with the runner's own reason in it, and its queue slot is released. The clock
@@ -747,7 +747,7 @@ the section above.
 
 There is still **one runner lane**. The agent runs at most one controller per
 device group, so the card holds one process; the engine rides on the job and
-resolves to an `idlegpu` service id at submit
+resolves to an `offpeak` service id at submit
 (`TTS_RUNNER_SERVICE_<ENGINE>`). When engines contend for the card **baseline
 wins**, because it has the worse fallback: 23 languages and two expressive
 controls with no substitute anywhere, against turbo's local floor 2.5x away. A
@@ -914,7 +914,7 @@ sentence.
 | `TTS_<ENGINE>_<FIELD>` | the global default | Per-engine default for one control, e.g. `TTS_CHATTERBOX_TURBO_TEMPERATURE`. Setting one for a field that engine has no control for is **fatal at boot**, naming the key and the way out |
 | `TTS_RUNNER_PORT` | `47600` | The runner's port. Only read when `TTS_RUNNER_HOST` is set |
 | `TTS_RUNNER_POLL` | `2` | Seconds between polls of a lease the runner is already working on. Not the readiness probe — that is `TTS_RUNNER_PROBE_S` |
-| `TTS_RUNNER_SERVICE_<ENGINE>` | the engine id | The `idlegpu` service id per engine. `TTS_RUNNER_SERVICE` is the legacy spelling and now means the `chatterbox` engine only. For an engine with no local lane an uninstalled service is a 503 rather than a slow local job, because there is no local job |
+| `TTS_RUNNER_SERVICE_<ENGINE>` | the engine id | The `offpeak` service id per engine. `TTS_RUNNER_SERVICE` is the legacy spelling and now means the `chatterbox` engine only. For an engine with no local lane an uninstalled service is a 503 rather than a slow local job, because there is no local job |
 | `TTS_REALTIME_FACTOR_<LANE>_<ENGINE>` | the catalogue seed | Rate seed per (lane, engine) pair. Falls back pair → lane → global |
 | `TTS_COLD_LOAD_SECONDS_<ENGINE>` | the catalogue seed | Cold load per engine; `chatterbox-turbo` seeds 68 from the 67.5 s measured on spring |
 | `TTS_API_KEYS` | *(unset)* | Comma-separated accepted keys. Unset means **no auth**; set but naming no key (`''`, `','`) refuses to start |
@@ -1009,14 +1009,14 @@ advertise it — which is what this deployment has now done, for reasons that
 outgrew the runner entirely. See
 [ADR 0010](../../docs/adr/0010-the-third-engine-was-measured-and-retired.md).
 
-The other end is an `idlegpu` agent (its own repository, not yet published): a
+The other end is an `offpeak` agent (its own repository, not yet published): a
 small program on a machine with a spare GPU, most likely somebody's gaming PC, that runs work while
 nobody is using the card and hands it straight back when they are. There is no
 broker and no cluster. This service talks to that machine directly over TLS.
 
 ```yaml
 TTS_RUNNER_HOST: "192.0.2.11"      # example only
-TTS_RUNNER_FINGERPRINT: ""         # `idlegpu fingerprint` on that machine
+TTS_RUNNER_FINGERPRINT: ""         # `offpeak fingerprint` on that machine
 TTS_RUNNER_API_KEY_FILE: /run/secrets/runner-key
 ```
 

@@ -175,7 +175,7 @@ it normal.
 There is still **one runner lane**. The agent starts at most one controller per
 device group and does not pre-empt, so the card physically holds one process; a
 second lane would let the dispatcher believe it has a slot it will never get.
-The engine rides on the job and resolves to an `idlegpu` service id at submit.
+The engine rides on the job and resolves to an `offpeak` service id at submit.
 
 When both engines want the card, **baseline wins**: turbo is registered at
 `Priority = 9` against baseline's `10`. The reason is not that baseline is more
@@ -217,7 +217,7 @@ indistinguishable from a week of gaming.
   layer. A turbo point release that adds either must fail the container at start
   with a named message, not one job at a time.
 * **Turbo ships local-first.** The first slice puts it on the API running on
-  orko's CPU with `idlegpu` untouched. That proves the local-floor rule instead
+  orko's CPU with `offpeak` untouched. That proves the local-floor rule instead
   of promising it, and it means nobody can later argue the card into being a
   requirement.
 

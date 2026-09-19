@@ -484,7 +484,7 @@ services:
       # app/remote.py is imported and never used. Setting the host is what
       # turns on the seam at app/main.py's _backend_for.
       #
-      # The runner is an `idlegpu` agent (its own repository) on a machine with
+      # The runner is an `offpeak` agent (its own repository) on a machine with
       # a spare GPU, most likely somebody's gaming PC. It is NOT a cluster and
       # there is no broker: this service talks to that machine directly.
       #
@@ -500,7 +500,7 @@ services:
       # app/synth.py is never removed and is what makes that safe.
       #
       # TLS ALWAYS, VERIFIED ALWAYS. The runner mints a self-signed certificate
-      # into its own directory; `idlegpu fingerprint` on that machine prints the
+      # into its own directory; `offpeak fingerprint` on that machine prints the
       # SHA-256 to pin here. There is no setting that turns verification off.
       # Use TTS_RUNNER_CA_FILE instead if you have your own certificate authority.
       #
@@ -510,7 +510,7 @@ services:
       TTS_RUNNER_PORT: "47600"
       # THE TRUST ROOT, and the only one. Verified from this host against the
       # live listener before it was written down: openssl s_client reported
-      # the same SHA-256 that `idlegpu fingerprint` prints on the runner. It
+      # the same SHA-256 that `offpeak fingerprint` prints on the runner. It
       # changes if the certificate is ever reminted, and a mismatch is a
       # refused connection rather than a warning.
       TTS_RUNNER_FINGERPRINT: "db3493bff0fd794d9aca37fd0091d86822cf568ed10ac86b579f2735bea5badc"
@@ -518,14 +518,14 @@ services:
       # not in it. Mounted read-only below, mode 0400, owned by the uid this
       # container runs as.
       TTS_RUNNER_API_KEY_FILE: /run/secrets/runner-key
-      # THE idlegpu SERVICE ID PER ENGINE. TTS_RUNNER_SERVICE is the legacy
+      # THE offpeak SERVICE ID PER ENGINE. TTS_RUNNER_SERVICE is the legacy
       # spelling and now means "the id for the `chatterbox` engine" and nothing
       # else; TTS_RUNNER_SERVICE_<ENGINE ID, UPPERCASED, HYPHENS TO
       # UNDERSCORES> is the general form. Both default to the engine id itself.
       #
       # SETTING THE TURBO ONE INSTALLS NOTHING. There is one lane and one card:
       # the agent registers services from its own worker.ini and must be
-      # restarted after `idlegpu service install chatterbox-turbo` on that
+      # restarted after `offpeak service install chatterbox-turbo` on that
       # machine. Until then the probe reports `no_such_service` for this id,
       # logs the install command once at WARNING, baseline keeps the card and
       # every turbo job runs on this container's CPU. That is the designed

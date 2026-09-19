@@ -132,7 +132,7 @@ class EngineFacts:
     # only on a fast path the standard path does not share. A CPU class here
     # would be a lie a boot-time check could not catch.
     local_class: str | None
-    # The idlegpu service id this engine's runner lane asks for by default.
+    # The offpeak service id this engine's runner lane asks for by default.
     runner_service: str
     languages: tuple[str, ...]
     # The generation fields that reach generate(). See the class docstring.
