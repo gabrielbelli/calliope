@@ -175,11 +175,39 @@ def test_the_menu_only_offers_settings_that_change_something():
         "the player no longer carries the key the daemon writes"
 
 
-def test_no_settings_window_for_what_a_menu_can_say():
-    """A window is a thing to find, open and close. Two controls do not earn
-    one, and it can be added the day something needs a text field -- a server
-    URL and a key, which is exactly the Calliope section."""
-    assert "NSWindow" not in DAEMON_CODE, "a settings window appeared before it was needed"
+def test_the_settings_window_says_what_a_menu_cannot():
+    """The two controls are in the menu as well, and on their own they would
+    not have earned a window. What earns it is the rest of the panel: whether
+    the permission is granted, whether the model is warm, and where the log is
+    -- because the answer to "the hotkey did nothing" is in that file and
+    nobody should have to be told its path."""
+    assert "NSWindow(" in DAEMON_CODE
+    assert "Accessibility" in DAEMON_CODE and "daemon.log" in DAEMON_CODE, \
+        "the window does not say why the hotkey might be silent"
+    # AND IT REFRESHES WHEN OPENED. A permission granted in System Settings
+    # happens outside this process, so a panel that reads its state once is
+    # wrong from the moment somebody acts on it.
+    assert "refreshSettings()" in DAEMON_CODE
+
+
+def test_the_daemon_owns_its_server_rather_than_adopting_one():
+    """A REAL DEFECT, SEEN IN THE MENU. The first version adopted whatever was
+    already listening on 47815 and said so for as long as it ran. Adopting
+    reads well and behaves badly: the daemon cannot hold open a process it does
+    not own, cannot restart it when it dies, and cannot tell it to skip the
+    idle timeout -- so "Kokoro is warm" became a claim about somebody else's
+    server, permanently, with no route back.
+
+    Measured on the machine: the listener's parent was launchd, which is what a
+    process looks like once the daemon that started it has gone. Every crash
+    and every reinstall over a running binary leaves one, so this is the common
+    case."""
+    assert "reclaimPort()" in DAEMON_CODE, "the port is not reclaimed"
+    assert "adopted a server" not in DAEMON_CODE, "it still adopts"
+    # Signalled by script path, never by port: something else listening there
+    # is a conflict to report, not a process to kill.
+    assert '"-TERM", "-f", script' in DAEMON_CODE, \
+        "it kills by port, so it could signal a process that is not ours"
 
 
 def test_the_daemon_is_local_only_like_the_player():

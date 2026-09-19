@@ -72,9 +72,26 @@ final class ServerSupervisor {
 
     func start() {
         guard !isRunning else { return }
+
+        // RECLAIM, DO NOT ADOPT, AND THIS WAS WRONG THE FIRST TIME. Adopting
+        // reads well and behaves badly: the daemon cannot hold open a process
+        // it does not own, cannot restart it when it dies, and cannot tell it
+        // to skip the idle timeout -- so "Kokoro is warm" becomes a sentence
+        // about somebody else's server. Worse, it is permanent: the menu said
+        // "adopted a server this daemon did not start" for as long as the
+        // daemon ran, with no route back.
+        //
+        // Measured on this machine: the listener's parent was launchd, which
+        // is what a process looks like after the daemon that started it has
+        // gone. That is the common case, not the exotic one -- every crash,
+        // every reinstall over a running binary leaves one.
+        //
+        // The server is the same script serving the same model whoever started
+        // it, so taking it over costs at most one interrupted passage, and
+        // only if something is speaking at the moment the daemon starts.
         if somethingIsListening {
-            lastError = "adopted a server this daemon did not start"
-            return
+            Log.write("port 47815 is taken; reclaiming it")
+            reclaimPort()
         }
 
         // ".venv/bin/python", EXACTLY WHAT install.sh CREATES AND WHAT THE
@@ -121,6 +138,30 @@ final class ServerSupervisor {
         } catch {
             lastError = "could not start: \(error.localizedDescription)"
         }
+    }
+
+    /// Stop whatever is holding 47815 and wait for it to let go.
+    ///
+    /// pkill BY THE SCRIPT PATH, not by port, because only our own server may
+    /// be signalled: something else listening there is a conflict to report,
+    /// not a process to kill. SIGTERM for the reason it is always SIGTERM
+    /// here -- phonemizer's espeak copy is removed on a normal exit and not
+    /// otherwise.
+    private func reclaimPort() {
+        let script = runtimeURL.appendingPathComponent("server.py").path
+        let pkill = Process()
+        pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        pkill.arguments = ["-TERM", "-f", script]
+        try? pkill.run()
+        pkill.waitUntilExit()
+
+        // Up to three seconds, checked rather than slept through: a server
+        // that closes in 200 ms should not cost the daemon three.
+        for _ in 0..<30 {
+            if !somethingIsListening { return }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        Log.write("port 47815 is still held after 3 s; starting anyway")
     }
 
     private func childDied() {
@@ -388,6 +429,11 @@ final class Hotkey {
 final class Daemon: NSObject, NSApplicationDelegate {
     private var item: NSStatusItem!
     private var loginItem: NSMenuItem?
+    private var settingsWindow: NSWindow?
+    private var loginCheckbox: NSButton?
+    private var speedPopup: NSPopUpButton?
+    private var statusText: NSTextField?
+    private var permissionButton: NSButton?
     private let server = ServerSupervisor()
     private let speaker = Speaker()
     private var hotkey: Hotkey?
@@ -441,6 +487,12 @@ final class Daemon: NSObject, NSApplicationDelegate {
         menu.addItem(speedMenu())
         menu.addItem(.separator())
         menu.addItem(statusLine)
+        menu.addItem(.separator())
+
+        let prefs = NSMenuItem(title: "Settings…", action: #selector(showSettings),
+                               keyEquivalent: ",")
+        prefs.target = self
+        menu.addItem(prefs)
         menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Quit Calliope", action: #selector(quit), keyEquivalent: "q")
@@ -521,6 +573,129 @@ final class Daemon: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+
+    /// WHAT A MENU CANNOT SAY. The two controls here are also in the menu, and
+    /// on their own they would not have earned a window -- a window is a thing
+    /// to find, open and close. What earns it is everything else on this
+    /// panel: whether the permission is granted, whether the model is warm,
+    /// and where the log is when the answer to "nothing happened" lives in it.
+    ///
+    /// THERE IS NO CALLIOPE SECTION HERE YET, and that is deliberate rather
+    /// than unfinished. The fields would be a server URL and a key; saving
+    /// them while nothing reads them makes the window lie about what the app
+    /// can do. They arrive with the proxy that uses them.
+    @objc private func showSettings() {
+        if settingsWindow == nil { settingsWindow = buildSettingsWindow() }
+        refreshSettings()
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    private func buildSettingsWindow() -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 292),
+                              styleMask: [.titled, .closable],
+                              backing: .buffered, defer: false)
+        window.title = "Calliope"
+        window.isReleasedWhenClosed = false
+        window.center()
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        func heading(_ text: String) -> NSTextField {
+            let label = NSTextField(labelWithString: text)
+            label.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+            return label
+        }
+        func note(_ text: String) -> NSTextField {
+            let label = NSTextField(wrappingLabelWithString: text)
+            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            label.textColor = .secondaryLabelColor
+            label.preferredMaxLayoutWidth = 380
+            return label
+        }
+
+        stack.addArrangedSubview(heading("Speaking"))
+
+        let login = NSButton(checkboxWithTitle: "Open at login",
+                             target: self, action: #selector(toggleLoginFromWindow(_:)))
+        loginCheckbox = login
+        stack.addArrangedSubview(login)
+
+        let speedRow = NSStackView()
+        speedRow.orientation = .horizontal
+        speedRow.spacing = 8
+        speedRow.addArrangedSubview(NSTextField(labelWithString: "Speed"))
+        let popup = NSPopUpButton()
+        for step in [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
+            popup.addItem(withTitle: step == 1.0 ? "1× (normal)" : "\(step)×")
+            popup.lastItem?.representedObject = step
+        }
+        popup.target = self
+        popup.action = #selector(setSpeedFromWindow(_:))
+        speedPopup = popup
+        speedRow.addArrangedSubview(popup)
+        stack.addArrangedSubview(speedRow)
+        stack.addArrangedSubview(note("The hotkey is ⌥⌘S. Speed applies to the "
+            + "next passage; the capsule has its own control for the one being read."))
+
+        stack.addArrangedSubview(heading("Status"))
+        let status = NSTextField(wrappingLabelWithString: "")
+        status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        status.preferredMaxLayoutWidth = 380
+        statusText = status
+        stack.addArrangedSubview(status)
+
+        let permission = NSButton(title: "Grant Accessibility…", target: self,
+                                  action: #selector(askForPermission))
+        permission.bezelStyle = .rounded
+        permissionButton = permission
+        stack.addArrangedSubview(permission)
+
+        let logs = NSButton(title: "Open Log", target: self, action: #selector(openLog))
+        logs.bezelStyle = .rounded
+        stack.addArrangedSubview(logs)
+
+        window.contentView = stack
+        return window
+    }
+
+    private func refreshSettings() {
+        loginCheckbox?.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        let speed = settings.object(forKey: "speed") as? Double ?? 1.0
+        speedPopup?.selectItem(at: [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+            .firstIndex(where: { abs($0 - speed) < 0.01 }) ?? 1)
+
+        let kokoro = server.lastError ?? (server.isRunning ? "warm" : "starting…")
+        let access = Selection.isPermitted ? "granted" : "not granted — the hotkey cannot read a selection"
+        statusText?.stringValue = "Kokoro: \(kokoro)\nAccessibility: \(access)"
+        permissionButton?.isHidden = Selection.isPermitted
+    }
+
+    @objc private func toggleLoginFromWindow(_ sender: NSButton) {
+        toggleLogin()
+        refreshSettings()
+    }
+
+    @objc private func setSpeedFromWindow(_ sender: NSPopUpButton) {
+        guard let step = sender.selectedItem?.representedObject as? Double else { return }
+        settings.set(step, forKey: "speed")
+    }
+
+    @objc private func askForPermission() {
+        Selection.requestPermission()
+        // The grant happens in System Settings, in their own time, so the panel
+        // has to notice rather than assume.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.refreshSettings() }
+    }
+
+    @objc private func openLog() {
+        NSWorkspace.shared.open(runtimeURL.appendingPathComponent("daemon.log"))
+    }
 }
 
 extension Daemon: NSMenuDelegate {
