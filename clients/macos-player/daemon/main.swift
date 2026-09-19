@@ -23,9 +23,9 @@
 // Build and install: ../install.sh
 import AppKit
 import Carbon.HIToolbox
+import ServiceManagement
 
 let runtimeURL = URL(fileURLWithPath: NSString(string: "~/.local/share/calliope").expandingTildeInPath)
-let serverURL = "http://127.0.0.1:47815"
 let settings = UserDefaults(suiteName: "com.gabrielbelli.calliope-player")!
 
 // MARK: - The Kokoro server
@@ -387,6 +387,7 @@ final class Hotkey {
 
 final class Daemon: NSObject, NSApplicationDelegate {
     private var item: NSStatusItem!
+    private var loginItem: NSMenuItem?
     private let server = ServerSupervisor()
     private let speaker = Speaker()
     private var hotkey: Hotkey?
@@ -426,6 +427,19 @@ final class Daemon: NSObject, NSApplicationDelegate {
         menu.addItem(stop)
 
         menu.addItem(.separator())
+
+        // NO SETTINGS WINDOW FOR TWO CONTROLS. A window is a thing to find,
+        // open, and close; a menu that is already open is not. It earns one
+        // when there is something in it that a menu cannot express -- a server
+        // URL and a key, which is the Calliope section and does not exist yet.
+        let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin),
+                               keyEquivalent: "")
+        login.target = self
+        loginItem = login
+        menu.addItem(login)
+
+        menu.addItem(speedMenu())
+        menu.addItem(.separator())
         menu.addItem(statusLine)
         menu.addItem(.separator())
 
@@ -460,11 +474,58 @@ final class Daemon: NSObject, NSApplicationDelegate {
 
     @objc private func stopSpeaking() { speaker.stop() }
 
+    /// THE SAME KEY THE PLAYER ALREADY READS, in the same suite. The speed is
+    /// the player's setting and always was; the daemon only offers a second
+    /// place to change it, because the player is gone by the time you have an
+    /// opinion about how fast it was going.
+    private func speedMenu() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
+        let menu = NSMenu()
+        let current = settings.object(forKey: "speed") as? Double ?? 1.0
+        for step in [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
+            let item = NSMenuItem(title: step == 1.0 ? "1× (normal)" : "\(step)×",
+                                  action: #selector(setSpeed(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = step
+            item.state = abs(step - current) < 0.01 ? .on : .off
+            menu.addItem(item)
+        }
+        parent.submenu = menu
+        return parent
+    }
+
+    @objc private func setSpeed(_ sender: NSMenuItem) {
+        guard let step = sender.representedObject as? Double else { return }
+        settings.set(step, forKey: "speed")
+        // The player reads this when it starts, so the next passage takes it.
+        // Changing it mid-sentence deliberately does nothing to the one being
+        // read: the capsule has its own control for that, and two controls
+        // fighting over one utterance is worse than a change that waits.
+    }
+
+    /// SMAppService, NOT A LaunchAgent plist. The plist is a file to write, to
+    /// keep in step with wherever the binary moved to, and to remember to
+    /// remove; this is one call, and macOS shows it to the owner in the same
+    /// list as everything else that opens at login.
+    @objc private func toggleLogin() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+            } else {
+                try service.register()
+            }
+        } catch {
+            Log.write("open at login: \(error.localizedDescription)")
+        }
+    }
+
     @objc private func quit() { NSApp.terminate(nil) }
 }
 
 extension Daemon: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
+        loginItem?.state = SMAppService.mainApp.status == .enabled ? .on : .off
         if !Selection.isPermitted {
             statusLine.title = "Needs Accessibility permission to read a selection"
         } else if let error = server.lastError {

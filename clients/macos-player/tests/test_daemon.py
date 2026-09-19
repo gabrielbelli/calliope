@@ -153,6 +153,35 @@ def test_the_daemon_and_the_player_agree_on_where_things_are():
     assert "kokoro-tts" not in DAEMON_CODE, "the daemon points at the old runtime"
 
 
+def test_the_menu_only_offers_settings_that_change_something():
+    """THE RULE THIS FILE EXISTS TO HOLD, and it is about what is ABSENT. A
+    switch that toggles nothing is worse than no switch: it tells somebody the
+    feature is there, and the bug report is "I turned it on and nothing
+    happened".
+
+    So the Calliope connection is not in this menu yet, because the proxy it
+    would enable does not exist. Neither is a "local API" toggle: the loopback
+    server is not an optional extra, it is how speech happens at all -- the
+    player fetches from it -- so turning it off would turn the hotkey off with
+    it, which is not what anybody would expect that switch to mean."""
+    assert "Connect to a Calliope" not in DAEMON_CODE, \
+        "a Calliope switch is in the menu before the proxy exists to be switched"
+    assert "serverURL" not in DAEMON_CODE and "apiKey" not in DAEMON_CODE
+    # And what IS there reaches something real.
+    assert "SMAppService" in DAEMON_CODE, "Open at Login does not use the API that owns it"
+    assert 'settings.set(step, forKey: "speed")' in DAEMON_CODE, \
+        "the speed menu writes somewhere the player does not read"
+    assert '"speed"' in (HERE / "player" / "defaults.swift").read_text(), \
+        "the player no longer carries the key the daemon writes"
+
+
+def test_no_settings_window_for_what_a_menu_can_say():
+    """A window is a thing to find, open and close. Two controls do not earn
+    one, and it can be added the day something needs a text field -- a server
+    URL and a key, which is exactly the Calliope section."""
+    assert "NSWindow" not in DAEMON_CODE, "a settings window appeared before it was needed"
+
+
 def test_the_daemon_is_local_only_like_the_player():
     """GAB-635 removed the remote path from the reader. The daemon is a new
     surface on the same app and must not reintroduce it: the proxy to a Calliope
