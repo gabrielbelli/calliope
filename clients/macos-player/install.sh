@@ -13,7 +13,11 @@ runtime="$HOME/.local/share/calliope"
 # identity for macOS to grant Accessibility to and for Gatekeeper to check,
 # which is what shipping this anywhere but this machine requires.
 app="${CALLIOPE_APP_DIR:-/Applications}/Calliope.app"
-version="${CALLIOPE_VERSION:-0.1.0}"
+# The default tracks the newest release. A source build that reports an older
+# version than it contains makes "which build is this" unanswerable -- measured:
+# after installing from source, Calliope.app said 0.1.0 while carrying every
+# 0.1.1 change, and that is the first thing anybody checks.
+version="${CALLIOPE_VERSION:-0.1.1}"
 # Ad-hoc by default, which is enough to run here and not enough to run
 # elsewhere. Set this to a "Developer ID Application: ..." identity to produce
 # something notarisable.
