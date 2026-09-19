@@ -747,8 +747,10 @@ def test_one_term_per_concept_survives_into_the_result_lines():
     """
     assert "Glossary rewrote" not in HTML
     assert "Vocabulary rewrote" in HTML
-    assert "Removed <strong>${voice.name}" not in HTML
-    assert "Deleted <strong>${voice.name}" in HTML
+    assert "Removed <strong>${esc(voice.name)}" not in HTML
+    # esc(), because this line interpolates a name into markup: a voice called
+    # `<img src=x onerror=...>` used to execute here.
+    assert "Deleted <strong>${esc(voice.name)}" in HTML
 
 
 def test_the_page_says_once_that_a_job_survives_the_tab_closing():

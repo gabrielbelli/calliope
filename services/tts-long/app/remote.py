@@ -724,7 +724,17 @@ class RunnerClient:
                     "state": doc.get("state"),
                     "can_run": doc.get("can_run"),
                     "mode": doc.get("mode"),
-                    "reason": doc.get("reason"),
+                    # `reason` IS THE RUNNER'S OWN PROSE AND IT NAMES PEOPLE.
+                    # Measured on the live deployment, world-readable: "agent
+                    # is in session 0, console is session 1 and <account> is
+                    # signed in: cannot observe the user" -- an account name
+                    # and a continuously pollable signal of whether somebody is
+                    # sitting at that desk. The text comes from idlegpu, not
+                    # from this repository, so what it says is not ours to
+                    # bound. `machine_state` below is the same answer as an
+                    # enum, which a page can render and a stranger learns
+                    # nothing from.
+                    "machine_state": doc.get("machine_state"),
                     "seconds_until_available": doc.get("seconds_until_available"),
                     "job_running": doc.get("job_running"),
                     "running_service": doc.get("running_service"),
@@ -737,7 +747,10 @@ class RunnerClient:
                     # Absent on a runner that predates the split, and absent is
                     # not the same as zero, so these stay None rather than 0.
                     "machine_state": doc.get("machine_state"),
-                    "machine_state_reason": doc.get("machine_state_reason"),
+                    # Out for the same reason as `reason` above: runner prose,
+                    # on a world-readable path. Today it says "cannot see
+                    # whether anybody is at this machine", which is harmless;
+                    # what it says in some other state is not ours to bound.
                     "limits": doc.get("limits"),
                     "cpu": {k: cpu.get(k) for k in
                             ("machine_pct", "own_pct", "foreign_pct", "logical_processors")
@@ -784,8 +797,17 @@ class RunnerClient:
                 }
         except Exception as exc:  # noqa: BLE001 - the failure IS the status
             snap = {"reachable": False, "error": type(exc).__name__}
-        snap["host"] = self.cfg.host
-        snap["port"] = self.cfg.port
+        # NEITHER host NOR port IS PUBLISHED, and this is not tidiness. The
+        # gateway inlines this whole document into /health, which is the one
+        # path authentication exempts by design (auth.py: the TrueNAS
+        # healthcheck has no key and no way to be given one). Fetched from the
+        # public internet with no credential, it was handing out a private
+        # workstation's LAN address and port. That exemption justifies a
+        # liveness answer about this stack, not a third machine's topology --
+        # and unlike the no-auth gap it survives turning keys on.
+        #
+        # Nothing needed them. The page printed them into a "where" line that
+        # tells its reader their own machine's address.
         snap["service"] = self.cfg.service
         # `cpu_service` IS NOT PUBLISHED HERE ANY MORE. It named
         # `chatterbox-cpu`, which the agent on spring has never registered, so

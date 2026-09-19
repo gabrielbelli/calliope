@@ -2212,7 +2212,30 @@ function roughly(seconds) {
   const h = seconds / 3600;
   return "about " + (h < 2 ? "an hour" : Math.round(h) + " hours");
 }
-function note(host, kind, html) {
+/* TEXT, NOT HTML, AND THAT IS THE WHOLE FIX.
+   This was an innerHTML sink with 64 callers, twelve of which concatenated
+   `err.message` straight in and one of which concatenated a REMOTE SERVER'S
+   words: ingest.py copies yt-dlp's failure text -- which quotes the far site's
+   own error string -- into `state.error`, and the download handler pasted it
+   here. A link to a host whose failure text carries `<img src=x onerror=...>`
+   ran that handler on this origin, and this origin is the authenticator: the
+   UI server signs every outgoing request with UI_GATEWAY_API_KEY, so injected
+   script could start jobs, delete clips and read transcripts with the
+   container's credential. The CSP allows 'unsafe-inline', so nothing stopped it.
+   This page closed exactly this hole once before -- see the comment above esc()
+   about a media title that executed -- and left the error path open.
+   Callers that genuinely build markup use noteHtml and escape their own
+   interpolations; there are four, and two of them were injectable through a
+   voice name. */
+function note(host, kind, text) {
+  host.textContent = "";
+  if (!text) return;
+  const box = document.createElement("div");
+  box.className = "note " + kind;
+  box.textContent = text;
+  host.appendChild(box);
+}
+function noteHtml(host, kind, html) {
   host.innerHTML = html ? `<div class="note ${kind}">${html}</div>` : "";
 }
 
@@ -3112,19 +3135,29 @@ function paintRunner() {
   if (!r.reachable) {
     $("runnerstate").textContent = "GPU runner: not answering";
     $("runnerwhy").textContent = r.error ? "The last attempt gave " + r.error + "." : "";
-    $("runnerwhere").textContent = r.host ? r.host + ":" + r.port : "";
+    $("runnerwhere").textContent = "";
     $("runnergpu").textContent = "";
     return;
   }
 
   const busy = r.job_running ? " · working" : "";
   $("runnerstate").textContent = "GPU runner: " + (r.state || "unknown") + busy;
-  $("runnerwhere").textContent = (r.host || "") + ":" + (r.port || "")
-    + (r.mode ? " · " + r.mode : "");
+  /* NOT host:port ANY MORE. /health is the one path the gateway exempts from
+     authentication, the gateway inlines this document into it, and it was
+     publishing a private workstation's LAN address to anybody who asked. The
+     address also told this page's reader nothing they did not know. */
+  $("runnerwhere").textContent = r.mode || "";
 
-  /* The reason is the useful half whenever it will not run, and it is the
-     runner's own words rather than this page guessing from a state name. */
-  let why = r.can_run ? "" : (r.reason || "");
+  /* The runner's own prose is gone from the payload for the same reason: on
+     the live deployment `reason` read "…and <account> is signed in: cannot
+     observe the user", which is an account name and a pollable signal of
+     whether somebody is at that desk, world-readable. machine_state is the
+     same answer as an enum, and this page can say it in its own words. */
+  let why = r.can_run ? "" : ({
+    busy: "Busy with something else.",
+    occupied: "Somebody is using that machine.",
+    unknown: "That machine is not answering.",
+  }[r.machine_state] || (r.machine_state ? "Machine state: " + r.machine_state + "." : ""));
   if (!r.can_run && r.seconds_until_available > 0)
     why += (why ? " " : "") + "Free again in " + clock(r.seconds_until_available) + ".";
   $("runnerwhy").textContent = why;
@@ -3699,7 +3732,7 @@ The file is deleted from disk.`)) return;
     await json("/glossaries/" + encodeURIComponent(target.name), { method: "DELETE" });
     $("glossform").hidden = true;
     await loadGlossaries();
-    note($("glossnote"), "ok", `Deleted <strong>${esc(target.name)}</strong>.`);
+    noteHtml($("glossnote"), "ok", `Deleted <strong>${esc(target.name)}</strong>.`);
   } catch (err) {
     note($("glossnote"), "bad", esc(err.message));
   }
@@ -4125,9 +4158,12 @@ async function watchDownload() {
       return;
     }
     const percent = Number(state.percent) || 0;
-    note(host, "flat", `Downloading ${percent.toFixed(0)}%${
-      state.speed ? " · " + human(state.speed) + "/s" : ""}${
-      state.eta ? " · " + clock(state.eta) + " left" : ""}
+    /* esc() on both: speed and eta come out of MeTube's /history like the
+       error text did, so they are a remote server's strings, not numbers this
+       page produced. human() and clock() format whatever they are given. */
+    noteHtml(host, "flat", `Downloading ${percent.toFixed(0)}%${
+      state.speed ? " · " + esc(human(state.speed)) + "/s" : ""}${
+      state.eta ? " · " + esc(clock(state.eta)) + " left" : ""}
       <div class="bar-track"><div class="bar-fill" style="transform:scaleX(${(percent / 100).toFixed(4)})"></div></div>
       <button class="link" id="stopdl" type="button">Stop and forget it</button>`);
     const stop = $("stopdl");
@@ -6184,7 +6220,7 @@ $("delvoice").addEventListener("click", async () => {
   try {
     await json("/ui/clips/" + encodeURIComponent(voice.name), { method: "DELETE" });
     await loadVoices();
-    note($("speak-note"), "ok", `Deleted <strong>${voice.name}</strong>.`);
+    noteHtml($("speak-note"), "ok", `Deleted <strong>${esc(voice.name)}</strong>.`);
   } catch (err) { note($("speak-note"), "bad", err.message); }
 });
 $("speed").addEventListener("input", () =>
@@ -9038,7 +9074,7 @@ $("saveclip").addEventListener("click", async () => {
     /* It used to add what a cloned voice costs. The voice is now selected,
        so the optgroup holding it says that, and estimate() has already put the
        figure on the Generate button. Three copies of one number. */
-    note($("speak-note"), "ok", `<strong>${payload.voice.name}</strong> is ready.`);
+    noteHtml($("speak-note"), "ok", `<strong>${esc(payload.voice.name)}</strong> is ready.`);
   } catch (err) {
     note($("clipnote"), "bad", err.message);
     $("saveclip").disabled = false;

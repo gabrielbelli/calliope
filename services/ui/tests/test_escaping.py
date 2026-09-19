@@ -1227,3 +1227,35 @@ def test_no_profile_name_reaches_innerhtml_unescaped():
     # And the two text sinks are still text sinks.
     assert '$("glosswhy").textContent =' in HTML
     assert 'confirm(`Delete the vocabulary profile' in HTML
+
+
+def test_note_puts_text_on_the_page_and_never_markup():
+    """AN innerHTML SINK WITH 64 CALLERS, one of which pasted a REMOTE SERVER'S
+    words. ingest.py copies yt-dlp's failure text — which quotes the far site's
+    own error string — into `state.error`, and the download handler concatenated
+    it straight into note(). A link to a host whose failure text carries
+    `<img src=x onerror=…>` ran that handler.
+
+    It ran on the origin that holds the credential: the UI server signs every
+    outgoing request with UI_GATEWAY_API_KEY, so injected script could start
+    jobs, delete clips and read transcripts as the container. The CSP allows
+    'unsafe-inline', so nothing downstream stopped it.
+
+    This page closed exactly this hole once before — see the comment above esc()
+    about a media title that executed — and left the error path open. Twelve
+    further callers concatenated `err.message` the same way.
+    """
+    body = HTML.split("function note(")[1].split("function noteHtml(")[0]
+    assert "innerHTML" not in body, "note() builds markup again"
+    assert "textContent" in body, "note() no longer sets text"
+
+    # The four callers that genuinely build markup escape what they interpolate.
+    import re
+    # Call sites only -- the definition's own `${kind}` is not a caller, and
+    # kind is one of three literals the page writes itself.
+    for call in re.findall(r"(?<!function )noteHtml\([^;]*?;", HTML, re.S):
+        for interpolation in re.findall(r"\$\{([^}]*)\}", call):
+            assert ("esc(" in interpolation
+                    or "toFixed" in interpolation
+                    or "CONFIG." in interpolation), \
+                f"noteHtml interpolates {interpolation!r} without escaping it"
