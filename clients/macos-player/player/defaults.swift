@@ -5,6 +5,9 @@ import Foundation
 let defaultsSuiteName = "com.gabrielbelli.calliope-player"
 let legacyDefaultsSuiteName = "com.gabrielbelli.kokoro-player"
 /// Everything the player persists: the speed step and whether the reader was left open.
+// "voice" is deliberately NOT carried: it did not exist before the rename, so
+// there is nothing under the old name to carry, and an empty value is the
+// default behaviour anyway.
 let carriedDefaultsKeys = ["speed", "karaoke"]
 
 // THE SUITE NAMES ARE ARGUMENTS SO THAT A TEST CAN RUN THIS EXACT FUNCTION, and for nothing else:

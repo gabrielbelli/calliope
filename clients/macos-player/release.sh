@@ -25,12 +25,20 @@ mkdir -p "$contents/MacOS" "$contents/Resources" "$helper/MacOS" "$dist"
 target="$(uname -m)-apple-macos26.0"
 
 echo "==> Code"
-swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" \
+swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" "$here/shared/mark.swift" \
     "$here/daemon/main.swift" -o "$contents/MacOS/calliope-daemon"
 swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" \
     "$here/player/main.swift" "$here/player/defaults.swift" \
     -o "$helper/MacOS/calliope-player"
 install -m 0644 "$here/server/server.py" "$contents/Resources/server.py"
+
+# THE MARK THE PAGE ALREADY WEARS. Drawn from shared/mark.swift rather than
+# shipped as an asset: there is no SVG rasteriser on this machine, the shape is
+# three primitives, and every size is drawn rather than downsampled -- a 2.2
+# unit stroke does not survive scaling 1024 down to 16.
+swiftc -O -swift-version 5 -target "$target" "$here/shared/mark.swift" \
+    "$here/bundle/make-icon.swift" -o "$staging/make-icon"
+"$staging/make-icon" "$contents/Resources/Calliope.icns"
 sed "s/__VERSION__/$version/g" "$here/bundle/Calliope-Info.plist" > "$contents/Info.plist"
 sed "s/__VERSION__/$version/g" "$here/bundle/CalliopePlayer-Info.plist" > "$helper/Info.plist"
 

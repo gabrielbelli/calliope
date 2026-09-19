@@ -1,0 +1,14 @@
+<!-- The Calliope mark, monochrome, for the OpenClip menu.
+
+     The same drawing as the app icon and the status item, from the same
+     numbers: the swell and the lamp out of shared/mark.swift, with the dark
+     plate dropped and the ink refitted to a 24 box. `currentColor` because
+     OpenClip tints its action icons, the way the other extensions here do.
+
+     This was the SF Symbol "waveform" -- a stock glyph with no relation to
+     anything else Calliope wears. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24">
+  <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+        d="M3 14.1C7.1 14.1 8.2 18.6 12 18.6C15.8 18.6 17 14.1 21 14.1"/>
+  <circle cx="12" cy="7.8" r="3.4" fill="currentColor"/>
+</svg>

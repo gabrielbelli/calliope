@@ -41,6 +41,34 @@ let voices: [NLLanguage: Voice] = [
     .simplifiedChinese: Voice(name: "zf_xiaobei", badge: "ZH"),
 ]
 
+/// Kokoro's voices carry their language in the first letter, which is how the
+/// server picks a phonemiser. Reading that back is what lets a chosen voice and
+/// auto-detection coexist.
+let languageByVoicePrefix: [Character: NLLanguage] = [
+    "a": .english, "b": .english, "e": .spanish, "f": .french,
+    "h": .hindi, "i": .italian, "j": .japanese, "p": .portuguese, "z": .simplifiedChinese,
+]
+
+/// The voice to read this passage in: the chosen one when it speaks the right
+/// language, the detected language's own otherwise.
+///
+/// A PINNED VOICE CANNOT SIMPLY WIN. The first letter is not decoration -- the
+/// server derives the phonemiser from it -- so pinning an English voice and
+/// then selecting Portuguese does not give you Portuguese in an English
+/// accent, it gives you Portuguese words run through an English phonemiser,
+/// which is a different and much worse thing. Detection exists precisely to
+/// stop that.
+///
+/// So the preference applies where it can apply, and the language wins where
+/// it cannot. Settings says so in one line rather than leaving somebody to
+/// discover it on a paragraph of French.
+func voiceFor(_ language: NLLanguage, chosen: String?) -> Voice {
+    let fallback = voices[language] ?? voices[.english]!
+    guard let chosen, !chosen.isEmpty, let prefix = chosen.first else { return fallback }
+    guard languageByVoicePrefix[prefix] == language else { return fallback }
+    return Voice(name: chosen, badge: fallback.badge)
+}
+
 var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 
 // MARK: - Text
@@ -874,7 +902,7 @@ let text = rawText.precomposedStringWithCanonicalMapping
 try? FileManager.default.removeItem(atPath: arguments[1])
 
 let language = detectLanguage(text)
-let voice = voices[language] ?? voices[.english]!
+let voice = voiceFor(language, chosen: settings.string(forKey: "voice"))
 let chunks = splitIntoChunks(text, language: language)
 guard !chunks.isEmpty else { exit(0) }
 

@@ -3,13 +3,26 @@
   "name": "Calliope",
   "description": "Reads the selection aloud with calliope-player: auto-detected language, a floating capsule with playback and speed controls.",
   "version": "2.1.0",
-  "keywords": ["tts", "speak", "read aloud", "voice", "calliope", "kokoro"],
+  "keywords": [
+    "tts",
+    "speak",
+    "read aloud",
+    "voice",
+    "calliope",
+    "kokoro"
+  ],
   "actions": [
     {
       "id": "com.gabrielbelli.calliope.speak",
       "title": "Speak",
-      "icon": "waveform",
-      "keywords": ["read aloud", "tts", "falar", "ler", "kokoro"],
+      "icon": "icon.svg",
+      "keywords": [
+        "read aloud",
+        "tts",
+        "falar",
+        "ler",
+        "kokoro"
+      ],
       "type": "script",
       "script": "calliope.py"
     }

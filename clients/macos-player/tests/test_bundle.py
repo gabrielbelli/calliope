@@ -144,3 +144,39 @@ def test_the_installer_puts_the_menu_bar_back():
         "the daemon is stopped by the installer and never restarted"
     assert INSTALL.index("pkill -TERM -f calliope-daemon") < INSTALL.index('open -g "$app"'), \
         "it is restarted before it is stopped"
+
+
+def test_the_app_wears_the_mark_the_page_already_wears():
+    """It shipped with no icon at all and an SF Symbol waveform in the menu bar
+    -- a stock glyph with no relation to anything else Calliope wears. The web
+    UI carries this mark inline in its <head> and its masthead, and that page's
+    own comment says of it: "it will be the app icon"."""
+    mark = (HERE / "shared" / "mark.swift").read_text()
+    for colour in ("1B / 255", "EB / 255", "FF / 255"):
+        assert colour in mark, f"the mark no longer uses {colour}, which the page does"
+    assert APP_PLIST["CFBundleIconFile"] == "Calliope"
+    assert "make-icon.swift" in INSTALL and "Calliope.icns" in INSTALL, \
+        "the installer does not build the icon"
+
+    daemon = (HERE / "daemon" / "main.swift").read_text()
+    assert "systemSymbolName" not in daemon, "the menu bar wears somebody else's glyph again"
+    assert "Mark.draw(in: context, size: rect.width, monochrome: true)" in daemon
+    assert "isTemplate = true" in daemon, \
+        "a coloured status item ignores light, dark and being clicked"
+
+    # And the OpenClip action, which was the same stock waveform.
+    import json
+    manifest = json.loads((HERE / "openclip" / "openclip.json").read_text())
+    assert manifest["actions"][0]["icon"] == "icon.svg"
+    svg = (HERE / "openclip" / "icon.svg").read_text()
+    assert "currentColor" in svg, "the menu cannot tint it"
+    assert "icon.svg" in INSTALL, "the installer does not ship it"
+
+
+def test_every_size_of_the_icon_is_drawn_rather_than_scaled():
+    """A 2.2-unit stroke does not survive 1024 downsampled to 16. iconutil
+    takes an iconset of real bitmaps, so each one is rendered at its own size."""
+    renderer = (HERE / "bundle" / "make-icon.swift").read_text()
+    assert "icon_16x16" in renderer and "icon_512x512@2x" in renderer
+    assert renderer.count("CGContext(data: nil") == 1, "more than one drawing path"
+    assert "for (name, size) in wanted" in renderer, "the sizes are not iterated"

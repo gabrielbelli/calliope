@@ -95,6 +95,36 @@ def remote_model_names(fresh=False):
 
 
 REMOTE_MODELS = [[], 0.0]
+REMOTE_VOICES = [[], 0.0]
+
+
+def remote_voice_names(fresh=False):
+    """The Calliope server's own preset voices, cached like its model list.
+
+    ONLY THE FAST ONES CAN BE HERE, and that is a property of the endpoint
+    rather than a filter applied afterwards: the gateway routes GET /voices to
+    tts-stack alone. The engines that answer 202 with a job instead of audio --
+    everything the gateway marks owned_by tts-long -- have no voices on that
+    path at all, so a name that arrives here is a name the player can actually
+    speak with. Offering a job-based voice in a picker would produce a reader
+    that shows a capsule and never makes a sound.
+    """
+    now = time.time()
+    if not fresh and REMOTE_VOICES[1] > now - 60:
+        return REMOTE_VOICES[0]
+    names = []
+    try:
+        request = urllib.request.Request(
+            CALLIOPE_URL + "/voices",
+            headers={"authorization": "Bearer " + CALLIOPE_KEY} if CALLIOPE_KEY else {})
+        with urllib.request.urlopen(request, timeout=5, context=tls_for(CALLIOPE_URL)) as answer:
+            names = list(json.loads(answer.read()).get("voices", []))
+    except Exception as error:
+        print("could not list remote voices: %r" % error, flush=True)
+        names = REMOTE_VOICES[0]
+    REMOTE_VOICES[0] = names
+    REMOTE_VOICES[1] = now
+    return names
 
 # THE MODEL IS NOT BESIDE THIS FILE ANY MORE, and assuming it was failed
 # totally: this script lives inside Calliope.app now, where a 310 MB model
@@ -212,6 +242,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, b"ok", "text/plain")
         if self.path == "/v1/models":
             return self.reply(200, json.dumps(self.models()).encode(), "application/json")
+        if self.path == "/voices":
+            return self.reply(200, json.dumps({"voices": self.voices()}).encode(),
+                              "application/json")
         return self.reply(404, b"not found", "text/plain")
 
     def models(self):
@@ -232,6 +265,19 @@ class Handler(BaseHTTPRequestHandler):
             for name in remote_model_names():
                 data.append({"id": name, "object": "model", "owned_by": "calliope-remote"})
         return {"object": "list", "data": data}
+
+    def voices(self):
+        """Every preset this address can speak with, local first.
+
+        The same shape as the gateway's /voices, so a caller that knows one
+        knows the other. Merged rather than replaced: a Calliope server adds
+        voices, it does not take away the ones on this Mac, and the local ones
+        keep working when the network does not.
+        """
+        names = list(KOKORO.get_voices()) if KOKORO else []
+        if CALLIOPE_URL:
+            names += [name for name in remote_voice_names() if name not in names]
+        return sorted(names)
 
     def do_POST(self):
         if self.path != "/v1/audio/speech":

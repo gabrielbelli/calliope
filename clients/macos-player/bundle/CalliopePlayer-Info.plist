@@ -8,6 +8,7 @@
   <key>CFBundleName</key>                  <string>Calliope Player</string>
   <key>CFBundleExecutable</key>            <string>calliope-player</string>
   <key>CFBundlePackageType</key>           <string>APPL</string>
+  <key>CFBundleIconFile</key>              <string>Calliope</string>
   <key>CFBundleShortVersionString</key>    <string>__VERSION__</string>
   <key>CFBundleVersion</key>               <string>__VERSION__</string>
   <key>LSMinimumSystemVersion</key>        <string>26.0</string>
