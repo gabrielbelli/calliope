@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import unicodedata
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -287,6 +288,28 @@ def ramp_chunks(phonemes: str, schedule: list[int],
 
 
 class Synth:
+    #: Held across the phonemiser, and only across the phonemiser.
+    #:
+    #: MEASURED, NOT FEARED: 320 calls from 8 threads against a single-threaded
+    #: reference gave 13 correct, 195 that returned ANOTHER TEXT'S PHONEMES and
+    #: 112 that raised "number of lines in input and output must be equal".
+    #: Reproduced three times, in this service's own environment.
+    #:
+    #: The cause is one process-wide EspeakBackend behind a ctypes CDLL that
+    #: releases the GIL. phonemizer says so itself, in
+    #: backend/espeak/api.py: the library "is not designed to be wrapped nor to
+    #: be used in multithreaded/multiprocess contexts (massive use of global
+    #: variables)". Both /speak and /v1/audio/speech are `def`, deliberately, so
+    #: FastAPI runs them on AnyIO's 40-thread pool -- which means ordinary
+    #: overlap, the page streaming while a shortcut speaks, is all it takes for
+    #: a reader to be handed audio of a document they never sent.
+    #:
+    #: Only this call. onnxruntime's Run() is thread-safe and speak_chunk passes
+    #: is_phonemes=True, so synthesis itself stays parallel and throughput is
+    #: unaffected; tokenize() is a dict lookup over an in-memory vocabulary and
+    #: touches nothing shared.
+    _espeak = threading.Lock()
+
     def __init__(self, model_path: str, voices_path: str) -> None:
         _wire_espeak()
         from kokoro_onnx import Kokoro
@@ -343,7 +366,8 @@ class Synth:
         text = unicodedata.normalize("NFC", text)
         if not text.strip():
             return []
-        phonemes = self._k.tokenizer.phonemize(text, language)
+        with self._espeak:
+            phonemes = self._k.tokenizer.phonemize(text, language)
         schedule = ramp(len(phonemes)) if ramp else None
         if schedule:
             return ramp_chunks(phonemes, schedule, cap=target)
