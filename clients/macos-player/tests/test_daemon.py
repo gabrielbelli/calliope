@@ -378,7 +378,14 @@ def test_the_daemon_can_stop_a_player_it_did_not_start():
     with the upper capsule covering the lower one's close button. README.md
     says "one player at a time", and it was true only when both came from the
     same side."""
-    assert "stopForeignPlayer()" in DAEMON_CODE, "the daemon still only stops its own player"
+    # THE CALL SITE, NOT THE DEFINITION. Asserting the name appears anywhere
+    # passed with the call deleted, because the function that is never called
+    # still contains its own name -- the same shape as the player.pid write
+    # that nothing read.
+    # Scoped to Speaker: ServerSupervisor has a stop() too, and it comes first.
+    speaker = DAEMON_CODE.split("class Speaker")[1]
+    stop = speaker.split("func stop() {")[1].split("private func stopForeignPlayer")[0]
+    assert "stopForeignPlayer()" in stop, "stop() no longer reaches a player it did not start"
     assert "killpg(pid, SIGTERM)" in DAEMON_CODE, \
         "it signals a process rather than a group, so a player that forked is left speaking"
     assert "proc_pidpath" in DAEMON_CODE, \
@@ -416,3 +423,22 @@ def test_a_web_page_cannot_spend_the_owners_machine():
     assert '"browser_not_allowed"' in SERVER
     assert "Access-Control-Allow-Origin" not in SERVER, \
         "a CORS header would hand a reply back to the page that asked"
+
+
+def test_a_passage_that_lost_its_server_does_not_end_as_if_it_finished():
+    """A chunk that failed to synthesise was blacklisted and then skipped in
+    silence, so walking off the end of a half-failed passage looked exactly like
+    finishing one: the capsule vanished mid-article and nothing said why.
+
+    Three ordinary things kill the server under a live passage -- changing a
+    setting in Settings (the daemon restarts it), opening Calliope.app while an
+    OpenClip player is speaking (the port is reclaimed), and the idle timeout
+    after a long pause. So this is the common case, and the retry is aimed at
+    it: the server is usually back a second later."""
+    finish = PLAYER.split("private func finish()")[1].split("\n    }")[0]
+    assert "failed.isEmpty" in finish, "it can still end cleanly with parts missing"
+    assert "fail(" in finish, "it ends quietly rather than saying what happened"
+    assert "retried" in PLAYER, "a chunk is given up on the first refusal"
+    # And the message has to be legible without hovering: `detail` is a tooltip.
+    fail = PLAYER.split("private func fail(")[1].split("\n    }")[0]
+    assert "status: message" in fail, "the only visible text is still the word \"error\""
