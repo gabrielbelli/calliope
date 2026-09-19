@@ -5,6 +5,19 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 runtime="$HOME/.local/share/calliope"
+
+# THE APPLICATION, WHICH IS NEW AND IS NOT A STYLE CHOICE. As two bare
+# executables this could not open at login -- SMAppService.mainApp reports
+# notFound without a bundle identifier, register() throws, and the checkbox in
+# Settings was a control that did nothing and said nothing. An app also has one
+# identity for macOS to grant Accessibility to and for Gatekeeper to check,
+# which is what shipping this anywhere but this machine requires.
+app="${CALLIOPE_APP_DIR:-/Applications}/Calliope.app"
+version="${CALLIOPE_VERSION:-0.1.0}"
+# Ad-hoc by default, which is enough to run here and not enough to run
+# elsewhere. Set this to a "Developer ID Application: ..." identity to produce
+# something notarisable.
+identity="${CALLIOPE_SIGN_IDENTITY:--}"
 extension="$HOME/.openclip/extensions/calliope.openclipext"
 old_runtime="$HOME/.local/share/kokoro-tts"
 old_extension="$HOME/.openclip/extensions/kokoro.openclipext"
@@ -44,19 +57,60 @@ for file in kokoro-v1.0.onnx voices-v1.0.bin; do
     [ -f "$runtime/$file" ] || curl -fL --progress-bar -o "$runtime/$file" "$models/$file"
 done
 
-echo "==> Server"
-install -m 0644 "$here/server/server.py" "$runtime/server.py"
+# BUILT INTO A STAGING DIRECTORY, MOVED IN ONE STEP. Compiling straight into
+# /Applications would leave a half-written app there if swiftc failed, and that
+# half-written app is what the login item and Gatekeeper would then be pointing
+# at. The move at the end is the only moment the installed app is not whole.
+staging="$(mktemp -d)"
+trap 'rm -rf "$staging"' EXIT
+contents="$staging/Calliope.app/Contents"
+helper="$contents/Helpers/CalliopePlayer.app/Contents"
+mkdir -p "$contents/MacOS" "$contents/Resources" "$helper/MacOS"
 
-echo "==> Player"
-swiftc -O -swift-version 5 "$here/player/main.swift" "$here/player/defaults.swift" -o "$runtime/calliope-player"
+# -target, AND IT IS NOT OPTIONAL. Without it swiftc stamps the Mach-O with
+# whatever minimum it infers from the host -- measured here as minos 28.0 on a
+# machine running 27.0 -- and LaunchServices refuses to open the app at all:
+# "_LSOpenURLsWithCompletionHandler() failed with error -10825", which is
+# kLSIncompatibleSystemVersionErr. Running the binary directly bypasses
+# LaunchServices and works, so this is invisible until somebody double-clicks
+# the app, which is what everybody but the person building it does.
+#
+# It must agree with LSMinimumSystemVersion in the Info.plist; 26.0 is where
+# NSGlassEffectView arrives, which is what the capsule is made of.
+target="arm64-apple-macos26.0"
 
 echo "==> Daemon"
-swiftc -O -swift-version 5 "$here/daemon/main.swift" -o "$runtime/calliope-daemon"
+swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" \
+    "$here/daemon/main.swift" -o "$contents/MacOS/calliope-daemon"
+
+echo "==> Player"
+swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" \
+    "$here/player/main.swift" "$here/player/defaults.swift" \
+    -o "$helper/MacOS/calliope-player"
+
+echo "==> Server"
+install -m 0644 "$here/server/server.py" "$contents/Resources/server.py"
+
+echo "==> Bundle"
+sed "s/__VERSION__/$version/g" "$here/bundle/Calliope-Info.plist" > "$contents/Info.plist"
+sed "s/__VERSION__/$version/g" "$here/bundle/CalliopePlayer-Info.plist" > "$helper/Info.plist"
+
+# INSIDE OUT. codesign seals what it finds, so a nested bundle signed after its
+# container invalidates the container's seal. --deep does this order for you and
+# Apple has deprecated it for notarisation, so it is done by hand.
+sign_options=()
+[ "$identity" = "-" ] || sign_options=(--options runtime --timestamp)
+codesign --force --sign "$identity" "${sign_options[@]+"${sign_options[@]}"}" \
+    "$staging/Calliope.app/Contents/Helpers/CalliopePlayer.app"
+codesign --force --sign "$identity" "${sign_options[@]+"${sign_options[@]}"}" \
+    "$staging/Calliope.app"
+codesign --verify --strict --deep "$staging/Calliope.app"
 
 echo "==> OpenClip extension"
 mkdir -p "$extension"
 install -m 0644 "$here/openclip/openclip.json" "$extension/openclip.json"
-install -m 0755 "$here/openclip/calliope.py" "$extension/calliope.py"
+sed "s|__APP__|$app|" "$here/openclip/calliope.py" > "$extension/calliope.py"
+chmod 0755 "$extension/calliope.py"
 
 # A running server keeps the old code until it idles out; stop it so the next
 # Speak starts the new one. The daemon goes with it: it holds the server open
@@ -70,6 +124,23 @@ install -m 0755 "$here/openclip/calliope.py" "$extension/calliope.py"
 # server open, which is the exact failure this line exists to prevent.
 pkill -TERM -f calliope-daemon || true
 pkill -TERM -f "$runtime/server.py" || true
+pkill -TERM -f "$app/Contents/Resources/server.py" || true
+
+echo "==> Installing $app"
+rm -rf "$app"
+mkdir -p "$(dirname "$app")"
+mv "$staging/Calliope.app" "$app"
+
+# The two loose binaries this replaces. Left behind they are a second, older
+# copy that nothing updates, and the OpenClip action used to point at one.
+rm -f "$runtime/calliope-daemon" "$runtime/calliope-player" "$runtime/server.py"
+
+# TELL LAUNCHSERVICES THE APP EXISTS. Measured: until it knows, SMAppService
+# reports notFound for an app sitting in /Applications, so the Open at Login
+# checkbox reads as off and cannot be turned on. Moving a bundle into place is
+# not something it notices on its own.
+lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+[ -x "$lsregister" ] && "$lsregister" -f "$app" || true
 
 retire_old_install
 
@@ -78,7 +149,7 @@ echo "Installed."
 echo
 echo "  One-shot, as before:  select text, click Speak in OpenClip."
 echo
-echo "  Resident, new:        $runtime/calliope-daemon"
+echo "  Resident:             open $app"
 echo "                        a menu bar icon, the model kept warm, and"
 echo "                        Option-Command-S to speak the selection."
 echo
@@ -86,4 +157,7 @@ echo "  The hotkey needs Accessibility permission -- there is no way to read"
 echo "  another application's selection without it. The daemon asks the first"
 echo "  time you press it, and does nothing until you agree."
 echo
-echo "  To start it at login, add it in System Settings > General > Login Items."
+echo "  macOS grants that permission to a particular copy of a program, so"
+echo "  this install asks again: it is an application now, where it used to be"
+echo "  a loose binary, and that is a different thing as far as macOS is"
+echo "  concerned. Once. Open at login is in Settings and now works."

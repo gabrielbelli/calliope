@@ -11,7 +11,6 @@ import AppKit
 import AVFoundation
 import NaturalLanguage
 
-let runtimeURL = URL(fileURLWithPath: NSString(string: "~/.local/share/calliope").expandingTildeInPath)
 let settings = playerDefaults()
 // THE PLAYER NEVER TALKS TO THE CALLIOPE STACK, AND THE SERVER IS NOT CONFIGURABLE. It reads
 // text you selected on this Mac. A remote host would mean a URL to keep right, a key to hold,
@@ -177,8 +176,8 @@ func launchLocalServer() {
     let logURL = runtimeURL.appendingPathComponent("server.log")
     FileManager.default.createFile(atPath: logURL.path, contents: nil)
     let process = Process()
-    process.executableURL = runtimeURL.appendingPathComponent(".venv/bin/python")
-    process.arguments = [runtimeURL.appendingPathComponent("server.py").path]
+    process.executableURL = pythonURL
+    process.arguments = [serverScriptURL.path]
     process.standardInput = FileHandle.nullDevice
     process.standardOutput = try? FileHandle(forWritingTo: logURL)
     process.standardError = process.standardOutput

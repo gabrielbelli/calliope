@@ -102,7 +102,9 @@ def test_the_player_builds_from_the_sources_install_sh_lists(tmp_path):
     the user with no new binary at all. Nothing else here would notice — the sources are never
     compiled, only read — so this compiles exactly what the shipped line compiles. It builds to
     a temp path and the binary is never run: running it opens a window and starts speaking."""
-    build = re.search(r'^swiftc .*-o "\$runtime/[\w-]+"$', INSTALL.read_text(), re.M).group(0)
+    text = INSTALL.read_text()
+    build = re.search(r'^swiftc [^\n]*(?:\\\n[^\n]*)*-o "\$helper/MacOS/[\w-]+"$',
+                      text, re.M).group(0)
     sources = [str(INSTALL.parent / name) for name in re.findall(r'"\$here/([\w/.-]+\.swift)"', build)]
 
     assert sources, build

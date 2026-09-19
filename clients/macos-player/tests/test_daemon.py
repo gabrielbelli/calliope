@@ -143,12 +143,22 @@ def test_the_daemon_and_the_player_agree_on_where_things_are():
     there, the player finds the interpreter, the daemon finds the interpreter
     and the player.
     """
-    for path in (".venv/bin/python", "server.py"):
-        assert path in INSTALL, f"install.sh no longer creates {path}"
-        assert path in DAEMON_CODE, f"the daemon does not look for {path}"
-    assert ".venv/bin/python" in PLAYER, "the player and the daemon disagree"
-    assert "calliope-player" in INSTALL and "calliope-player" in DAEMON_CODE, \
-        "the daemon cannot find the binary the installer builds"
+    paths = (HERE / "shared" / "paths.swift").read_text()
+    for path in (".venv/bin/python", "server.py", "calliope-player"):
+        assert path in paths, f"shared/paths.swift no longer names {path}"
+    assert ".venv/bin/python" in INSTALL, "install.sh no longer creates the interpreter"
+
+    # THE FIX IS THAT THERE IS ONE SPELLING, so the thing to hold is that both
+    # halves are built from it. A swiftc line that forgets this file does not
+    # fail to compile -- it fails to link, or worse, compiles against a copy
+    # somebody reintroduced.
+    for target in ('"$contents/MacOS/calliope-daemon"', '"$helper/MacOS/calliope-player"'):
+        line = [l for l in INSTALL.replace("\\\n", " ").splitlines()
+                if target in l and l.strip().startswith("swiftc")]
+        assert line, f"install.sh does not build {target}"
+        assert "shared/paths.swift" in line[0], f"{target} is built without the shared paths"
+    for source, who in ((DAEMON_CODE, "the daemon"), (code(PLAYER), "the player")):
+        assert "runtimeURL = URL(" not in source, f"{who} defines its own copy again"
     # And nothing looks for the pre-rename layout.
     assert "kokoro-tts" not in DAEMON_CODE, "the daemon points at the old runtime"
 

@@ -14,7 +14,6 @@ import ScreenCaptureKit
 
 let arguments = CommandLine.arguments
 let outputPath = arguments.dropFirst().first { !$0.hasPrefix("--") && !$0.contains(":") } ?? "demo-raw.mov"
-let runtimeURL = URL(fileURLWithPath: NSString(string: "~/.local/share/calliope").expandingTildeInPath)
 let playerSettings = UserDefaults(suiteName: "com.gabrielbelli.calliope-player")!
 
 let screenFrame = NSScreen.screens[0].frame
@@ -256,8 +255,8 @@ func serverIsWarm() async -> Bool {
 func warmServer() async -> Bool {
     if await serverIsWarm() { return true }
     let process = Process()
-    process.executableURL = runtimeURL.appendingPathComponent(".venv/bin/python")
-    process.arguments = [runtimeURL.appendingPathComponent("server.py").path]
+    process.executableURL = pythonURL
+    process.arguments = [serverScriptURL.path]
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
     try? process.run()
@@ -278,7 +277,7 @@ final class PlayerRemote {
         let file = queue.appendingPathComponent("demo-\(UUID().uuidString).txt")
         try text.write(to: file, atomically: true, encoding: .utf8)
         let process = Process()
-        process.executableURL = runtimeURL.appendingPathComponent("calliope-player")
+        process.executableURL = playerURL
         process.arguments = [file.path]
         try process.run()
         self.process = process

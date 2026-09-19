@@ -13,7 +13,17 @@ import sys
 import tempfile
 
 RUNTIME = os.path.expanduser("~/.local/share/calliope")
-PLAYER = os.path.join(RUNTIME, "calliope-player")
+# Inside the application, which is where the code lives now. The runtime below
+# is still the changing half -- the queue, the pid file, the logs.
+# install.sh replaces __APP__ with wherever it put Calliope.app, so this file
+# and the installer cannot disagree. Read straight out of the repository it is
+# still the placeholder, hence the fallback -- and the check is on the variable
+# rather than on a second literal, because a sed that replaced one occurrence
+# and not the other left this silently pointing at /Applications.
+APP = "__APP__"
+if APP.startswith("__"):
+    APP = "/Applications/Calliope.app"
+PLAYER = os.path.join(APP, "Contents/Helpers/CalliopePlayer.app/Contents/MacOS/calliope-player")
 PID_FILE = os.path.join(RUNTIME, "player.pid")
 QUEUE_DIR = os.path.join(RUNTIME, "queue")
 LOG_FILE = os.path.join(RUNTIME, "player.log")

@@ -24,6 +24,8 @@ learns the difference.
 
 | Path | What |
 |---|---|
+| `bundle/*.plist` | The two identities: `com.gabrielbelli.calliope` and `…calliope.player` |
+| `shared/paths.swift` | Where everything is, said once and compiled into all three binaries |
 | `daemon/main.swift` | The daemon: the menu bar item, the hotkey, the warm server, Settings |
 | `player/main.swift` | The player: language detection, sentence splitting, playback, the capsule |
 | `player/defaults.swift` | The two saved settings, and the carry from the pre-rename suite |
@@ -31,8 +33,25 @@ learns the difference.
 | `openclip/` | The OpenClip extension: one **Speak** action |
 | `install.sh` | Builds and installs all four |
 
-Built files and the model live outside the repository, in `~/.local/share/calliope`
-(Python 3.12 venv, `kokoro-v1.0.onnx`, `voices-v1.0.bin`, `calliope-player`, `calliope-daemon`, `server.py`).
+It installs as an application, `/Applications/Calliope.app`:
+
+```text
+Calliope.app/Contents/
+  MacOS/calliope-daemon                                  the menu bar, the hotkey, Settings
+  Helpers/CalliopePlayer.app/…/calliope-player           one process per passage
+  Resources/server.py                                    the local server
+```
+
+Everything that changes stays outside it, in `~/.local/share/calliope`: the Python 3.12 venv,
+`kokoro-v1.0.onnx`, `voices-v1.0.bin`, the logs, the queue. **A signed bundle must not be
+written to**, and a re-install must not download 310 MB again — so code is inside and state is
+outside, and `shared/paths.swift` is the one place that says which is which.
+
+It is an application rather than two loose binaries because it had to become one. Without a
+bundle identifier `SMAppService.mainApp` reports `notFound`, `register()` throws, and **Open at
+Login is a control that does nothing**. There is also no identity for macOS to grant
+Accessibility to and nothing for Gatekeeper to check — which is what shipping it anywhere else
+requires.
 
 ## Install
 
@@ -42,6 +61,22 @@ clients/macos-player/install.sh
 
 Needs macOS 26 (the capsule is `NSGlassEffectView`), the Command Line Tools, `uv`, and
 OpenClip with Accessibility permission. Re-run it after changing anything here.
+
+Two environment variables, both optional:
+
+| Variable | Default | For |
+|---|---|---|
+| `CALLIOPE_APP_DIR` | `/Applications` | Installing somewhere else; the extension follows |
+| `CALLIOPE_SIGN_IDENTITY` | `-` (ad-hoc) | `Developer ID Application: …`, for a notarisable build |
+
+> Ad-hoc is enough to run on the machine that built it and not enough to run anywhere else.
+> A Gatekeeper-clean download needs a Developer ID identity and notarisation.
+
+The deployment target is pinned to `arm64-apple-macos26.0`. Without `-target`, `swiftc` stamps
+the binary with a minimum inferred from the build host — measured as `minos 28.0` on macOS
+27 — and LaunchServices then refuses to open the app at all (`-10825`,
+`kLSIncompatibleSystemVersionErr`). Running the binary directly bypasses LaunchServices and
+works, so this is invisible until somebody double-clicks it.
 
 It was called Kokoro before. A first install under the new name reuses the model files from
 `~/.local/share/kokoro-tts`, then removes that directory and the `kokoro.openclipext`

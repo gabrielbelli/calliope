@@ -26,7 +26,6 @@ import Carbon.HIToolbox
 import ServiceManagement
 import Security
 
-let runtimeURL = URL(fileURLWithPath: NSString(string: "~/.local/share/calliope").expandingTildeInPath)
 let settings = UserDefaults(suiteName: "com.gabrielbelli.calliope-player")!
 
 // MARK: - The Kokoro server
@@ -95,13 +94,12 @@ final class ServerSupervisor {
             reclaimPort()
         }
 
-        // ".venv/bin/python", EXACTLY WHAT install.sh CREATES AND WHAT THE
-        // PLAYER ALREADY USES. Written from memory as "venv/bin/python3" this
-        // matched nothing, and the failure was quiet in the worst way: the menu
-        // said "not installed: run install.sh" on a machine where install.sh
-        // had just succeeded.
-        let python = runtimeURL.appendingPathComponent(".venv/bin/python")
-        let script = runtimeURL.appendingPathComponent("server.py")
+        // Both from shared/paths.swift, which is the whole point of that file:
+        // written from memory here once as "venv/bin/python3", this matched
+        // nothing, and the menu said "not installed: run install.sh" on a
+        // machine where install.sh had just succeeded.
+        let python = pythonURL
+        let script = serverScriptURL
         guard FileManager.default.isExecutableFile(atPath: python.path),
               FileManager.default.fileExists(atPath: script.path) else {
             lastError = "not installed: run install.sh"
@@ -158,7 +156,7 @@ final class ServerSupervisor {
     /// here -- phonemizer's espeak copy is removed on a normal exit and not
     /// otherwise.
     private func reclaimPort() {
-        let script = runtimeURL.appendingPathComponent("server.py").path
+        let script = serverScriptURL.path
         let pkill = Process()
         pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         pkill.arguments = ["-TERM", "-f", script]
@@ -442,7 +440,7 @@ final class Speaker {
         let file = queue.appendingPathComponent(UUID().uuidString + ".txt")
         guard (try? trimmed.write(to: file, atomically: true, encoding: .utf8)) != nil else { return }
 
-        let player = runtimeURL.appendingPathComponent("calliope-player")
+        let player = playerURL
         guard FileManager.default.isExecutableFile(atPath: player.path) else { return }
 
         let task = Process()
@@ -536,6 +534,15 @@ final class Daemon: NSObject, NSApplicationDelegate {
                                      accessibilityDescription: "Calliope")
         item.menu = buildMenu()
 
+        // WRITTEN DOWN AT STARTUP BECAUSE IT CANNOT BE ASKED FOR LATER FROM
+        // OUTSIDE. Accessibility is granted to a responsible process, so a
+        // probe run from a terminal reports the terminal's answer, not this
+        // one's -- the only process that can say whether Calliope has it is
+        // Calliope. It is also the first thing to check when the hotkey does
+        // nothing, which is the whole reason this log exists.
+        Log.write("started \(Bundle.main.bundleIdentifier ?? "unbundled") "
+            + "from \(Bundle.main.bundlePath); accessibility "
+            + (Selection.isPermitted ? "granted" : "NOT granted"))
         server.start()
         hotkey = Hotkey { [weak self] in self?.speakSelection() }
     }
@@ -938,16 +945,21 @@ extension Daemon: NSMenuDelegate {
 // MARK: - One of us, not several
 
 // A SECOND DAEMON WOULD FIGHT THE FIRST for the hotkey and the port, and the
-// symptom is a hotkey that silently stops working rather than an error. The
-// check is by bundle-free process name because this is a bare executable rather
-// than an app bundle, so NSRunningApplication's bundle identifier is nil.
+// symptom is a hotkey that silently stops working rather than an error.
+//
+// BY BUNDLE IDENTIFIER NOW, WITH THE EXECUTABLE NAME KEPT AS WELL. The identity
+// is the right question and it only became askable when this became an app.
+// The name stays because a copy run straight out of a build directory has no
+// bundle and no identifier, and two of those would fight just as happily.
 /// Held for the life of the process: a cancelled source stops delivering.
 var signalSources: [DispatchSourceSignal] = []
 
 let mine = ProcessInfo.processInfo.processIdentifier
 let others = NSWorkspace.shared.runningApplications.filter {
     $0.processIdentifier != mine
-        && $0.executableURL?.lastPathComponent == "calliope-daemon"
+        && ($0.bundleIdentifier == Bundle.main.bundleIdentifier
+                && Bundle.main.bundleIdentifier != nil
+            || $0.executableURL?.lastPathComponent == "calliope-daemon")
 }
 if !others.isEmpty {
     FileHandle.standardError.write("calliope-daemon is already running\n".data(using: .utf8)!)

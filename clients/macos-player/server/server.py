@@ -87,7 +87,13 @@ def remote_model_names(fresh=False):
 
 REMOTE_MODELS = [[], 0.0]
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# THE MODEL IS NOT BESIDE THIS FILE ANY MORE, and assuming it was failed
+# totally: this script lives inside Calliope.app now, where a 310 MB model
+# cannot go -- a signed bundle must not be written to, and a re-install would
+# have to download it again. So the code is in the bundle and the model is in
+# the runtime, and this is the line that knows the difference. It matches
+# shared/paths.swift, which a test holds it to.
+RUNTIME = os.path.expanduser("~/.local/share/calliope")
 PORT = 47815
 # WHO IS HOLDING THIS OPEN DECIDES WHEN IT CLOSES. Started by the one-shot
 # player, the server has to time itself out or it would outlive every reason to
@@ -328,7 +334,8 @@ def main():
     from kokoro_onnx import Kokoro
 
     started = time.time()
-    KOKORO = Kokoro(os.path.join(HERE, "kokoro-v1.0.onnx"), os.path.join(HERE, "voices-v1.0.bin"))
+    KOKORO = Kokoro(os.path.join(RUNTIME, "kokoro-v1.0.onnx"),
+                    os.path.join(RUNTIME, "voices-v1.0.bin"))
     for voice in ("af_heart", "pf_dora"):
         KOKORO.create("ok.", voice=voice, lang=LANG_BY_VOICE_PREFIX[voice[0]])  # first call per language is slow
     print("model ready in %.2f s on port %d" % (time.time() - started, PORT), flush=True)
