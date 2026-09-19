@@ -23,6 +23,7 @@
 // Build and install: ../install.sh
 import AppKit
 import Carbon.HIToolbox
+import Darwin
 import ServiceManagement
 import Security
 
@@ -307,6 +308,26 @@ enum Log {
 enum Selection {
     static var isPermitted: Bool { AXIsProcessTrusted() }
 
+    /// One read at a time, AND THIS IS A PRIVACY FIX RATHER THAN TIDINESS.
+    ///
+    /// Every piece of state below is function-local, so two overlapping reads
+    /// interleave. Press the hotkey twice with nothing selected and it reads
+    /// the clipboard aloud: the first read's Command-C copies nothing, so it
+    /// polls the full 0.6 s; the second starts and records the same
+    /// changeCount; the first then restores, and clearContents() bumps the
+    /// counter; the second sees the change, decides the copy worked, and
+    /// speaks what it finds -- which is whatever the person last copied. A
+    /// password out of a password manager, read out loud.
+    ///
+    /// The terminal case is worse in a quieter way: the second read captures
+    /// its "saved" clipboard AFTER the first has already copied the selection
+    /// into it, so its restore writes the selection back and leaves it there
+    /// for good. That is the one side effect this file promises never happens.
+    ///
+    /// Pressing again is the natural reaction to a hotkey that has not made a
+    /// sound yet, so this is the common path, not a contrived one.
+    private static var isReading = false
+
     static func requestPermission() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
         _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
@@ -348,6 +369,13 @@ enum Selection {
             completion(text)
             return
         }
+
+        guard !isReading else {
+            Log.write("selection: a pasteboard read is already in flight; ignoring")
+            completion(nil)
+            return
+        }
+        isReading = true
 
         let board = NSPasteboard.general
         let saved = board.pasteboardItems?.compactMap { item -> [NSPasteboard.PasteboardType: Data] in
@@ -399,6 +427,10 @@ enum Selection {
         // Put it back on the next turn of the loop: restoring immediately can
         // land before the copy that is still in flight.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            // Released HERE and not at completion: the restore is what moves
+            // the changeCount, so a second read starting before it lands would
+            // see that move and mistake it for a successful copy.
+            defer { isReading = false }
             let board = NSPasteboard.general
             board.clearContents()
             guard !saved.isEmpty else { return }
@@ -457,15 +489,45 @@ final class Speaker {
         // in OpenClip while the hotkey's player is talking gives you two voices
         // at once -- the script looks for a pid, finds the one it wrote last
         // time, and signals a process that is long gone.
-        let pidFile = runtimeURL.appendingPathComponent("player.pid")
-        try? String(task.processIdentifier).write(to: pidFile, atomically: true, encoding: .utf8)
+
     }
 
+    /// Stop whatever is speaking, including a player this daemon did not start.
+    ///
+    /// HALF THIS CONTRACT WAS MISSING AND THE SUITE PASSED ON THE OTHER HALF.
+    /// The daemon wrote player.pid and never read it, so a player launched from
+    /// the OpenClip action was invisible here: click Speak, then press the
+    /// hotkey, and the pre-emptive stop below found nothing while a second
+    /// player started -- two voices reading over each other, two capsules with
+    /// the upper one covering the lower one's close button. README.md says
+    /// "one player at a time: a new Speak replaces whatever is playing", and it
+    /// was true only when both came from the same side.
+    ///
+    /// The player writes its own pid now, after setsid(), so there is one
+    /// writer and the number is always a process-group leader.
     func stop() {
-        guard let task = current, task.isRunning else { return }
-        current = nil
-        task.terminationHandler = nil
-        task.terminate()
+        if let task = current, task.isRunning {
+            current = nil
+            task.terminationHandler = nil
+            task.terminate()
+        }
+        stopForeignPlayer()
+    }
+
+    /// SIGNALLED BY GROUP, AND ONLY AFTER CHECKING WHAT IT IS. A stale pid file
+    /// whose number has been reused belongs to somebody else's program by then,
+    /// and killing that is far worse than failing to stop a player.
+    private func stopForeignPlayer() {
+        let pidFile = runtimeURL.appendingPathComponent("player.pid")
+        guard let text = try? String(contentsOf: pidFile, encoding: .utf8),
+              let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid > 0 else { return }
+
+        var path = [CChar](repeating: 0, count: Int(4 * MAXPATHLEN))
+        guard proc_pidpath(pid, &path, UInt32(path.count)) > 0,
+              String(cString: path) == playerURL.path else { return }
+        _ = killpg(pid, SIGTERM)
+        try? FileManager.default.removeItem(at: pidFile)
     }
 }
 
@@ -871,9 +933,16 @@ final class Daemon: NSObject, NSApplicationDelegate {
     }
 
     @objc private func saveCalliope() {
+        let wasURL = Calliope.url, wasKey = Calliope.key, wasOn = Calliope.isOn
         Calliope.url = calliopeURLField?.stringValue ?? ""
         Calliope.key = calliopeKeyField?.stringValue ?? ""
         calliopeURLField?.stringValue = Calliope.url      // show the trim
+
+        // ONLY WHEN SOMETHING CHANGED. Both fields commit on leaving them, so
+        // tabbing from the URL to the key fired this twice -- and a restart
+        // takes the server away from whatever is being read aloud, which the
+        // player sees as a passage that stops early.
+        guard Calliope.url != wasURL || Calliope.key != wasKey || Calliope.isOn != wasOn else { return }
         server.restart()
 
         guard Calliope.isConfigured else {

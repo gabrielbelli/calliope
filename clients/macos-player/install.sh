@@ -54,7 +54,16 @@ for file in kokoro-v1.0.onnx voices-v1.0.bin; do
     # the old name would otherwise be downloaded again. Copied, not moved, so a failure further
     # down leaves the old install whole and re-runnable.
     [ -f "$runtime/$file" ] || [ ! -f "$old_runtime/$file" ] || cp "$old_runtime/$file" "$runtime/$file"
-    [ -f "$runtime/$file" ] || curl -fL --progress-bar -o "$runtime/$file" "$models/$file"
+    # DOWNLOADED BESIDE ITS NAME AND RENAMED, because [ -f ] cannot tell 310 MB
+    # from 3 MB. A Ctrl-C or a dropped connection used to leave truncated bytes
+    # at the final name, every later run then skipped the download, and the
+    # failure surfaced far away as an onnxruntime parse error on a corrupt
+    # model. The rename is atomic on one filesystem, so the name exists only
+    # once the bytes are all there.
+    if [ ! -f "$runtime/$file" ]; then
+        curl -fL --progress-bar -o "$runtime/$file.part" "$models/$file"
+        mv "$runtime/$file.part" "$runtime/$file"
+    fi
 done
 
 # BUILT INTO A STAGING DIRECTORY, MOVED IN ONE STEP. Compiling straight into
@@ -77,7 +86,10 @@ mkdir -p "$contents/MacOS" "$contents/Resources" "$helper/MacOS"
 #
 # It must agree with LSMinimumSystemVersion in the Info.plist; 26.0 is where
 # NSGlassEffectView arrives, which is what the capsule is made of.
-target="arm64-apple-macos26.0"
+# The architecture is the HOST's, not a constant: hardcoding arm64 on an Intel
+# Mac running macOS 26 cross-builds a thin binary that machine cannot execute,
+# and the installer would print "Installed." over it.
+target="$(uname -m)-apple-macos26.0"
 
 echo "==> Daemon"
 swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" \
@@ -143,6 +155,13 @@ lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchS
 [ -x "$lsregister" ] && "$lsregister" -f "$app" || true
 
 retire_old_install
+
+# PUT THE MENU BAR BACK. This script stops the running daemon so the upgrade
+# takes effect, and used to leave it stopped -- so every re-run silently killed
+# the hotkey until somebody noticed and opened the app by hand, while the text
+# below read like first-run instructions. -g keeps it in the background, and
+# the app is LSUIElement, so nothing appears but the status item.
+open -g "$app" || true
 
 echo
 echo "Installed."

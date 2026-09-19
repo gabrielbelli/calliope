@@ -59,8 +59,10 @@ def main():
     with open(LOG_FILE, "w") as log:
         proc = subprocess.Popen([PLAYER, text_path], stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=log, start_new_session=True)
-    with open(PID_FILE, "w") as f:
-        f.write(str(proc.pid))
+    # THE PLAYER WRITES PID_FILE ITSELF, after setsid(), because it is the
+    # process that has to be named: killpg only reaches a group leader. Two
+    # writers meant the daemon's hotkey and this action each knew only about
+    # their own player, and a second Speak read over the first.
     sys.stdout.write(json.dumps({"type": "success"}))
 
 

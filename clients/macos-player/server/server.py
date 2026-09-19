@@ -49,7 +49,16 @@ def tls_for(url):
     So: verify by name, and accept that an address given as a bare IP is
     trusted on the strength of being on the owner's own network.
     """
-    host = urllib.parse.urlsplit(url).hostname or ""
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if parts.scheme != "https":
+        # NOT A TLS DECISION AT ALL, and worth saying out loud: an http address
+        # sends the Authorization header in clear over whatever network is
+        # between here and there. Refusing it outright would make a plain-HTTP
+        # server on a home LAN unusable, which is a real deployment, so it is
+        # allowed and said rather than allowed and hidden.
+        print("warning: %s is not https; the key is sent in clear" % url, flush=True)
+        return None
     try:
         ipaddress.ip_address(host)
     except ValueError:
@@ -219,6 +228,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path != "/v1/audio/speech":
             return self.reply(404, b"not found", "text/plain")
+        # NO BROWSER MAY SPEND THIS. Loopback is not a boundary a web page
+        # respects: any site the owner visits can POST JSON here, and with a
+        # Calliope server configured that means their GPU, their gateway key
+        # and their OpenAI credit. Browsers attach Origin to every cross-site
+        # POST and the real clients -- the player, curl, a script -- attach
+        # none, so the header's presence is the whole test. No CORS headers are
+        # sent anywhere in this file, so nothing can read a reply either.
+        if self.headers.get("Origin"):
+            return self.refuse(403, "browser_not_allowed",
+                               "this server answers local programs, not web pages")
         LAST_REQUEST[0] = time.time()
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
@@ -240,9 +259,17 @@ class Handler(BaseHTTPRequestHandler):
                 rounded = [[round(start, 3), round(end, 3)] for start, end in timings]
                 headers["X-Word-Timings"] = json.dumps(rounded, separators=(",", ":"))
             self.reply(200, pcm, "audio/pcm", headers)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            # 400, NOT 500. Every client mistake used to come back as a server
+            # error with a bare text/plain body: {} gave 500 "'input'", a
+            # truncated body gave 500 "Expecting value", an unknown voice gave
+            # 500 with a KeyError. A caller cannot tell "I sent that wrong"
+            # from "the server is broken", and neither can anybody reading a
+            # bug report about it.
+            self.refuse(400, "invalid_request", str(error) or type(error).__name__)
         except Exception as error:
             print("speech failed: %r" % error, flush=True)
-            self.reply(500, str(error).encode(), "text/plain")
+            self.refuse(500, "internal_error", str(error))
         finally:
             LAST_REQUEST[0] = time.time()
 

@@ -169,5 +169,10 @@ curl() {{ while [ $# -gt 0 ] && [ "$1" != "-o" ]; do shift; done; echo "$2" >> "
     result = run_shell(script, tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / "downloaded").read_text().strip().endswith("kokoro-v1.0.onnx")
+    # Downloaded beside its name and renamed: [ -f ] cannot tell 310 MB from
+    # 3 MB, so a Ctrl-C used to leave truncated bytes at the final name and
+    # every later run skipped the download.
+    assert (tmp_path / "downloaded").read_text().strip().endswith("kokoro-v1.0.onnx.part")
+    assert (tmp_path / "new/kokoro-v1.0.onnx").exists(), "the part file was never renamed"
+    assert not (tmp_path / "new/kokoro-v1.0.onnx.part").exists(), "the part file is left behind"
     assert (tmp_path / "new/voices-v1.0.bin").read_text() == "voices"

@@ -340,3 +340,79 @@ def test_the_calliope_section_is_one_line_until_it_is_wanted():
         "the fields need a second thing pressed to take effect"
     assert "window.initialFirstResponder = urlField" in DAEMON_CODE, \
         "opening the window summons the Passwords popover over the section"
+
+
+def test_two_hotkey_presses_cannot_read_the_clipboard_aloud():
+    """A PRIVACY DEFECT, AND THE PATH TO IT IS THE ORDINARY ONE. Every piece of
+    Selection.read's state was function-local, so two reads interleaved. Press
+    the hotkey twice with nothing selected: the first Command-C copies nothing
+    so it polls the full 0.6 s; the second starts and records the same
+    changeCount; the first then restores, and clearContents() bumps the counter;
+    the second sees the change, concludes its copy worked, and speaks whatever
+    it finds -- the person's own clipboard. A password out of a password
+    manager, read out loud.
+
+    Pressing again is the natural reaction to a hotkey that has not made a sound
+    yet, so this is the common path, not a contrived one.
+
+    The flag must be released in the RESTORE, not at completion: the restore is
+    what moves the changeCount, so a read starting between the two would see
+    that move and mistake it for a copy."""
+    assert "isReading" in DAEMON_CODE, "overlapping selection reads are possible again"
+    # "static func read(" -- readViaAccessibility comes first and is not it.
+    body = DAEMON_CODE.split("static func read(")[1].split("private static func postCommandC")[0]
+    assert "guard !isReading" in body, "a second read is not turned away"
+    restore = DAEMON_CODE.split("private static func restore")[1]
+    assert "isReading = false" in restore.split("board.clearContents()")[0], \
+        "the flag is cleared somewhere other than before the restore's own clipboard write"
+
+
+def test_the_daemon_can_stop_a_player_it_did_not_start():
+    """HALF THE CONTRACT WAS MISSING AND THE SUITE PASSED ON THE OTHER HALF --
+    test_both_ways_of_starting_a_player_can_stop_each_other asserted only that
+    the string "player.pid" appeared in the daemon, and it appeared in a write
+    that nothing ever read back.
+
+    So: click Speak in OpenClip, then press the hotkey. The pre-emptive stop
+    found nothing, a second player started, and the two read over each other --
+    with the upper capsule covering the lower one's close button. README.md
+    says "one player at a time", and it was true only when both came from the
+    same side."""
+    assert "stopForeignPlayer()" in DAEMON_CODE, "the daemon still only stops its own player"
+    assert "killpg(pid, SIGTERM)" in DAEMON_CODE, \
+        "it signals a process rather than a group, so a player that forked is left speaking"
+    assert "proc_pidpath" in DAEMON_CODE, \
+        "a stale pid file whose number has been reused would have somebody else's program killed"
+    # ONE WRITER, and it is the one that can be signalled: killpg reaches a
+    # group leader, and setsid() is what makes the player one.
+    assert "player.pid" in PLAYER and "setsid()" in PLAYER, "the player does not name itself"
+    assert re.search(r'try\? String\(getpid\)?\(\)', PLAYER) or "String(getpid())" in PLAYER, \
+        "the player writes somebody else's pid"
+    assert "player.pid" not in code(OPENCLIP).split("def main")[1], \
+        "the OpenClip action writes the pid file too, so there are two writers again"
+
+
+def test_a_client_mistake_is_not_reported_as_a_server_error():
+    """Every malformed request came back 500 with a bare text/plain body: {}
+    gave "'input'", a truncated body gave "Expecting value", an unknown voice
+    gave a KeyError. A caller cannot tell "I sent that wrong" from "the server
+    is broken", and neither can anybody reading the bug report."""
+    assert 'self.refuse(400, "invalid_request"' in SERVER, "client mistakes are still 500s"
+    assert "json.JSONDecodeError" in SERVER and "KeyError" in SERVER, \
+        "the 400 does not cover the ways a body is actually wrong"
+    assert 'self.reply(500, str(error).encode(), "text/plain")' not in SERVER, \
+        "the bare text/plain 500 is still there"
+
+
+def test_a_web_page_cannot_spend_the_owners_machine():
+    """Loopback is not a boundary a browser respects: any site the owner visits
+    can POST JSON to 127.0.0.1:47815, and with a Calliope server configured that
+    is their GPU, their gateway key and their OpenAI credit.
+
+    Browsers attach Origin to every cross-site POST; the real clients -- the
+    player, curl, a script -- attach none. So the header's presence is the whole
+    test, and no CORS header is sent anywhere, so nothing could read a reply."""
+    assert 'self.headers.get("Origin")' in SERVER, "a web page can still POST here"
+    assert '"browser_not_allowed"' in SERVER
+    assert "Access-Control-Allow-Origin" not in SERVER, \
+        "a CORS header would hand a reply back to the page that asked"

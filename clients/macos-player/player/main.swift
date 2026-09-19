@@ -245,6 +245,8 @@ final class Player {
     private let timePitch = AVAudioUnitTimePitch()
     private var speeches: [Int: Speech] = [:]
     private var failed = Set<Int>()
+    /// Chunks given a second chance; see fetchIfNeeded.
+    private var retried: Set<Int> = []
     private var index = 0
     private var generation = 0  // bumped on every (re)schedule so callbacks of cut-off buffers are ignored
     private var fetchInFlight = false
@@ -388,7 +390,23 @@ final class Player {
         fetchInFlight = true
         synthesise(chunks[target], voice: voice) { [self] speech in
             fetchInFlight = false
-            if let speech { speeches[target] = speech } else { failed.insert(target) }
+            if let speech {
+                speeches[target] = speech
+                retried.remove(target)
+            } else if retried.insert(target).inserted {
+                // ONE RETRY, BECAUSE THE COMMON FAILURE IS A SERVER THAT WENT
+                // AWAY AND IS COMING BACK. The daemon restarts it whenever the
+                // Calliope settings change or the port is reclaimed, and it
+                // exits by itself after an idle timeout -- so a paused passage
+                // resumed later hits a closed socket that will be open again a
+                // second after it is asked.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [self] in
+                    fetchIfNeeded()
+                }
+                return
+            } else {
+                failed.insert(target)
+            }
             if waitingForAudio && target == index { playCurrent() } else { fetchIfNeeded() }
         }
     }
@@ -403,14 +421,32 @@ final class Player {
         }
     }
 
+    /// Reaching the end is not the same as having read it.
+    ///
+    /// MEASURED AS A SILENT TRUNCATION. A chunk that could not be synthesised
+    /// was blacklisted and then skipped without a sound, so walking off the end
+    /// of a half-failed passage looked exactly like finishing one: the capsule
+    /// vanished mid-article and nothing anywhere said why. Three ordinary
+    /// things kill the server under a live passage -- changing a setting in
+    /// Settings, opening Calliope.app while OpenClip is speaking, and the idle
+    /// timeout after a long pause -- so this is the common case.
     private func finish() {
+        guard failed.isEmpty else {
+            return fail(failed.count == chunks.count
+                ? "the server did not answer"
+                : "stopped early — \(failed.count) of \(chunks.count) parts did not arrive")
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { NSApp.terminate(nil) }
     }
 
+    /// THE ONLY THING A USER EVER SAW WAS THE WORD "error". The message went to
+    /// `detail`, which the panel puts in a tooltip -- so reading it meant
+    /// hovering a capsule that deletes itself, and the six seconds were counted
+    /// from before they had noticed anything was wrong.
     private func fail(_ message: String) {
         FileHandle.standardError.write(Data((message + "\n").utf8))
-        panel?.update(status: "error", detail: message, busy: false)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { NSApp.terminate(nil) }
+        panel?.update(status: message, detail: message, busy: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { NSApp.terminate(nil) }
     }
 }
 
@@ -818,6 +854,14 @@ final class ControlPanel: NSPanel {
 // EPERM means somebody already did it, which is success. Mirrors what
 // server.py does for the same reason.
 _ = setsid()
+// THE ONE WRITER OF player.pid, because this is the process the file has to
+// name: killpg only reaches a group leader, and setsid() above is what makes
+// this one. The daemon and the OpenClip action both used to write it, each
+// naming a process they had spawned, and the daemon then never read it back --
+// so a player started from OpenClip could not be stopped by the hotkey and the
+// two read over each other.
+try? String(getpid()).write(to: runtimeURL.appendingPathComponent("player.pid"),
+                            atomically: true, encoding: .utf8)
 
 let arguments = CommandLine.arguments
 guard arguments.count >= 2, let rawText = try? String(contentsOfFile: arguments[1], encoding: .utf8) else {

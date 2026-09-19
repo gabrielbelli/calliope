@@ -9,12 +9,18 @@ Gatekeeper to check, which is what shipping it anywhere else requires.
 These read the installer and the plists. The one exception compiles, because the
 defect it guards was invisible in every source file.
 """
+import platform
 import plistlib
 import re
 import pathlib
 import subprocess
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
+
+
+def expand(target):
+    """install.sh builds for the host, so the literal carries a substitution."""
+    return target.replace("$(uname -m)", platform.machine())
 INSTALL = (HERE / "install.sh").read_text()
 APP_PLIST = plistlib.loads((HERE / "bundle" / "Calliope-Info.plist").read_bytes())
 PLAYER_PLIST = plistlib.loads((HERE / "bundle" / "CalliopePlayer-Info.plist").read_bytes())
@@ -51,6 +57,8 @@ def test_the_deployment_target_is_stated_and_agrees_with_the_plist():
     target = re.search(r'^target="([^"]+)"', INSTALL, re.M)
     assert target, "install.sh does not state a deployment target"
     stated = target.group(1).split("macos")[-1]
+    assert "$(uname -m)" in target.group(1), \
+        "the architecture is hardcoded, so an Intel Mac gets a thin app it cannot run"
     assert APP_PLIST["LSMinimumSystemVersion"] == stated, \
         "the compiler and the Info.plist disagree about the oldest macOS this runs on"
     assert PLAYER_PLIST["LSMinimumSystemVersion"] == stated
@@ -66,7 +74,7 @@ def test_the_compiler_honours_that_target(tmp_path):
     """The agreement above is between two files; this is against the compiler.
     A -target that swiftc silently ignored would satisfy every assertion here
     and still produce the binary LaunchServices refuses."""
-    target = re.search(r'^target="([^"]+)"', INSTALL, re.M).group(1)
+    target = expand(re.search(r'^target="([^"]+)"', INSTALL, re.M).group(1))
     source = tmp_path / "t.swift"
     source.write_text("print(1)\n")
     subprocess.run(["swiftc", "-swift-version", "5", "-target", target,
@@ -114,7 +122,7 @@ def test_the_bundle_holds_no_state():
     assert '"$contents/Resources/server.py"' in INSTALL, "the server is not in the bundle"
     assert re.search(r'uv venv[^\n]*"\$runtime/\.venv"', INSTALL), \
         "the Python environment is built somewhere other than the runtime"
-    assert re.search(r'-o "\$runtime/\$file"', INSTALL), \
+    assert re.search(r'-o "\$runtime/\$file\.part"', INSTALL), \
         "the model is downloaded somewhere other than the runtime"
 
 
@@ -124,3 +132,15 @@ def test_launchservices_is_told_the_app_exists():
     on. Moving a bundle into place is not something it notices."""
     assert "lsregister" in INSTALL and re.search(r'"\$lsregister" -f "\$app"', INSTALL), \
         "nothing registers the installed app with LaunchServices"
+
+
+def test_the_installer_puts_the_menu_bar_back():
+    """It stops the running daemon so the upgrade takes effect, and used to
+    leave it stopped -- so every re-run silently killed the hotkey until
+    somebody noticed, while the closing text read like first-run instructions.
+    -g keeps it in the background; the app is LSUIElement, so nothing appears
+    but the status item."""
+    assert re.search(r'^open -g "\$app"', INSTALL, re.M), \
+        "the daemon is stopped by the installer and never restarted"
+    assert INSTALL.index("pkill -TERM -f calliope-daemon") < INSTALL.index('open -g "$app"'), \
+        "it is restarted before it is stopped"
