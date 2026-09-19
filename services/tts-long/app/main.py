@@ -759,11 +759,10 @@ def _failed_here(job: dict, why: str) -> str:
     where did it go wrong" is the question the run log exists to answer, and it
     was losing exactly the runs worth asking it about.
     """
-    job.update(status="failed", error=why, finished_at=time.time())
+    _finish(job, status="failed", error=why, finished_at=time.time())
     stream = job.get("stream")
     if stream is not None:
         stream.put("error", why)
-    _write_record(job)
     return FINISHED
 
 
@@ -1007,15 +1006,14 @@ def _run(synth: Synth, job: dict) -> None:
     if job["cancelled"]:
         # Cancelled while it sat in the queue. Nothing was generated, so there
         # is no audio to write and nothing to stream.
-        job.update(status="cancelled", finished_at=time.time())
+        _finish(job, status="cancelled", finished_at=time.time())
         if stream is not None:
             stream.put("error", "the job was cancelled before it started")
         # THE ROW IS STILL A RUN. This one produced no audio at all, so it is
         # the record or nothing: _recover indexes records and adopts audio, and
-        # a job cancelled in the queue has neither unless this line writes one.
+        # a job cancelled in the queue has neither unless _finish writes one.
         # It used to vanish at the next restart, which reads as a job that was
         # never submitted rather than one somebody stopped.
-        _write_record(job)
         return
 
     started = time.time()
@@ -1156,7 +1154,7 @@ def _run(synth: Synth, job: dict) -> None:
             "output_tokens": speech_tokens(spoken.audio.size),
             "total_tokens": spoken.input_tokens + speech_tokens(spoken.audio.size),
         }
-        job.update(status="cancelled" if job["cancelled"] else "done",
+        _finish(job, status="cancelled" if job["cancelled"] else "done",
                    path=str(path),
                    # HOW BIG THE FILE IS, SET WHERE THE FILE IS WRITTEN. This
                    # was set in _recover and nowhere else, so the `audio`
@@ -1173,9 +1171,6 @@ def _run(synth: Synth, job: dict) -> None:
                    usage=usage,
                    waiting_since=None,
                    finished_at=time.time())
-        # Beside the audio, so a restart can rebuild this row rather than a
-        # filename. See _write_record.
-        _write_record(job)
         log.info("%s %s: %.1fs audio in %.0fs (%.2fx)", job["id"][:8],
                  job["status"], duration, compute,
                  duration / compute if compute else 0)
@@ -1206,14 +1201,10 @@ def _run(synth: Synth, job: dict) -> None:
         # ran before any of this existed.
         raise
     except Exception as exc:  # noqa: BLE001 - surfaced on the job, not raised
-        job.update(status="failed", error=str(exc), finished_at=time.time())
+        _finish(job, status="failed", error=str(exc), finished_at=time.time())
         log.exception("%s failed", job["id"][:8])
         if stream is not None:
             stream.put("error", str(exc))
-        # THE RUN WORTH KEEPING IS THE ONE THAT WENT WRONG, and it was the one
-        # run with nothing on disk: no audio for _recover to adopt and, until
-        # this line, no record to index either. See _failed_here.
-        _write_record(job)
     finally:
         if encoder is not None:
             # Only reached on the failure path: close() on a half-fed ffmpeg
@@ -1421,6 +1412,29 @@ def _sidecar(job_id: str) -> Path:
     look at and reject. Records outnumber audio files by design now.
     """
     return OUT_DIR / "runs" / f"{job_id}.json"
+
+
+def _finish(job: dict, **fields) -> None:
+    """Publish a terminal status, with the record already on disk.
+
+    THE ORDER IS THE WHOLE POINT, and getting it wrong is a race that only a
+    loaded machine loses. Every terminal path used to update `job` first and
+    write the record second, so between those two statements the job reported
+    `done` or `failed` while its record did not exist. `jobs` is a plain dict
+    read by GET /jobs/{id} from another thread; a client that polls until the
+    status is terminal and then reads the record can arrive in that window.
+
+    Seen in CI and nowhere else, which is exactly what a race looks like: the
+    suite passes on a quiet laptop and fails on a shared runner, at whichever
+    test happens to be running when the scheduler blinks.
+
+    So the record is written from a copy carrying the terminal fields, and only
+    then are those fields published. After this, "the status is terminal" is a
+    promise that the record is readable, for every reader and not just the one
+    that complained.
+    """
+    _write_record(dict(job, **fields))
+    job.update(**fields)
 
 
 def _write_record(job: dict) -> None:
@@ -1704,8 +1718,12 @@ async def lifespan(app: FastAPI):
         # this one was going fine and the service was asked to stop.
         for job in list(jobs.values()):
             if job["status"] in {"queued", "running"}:
-                job.update(status="cancelled", finished_at=time.time(),
-                           error="the service was shutting down")
+                # Through _finish like every other terminal path. A job the
+                # service itself stopped is the one most worth keeping: it did
+                # not go wrong, it was interrupted, and without a record it
+                # comes back from the restart looking like it never existed.
+                _finish(job, status="cancelled", finished_at=time.time(),
+                        error="the service was shutting down")
         log.warning("the lanes did not come back clean within %.0fs; what was "
                     "still running or still waiting is marked cancelled",
                     SHUTDOWN_GRACE_S)

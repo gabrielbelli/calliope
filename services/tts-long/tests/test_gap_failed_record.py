@@ -164,3 +164,39 @@ def test_a_job_cancelled_in_the_queue_survives_a_restart(speech, monkeypatch):
     assert back.get("audio_expired") is not True, (
         "audio that was never made has not expired; telling a reader a file "
         "was lost when none ever existed is the lie the split states prevent")
+
+
+# ------------------------------------------- the order, not just the write ---
+
+
+def test_a_terminal_status_is_never_published_before_its_record():
+    """THE RACE THAT ONLY A LOADED MACHINE LOSES, and the one CI kept losing.
+
+    Every terminal path used to update `job` first and write the record second.
+    `jobs` is a plain dict that GET /jobs/{id} reads from another thread, so
+    between those two statements a job reported `done` or `failed` while its
+    record did not exist — and a client that polls until the status is terminal
+    and then reads the record lands in exactly that window.
+
+    It passed on a quiet laptop and failed on a shared runner, at whichever test
+    happened to be running when the scheduler blinked. Timing is not something a
+    test can assert, so this asserts the structure instead: every terminal
+    status goes through `_finish`, which writes from a copy and publishes after.
+    """
+    import inspect
+    import re
+
+    from app import main
+
+    source = inspect.getsource(main)
+    # `status=` set to a terminal value, anywhere other than inside _finish.
+    terminal = re.findall(r'job\.update\([^)]*status\s*=\s*["\'](done|failed|cancelled)',
+                          source, re.S)
+    assert not terminal, (
+        f"a terminal status is published by job.update rather than _finish: {terminal}. "
+        "That republishes the race: the status becomes visible before the record exists."
+    )
+
+    body = inspect.getsource(main._finish)
+    assert body.index("_write_record") < body.index("job.update"), \
+        "_finish publishes before it writes, which is the race it exists to close"
