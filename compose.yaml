@@ -67,9 +67,17 @@ services:
   #
   # The only service with a `ports` entry. If a second one ever appears here,
   # this file has stopped doing its job.
+  # PINNED TO A RELEASE, NOT TO :pre. Measured on this deployment: the images
+  # tagged :pre were four weeks stale while v0.1.0 carried every fix, because
+  # the release build publishes v0.1.0 and latest and does not move the
+  # floating tag. With pull_policy: always that made a redeploy for an
+  # unrelated reason silently swap the running build -- in either direction.
+  #
+  # A version here means `git checkout v0.1.0` gives you the stack that is
+  # running. Raising it is a deliberate edit, which is the point.
   voice-gateway:
     container_name: voice-gateway
-    image: ghcr.io/gabrielbelli/calliope-gateway:pre
+    image: ghcr.io/gabrielbelli/calliope-gateway:v0.1.0
     pull_policy: always
     restart: unless-stopped
     ports:
@@ -198,7 +206,7 @@ services:
 
   stt-stack:
     container_name: stt-stack
-    image: ghcr.io/gabrielbelli/calliope-stt:pre
+    image: ghcr.io/gabrielbelli/calliope-stt:v0.1.0
     pull_policy: always
     restart: unless-stopped
     expose:
@@ -273,7 +281,7 @@ services:
 
   tts-stack:
     container_name: tts-stack
-    image: ghcr.io/gabrielbelli/calliope-tts:pre
+    image: ghcr.io/gabrielbelli/calliope-tts:v0.1.0
     pull_policy: always
     restart: unless-stopped
     expose:
@@ -320,7 +328,7 @@ services:
 
   tts-long:
     container_name: tts-long
-    image: ghcr.io/gabrielbelli/calliope-tts-long:pre
+    image: ghcr.io/gabrielbelli/calliope-tts-long:v0.1.0
     pull_policy: always
     restart: unless-stopped
     expose:
@@ -720,7 +728,7 @@ services:
   # passthrough it always was.
   voice-ui:
     container_name: voice-ui
-    image: ghcr.io/gabrielbelli/calliope-ui:pre
+    image: ghcr.io/gabrielbelli/calliope-ui:v0.1.0
     pull_policy: always
     restart: unless-stopped
     # NO PORTS. The gateway reaches this service on the app-internal network
