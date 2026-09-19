@@ -24,6 +24,7 @@
 import AppKit
 import Carbon.HIToolbox
 import ServiceManagement
+import Security
 
 let runtimeURL = URL(fileURLWithPath: NSString(string: "~/.local/share/calliope").expandingTildeInPath)
 let settings = UserDefaults(suiteName: "com.gabrielbelli.calliope-player")!
@@ -116,6 +117,15 @@ final class ServerSupervisor {
         // open, so it closes when this one does and not before.
         var env = ProcessInfo.processInfo.environment
         env["CALLIOPE_IDLE_SECONDS"] = "0"
+        // PASSED IN, NEVER READ FROM DISK BY THE SERVER. The daemon is the one
+        // thing that knows both -- the URL from the settings, the key from the
+        // Keychain -- so a server started by the one-shot player inherits
+        // neither and has no remote at all. That is the right default for a
+        // path nobody configured.
+        if Calliope.isConfigured {
+            env["CALLIOPE_URL"] = Calliope.url
+            env["CALLIOPE_KEY"] = Calliope.key
+        }
         task.environment = env
 
         let log = runtimeURL.appendingPathComponent("server.log")
@@ -178,6 +188,17 @@ final class ServerSupervisor {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.start() }
     }
 
+    /// Take the settings the server only reads at startup and restart it.
+    ///
+    /// THE ENVIRONMENT IS READ ONCE, so a URL saved into a running server
+    /// changes nothing -- the setting would appear to save and then not work,
+    /// which is the worst of both. The gap lets the old process close its
+    /// socket; if it has not, start() reclaims the port as it always does.
+    func restart() {
+        stop()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.start() }
+    }
+
     /// SIGTERM, NEVER SIGKILL. phonemizer copies libespeak-ng into a temporary
     /// directory per process and removes it only on a normal exit; the server
     /// turns SIGTERM into sys.exit for exactly that reason. Killed outright it
@@ -187,6 +208,58 @@ final class ServerSupervisor {
         process = nil
         task.terminationHandler = nil
         task.terminate()
+    }
+}
+
+// MARK: - The Calliope server, when there is one
+
+/// Where the other engines live, and the credential for reaching them.
+///
+/// THE URL IS A SETTING AND THE KEY IS NOT. A URL is a preference; a key is a
+/// credential, and UserDefaults is a plist anybody who can read the home
+/// directory can read. It also rides in every backup and every screen share of
+/// a `defaults read`. The Keychain is where macOS puts these, so that is where
+/// this one goes.
+enum Calliope {
+    private static let urlKey = "calliopeURL"
+    private static let account = "calliope-server"
+    private static let service = "com.gabrielbelli.calliope"
+
+    static var url: String {
+        get { settings.string(forKey: urlKey) ?? "" }
+        set { settings.set(newValue.trimmingCharacters(in: .whitespaces), forKey: urlKey) }
+    }
+
+    static var isConfigured: Bool { !url.isEmpty }
+
+    static var key: String {
+        get {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+                kSecReturnData as String: true,
+            ]
+            var out: CFTypeRef?
+            guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
+                  let data = out as? Data else { return "" }
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+        set {
+            let base: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+            ]
+            SecItemDelete(base as CFDictionary)
+            guard !newValue.isEmpty, let data = newValue.data(using: .utf8) else { return }
+            var add = base
+            add[kSecValueData as String] = data
+            // This machine only, and only while it is unlocked. A speech key
+            // has no business syncing to every other device on the account.
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            SecItemAdd(add as CFDictionary, nil)
+        }
     }
 }
 
@@ -434,6 +507,9 @@ final class Daemon: NSObject, NSApplicationDelegate {
     private var speedPopup: NSPopUpButton?
     private var statusText: NSTextField?
     private var permissionButton: NSButton?
+    private var calliopeURLField: NSTextField?
+    private var calliopeKeyField: NSSecureTextField?
+    private var calliopeResult: NSTextField?
     private let server = ServerSupervisor()
     private let speaker = Speaker()
     private var hotkey: Hotkey?
@@ -580,10 +656,10 @@ final class Daemon: NSObject, NSApplicationDelegate {
     /// panel: whether the permission is granted, whether the model is warm,
     /// and where the log is when the answer to "nothing happened" lives in it.
     ///
-    /// THERE IS NO CALLIOPE SECTION HERE YET, and that is deliberate rather
-    /// than unfinished. The fields would be a server URL and a key; saving
-    /// them while nothing reads them makes the window lie about what the app
-    /// can do. They arrive with the proxy that uses them.
+    /// The Calliope section waited for the proxy rather than shipping ahead of
+    /// it: fields that save somewhere nothing reads make the window lie about
+    /// what the app can do. server.py forwards now, so they are here, and the
+    /// Connect button proves the round trip instead of claiming it.
     @objc private func showSettings() {
         if settingsWindow == nil { settingsWindow = buildSettingsWindow() }
         refreshSettings()
@@ -592,7 +668,7 @@ final class Daemon: NSObject, NSApplicationDelegate {
     }
 
     private func buildSettingsWindow() -> NSWindow {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 292),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 560),
                               styleMask: [.titled, .closable],
                               backing: .buffered, defer: false)
         window.title = "Calliope"
@@ -643,6 +719,36 @@ final class Daemon: NSObject, NSApplicationDelegate {
         stack.addArrangedSubview(note("The hotkey is ⌥⌘S. Speed applies to the "
             + "next passage; the capsule has its own control for the one being read."))
 
+        stack.addArrangedSubview(heading("Calliope server (optional)"))
+        stack.addArrangedSubview(note("Leave this empty and everything stays on "
+            + "this Mac. Fill it in and the other engines -- cloned voices, long "
+            + "documents, transcription -- answer at the same address, from your "
+            + "own server. Nothing else changes: same hotkey, same capsule."))
+
+        let urlField = NSTextField(string: Calliope.url)
+        urlField.placeholderString = "https://calliope.example.com"
+        urlField.widthAnchor.constraint(equalToConstant: 380).isActive = true
+        calliopeURLField = urlField
+        stack.addArrangedSubview(urlField)
+
+        let keyField = NSSecureTextField(string: Calliope.key)
+        keyField.placeholderString = "API key"
+        keyField.widthAnchor.constraint(equalToConstant: 380).isActive = true
+        calliopeKeyField = keyField
+        stack.addArrangedSubview(keyField)
+
+        let connect = NSButton(title: "Connect", target: self, action: #selector(saveCalliope))
+        connect.bezelStyle = .rounded
+        connect.keyEquivalent = "\r"
+        stack.addArrangedSubview(connect)
+
+        let result = NSTextField(wrappingLabelWithString: "")
+        result.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        result.textColor = .secondaryLabelColor
+        result.preferredMaxLayoutWidth = 380
+        calliopeResult = result
+        stack.addArrangedSubview(result)
+
         stack.addArrangedSubview(heading("Status"))
         let status = NSTextField(wrappingLabelWithString: "")
         status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -684,6 +790,58 @@ final class Daemon: NSObject, NSApplicationDelegate {
     @objc private func setSpeedFromWindow(_ sender: NSPopUpButton) {
         guard let step = sender.selectedItem?.representedObject as? Double else { return }
         settings.set(step, forKey: "speed")
+    }
+
+    /// Save both, restart the server that reads them, then ask it what it can
+    /// reach and say so.
+    ///
+    /// THE ANSWER COMES FROM THE PROXY, NOT FROM THE SERVER BEING CONFIGURED.
+    /// The daemon could reach the Calliope address itself and get a faster,
+    /// prettier yes -- and it would be testing a path nothing uses. What
+    /// matters is whether the thing the player talks to can reach it, with the
+    /// credential this daemon just handed it, so that is what gets asked.
+    @objc private func saveCalliope() {
+        Calliope.url = calliopeURLField?.stringValue ?? ""
+        Calliope.key = calliopeKeyField?.stringValue ?? ""
+        calliopeURLField?.stringValue = Calliope.url      // show the trim
+        server.restart()
+
+        guard Calliope.isConfigured else {
+            calliopeResult?.stringValue = "Disconnected. Everything runs on this Mac."
+            return
+        }
+        calliopeResult?.stringValue = "Connecting…"
+        // The server has to come back up before it can answer, so this asks for
+        // a while rather than once. Ten seconds is past a cold Kokoro load.
+        askProxy(attemptsLeft: 20)
+    }
+
+    private func askProxy(attemptsLeft: Int) {
+        let url = URL(string: "http://127.0.0.1:47815/v1/models")!
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            let listing = data.flatMap {
+                (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
+            }
+            let rows = listing?["data"] as? [[String: Any]] ?? []
+            let remote = rows.filter { $0["owned_by"] as? String == "calliope-remote" }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if !remote.isEmpty {
+                    let names = remote.compactMap { $0["id"] as? String }.sorted()
+                    self.calliopeResult?.stringValue =
+                        "Connected. \(names.count) more models: \(names.joined(separator: ", "))"
+                } else if attemptsLeft > 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.askProxy(attemptsLeft: attemptsLeft - 1)
+                    }
+                } else {
+                    // Saved anyway: an address that is down now may be up later,
+                    // and clearing it would lose what they typed.
+                    self.calliopeResult?.stringValue = "Saved, but no answer from that "
+                        + "address. Check the URL and the key, or that the server is up."
+                }
+            }
+        }.resume()
     }
 
     @objc private func askForPermission() {

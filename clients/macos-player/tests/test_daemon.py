@@ -159,14 +159,17 @@ def test_the_menu_only_offers_settings_that_change_something():
     feature is there, and the bug report is "I turned it on and nothing
     happened".
 
-    So the Calliope connection is not in this menu yet, because the proxy it
-    would enable does not exist. Neither is a "local API" toggle: the loopback
-    server is not an optional extra, it is how speech happens at all -- the
-    player fetches from it -- so turning it off would turn the hotkey off with
-    it, which is not what anybody would expect that switch to mean."""
-    assert "Connect to a Calliope" not in DAEMON_CODE, \
-        "a Calliope switch is in the menu before the proxy exists to be switched"
-    assert "serverURL" not in DAEMON_CODE and "apiKey" not in DAEMON_CODE
+    There is no "local API" toggle for the same reason: the loopback server is
+    not an optional extra, it is how speech happens at all -- the player fetches
+    from it -- so turning it off would turn the hotkey off with it, which is not
+    what anybody would expect that switch to mean.
+
+    The Calliope connection waited for this rule and now satisfies it: the
+    fields are in the window because server.py forwards, and the test below
+    holds them to reaching it."""
+    assert "localAPI" not in DAEMON_CODE and "enableAPI" not in DAEMON_CODE, \
+        "a switch for the loopback server, which cannot be switched off without "\
+        "switching off speech"
     # And what IS there reaches something real.
     assert "SMAppService" in DAEMON_CODE, "Open at Login does not use the API that owns it"
     assert 'settings.set(step, forKey: "speed")' in DAEMON_CODE, \
@@ -211,9 +214,90 @@ def test_the_daemon_owns_its_server_rather_than_adopting_one():
 
 
 def test_the_daemon_is_local_only_like_the_player():
-    """GAB-635 removed the remote path from the reader. The daemon is a new
-    surface on the same app and must not reintroduce it: the proxy to a Calliope
-    server is a later, opt-in step, and until it exists there is one host here."""
-    urls = set(re.findall(r'"(https?://[^"]+)"', DAEMON_CODE))
-    assert urls <= {"http://127.0.0.1:47815"}, f"the daemon reaches elsewhere: {urls}"
-    assert "Authorization" not in DAEMON_CODE and "apiKey" not in DAEMON_CODE
+    """GAB-635 removed the remote path from the reader, and the proxy did not
+    put it back HERE. One process makes the remote call -- server.py -- and the
+    daemon's job is to hand it the address and the credential, so the daemon
+    still speaks to 127.0.0.1 and nothing else.
+
+    That is why the Connect button asks the proxy rather than the Calliope
+    server: testing the address directly would prove a path nothing uses, and
+    would pass while the thing the player actually talks to could not reach it."""
+    hosts = {u.split("/")[2] for u in re.findall(r'"(https?://[^"]+)"', DAEMON_CODE)}
+    assert hosts <= {"127.0.0.1:47815"}, f"the daemon reaches elsewhere: {hosts}"
+    assert "Authorization" not in DAEMON_CODE, \
+        "the daemon authenticates to the remote itself instead of handing the key on"
+
+
+def test_the_calliope_fields_reach_the_process_that_reads_them():
+    """THE DEFECT THIS PREVENTS IS A SETTING THAT SAVES AND DOES NOTHING. Three
+    things have to line up and none of them is visible from the others:
+
+    server.py reads the address from the ENVIRONMENT, which is read once at
+    startup -- so a URL saved into a running server changes nothing until it is
+    restarted. The daemon is the only process that knows both halves, so it is
+    the one that passes them. And the key is a credential, so it lives in the
+    Keychain rather than in a plist that rides in every backup."""
+    for name in ("CALLIOPE_URL", "CALLIOPE_KEY"):
+        assert name in SERVER, f"server.py no longer reads {name}"
+        assert f'env["{name}"]' in DAEMON_CODE, f"the daemon never passes {name}"
+    assert "server.restart()" in DAEMON_CODE, \
+        "the settings save without restarting the server that only reads them at startup"
+    assert "kSecClassGenericPassword" in DAEMON_CODE, "the key is not in the Keychain"
+    assert "kSecAttrAccessibleWhenUnlockedThisDeviceOnly" in DAEMON_CODE, \
+        "a speech key syncs to every other device on the account"
+    # Every UserDefaults key, literal or named. Two are expected; a third is
+    # something new stored in a plist that rides in every backup, and the only
+    # value here that must never do that is the key.
+    keys = set(re.findall(r'forKey:\s*("?\w+"?)', DAEMON_CODE))
+    assert keys <= {'"speed"', "urlKey"}, \
+        f"something new is in UserDefaults, and a credential must not be: {keys}"
+    # And the round trip is proven rather than claimed: the button reads back
+    # what the proxy says it can reach.
+    assert "calliope-remote" in DAEMON_CODE and "calliope-remote" in SERVER, \
+        "the two sides disagree about how a forwarded model is labelled"
+
+
+def test_the_key_is_not_handed_to_an_unverified_connection():
+    """A CREDENTIAL TRAVELS ON THIS CONNECTION, which is what makes certificate
+    verification load-bearing rather than tidy: an unverified TLS session is one
+    anything on the path can sit in the middle of, and it would be given the
+    Authorization header on the way past.
+
+    An earlier draft here disabled verification for every request, reasoning
+    that a home server presents a certificate for a name it is not reached by.
+    Measured against the real deployment that was false -- it answers on its own
+    hostname with a certificate that verifies. Only a server typed in as a bare
+    IP has no name for a certificate to match, and that is the one case left."""
+    assert "context=UNVERIFIED" not in SERVER, \
+        "a request skips verification unconditionally, and one of them carries the key"
+    assert "def tls_for(" in SERVER and SERVER.count("tls_for(CALLIOPE_URL)") == 2, \
+        "not every outbound request decides verification the same way"
+    assert "ipaddress.ip_address(host)" in SERVER, \
+        "the bare-IP exception is decided by something other than what an address is"
+
+
+def test_an_unknown_model_is_refused_here_rather_than_guessed_at_there():
+    """MEASURED, AND IT RETURNED AUDIO. A request for model "nonesuch" came back
+    200 with eighteen kilobytes of MP3, because the proxy forwarded any name it
+    did not recognise and the gateway answers an unknown model with a default
+    instead of refusing. A typo produced speech in a voice nobody chose, and the
+    proxy is what hid it -- the same substitution forward()'s own docstring
+    calls a defect noticed only after the audio has been sent to somebody.
+
+    The listing is refreshed once before refusing, because the cache is a minute
+    old and a model added on the server inside that minute is a real name."""
+    assert "def remote_model_names(fresh=False)" in SERVER, "the cache cannot be bypassed"
+    assert "remote_model_names(fresh=True)" in SERVER, \
+        "a name added in the last minute is refused as a typo"
+    assert SERVER.count('"no_such_model"') == 2, \
+        "the unknown-model refusal is gone, or there is a third path that differs"
+
+
+def test_an_upgrade_stops_the_running_daemon():
+    """A DAEMON STARTED AS ./calliope-daemon HAS EXACTLY THAT ON ITS COMMAND
+    LINE, so a pkill pattern built from the runtime path matched nothing. The
+    old daemon survived install.sh, and its own single-instance guard then
+    turned the new one away -- an install that reports success while the old
+    binary keeps running and holds the old server open. Seen, not imagined."""
+    assert re.search(r"pkill -TERM -f calliope-daemon", INSTALL), \
+        "the installer matches the daemon by a path it may not have been started with"

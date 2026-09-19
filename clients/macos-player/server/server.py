@@ -21,7 +21,71 @@ import sys
 import threading
 import time
 import unicodedata
+import ipaddress
+import ssl
+import urllib.error
+import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+UNVERIFIED = ssl._create_unverified_context()
+
+
+def tls_for(url):
+    """Verify the certificate unless there is no name to verify it against.
+
+    A KEY TRAVELS ON THIS CONNECTION, so this is not a cosmetic choice: an
+    unverified TLS session is one anything on the path can sit in the middle
+    of, and it would be handed the Authorization header on the way past.
+
+    An earlier draft of this file disabled verification outright, on the
+    reasoning that a home server presents a certificate for a name it is not
+    reached by. Measured against the real deployment that was simply false --
+    it answers on its own hostname with a Let's Encrypt certificate that
+    verifies. What remains true is the case it was reaching for: a server typed
+    in as "https://192.168.1.5:30080" has no name in it, so no certificate can
+    match, and refusing would make that address unusable rather than safer.
+
+    So: verify by name, and accept that an address given as a bare IP is
+    trusted on the strength of being on the owner's own network.
+    """
+    host = urllib.parse.urlsplit(url).hostname or ""
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return None          # a name -- urlopen's default context verifies it
+    return UNVERIFIED
+
+
+def remote_model_names(fresh=False):
+    """What the Calliope server says it has, asked once and remembered.
+
+    CACHED, AND OFF THE REQUEST PATH. Asking the server on every /v1/models
+    would make a listing as slow as the network on a good day and hang it on a
+    bad one -- the same defect as a health check that blocks on a backend, which
+    this project has already paid for once.
+    """
+    now = time.time()
+    if not fresh and REMOTE_MODELS[1] > now - 60:
+        return REMOTE_MODELS[0]
+    names = []
+    try:
+        request = urllib.request.Request(
+            CALLIOPE_URL + "/v1/models",
+            headers={"authorization": "Bearer " + CALLIOPE_KEY} if CALLIOPE_KEY else {})
+        with urllib.request.urlopen(request, timeout=5, context=tls_for(CALLIOPE_URL)) as answer:
+            listing = json.loads(answer.read())
+        names = [row["id"] for row in listing.get("data", [])
+                 if row.get("id") not in LOCAL_MODELS]
+    except Exception as error:
+        print("could not list remote models: %r" % error, flush=True)
+        names = REMOTE_MODELS[0]          # keep the last good answer
+    REMOTE_MODELS[0] = names
+    REMOTE_MODELS[1] = now
+    return names
+
+
+REMOTE_MODELS = [[], 0.0]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = 47815
@@ -39,6 +103,22 @@ PORT = 47815
 # 0 means never, and the environment is the seam because the daemon already
 # spawns this process and the player does not have to learn anything new.
 IDLE_SECONDS = int(os.environ.get("CALLIOPE_IDLE_SECONDS", 15 * 60))
+# WHERE THE OTHER ENGINES LIVE, WHEN THERE ARE ANY. Empty means this machine is
+# the whole of it: Kokoro, 54 preset voices, no network. Set, and a model this
+# server does not have is forwarded rather than refused -- cloned voices and
+# Chatterbox need a GPU this Mac does not have.
+#
+# THE DAEMON SUPPLIES BOTH, because it is the thing that knows: it reads the URL
+# from the settings and the key from the Keychain, and restarts this process
+# when either changes. Nothing is read from disk here, so a server started by
+# the one-shot player has no credential and no remote at all, which is the
+# correct default for a path nobody configured.
+CALLIOPE_URL = os.environ.get("CALLIOPE_URL", "").rstrip("/")
+CALLIOPE_KEY = os.environ.get("CALLIOPE_KEY", "")
+
+# What this machine can say without asking anybody.
+LOCAL_MODELS = ("kokoro", "tts-1", "tts-1-hd")
+
 LANG_BY_VOICE_PREFIX = {
     "a": "en-us", "b": "en-gb", "e": "es", "f": "fr-fr", "h": "hi",
     "i": "it", "j": "ja", "p": "pt-br", "z": "cmn",
@@ -105,9 +185,30 @@ class Handler(BaseHTTPRequestHandler):
             pass  # client gave up (health probe timed out while the model was loading, or playback stopped)
 
     def do_GET(self):
-        if self.path != "/health":
-            return self.reply(404, b"not found", "text/plain")
-        self.reply(200, b"ok", "text/plain")
+        if self.path == "/health":
+            return self.reply(200, b"ok", "text/plain")
+        if self.path == "/v1/models":
+            return self.reply(200, json.dumps(self.models()).encode(), "application/json")
+        return self.reply(404, b"not found", "text/plain")
+
+    def models(self):
+        """Everything this address can be asked for, local and remote alike.
+
+        REMOTE MODELS STAY LISTED WHEN THE SERVER IS DOWN, and that is the
+        decision worth writing down. A client caches this list; an entry that
+        disappears reads as a misconfiguration and sends somebody digging
+        through their own settings. A 503 that says which backend is unreachable
+        and since when is a sentence they can act on instead.
+
+        owned_by names where it runs, because OpenAI's model object has no field
+        for "what this can do" and the engine name is the closest honest thing.
+        """
+        data = [{"id": name, "object": "model", "owned_by": "calliope-local"}
+                for name in LOCAL_MODELS]
+        if CALLIOPE_URL:
+            for name in remote_model_names():
+                data.append({"id": name, "object": "model", "owned_by": "calliope-remote"})
+        return {"object": "list", "data": data}
 
     def do_POST(self):
         if self.path != "/v1/audio/speech":
@@ -115,6 +216,9 @@ class Handler(BaseHTTPRequestHandler):
         LAST_REQUEST[0] = time.time()
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            model = body.get("model") or "kokoro"
+            if model not in LOCAL_MODELS:
+                return self.forward(body, model)   # checked there, against the real listing
             if body.get("response_format", "pcm") != "pcm":
                 return self.reply(400, b"this server only returns response_format pcm", "text/plain")
             # Decomposed accents ("e" + U+0301) reach espeak as a bare "e": "avó" becomes "avô".
@@ -135,6 +239,63 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(500, str(error).encode(), "text/plain")
         finally:
             LAST_REQUEST[0] = time.time()
+
+    def forward(self, body, model):
+        """A model this machine does not have, asked of the one that does.
+
+        503 AND NEVER A SUBSTITUTION. Answering a request for a cloned voice in
+        a preset one, with nothing saying so, is a defect noticed only after the
+        audio has been sent to somebody. The error names the backend and the
+        reason, because "it did not work" is not something anybody can act on.
+
+        WHICH IS WHY THE NAME IS CHECKED HERE RATHER THAN LEFT TO THE BACKEND.
+        Measured: a request for "nonesuch" came back 200 with eighteen kilobytes
+        of MP3 in a voice nobody asked for, because the gateway answers an
+        unknown model with a default instead of refusing. Forwarding blind makes
+        this proxy the thing that hid the typo, so it does not forward blind --
+        a name that is on neither side is refused with both lists in the error.
+
+        The listing is refreshed once before refusing, because the cache is
+        sixty seconds old and a model added on the server in that window is a
+        real name, not a typo. That costs one request, only on the path that was
+        about to fail anyway.
+        """
+        known = remote_model_names()
+        if model not in known:
+            known = remote_model_names(fresh=True)
+        if model not in known:
+            return self.refuse(404, "no_such_model",
+                               "%r is not a model here (%s) or on the Calliope server at %s (%s)"
+                               % (model, ", ".join(LOCAL_MODELS), CALLIOPE_URL,
+                                  ", ".join(known) or "nothing it would name"))
+        if not CALLIOPE_URL:
+            return self.refuse(404, "no_such_model",
+                               "%r is not one of this machine's models (%s), and no Calliope "
+                               "server is configured to ask." % (model, ", ".join(LOCAL_MODELS)))
+        request = urllib.request.Request(
+            CALLIOPE_URL + "/v1/audio/speech",
+            data=json.dumps(body).encode(),
+            headers={"content-type": "application/json",
+                     **({"authorization": "Bearer " + CALLIOPE_KEY} if CALLIOPE_KEY else {})},
+            method="POST")
+        try:
+            # LONGER THAN FEELS REASONABLE, ON PURPOSE. Chatterbox is slower
+            # than realtime, so a minute of speech is minutes of compute, and a
+            # timeout tuned to a local model would cut off every cloned voice.
+            with urllib.request.urlopen(request, timeout=600,
+                                        context=tls_for(CALLIOPE_URL)) as answer:
+                self.reply(answer.status, answer.read(),
+                           answer.headers.get("content-type", "application/octet-stream"))
+        except urllib.error.HTTPError as error:
+            self.reply(error.code, error.read(), error.headers.get("content-type", "text/plain"))
+        except Exception as error:
+            self.refuse(503, "backend_unreachable",
+                        "%r runs on the Calliope server at %s, which did not answer: %s"
+                        % (model, CALLIOPE_URL, error))
+
+    def refuse(self, status, code, message):
+        body = json.dumps({"error": {"code": code, "message": message}}).encode()
+        self.reply(status, body, "application/json")
 
 
 def exit_when_idle(server):

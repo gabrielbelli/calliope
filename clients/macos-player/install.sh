@@ -62,7 +62,13 @@ install -m 0755 "$here/openclip/calliope.py" "$extension/calliope.py"
 # Speak starts the new one. The daemon goes with it: it holds the server open
 # now (CALLIOPE_IDLE_SECONDS=0), so a daemon left running would keep the OLD
 # server alive for ever and the upgrade would appear not to have happened.
-pkill -TERM -f "$runtime/calliope-daemon" || true
+# BY NAME, NOT BY FULL PATH, AND THIS WAS WRONG AND MEASURED. A daemon started
+# as ./calliope-daemon has exactly that on its command line, so a pattern built
+# from $runtime matched nothing -- the old one survived the upgrade, and its
+# single-instance guard then turned the new one away on sight. The symptom is
+# an install that succeeds while the old binary keeps running, holding the old
+# server open, which is the exact failure this line exists to prevent.
+pkill -TERM -f calliope-daemon || true
 pkill -TERM -f "$runtime/server.py" || true
 
 retire_old_install

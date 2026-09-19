@@ -12,22 +12,27 @@ OpenClip "Speak"  ──text file──►  calliope-player (Swift)        ─�
 
 It is a client of the same contract as `services/tts`, not a second implementation of it:
 the player sends OpenAI's body with `response_format: "pcm"` and plays headerless 24 kHz
-16-bit mono. It speaks that contract only to `127.0.0.1`. The Calliope stack is not an option
-and is not meant to be one: the model runs faster than realtime on this Mac's own CPU, so a
-server on the network would add a URL, a key and an outage for nothing.
+16-bit mono, and it speaks that contract only to `127.0.0.1`.
+
+That address can answer for more than this Mac. Left alone it is Kokoro and nothing else --
+no URL, no key, no outage, because the model runs faster than realtime on this CPU and a
+server on the network would buy nothing. Given a Calliope address in Settings, the same
+address also answers for the engines this Mac has no business running, and the player never
+learns the difference.
 
 ## Layout
 
 | Path | What |
 |---|---|
+| `daemon/main.swift` | The daemon: the menu bar item, the hotkey, the warm server, Settings |
 | `player/main.swift` | The player: language detection, sentence splitting, playback, the capsule |
 | `player/defaults.swift` | The two saved settings, and the carry from the pre-rename suite |
 | `server/server.py` | A local server answering the subset of `services/tts` the player uses |
 | `openclip/` | The OpenClip extension: one **Speak** action |
-| `install.sh` | Builds and installs all three |
+| `install.sh` | Builds and installs all four |
 
 Built files and the model live outside the repository, in `~/.local/share/calliope`
-(Python 3.12 venv, `kokoro-v1.0.onnx`, `voices-v1.0.bin`, `calliope-player`, `server.py`).
+(Python 3.12 venv, `kokoro-v1.0.onnx`, `voices-v1.0.bin`, `calliope-player`, `calliope-daemon`, `server.py`).
 
 ## Install
 
@@ -75,3 +80,29 @@ old suite is left alone.
   model was 3× slower and ONNX Runtime's CoreML provider no faster, so neither is used.
 - **Temp directories**: phonemizer copies `libespeak-ng.dylib` into a new temp directory per
   process and removes it only on a normal exit, so the server turns SIGTERM into one.
+
+## The Calliope server (optional)
+
+Menu bar icon → **Settings…** → *Calliope server*. An address and a key; empty means
+everything stays here.
+
+Filled in, `server.py` becomes a proxy: `kokoro`, `tts-1` and `tts-1-hd` are answered on this
+Mac as before, and anything else is forwarded to the Calliope gateway. `GET /v1/models` lists
+both, with `owned_by` saying which side each comes from, so one address covers every engine
+and nothing that talks to `127.0.0.1:47815` needs to know where a voice actually ran.
+
+Three things are deliberate:
+
+- **The key is in the Keychain**, not in the preferences plist, which rides in every backup.
+  The daemon is the only process holding both halves and passes them to `server.py` in its
+  environment — so a server started by the one-shot player has no remote at all.
+- **The certificate is verified** whenever the address has a name in it. An address typed as a
+  bare IP cannot be verified by any certificate, so that one case is trusted on the strength
+  of being your own network.
+- **An unknown model is refused here**, with both lists in the error, rather than forwarded.
+  A gateway answers a name it does not know with a default voice, which turns a typo into
+  audio nobody chose.
+
+**Connect** saves, restarts the server and then asks the proxy what it can reach, so the
+answer on screen is the round trip rather than a claim about it. An address that is down is
+still saved — it may be up later.
