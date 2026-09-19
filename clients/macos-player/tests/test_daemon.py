@@ -30,7 +30,15 @@ def code(source: str) -> str:
     when the rule is written down and passes when it is merely obeyed silently.
     """
     source = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
-    return re.sub(r"//[^\n]*", "", source)
+    # STRING LITERALS SURVIVE, AND THAT IS NOT A DETAIL. A bare
+    # `//[^\n]*` also eats the inside of every URL -- "http://127.0.0.1:47815"
+    # becomes "http:" -- so test_the_daemon_is_local_only_like_the_player found
+    # no URLs at all and passed by finding nothing. The same shape as the
+    # stripper in the UI suite that ate 19 KB of stylesheet because base64
+    # contains "//".
+    return re.sub(r'"(?:[^"\\]|\\.)*"|//[^\n]*',
+                  lambda m: m.group(0) if m.group(0).startswith('"') else "",
+                  source)
 
 
 DAEMON_CODE = code(DAEMON)
@@ -232,7 +240,18 @@ def test_the_daemon_is_local_only_like_the_player():
     That is why the Connect button asks the proxy rather than the Calliope
     server: testing the address directly would prove a path nothing uses, and
     would pass while the thing the player actually talks to could not reach it."""
-    hosts = {u.split("/")[2] for u in re.findall(r'"(https?://[^"]+)"', DAEMON_CODE)}
+    urls = re.findall(r'"(https?://[^"]+)"', DAEMON_CODE)
+    assert urls, "no URL was found at all, which is how this passed while mangled"
+
+    # calliope.example.com is the URL field's placeholder -- grey text showing
+    # the shape of an address, never fetched. Held to that here rather than
+    # waved through: if it ever appears anywhere but a placeholderString, this
+    # exemption stops describing it.
+    placeholder = "https://calliope.example.com"
+    assert DAEMON_CODE.count(placeholder) == 1
+    assert f'placeholderString = "{placeholder}"' in DAEMON_CODE
+
+    hosts = {u.split("/")[2] for u in urls if u != placeholder}
     assert hosts <= {"127.0.0.1:47815"}, f"the daemon reaches elsewhere: {hosts}"
     assert "Authorization" not in DAEMON_CODE, \
         "the daemon authenticates to the remote itself instead of handing the key on"
@@ -259,7 +278,7 @@ def test_the_calliope_fields_reach_the_process_that_reads_them():
     # something new stored in a plist that rides in every backup, and the only
     # value here that must never do that is the key.
     keys = set(re.findall(r'forKey:\s*("?\w+"?)', DAEMON_CODE))
-    assert keys <= {'"speed"', "urlKey", "onKey"}, \
+    assert keys <= {'"speed"', '"voice"', "urlKey", "onKey"}, \
         f"something new is in UserDefaults, and a credential must not be: {keys}"
     # And the round trip is proven rather than claimed: the button reads back
     # what the proxy says it can reach.
@@ -280,8 +299,11 @@ def test_the_key_is_not_handed_to_an_unverified_connection():
     IP has no name for a certificate to match, and that is the one case left."""
     assert "context=UNVERIFIED" not in SERVER, \
         "a request skips verification unconditionally, and one of them carries the key"
-    assert "def tls_for(" in SERVER and SERVER.count("tls_for(CALLIOPE_URL)") == 2, \
-        "not every outbound request decides verification the same way"
+    # Every urlopen decides verification the same way -- counted rather than
+    # pinned to a number, so adding a request cannot quietly skip it.
+    assert "def tls_for(" in SERVER
+    assert SERVER.count("urlopen(") == SERVER.count("tls_for(CALLIOPE_URL)"), \
+        "an outbound request does not pass through tls_for"
     assert "ipaddress.ip_address(host)" in SERVER, \
         "the bare-IP exception is decided by something other than what an address is"
 
@@ -442,3 +464,43 @@ def test_a_passage_that_lost_its_server_does_not_end_as_if_it_finished():
     # And the message has to be legible without hovering: `detail` is a tooltip.
     fail = PLAYER.split("private func fail(")[1].split("\n    }")[0]
     assert "status: message" in fail, "the only visible text is still the word \"error\""
+
+
+def test_the_voice_list_comes_from_the_server_and_cannot_offer_a_job():
+    """THE DEFECT THIS PREVENTS IS A CAPSULE THAT SHOWS AND NEVER SPEAKS. Not
+    every model on a Calliope server returns audio: the ones the gateway marks
+    owned_by tts-long answer 202 with a job to poll, and the player has no idea
+    what to do with that. A picker built from a list written here would drift
+    the moment an engine was added.
+
+    So the list is asked for, and the endpoint is the filter: the gateway
+    routes GET /voices to tts-stack alone, so a name that comes back is a name
+    that can be spoken with."""
+    assert "127.0.0.1:47815/voices" in DAEMON_CODE, \
+        "the voice list is built from something other than the server"
+    assert 'forKey: "voice"' in DAEMON_CODE, "choosing a voice saves nothing"
+    assert "/voices" in SERVER and "def voices(" in SERVER, "the server cannot list voices"
+    assert "remote_voice_names" in SERVER, \
+        "a configured Calliope server contributes no voices"
+    # Local first and merged, not replaced: the ones on this Mac keep working
+    # when the network does not.
+    assert "KOKORO.get_voices()" in SERVER
+
+
+def test_a_chosen_voice_does_not_override_the_detected_language():
+    """A PINNED VOICE CANNOT SIMPLY WIN. Kokoro derives its phonemiser from the
+    voice's first letter, so pinning an English voice and then selecting
+    Portuguese does not give Portuguese in an English accent -- it gives
+    Portuguese words run through an English phonemiser, which is a different
+    and much worse thing. Detection exists to stop exactly that.
+
+    So the preference applies where it can and the language wins where it
+    cannot, and the Settings window says so rather than leaving somebody to
+    discover it on a paragraph of French."""
+    assert "func voiceFor(" in PLAYER, "the reconciliation does not exist"
+    body = PLAYER.split("func voiceFor(")[1].split("\n}")[0]
+    assert "languageByVoicePrefix[prefix] == language" in body, \
+        "a chosen voice is used whatever language the text turned out to be"
+    assert "return fallback" in body, "there is no fall back to the language's own voice"
+    assert "that voice's language" in DAEMON_CODE, \
+        "the window does not say when a chosen voice applies"

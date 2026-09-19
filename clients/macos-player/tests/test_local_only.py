@@ -27,7 +27,14 @@ def test_no_setting_can_redirect_the_player():
     for source in SOURCES:
         keys.update(re.findall(r'forKey: "([^"]+)"', source.read_text()))
 
-    assert keys == {"speed", "karaoke"}
+    # "voice" is a preset name, not an address: it selects which voice the one
+    # host is asked for, and cannot point the player anywhere. The rule this
+    # test holds is about redirection, so the list grows when something is
+    # added that cannot redirect, and the second assertion is what enforces it.
+    assert keys == {"speed", "karaoke", "voice"}
+    assert not [k for k in keys if any(word in k.lower()
+                                       for word in ("url", "host", "server", "key", "token"))], \
+        "a setting is shaped like an address or a credential"
 
 
 def test_the_player_sends_no_credential():

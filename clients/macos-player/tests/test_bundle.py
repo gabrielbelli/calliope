@@ -144,3 +144,70 @@ def test_the_installer_puts_the_menu_bar_back():
         "the daemon is stopped by the installer and never restarted"
     assert INSTALL.index("pkill -TERM -f calliope-daemon") < INSTALL.index('open -g "$app"'), \
         "it is restarted before it is stopped"
+
+
+def test_the_app_wears_the_mark_the_page_already_wears():
+    """It shipped with no icon at all and an SF Symbol waveform in the menu bar
+    -- a stock glyph with no relation to anything else Calliope wears. The web
+    UI carries this mark inline in its <head> and its masthead, and that page's
+    own comment says of it: "it will be the app icon"."""
+    mark = (HERE / "shared" / "mark.swift").read_text()
+    for colour in ("1B / 255", "EB / 255", "FF / 255"):
+        assert colour in mark, f"the mark no longer uses {colour}, which the page does"
+    assert APP_PLIST["CFBundleIconFile"] == "Calliope"
+    assert "make-icon.swift" in INSTALL and "Calliope.icns" in INSTALL, \
+        "the installer does not build the icon"
+
+    daemon = (HERE / "daemon" / "main.swift").read_text()
+    assert "systemSymbolName" not in daemon, "the menu bar wears somebody else's glyph again"
+    assert "Mark.draw(in: context, size: rect.width, monochrome: true)" in daemon
+    assert "isTemplate = true" in daemon, \
+        "a coloured status item ignores light, dark and being clicked"
+
+    # And the OpenClip action, which was the same stock waveform.
+    import json
+    manifest = json.loads((HERE / "openclip" / "openclip.json").read_text())
+    assert manifest["actions"][0]["icon"] == "icon.svg"
+    svg = (HERE / "openclip" / "icon.svg").read_text()
+    assert "currentColor" in svg, "the menu cannot tint it"
+    assert "icon.svg" in INSTALL, "the installer does not ship it"
+
+
+def test_every_size_of_the_icon_is_drawn_rather_than_scaled():
+    """A 2.2-unit stroke does not survive 1024 downsampled to 16. iconutil
+    takes an iconset of real bitmaps, so each one is rendered at its own size."""
+    renderer = (HERE / "bundle" / "make-icon.swift").read_text()
+    assert "icon_16x16" in renderer and "icon_512x512@2x" in renderer
+    assert renderer.count("CGContext(data: nil") == 1, "more than one drawing path"
+    assert "for (name, size) in wanted" in renderer, "the sizes are not iterated"
+
+
+def test_the_monochrome_mark_fits_its_canvas():
+    """WITH THE PLATE DROPPED THE INK IS ONLY THE MIDDLE OF THE SQUARE. The
+    colour icon's rounded plate fills its canvas; a template image has no plate,
+    so drawing from the same numbers left the swell and the lamp occupying about
+    60 per cent of the height with a ring of empty space no other status item
+    has — a menu bar icon that reads as small and adrift.
+
+    So monochrome scales by the ink's own bounds rather than by the 32-unit
+    grid, and the same refit is what makes openclip/icon.svg line up with the
+    other extensions' icons."""
+    mark = (HERE / "shared" / "mark.swift").read_text()
+    assert "private static let ink" in mark, "the ink's bounds are not recorded"
+    assert "min(size / ink.width, size / ink.height)" in mark, \
+        "monochrome scales by the grid again, so the art floats in empty space"
+    # And the colour path still fills the canvas, plate and all.
+    assert ": size / grid" in mark, "the app icon stopped filling its square"
+
+
+def test_the_openclip_action_is_only_installed_where_openclip_is():
+    """It used to mkdir -p its way in regardless, so a Mac that had never had
+    OpenClip ended up with a ~/.openclip/extensions tree holding one extension
+    for an application that is not there. OpenClip is optional — the hotkey,
+    the menu bar item and the `calliope` command all work without it — and an
+    optional integration should leave no trace when it is not taken."""
+    assert re.search(r'if \[ -d "\$HOME/\.openclip" \]', INSTALL), \
+        "the extension is written whether or not OpenClip exists"
+    guarded = INSTALL.split('if [ -d "$HOME/.openclip" ]')[1].split("\nfi")[0]
+    assert "$extension/openclip.json" in guarded and "$extension/icon.svg" in guarded, \
+        "part of the extension is written outside the guard"

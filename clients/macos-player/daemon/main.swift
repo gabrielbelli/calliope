@@ -574,6 +574,7 @@ final class Daemon: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var loginCheckbox: NSButton?
     private var speedPopup: NSPopUpButton?
+    private var voicePopup: NSPopUpButton?
     private var statusText: NSTextField?
     private var permissionButton: NSButton?
     private var calliopeToggle: NSSwitch?
@@ -592,8 +593,22 @@ final class Daemon: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "waveform",
-                                     accessibilityDescription: "Calliope")
+        // THE SAME DRAWING AS THE PAGE AND THE APP ICON, not somebody else's.
+        // This was an SF Symbol waveform -- a stock glyph with no relation to
+        // the mark in the web UI's masthead, which that page's own comment
+        // says "will be the app icon".
+        //
+        // A template image: black shapes with alpha, which macOS tints for
+        // light, for dark, and for the moment it is clicked. Drawn rather than
+        // loaded so it is sharp at whatever height the menu bar is.
+        item.button?.image = NSImage(size: NSSize(width: 18, height: 18),
+                                     flipped: false) { rect in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            Mark.draw(in: context, size: rect.width, monochrome: true)
+            return true
+        }
+        item.button?.image?.isTemplate = true
+        item.button?.image?.accessibilityDescription = "Calliope"
         item.menu = buildMenu()
 
         // WRITTEN DOWN AT STARTUP BECAUSE IT CANNOT BE ASKED FOR LATER FROM
@@ -796,8 +811,23 @@ final class Daemon: NSObject, NSApplicationDelegate {
         speedPopup = popup
         speedRow.addArrangedSubview(popup)
         stack.addArrangedSubview(speedRow)
+
+        let voiceRow = NSStackView()
+        voiceRow.orientation = .horizontal
+        voiceRow.spacing = 8
+        voiceRow.addArrangedSubview(NSTextField(labelWithString: "Voice"))
+        let voices = NSPopUpButton()
+        voices.target = self
+        voices.action = #selector(setVoiceFromWindow(_:))
+        voicePopup = voices
+        voiceRow.addArrangedSubview(voices)
+        stack.addArrangedSubview(voiceRow)
+
         stack.addArrangedSubview(note("The hotkey is ⌥⌘S. Speed applies to the "
-            + "next passage; the capsule has its own control for the one being read."))
+            + "next passage; the capsule has its own control for the one being read. "
+            + "A chosen voice is used when the text is in that voice's language — "
+            + "otherwise the detected language's own voice is, because the voice is "
+            + "what tells the server how to pronounce the words."))
 
         // A SWITCH, AND THE FIELDS ONLY WHEN IT IS ON. Three controls and a
         // button, all visible, made the common case -- everything on this Mac
@@ -886,6 +916,7 @@ final class Daemon: NSObject, NSApplicationDelegate {
     private func refreshSettings() {
         loginCheckbox?.state = SMAppService.mainApp.status == .enabled ? .on : .off
         calliopeToggle?.state = Calliope.isOn ? .on : .off
+        loadVoices()
         showCalliopeFields(Calliope.isOn)
         let speed = settings.object(forKey: "speed") as? Double ?? 1.0
         speedPopup?.selectItem(at: [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
@@ -900,6 +931,46 @@ final class Daemon: NSObject, NSApplicationDelegate {
     @objc private func toggleLoginFromWindow(_ sender: NSButton) {
         toggleLogin()
         refreshSettings()
+    }
+
+    /// Fill the voice list from the server rather than from a list in here.
+    ///
+    /// ASKED, NOT HARDCODED, AND THE ENDPOINT IS THE FILTER. server.py answers
+    /// /voices with Kokoro's own presets plus -- when a Calliope server is
+    /// configured -- that server's, which the gateway routes to tts-stack
+    /// alone. The engines that answer 202 with a job instead of audio never
+    /// appear on that path, so nothing here can offer a voice that would give
+    /// somebody a capsule that shows and never speaks.
+    private func loadVoices() {
+        let url = URL(string: "http://127.0.0.1:47815/voices")!
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            let listing = data.flatMap {
+                (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
+            }
+            let names = (listing?["voices"] as? [String] ?? []).sorted()
+            DispatchQueue.main.async { self?.fillVoices(names) }
+        }.resume()
+    }
+
+    private func fillVoices(_ names: [String]) {
+        guard let popup = voicePopup else { return }
+        let chosen = settings.string(forKey: "voice") ?? ""
+        popup.removeAllItems()
+        // The default is first and is not a voice: matching the language is
+        // what this did before there was a choice, and it stays the behaviour
+        // for anybody who never opens this window.
+        popup.addItem(withTitle: "Match the language")
+        popup.lastItem?.representedObject = ""
+        for name in names {
+            popup.addItem(withTitle: name)
+            popup.lastItem?.representedObject = name
+        }
+        popup.selectItem(at: names.firstIndex(of: chosen).map { $0 + 1 } ?? 0)
+        popup.isEnabled = !names.isEmpty
+    }
+
+    @objc private func setVoiceFromWindow(_ sender: NSPopUpButton) {
+        settings.set(sender.selectedItem?.representedObject as? String ?? "", forKey: "voice")
     }
 
     @objc private func setSpeedFromWindow(_ sender: NSPopUpButton) {

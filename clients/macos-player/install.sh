@@ -92,7 +92,7 @@ mkdir -p "$contents/MacOS" "$contents/Resources" "$helper/MacOS"
 target="$(uname -m)-apple-macos26.0"
 
 echo "==> Daemon"
-swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" \
+swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" "$here/shared/mark.swift" \
     "$here/daemon/main.swift" -o "$contents/MacOS/calliope-daemon"
 
 echo "==> Player"
@@ -102,6 +102,14 @@ swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" \
 
 echo "==> Server"
 install -m 0644 "$here/server/server.py" "$contents/Resources/server.py"
+
+# THE MARK THE PAGE ALREADY WEARS. Drawn from shared/mark.swift rather than
+# shipped as an asset: there is no SVG rasteriser on this machine, the shape is
+# three primitives, and every size is drawn rather than downsampled -- a 2.2
+# unit stroke does not survive scaling 1024 down to 16.
+swiftc -O -swift-version 5 -target "$target" "$here/shared/mark.swift" \
+    "$here/bundle/make-icon.swift" -o "$staging/make-icon"
+"$staging/make-icon" "$contents/Resources/Calliope.icns"
 
 echo "==> Bundle"
 sed "s/__VERSION__/$version/g" "$here/bundle/Calliope-Info.plist" > "$contents/Info.plist"
@@ -118,11 +126,22 @@ codesign --force --sign "$identity" "${sign_options[@]+"${sign_options[@]}"}" \
     "$staging/Calliope.app"
 codesign --verify --strict --deep "$staging/Calliope.app"
 
-echo "==> OpenClip extension"
-mkdir -p "$extension"
-install -m 0644 "$here/openclip/openclip.json" "$extension/openclip.json"
-sed "s|__APP__|$app|" "$here/openclip/calliope.py" > "$extension/calliope.py"
-chmod 0755 "$extension/calliope.py"
+# ONLY WHERE THERE IS AN OPENCLIP TO EXTEND. This used to mkdir -p its way in
+# regardless, so a Mac that has never had OpenClip ended up with a
+# ~/.openclip/extensions tree holding one extension for an application that is
+# not there. OpenClip is optional -- the hotkey, the menu bar item and the
+# `calliope` command all work without it -- and an optional integration should
+# leave no trace when it is not taken.
+if [ -d "$HOME/.openclip" ]; then
+    echo "==> OpenClip extension"
+    mkdir -p "$extension"
+    install -m 0644 "$here/openclip/openclip.json" "$extension/openclip.json"
+    install -m 0644 "$here/openclip/icon.svg" "$extension/icon.svg"
+    sed "s|__APP__|$app|" "$here/openclip/calliope.py" > "$extension/calliope.py"
+    chmod 0755 "$extension/calliope.py"
+else
+    echo "==> OpenClip not installed; skipping the Speak action"
+fi
 
 # A running server keeps the old code until it idles out; stop it so the next
 # Speak starts the new one. The daemon goes with it: it holds the server open
