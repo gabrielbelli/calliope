@@ -126,12 +126,22 @@ codesign --force --sign "$identity" "${sign_options[@]+"${sign_options[@]}"}" \
     "$staging/Calliope.app"
 codesign --verify --strict --deep "$staging/Calliope.app"
 
-echo "==> OpenClip extension"
-mkdir -p "$extension"
-install -m 0644 "$here/openclip/openclip.json" "$extension/openclip.json"
-install -m 0644 "$here/openclip/icon.svg" "$extension/icon.svg"
-sed "s|__APP__|$app|" "$here/openclip/calliope.py" > "$extension/calliope.py"
-chmod 0755 "$extension/calliope.py"
+# ONLY WHERE THERE IS AN OPENCLIP TO EXTEND. This used to mkdir -p its way in
+# regardless, so a Mac that has never had OpenClip ended up with a
+# ~/.openclip/extensions tree holding one extension for an application that is
+# not there. OpenClip is optional -- the hotkey, the menu bar item and the
+# `calliope` command all work without it -- and an optional integration should
+# leave no trace when it is not taken.
+if [ -d "$HOME/.openclip" ]; then
+    echo "==> OpenClip extension"
+    mkdir -p "$extension"
+    install -m 0644 "$here/openclip/openclip.json" "$extension/openclip.json"
+    install -m 0644 "$here/openclip/icon.svg" "$extension/icon.svg"
+    sed "s|__APP__|$app|" "$here/openclip/calliope.py" > "$extension/calliope.py"
+    chmod 0755 "$extension/calliope.py"
+else
+    echo "==> OpenClip not installed; skipping the Speak action"
+fi
 
 # A running server keeps the old code until it idles out; stop it so the next
 # Speak starts the new one. The daemon goes with it: it holds the server open

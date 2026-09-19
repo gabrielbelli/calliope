@@ -131,17 +131,39 @@ through the gateway — **0.85 ms added**, under 1% of a 200 ms dictation turn.
 
 ## The client that is not a service
 
-`clients/macos-player` is a macOS reader, and it is the one part of this
-repository that never talks to the rest of it. Select text in any application,
-press **Speak** in OpenClip, and a floating capsule reads it aloud; the capsule
-can grow into a reader that runs an underline across each word as it is spoken.
+`clients/macos-player` is a macOS reader. Select text in any application, press
+**⌥⌘S**, and a floating capsule reads it aloud; the capsule can grow into a
+reader that runs an underline across each word as it is spoken.
 
-**It is local only, deliberately.** It ran against this stack over HTTP for a
-while and that path has been removed: a reader for text you selected on your own
-Mac gains nothing from a NAS, and loses a URL to configure, a key to hold, a
-network that can be down and a second place a bug can live. Kokoro's full ONNX
-model measures about 4.9x realtime on an M2's own CPU, so the machine already in
-front of you is fast enough.
+```bash
+brew install --cask gabrielbelli/tap/calliope
+open -g /Applications/Calliope.app
+```
+
+The app carries its own model, so it speaks with nothing configured and no
+network at all. Kokoro's full ONNX model measures about 4.9x realtime on an M2's
+own CPU, so the machine in front of you is fast enough on its own.
+
+**This stack is an opt-in extra, not a dependency.** Menu bar icon →
+**Settings…** → *Use a Calliope server*, and the same local address also answers
+for the engines a laptop has no business running — cloned voices, long
+documents, transcription. Off is the resting state, and off is the whole of the
+privacy story.
+
+### It pairs with OpenClip
+
+[OpenClip](https://www.getopenclip.app/) puts actions on whatever you have
+selected, anywhere in macOS. Calliope installs a **Speak** action into it, so
+the reader is reachable from the selection itself as well as from the hotkey —
+useful where a hotkey is taken, and the only route in applications that will not
+give up their selection to the Accessibility API.
+
+```bash
+brew install --cask ganeshmshetty/tap/openclip
+```
+
+It is optional. The hotkey, the menu bar item and the `calliope` command all
+work without it, and `install.sh` skips the extension if OpenClip is absent.
 
 It speaks the same contract `services/tts` does -- OpenAI's body with
 `response_format: "pcm"` -- against a small bundled server on 127.0.0.1, which
@@ -157,10 +179,12 @@ OpenClip "Speak"  ->  openclip/calliope.py  ->  calliope-player (Swift)
                                           Kokoro-82M, ONNX, CPU
 ```
 
-`install.sh` builds and installs everything into `~/.local/share/calliope`.
-Nothing in this directory is built by CI or shipped as an image: it is a Swift
-binary and a Python venv on one Mac, and `clients/macos-player/README.md` is
-where its behaviour and its measurements are written down.
+`install.sh` builds it from source into `/Applications/Calliope.app`;
+`release.sh` builds the tarball the cask installs. Nothing here is built by CI
+or shipped as an image — the capsule is `NSGlassEffectView`, and no hosted
+runner has the macOS 26 SDK — so the machine that uses it is the machine that
+builds it. `clients/macos-player/README.md` has the behaviour and the
+measurements.
 
 ## Build
 
