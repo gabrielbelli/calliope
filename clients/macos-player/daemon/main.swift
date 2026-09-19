@@ -222,6 +222,7 @@ final class ServerSupervisor {
 /// this one goes.
 enum Calliope {
     private static let urlKey = "calliopeURL"
+    private static let onKey = "calliopeOn"
     private static let account = "calliope-server"
     private static let service = "com.gabrielbelli.calliope"
 
@@ -230,7 +231,15 @@ enum Calliope {
         set { settings.set(newValue.trimmingCharacters(in: .whitespaces), forKey: urlKey) }
     }
 
-    static var isConfigured: Bool { !url.isEmpty }
+    /// The switch, which is what decides -- not whether a URL happens to be
+    /// saved. Turning it off has to leave the address alone, or the only way
+    /// back is to type it again, and nobody would call that a switch.
+    static var isOn: Bool {
+        get { settings.bool(forKey: onKey) }
+        set { settings.set(newValue, forKey: onKey) }
+    }
+
+    static var isConfigured: Bool { isOn && !url.isEmpty }
 
     static var key: String {
         get {
@@ -507,6 +516,8 @@ final class Daemon: NSObject, NSApplicationDelegate {
     private var speedPopup: NSPopUpButton?
     private var statusText: NSTextField?
     private var permissionButton: NSButton?
+    private var calliopeToggle: NSSwitch?
+    private var calliopeFields: NSStackView?
     private var calliopeURLField: NSTextField?
     private var calliopeKeyField: NSSecureTextField?
     private var calliopeResult: NSTextField?
@@ -658,8 +669,8 @@ final class Daemon: NSObject, NSApplicationDelegate {
     ///
     /// The Calliope section waited for the proxy rather than shipping ahead of
     /// it: fields that save somewhere nothing reads make the window lie about
-    /// what the app can do. server.py forwards now, so they are here, and the
-    /// Connect button proves the round trip instead of claiming it.
+    /// what the app can do. server.py forwards now, so the switch is here, and
+    /// what it reports is the round trip rather than a claim about it.
     @objc private func showSettings() {
         if settingsWindow == nil { settingsWindow = buildSettingsWindow() }
         refreshSettings()
@@ -668,7 +679,7 @@ final class Daemon: NSObject, NSApplicationDelegate {
     }
 
     private func buildSettingsWindow() -> NSWindow {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 560),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 100),
                               styleMask: [.titled, .closable],
                               backing: .buffered, defer: false)
         window.title = "Calliope"
@@ -719,35 +730,59 @@ final class Daemon: NSObject, NSApplicationDelegate {
         stack.addArrangedSubview(note("The hotkey is ⌥⌘S. Speed applies to the "
             + "next passage; the capsule has its own control for the one being read."))
 
-        stack.addArrangedSubview(heading("Calliope server (optional)"))
-        stack.addArrangedSubview(note("Leave this empty and everything stays on "
-            + "this Mac. Fill it in and the other engines -- cloned voices, long "
-            + "documents, transcription -- answer at the same address, from your "
-            + "own server. Nothing else changes: same hotkey, same capsule."))
+        // A SWITCH, AND THE FIELDS ONLY WHEN IT IS ON. Three controls and a
+        // button, all visible, made the common case -- everything on this Mac
+        // -- look like something half-configured. Off is the resting state and
+        // it should look like one line.
+        let calliopeRow = NSStackView()
+        calliopeRow.orientation = .horizontal
+        calliopeRow.spacing = 8
+        calliopeRow.addArrangedSubview(heading("Use a Calliope server"))
+        let toggle = NSSwitch()
+        toggle.target = self
+        toggle.action = #selector(toggleCalliope(_:))
+        calliopeToggle = toggle
+        calliopeRow.addArrangedSubview(toggle)
+        stack.addArrangedSubview(calliopeRow)
+
+        let fields = NSStackView()
+        fields.orientation = .vertical
+        fields.alignment = .leading
+        fields.spacing = 8
+        fields.addArrangedSubview(note("The other engines -- cloned voices, long "
+            + "documents, transcription -- answer at the same address, from your own "
+            + "server. Nothing else changes: same hotkey, same capsule."))
 
         let urlField = NSTextField(string: Calliope.url)
         urlField.placeholderString = "https://calliope.example.com"
         urlField.widthAnchor.constraint(equalToConstant: 380).isActive = true
+        // NO CONNECT BUTTON. Typing an address and then having to press a
+        // second thing is one step more than the switch already promised, so
+        // the field commits itself: on Return, and on leaving it.
+        urlField.target = self
+        urlField.action = #selector(saveCalliope)
+        (urlField.cell as? NSTextFieldCell)?.sendsActionOnEndEditing = true
         calliopeURLField = urlField
-        stack.addArrangedSubview(urlField)
+        fields.addArrangedSubview(urlField)
 
         let keyField = NSSecureTextField(string: Calliope.key)
-        keyField.placeholderString = "API key"
+        keyField.placeholderString = "API key, if the server asks for one"
         keyField.widthAnchor.constraint(equalToConstant: 380).isActive = true
+        keyField.target = self
+        keyField.action = #selector(saveCalliope)
+        (keyField.cell as? NSTextFieldCell)?.sendsActionOnEndEditing = true
         calliopeKeyField = keyField
-        stack.addArrangedSubview(keyField)
-
-        let connect = NSButton(title: "Connect", target: self, action: #selector(saveCalliope))
-        connect.bezelStyle = .rounded
-        connect.keyEquivalent = "\r"
-        stack.addArrangedSubview(connect)
+        fields.addArrangedSubview(keyField)
 
         let result = NSTextField(wrappingLabelWithString: "")
         result.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         result.textColor = .secondaryLabelColor
         result.preferredMaxLayoutWidth = 380
         calliopeResult = result
-        stack.addArrangedSubview(result)
+        fields.addArrangedSubview(result)
+
+        calliopeFields = fields
+        stack.addArrangedSubview(fields)
 
         stack.addArrangedSubview(heading("Status"))
         let status = NSTextField(wrappingLabelWithString: "")
@@ -767,11 +802,22 @@ final class Daemon: NSObject, NSApplicationDelegate {
         stack.addArrangedSubview(logs)
 
         window.contentView = stack
+        // SEEN IN A SCREENSHOT, NOT REASONED ABOUT. The secure field took focus
+        // on open, so macOS anchored its Passwords autofill popover to it --
+        // squarely on top of the Connect button. Opening a settings window
+        // should not summon a password manager, and it certainly should not
+        // hide the only button that does anything.
+        window.initialFirstResponder = urlField
+        // And the height was a guess that left dead space under the last
+        // control. The stack knows what it needs.
+        window.setContentSize(stack.fittingSize)
         return window
     }
 
     private func refreshSettings() {
         loginCheckbox?.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        calliopeToggle?.state = Calliope.isOn ? .on : .off
+        showCalliopeFields(Calliope.isOn)
         let speed = settings.object(forKey: "speed") as? Double ?? 1.0
         speedPopup?.selectItem(at: [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
             .firstIndex(where: { abs($0 - speed) < 0.01 }) ?? 1)
@@ -800,6 +846,23 @@ final class Daemon: NSObject, NSApplicationDelegate {
     /// prettier yes -- and it would be testing a path nothing uses. What
     /// matters is whether the thing the player talks to can reach it, with the
     /// credential this daemon just handed it, so that is what gets asked.
+    @objc private func toggleCalliope(_ sender: NSSwitch) {
+        Calliope.isOn = sender.state == .on
+        showCalliopeFields(Calliope.isOn)
+        saveCalliope()
+        if Calliope.isOn, Calliope.url.isEmpty {
+            calliopeResult?.stringValue = "Where is it?"
+            settingsWindow?.makeFirstResponder(calliopeURLField)
+        }
+    }
+
+    private func showCalliopeFields(_ shown: Bool) {
+        calliopeFields?.isHidden = !shown
+        if let stack = settingsWindow?.contentView {
+            settingsWindow?.setContentSize(stack.fittingSize)
+        }
+    }
+
     @objc private func saveCalliope() {
         Calliope.url = calliopeURLField?.stringValue ?? ""
         Calliope.key = calliopeKeyField?.stringValue ?? ""
@@ -807,7 +870,8 @@ final class Daemon: NSObject, NSApplicationDelegate {
         server.restart()
 
         guard Calliope.isConfigured else {
-            calliopeResult?.stringValue = "Disconnected. Everything runs on this Mac."
+            calliopeResult?.stringValue = Calliope.isOn ? ""
+                : "Off. Everything runs on this Mac."
             return
         }
         calliopeResult?.stringValue = "Connecting…"

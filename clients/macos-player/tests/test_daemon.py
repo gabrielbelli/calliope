@@ -249,7 +249,7 @@ def test_the_calliope_fields_reach_the_process_that_reads_them():
     # something new stored in a plist that rides in every backup, and the only
     # value here that must never do that is the key.
     keys = set(re.findall(r'forKey:\s*("?\w+"?)', DAEMON_CODE))
-    assert keys <= {'"speed"', "urlKey"}, \
+    assert keys <= {'"speed"', "urlKey", "onKey"}, \
         f"something new is in UserDefaults, and a credential must not be: {keys}"
     # And the round trip is proven rather than claimed: the button reads back
     # what the proxy says it can reach.
@@ -301,3 +301,32 @@ def test_an_upgrade_stops_the_running_daemon():
     binary keeps running and holds the old server open. Seen, not imagined."""
     assert re.search(r"pkill -TERM -f calliope-daemon", INSTALL), \
         "the installer matches the daemon by a path it may not have been started with"
+
+
+def test_the_calliope_section_is_one_line_until_it_is_wanted():
+    """SEEN IN A SCREENSHOT AND CALLED BAD AND UNINTUITIVE, which it was: two
+    fields and a Connect button, always visible, made the common case -- one
+    Mac, nothing else -- look like something left half-configured.
+
+    A switch says what the section is for in one line, and the fields belong to
+    it rather than standing alongside. Three consequences, each of which was a
+    decision:
+
+    Off must not erase the address, or the only way back is to type it again.
+    The URL therefore decides nothing on its own; the switch does.
+
+    The fields commit themselves, because a switch that then needs a button
+    pressed is one step more than it promised.
+
+    And the secure field must not take focus on open: macOS anchors its
+    Passwords popover to whatever is focused, and it landed on top of the
+    button that used to be there."""
+    assert "NSSwitch()" in DAEMON_CODE, "the section is not behind a switch"
+    assert 'NSButton(title: "Connect"' not in DAEMON_CODE, \
+        "the button the switch replaced is still there"
+    assert "isOn && !url.isEmpty" in DAEMON_CODE, \
+        "a saved address is used whether or not the switch is on"
+    assert "sendsActionOnEndEditing = true" in DAEMON_CODE, \
+        "the fields need a second thing pressed to take effect"
+    assert "window.initialFirstResponder = urlField" in DAEMON_CODE, \
+        "opening the window summons the Passwords popover over the section"

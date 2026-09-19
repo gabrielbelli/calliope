@@ -83,8 +83,9 @@ old suite is left alone.
 
 ## The Calliope server (optional)
 
-Menu bar icon → **Settings…** → *Calliope server*. An address and a key; empty means
-everything stays here.
+Menu bar icon → **Settings…** → **Use a Calliope server**. Off is the resting state and
+looks like one line; on reveals an address and a key, and turning it back off leaves both
+alone. The fields commit on Return or on leaving them — there is nothing else to press.
 
 Filled in, `server.py` becomes a proxy: `kokoro`, `tts-1` and `tts-1-hd` are answered on this
 Mac as before, and anything else is forwarded to the Calliope gateway. `GET /v1/models` lists
@@ -103,6 +104,6 @@ Three things are deliberate:
   A gateway answers a name it does not know with a default voice, which turns a typo into
   audio nobody chose.
 
-**Connect** saves, restarts the server and then asks the proxy what it can reach, so the
-answer on screen is the round trip rather than a claim about it. An address that is down is
+Each change saves, restarts the server and then asks the proxy what it can reach, so the line
+under the fields is the round trip rather than a claim about it. An address that is down is
 still saved — it may be up later.
