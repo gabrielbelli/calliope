@@ -103,6 +103,14 @@ REMOTE_MODELS = [[], 0.0]
 # the runtime, and this is the line that knows the difference. It matches
 # shared/paths.swift, which a test holds it to.
 RUNTIME = os.path.expanduser("~/.local/share/calliope")
+
+# WHERE THE MODEL IS, which is not always the same place. install.sh downloads
+# it into the runtime directory; a Homebrew formula cannot write there, because
+# its install step is sandboxed to the formula's own prefix, so it puts the
+# model beside this file inside Calliope.app. Beside-this-file first, because an
+# app that carries its own model is the self-contained one.
+HERE = os.path.dirname(os.path.abspath(__file__))
+MODELS = HERE if os.path.exists(os.path.join(HERE, "kokoro-v1.0.onnx")) else RUNTIME
 PORT = 47815
 # WHO IS HOLDING THIS OPEN DECIDES WHEN IT CLOSES. Started by the one-shot
 # player, the server has to time itself out or it would outlive every reason to
@@ -361,8 +369,8 @@ def main():
     from kokoro_onnx import Kokoro
 
     started = time.time()
-    KOKORO = Kokoro(os.path.join(RUNTIME, "kokoro-v1.0.onnx"),
-                    os.path.join(RUNTIME, "voices-v1.0.bin"))
+    KOKORO = Kokoro(os.path.join(MODELS, "kokoro-v1.0.onnx"),
+                    os.path.join(MODELS, "voices-v1.0.bin"))
     for voice in ("af_heart", "pf_dora"):
         KOKORO.create("ok.", voice=voice, lang=LANG_BY_VOICE_PREFIX[voice[0]])  # first call per language is slow
     print("model ready in %.2f s on port %d" % (time.time() - started, PORT), flush=True)

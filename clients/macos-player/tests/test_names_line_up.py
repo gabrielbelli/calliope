@@ -52,8 +52,14 @@ def test_everything_agrees_on_the_runtime_directory():
     # "NO_SUCHFILE ... Contents/Resources/kokoro-v1.0.onnx".
     server = (ROOT / "server/server.py").read_text()
     assert re.search(r'RUNTIME = os\.path\.expanduser\("([^"]+)"\)', server).group(1) == runtime
-    assert "os.path.dirname(os.path.abspath(__file__))" not in server, \
-        "the server locates the model relative to itself again"
+    # It may look beside itself FIRST -- a packaged app carries its own model,
+    # because a Homebrew install step is sandboxed to the formula's prefix and
+    # cannot write to the runtime. What it must never do is look ONLY there,
+    # which is how it failed when it moved into the bundle: the directory had
+    # no model in it and the stack would not start.
+    assert "MODELS = HERE if" in server, "the model is found in exactly one place"
+    assert "else RUNTIME" in server, \
+        "an install.sh install has no model, because nothing falls back to the runtime"
 
 
 def test_the_installed_script_is_the_one_the_manifest_names():

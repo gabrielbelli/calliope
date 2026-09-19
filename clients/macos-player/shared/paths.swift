@@ -37,9 +37,26 @@ let appURL: URL = {
 /// The local server, in the bundle's Resources.
 let serverScriptURL = appURL.appendingPathComponent("Contents/Resources/server.py")
 
-/// The interpreter that runs it, in the runtime, because a venv is 125 MB of
-/// files that pip rewrites.
-let pythonURL = runtimeURL.appendingPathComponent(".venv/bin/python")
+/// The interpreter that runs it.
+///
+/// INSIDE THE BUNDLE WHEN THERE IS ONE, and that is what makes a packaged
+/// Calliope work at all. install.sh builds the environment in the runtime
+/// directory, because it is a script the owner runs and $HOME is theirs to
+/// write to. A Homebrew formula cannot do that -- its install step is
+/// sandboxed to the formula's own prefix -- so it puts the environment and the
+/// model inside Calliope.app instead, where they are built once, sealed by the
+/// signature, and never written to again.
+///
+/// Bundle first, runtime second: an app that carries its own is self-contained,
+/// and one that does not falls back to the directory install.sh fills.
+private func preferBundle(_ inside: String, _ outside: String) -> URL {
+    let bundled = appURL.appendingPathComponent("Contents/Resources/" + inside)
+    return FileManager.default.fileExists(atPath: bundled.path)
+        ? bundled
+        : runtimeURL.appendingPathComponent(outside)
+}
+
+let pythonURL = preferBundle("python/bin/python3", ".venv/bin/python")
 
 /// The one-shot player, a nested application with its own identity.
 ///
