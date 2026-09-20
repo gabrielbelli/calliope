@@ -77,7 +77,7 @@ services:
   # running. Raising it is a deliberate edit, which is the point.
   voice-gateway:
     container_name: voice-gateway
-    image: ghcr.io/gabrielbelli/calliope-gateway:v0.1.0
+    image: ghcr.io/gabrielbelli/calliope-gateway:v0.1.2
     pull_policy: always
     restart: unless-stopped
     ports:
@@ -206,7 +206,7 @@ services:
 
   stt-stack:
     container_name: stt-stack
-    image: ghcr.io/gabrielbelli/calliope-stt:v0.1.0
+    image: ghcr.io/gabrielbelli/calliope-stt:v0.1.2
     pull_policy: always
     restart: unless-stopped
     expose:
@@ -281,7 +281,7 @@ services:
 
   tts-stack:
     container_name: tts-stack
-    image: ghcr.io/gabrielbelli/calliope-tts:v0.1.0
+    image: ghcr.io/gabrielbelli/calliope-tts:v0.1.2
     pull_policy: always
     restart: unless-stopped
     expose:
@@ -328,7 +328,7 @@ services:
 
   tts-long:
     container_name: tts-long
-    image: ghcr.io/gabrielbelli/calliope-tts-long:v0.1.0
+    image: ghcr.io/gabrielbelli/calliope-tts-long:v0.1.2
     pull_policy: always
     restart: unless-stopped
     expose:
@@ -728,7 +728,7 @@ services:
   # passthrough it always was.
   voice-ui:
     container_name: voice-ui
-    image: ghcr.io/gabrielbelli/calliope-ui:v0.1.0
+    image: ghcr.io/gabrielbelli/calliope-ui:v0.1.2
     pull_policy: always
     restart: unless-stopped
     # NO PORTS. The gateway reaches this service on the app-internal network
