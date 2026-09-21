@@ -49,6 +49,63 @@ before anything is fetched. The fetching itself is MeTube's job.
 
 ---
 
+## Copied
+
+Their code is in our tree, so their notice travels with it.
+
+### `hasib41/meniscus-liquid-nav` — MIT — Copyright (c) 2026 Hasib
+
+The dock — the bottom navigation whose top edge is a liquid surface, and whose
+selected tab is a bead that surface dips beneath — is **ported from Meniscus**.
+The geometry, the spring constants and the drag response are theirs and are
+deliberately not reinterpreted. The four icons, the accents and the two themes
+are this page's. Found through its listing at
+`vibing.inc/library/meniscus-vg-2134`; upstream is
+`github.com/hasib41/meniscus-liquid-nav`, with a live demo at
+`hasib41.github.io/meniscus-liquid-nav/`.
+
+All of it lives in `services/ui/app/static/ui.html`, in three places, each
+already carrying a pointer back to the original:
+
+| Where | What came from Meniscus |
+|---|---|
+| the dock CSS (`.rail`, `.dock`, the socket custom properties) | the plate, the rim and the bead |
+| the `<div class="rail">` markup and its SVG `<defs>` | the one closed path the socket is cut into |
+| `dockMeasure`, `dockTrough`, `meniscusTo` and the spring loop | the geometry, the spring and the drag |
+
+It is one component in vanilla JS and SVG with zero dependencies, which is why
+it could be taken at all — there was no framework attached to it, and nothing
+to reconcile with a page that has no build step.
+
+The notice below is reproduced in full at the top of `ui.html` as well, because
+that is the file the code is actually in.
+
+```
+MIT License
+
+Copyright (c) 2026 Hasib
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
 ## Learned from
 
 No code from these was copied verbatim. Credited because the ideas were load
