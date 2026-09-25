@@ -229,14 +229,14 @@ def test_the_health_line_counts_faults_and_not_choices(tmp_path):
                          sat({ id: "a4", status: { muted: true } }),
                          sat({ id: "a5", config: { mic_enabled: false } }),
                          sat({ id: "a6", adopted: false, online: false })];
-      WAKE.server = { words: [{ name: "alexa", satellites: ["*"], state: "error" }] };
-      SATELLITES.routing = { load_error: "rules.json: bad" };
+      WAKE.server = { words: [{ name: "alexa", satellites: ["*"], state: "error" }],
+                      load_error: "wake_words.json could not be loaded" };
       satellitesHealth();
       const busy = $("sathealth").textContent;
-      SATELLITES.list = [sat({})]; WAKE.server = { words: [] }; SATELLITES.routing = null;
+      SATELLITES.list = [sat({})]; WAKE.server = { words: [], load_error: null };
       satellitesHealth();
       console.log(JSON.stringify({ busy, calm: $("sathealth").textContent }));
     """)
     assert got["busy"] == ("2 offline · 1 update failed · alexa failed to download · "
-                           "routing did not load"), got
+                           "wake words did not load"), got
     assert got["calm"] == "", "the health line says something when all is well"

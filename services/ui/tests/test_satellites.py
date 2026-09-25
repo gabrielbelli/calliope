@@ -1,6 +1,7 @@
 """The Satellites tab: one card, one list of satellites, each satellite's own
 settings folded under its row, and the hub's settings (wake words, activity,
-routing, firmware) as four quiet disclosures at the foot.
+firmware) as three quiet disclosures at the foot. Routing was a fourth until
+the hub moved it onto each wake word (2026-09-25).
 
 The owner's words were "the main page should list and manage the satellites,
 the satellite specific settings should be a collapsible on the satellite",
@@ -94,15 +95,17 @@ OPEN_ROW = BODY[:BODY.index('<details class="sub')]
 
 def test_the_satellites_tab_is_one_card():
     """It was five cards at one weight, which read as a settings dump. The
-    list and the hub's four disclosures are one card now, the hub sections at
-    the foot of it, and the owner's "firmware etc." last of all."""
+    list and the hub's disclosures are one card now, the hub sections at the
+    foot of it, and the owner's "firmware etc." last of all. Routing is not
+    one of them any more: a wake word says what it does, and the hub answers
+    PUT /satellites/routing 409."""
     assert PANEL.count('class="card"') == 1, "the tab is a stack of cards again"
     order = [PANEL.index(f'id="{i}"') for i in ("satellitelist", "sat-wakewords", "sat-activity",
-                                                  "sat-routing", "sat-firmware")]
+                                                  "sat-firmware")]
     assert order == sorted(order), "the list is not first, or Firmware is not last"
     hub = PANEL[PANEL.index('<div class="sat-hub"'):]
-    for section in ("sat-wakewords", "sat-activity", "sat-routing", "sat-firmware"):
-        assert f'<details id="{section}"' in hub, f"#{section} is not a disclosure at the foot"
+    assert re.findall(r'<details id="(sat-[a-z]+)"', hub) == [
+        "sat-wakewords", "sat-activity", "sat-firmware"], "the hub's disclosures changed"
     # Everything the hub answers is inside #satellitesman, so a deployment with
     # no hub shows one sentence and no empty headings.
     man = PANEL[PANEL.index('id="satellitesman"'):]
@@ -197,13 +200,18 @@ def test_a_poll_never_rebuilds_a_row_so_an_open_disclosure_stays_open():
         body = function(name)
         assert ".open" not in body, f"{name} decides whether a disclosure is open"
         assert "innerHTML" not in body, f"{name} rewrites markup"
-    # The three places the page opens a disclosure: restoring a row the viewer
+    # The four places the page opens a disclosure: restoring a row the viewer
     # left open (or the only satellite), the moment a satellite is adopted,
-    # and Change wake words. All three are a press or a first render.
-    assert CODE.count(".open = true") == 3
+    # Change wake words, and a wake word just added. Each is a press or a
+    # first render; the word list is kept across polls like the satellites.
+    assert CODE.count(".open = true") == 4
     assert 'li.querySelector("details.sat-row").open = true;' in render
     assert "row.open = true;" in function("satelliteAct")
     assert "box.open = true;" in function("satGoWakeWords")
+    assert 'row.querySelector("details.sat-row").open = true;' in listener("wwaddgo")
+    for name in ("wakeRender", "wakeRowUpdate", "wakeActionUpdate"):
+        assert ".open" not in function(name), f"{name} decides whether a disclosure is open"
+    assert "if (!row) { row = wakeRow(w.name); WAKE.rows.set(w.name, row); }" in function("wakeRender")
 
 
 def test_open_rows_are_remembered_per_viewer():
@@ -251,8 +259,14 @@ def test_nothing_a_satellite_says_about_itself_reaches_innerhtml():
     fw = firmware[firmware.index("row.innerHTML = `"):]
     assert "${" not in fw[:fw.index("`;")], "firmwareRow interpolates into markup"
     for name in ("satelliteUpdate", "satButtons", "satDevice", "wakeRowUpdate", "wakeRender",
-                 "satellitesHealth", "routingWords", "satFillSelect"):
+                 "wakeActionUpdate", "satellitesHealth", "wakeTryWords", "satFillSelect"):
         assert "innerHTML" not in function(name), f"{name} writes markup"
+    # A custom model's name is the hub's, and anyone who can upload chooses
+    # it: its row is markup with no hole at all, and the name goes in as text.
+    models = function("wakeModels")
+    literal = models[models.index("row.innerHTML = `"):]
+    assert "${" not in literal[:literal.index("`;")], "wakeModels interpolates into markup"
+    assert 'row.querySelector(".sat-name").textContent = wwLabel(name);' in models
     assert 'const u = "sat" + (++SATELLITES.seq);' in function("satelliteBuild")
     assert 'const u = "wake" + (++SATELLITES.seq);' in function("wakeRow")
 
@@ -373,7 +387,8 @@ SAMPLES = {"name": "Kitchen", "old": "Kitchen", "new": "Bedroom", "id": "a1b2c3d
            "what": "heard hey jarvis (0.82) from 40°", "words": "hey jarvis, alexa",
            "list": "Speaker, Microphone and Lights", "message": "503 Service Unavailable",
            "n": "3 satellites", "k": "2 warnings", "score": "0.82", "b": "Vol −",
-           "how": "strong"}
+           "how": "strong", "word": "hey mycroft", "var": "SATELLITES_HA_TOKEN_KITCHEN",
+           "s": "1.3"}
 
 
 def sat_copy() -> dict[str, str]:
@@ -440,18 +455,23 @@ def test_change_wake_words_opens_the_editor_and_moves_focus_to_it():
 
 
 def test_a_save_sends_what_put_takes_and_nothing_the_hub_reports():
-    """GET answers each word with its state and error; PUT takes name,
-    threshold and satellites. A body that carried the state back would be the
-    hub's own report sent to it as an instruction."""
+    """GET answers each word with its state and error; PUT takes the entry.
+    A body that carried the state back would be the hub's own report sent to
+    it as an instruction. (Which fields PUT takes is read from the hub itself
+    in test_wake_words_contract.py.) A trigger sends no action: it has none."""
     copy = function("wakeCopy")
-    assert "return { name: w.name, threshold: w.threshold, satellites: [...w.satellites] };" in copy
-    assert "wakePut(wakeEffective().map(wakeCopy))" in function("wakeSave")
-    assert "body: JSON.stringify({ words })" in function("wakePut")
+    body = copy[copy.index("return {"):]
+    assert "state" not in body and "error" not in body
+    assert 'action: w.mode === "trigger" ? undefined : w.action' in body
+    assert "wakePut(wakeEffective().map(wakeCopy), ptt)" in function("wakeSave")
+    assert "body: JSON.stringify(ptt ? { words, ptt } : { words })" in function("wakePut")
+    # Push-to-talk is sent only when it changed; left out, the hub keeps it.
+    assert "wakeKey([], WAKE.draftPtt) !== wakeKey([], WAKE.server.ptt)" in function("wakeSave")
 
 
 def test_a_refused_save_keeps_the_edit_and_says_why_beside_it():
     save = function("wakeSave")
-    assert save.index("await wakePut(") < save.index("WAKE.draft = null;")
+    assert save.index("await wakePut(") < save.index("WAKE.draft = WAKE.draftPtt = null;")
     assert 'note($("wwnote"), "bad", e.message);' in save
     assert '<div id="wwnote" aria-live="polite"></div>' in PANEL
 
@@ -484,10 +504,17 @@ def test_removing_a_word_is_staged_and_can_be_kept():
 
 
 def test_save_is_off_with_its_reason_when_there_is_nothing_to_save():
+    """Off when nothing changed, when a word is left with nobody to hear it,
+    and when an entry would be refused: the hub's 422, said before the press,
+    with the word named beside Save and the reason on the word's own row."""
     render = function("wakeRender")
     assert "const nobody = dirty && wakeEffective().some(w => !w.satellites.length);" in render
-    assert '$("wwsave").disabled = !dirty || nobody;' in render
-    assert "nobody ? SAT_COPY.wwNone : dirty ? SAT_COPY.wwDirty : SAT_COPY.wwClean" in render
+    assert "const fix = dirty ? wakeFirstProblem() : \"\";" in render
+    assert '$("wwsave").disabled = !dirty || nobody || !!fix;' in render
+    assert ('nobody ? SAT_COPY.wwNone : fix ? satText("wwFix", { word: fix })\n'
+            "    : dirty ? SAT_COPY.wwDirty : SAT_COPY.wwClean") in render
+    assert 'satNoteOnce(q(".ww-fix"), "warn", problem);' in function("wakeRowUpdate")
+    assert "if (wakeFirstProblem()) { wakeRender(); return; }" in function("wakeSave")
 
 
 def test_the_add_list_offers_only_what_the_hub_can_load_and_is_not_listed():
@@ -498,13 +525,17 @@ def test_the_add_list_offers_only_what_the_hub_can_load_and_is_not_listed():
 
 
 def test_the_threshold_slider_offers_exactly_the_range_the_hub_accepts():
-    """Read from the hub itself, so the two cannot drift apart."""
+    """Read from the hub itself, so the two cannot drift apart: the range, and
+    where a new word starts, which is higher for a trigger."""
     hub = HUB_WAKE_WORDS.read_text()
     low = re.search(r"^MIN_THRESHOLD = ([\d.]+)$", hub, re.M).group(1)
     high = re.search(r"^MAX_THRESHOLD = ([\d.]+)$", hub, re.M).group(1)
     default = re.search(r"^DEFAULT_THRESHOLD = ([\d.]+)$", hub, re.M).group(1)
+    trigger = re.search(r"^DEFAULT_TRIGGER_THRESHOLD = ([\d.]+)$", hub, re.M).group(1)
     assert f'min="{low}" max="{high}"' in WORD
-    assert f"threshold: {default}, satellites: [\"*\"]" in listener("wwaddgo")
+    assert f"const WAKE_THRESHOLD = {{ usual: {default}, trigger: {trigger} }};" in CODE
+    assert 'threshold: WAKE_THRESHOLD.usual, satellites: ["*"], mode: "command"' in function("wakeAdd")
+    assert "wakeAdd(name);" in listener("wwaddgo")
 
 
 def test_a_hub_without_wake_word_assignment_costs_the_section_and_not_the_tab():
@@ -550,7 +581,9 @@ def test_the_stream_remembers_what_the_hub_does_not():
     (injected) lights nothing."""
     handler = function("satellitesListen")
     assert 'if (ev.type === "wake" && !ev.injected)' in handler
-    assert 'if (ev.type === "routed") SATELLITES.woke.delete(ev.satellite);' in handler
+    assert "if (SAT_WOKE_ENDS.includes(ev.type)) SATELLITES.woke.delete(ev.satellite);" in handler
+    assert ('const SAT_WOKE_ENDS = ["routed", "turn", "conversation_ended", "triggered"];'
+            in CODE), "a reply that is a turn, or a trigger, leaves the row Listening"
     assert 'ev.type === "ota" && ev.state === "rebooting"' in handler
     assert '$("evnone").hidden = true;' in handler
     state = function("satState")
@@ -584,16 +617,29 @@ def test_a_wake_word_that_failed_says_so_once_and_in_a_sentence():
 # --------------------------------------------------------- routing, firmware --
 
 
-def test_the_routing_test_offers_what_a_rule_can_name():
-    """A free-text satellite and a wake word defaulting to hey_jarvis were
-    guesses: the selects now list any satellite and each adopted one, any
-    wake word, push-to-talk and each of the hub's words."""
-    assert '<select id="routesatellite"></select>' in PANEL
-    assert '<select id="routeword"></select>' in PANEL
-    words = function("routingWords")
-    assert '["*", "Any wake word"], ["ptt", "Push-to-talk"]' in words
-    assert '["any", "Any satellite"]' in words
+def test_routing_is_on_the_word_and_its_editor_is_gone():
+    """The hub keeps what a word does on the word, and answers PUT
+    /satellites/routing 409 routing_per_wake_word. The rules.json editor
+    would have been a box whose every Save failed, so it is gone, and only
+    its Try box is left, inside Wake words."""
+    for gone in ('id="sat-routing"', 'id="routetext"', 'id="routesave"', 'id="routesatellite"'):
+        assert gone not in PANEL, f"{gone} is back"
+    assert 'json("/satellites/routing", { method: "PUT"' not in CODE
+    assert 'json("/satellites/routing")' not in CODE
+    words = PANEL[PANEL.index('<details id="sat-wakewords"'):PANEL.index('<details id="sat-activity"')]
+    assert 'id="routeform"' in words and '<select id="routeword"></select>' in words
+
+
+def test_try_a_word_offers_the_saved_words_that_have_an_action():
+    """A trigger has no action to run, and the hub runs what it has saved,
+    not what the page is editing; push-to-talk is always there."""
+    words = function("wakeTryWords")
+    assert 'WAKE.server.words.filter(w => w.mode !== "trigger" && w.action)' in words
+    assert "WAKE.draft" not in words
+    assert '[WAKE_PTT, "Push-to-talk"]' in words
     assert "hey_jarvis" not in PANEL
+    assert CODE.count('json("/satellites/routing/test", { method: "POST"') == 1
+    assert '$("routeform").addEventListener("submit"' in CODE, "Enter does not send it"
 
 
 def test_update_every_satellite_is_on_the_newest_image_only():
@@ -607,22 +653,6 @@ def test_update_every_satellite_is_on_the_newest_image_only():
     assert "row.querySelector(newest ? '[data-fw=\"back\"]' : '[data-fw=\"all\"]').remove();" in row
     assert 'data-fw="back">Roll back every satellite</button>' in row
     assert "an older image?" in SCRIPT[SCRIPT.index("askRollback:"):][:120]
-
-
-def test_save_rules_is_off_with_its_reason_when_there_is_nothing_to_save():
-    """Save rules was a live filled button with nothing changed, beside Save
-    wake words, which greys with "No changes to save."."""
-    assert '<button class="primary small" id="routesave" type="button" disabled>Save rules</button>' in PANEL
-    assert '<span class="hint" id="routedirty"></span>' in PANEL
-    dirty = function("routingDirty")
-    assert '$("routetext").value !== SATELLITES.routingFilled' in dirty
-    assert '$("routesave").disabled = !dirty && !redo;' in dirty
-    assert "SAT_COPY.routeDirty" in dirty and "SAT_COPY.routeClean" in dirty
-    assert 'addEventListener("input", routingDirty)' in CODE
-    assert "routingDirty();" in function("routingShow")
-    save = CODE[CODE.index('$("routesave").addEventListener("click"'):]
-    assert "finally { done(); routingDirty(); }" in save[:save.index("\n});\n")], \
-        "busy() hands Save rules back switched on after a save"
 
 
 def test_a_satellite_that_has_gone_is_a_word_a_reason_and_forget():

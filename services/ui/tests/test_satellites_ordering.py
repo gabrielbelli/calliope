@@ -10,8 +10,8 @@ What they prevent:
     it carries the list from before the save, and taken whole it was the copy
     the next edit was built from, so that edit's Save put the old assignment
     back;
-  * Routing coming back after a missed poll by writing the hub's rules over
-    an edit somebody was in the middle of;
+  * a poll, or the hub coming back after a missed one, writing the hub's
+    copy over a word somebody is in the middle of editing;
   * the rows moving on a poll, which takes the row under a finger away.
 """
 
@@ -43,25 +43,22 @@ def test_a_wake_word_event_from_before_a_save_cannot_undo_it(tmp_path):
     assert got["state"] == "error", got
 
 
-def test_routing_comes_back_after_a_missed_poll_without_overwriting_an_edit(tmp_path):
-    """Routing is loaded again after the hub was away, which is what shows it.
-    The rules somebody was editing while it was away stay in the box: the
-    hub's copy goes in only when the box still holds what it put there."""
+def test_an_address_being_typed_survives_the_polls_and_the_hub_going_away(tmp_path):
+    """What Routing's box promised, now on a word: a poll every 3 s, and a
+    hub that restarts in the middle, leave an edit where it is. The draft is
+    the list, and a poll only refreshes the hub's copy under it."""
     got = run(tmp_path, """
-      $("routetext").value = "";                        // the empty box the page starts with
       await satellitesRefresh();
-      await new Promise(r => setTimeout(r, 50));        // the first routing load fills it
-      const filled = $("routetext").value.includes('"rules"');
-      $("routetext").value = '{"version": 1, "rules": [ half-typed';
+      wakeEdit("alexa", w => { wakeSetMode(w, "command", "alexa"); wakeSetDest(w, "ha_assist"); });
+      wakeEdit("alexa", w => wakeField(w, "d.url", "https://homeassistant.lo"));   // half-typed
+      await satellitesRefresh();
       hub.down = true;  await satellitesRefresh();
       hub.down = false; await satellitesRefresh();
-      await new Promise(r => setTimeout(r, 50));
-      console.log(JSON.stringify({ filled, shown: $("sat-routing").hidden === false,
-                                   kept: $("routetext").value.endsWith("half-typed") }));
+      const w = WAKE.draft && WAKE.draft.find(x => x.name === "alexa");
+      console.log(JSON.stringify({ url: w && w.action.destination.url, puts: hub.puts.length }));
     """)
-    assert got["filled"], got
-    assert got["shown"], got
-    assert got["kept"], got
+    assert got["url"] == "https://homeassistant.lo", got
+    assert got["puts"] == 0, "a poll sent an edit nobody saved"
 
 
 def test_a_poll_never_reorders_the_rows_and_a_rename_does(tmp_path):

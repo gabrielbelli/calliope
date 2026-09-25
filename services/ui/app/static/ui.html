@@ -1227,7 +1227,7 @@ details>summary:active{opacity:.72}
   /* A SATELLITE ROW IS A LIST ROW, NOT A PANEL. Boxed like the Expert panels
      it became a box per satellite, and a box per sub-disclosure inside that:
      the nesting this tab was rebuilt to remove. The rows keep their
-     hairlines; the hub's four disclosures stay boxed, as the Expert panels. */
+     hairlines; the hub's three disclosures stay boxed, as the Expert panels. */
   details.sat-row{border:0;border-radius:0;padding:0;margin-inline:0}
   details.sub{border:0;border-top:1px solid var(--line);border-radius:0;padding:0;
     margin-inline:0}
@@ -1262,7 +1262,7 @@ details>summary:active{opacity:.72}
   /* Beside a 44px select, or the Colour swatch and the file button sit
      lower than the fields they share a line with. */
   #tab-satellites input[type=color]{min-height:44px}
-  #fwfile::file-selector-button{min-height:44px}
+  #fwfile::file-selector-button,#wwfile::file-selector-button{min-height:44px}
 }
 @media (max-width:30rem){
   /* Tracking is size-specific, including when the viewport forces the size. */
@@ -1289,8 +1289,8 @@ details>summary:active{opacity:.72}
    name, one state word and one dim line. Opened, it holds what changes weekly
    (levels, speaker, microphone, lights); what is set once or is rare folds one
    level further down (Try it, Buttons, Device). The hub's own settings sit at
-   the foot of the same card as four dim disclosures, the Expert panels' shape,
-   because "the advanced path sits on the page itself".
+   the foot of the same card as three dim disclosures, the Expert panels'
+   shape, because "the advanced path sits on the page itself".
 
    HEALTHY IS QUIET. A satellite that is simply online says Online in dim text;
    a chip appears only for something happening now (the lamp dot) or something
@@ -1360,8 +1360,8 @@ details.sub>.body{padding:0 0 var(--s4)}
    as the satellites' are, so a wake word's name lines up with a satellite's. */
 .sat-hub>details>.body{padding-left:1em}
 /* A CLOSED DISCLOSURE STILL SAYS SOMETHING. The note after a summary's title
-   is its state ("3 rules", "v0.3.1 is ready for 2 satellites"), so the hub's
-   four lines inform without being opened. */
+   is its state ("hey jarvis, lumos", "v0.3.1 is ready for 2 satellites"), so
+   the hub's lines inform without being opened. */
 .sum-note{margin-left:var(--s2);font-weight:400;color:var(--dim)}
 .sat-listens{margin:0}
 #tab-satellites .actions .hint{margin-top:0}
@@ -1369,6 +1369,19 @@ details.sub>.body{padding:0 0 var(--s4)}
    travelling along the row does not land on them by momentum. */
 #tab-satellites .actions .end,#tab-satellites .row>.end{margin-left:auto}
 #tab-satellites .grow{flex:1 1 16rem}
+/* A WAKE WORD IS A ROW LIKE A SATELLITE: its <details> carries the hairline
+   and the summary its own padding, so the <li> adds none. */
+.wws>li{padding:0}
+/* Push-to-talk is a row of the same family, under the Add hint. */
+#wwptt>li:first-child{border-top:1px solid var(--line)}
+/* TWO COLUMNS AT MOST INSIDE A WORD, so a field alone on its line (the
+   fallback, the follow-up seconds) is half a line like its neighbours and
+   not a bar across the card. The track floor is half the row less one gap,
+   which rounds to two columns and never to one; on a phone the 12.5rem floor
+   wins and it is one column. */
+.ww .grid2{grid-template-columns:repeat(auto-fill,minmax(max(12.5rem,calc(50% - var(--s3))),1fr))}
+/* Try a word and Custom models close the Wake words body as one short list. */
+.sat-hub .body>details.sub+details.sub{margin-top:0}
 /* A select is as wide as its longest option, and a satellite can be called
    anything: held to the line, a 64-character name clips inside its own
    control instead of widening the page (the Routing test's Satellite). */
@@ -1390,11 +1403,12 @@ details.sub>.body{padding:0 0 var(--s4)}
 #tab-satellites .row>.sat-pattern{flex:1 1 8rem;min-width:8rem}
 /* The one control the browser still drew itself: its button takes the .small
    button's dress, and the file name reads as a hint. */
-#fwfile{font-size:var(--t-label);color:var(--dim);max-width:100%}
-#fwfile::file-selector-button{font:inherit;color:var(--ink);background:var(--panel);
+#fwfile,#wwfile{font-size:var(--t-label);color:var(--dim);max-width:100%}
+#fwfile::file-selector-button,#wwfile::file-selector-button{font:inherit;color:var(--ink);
+  background:var(--panel);
   border:1px solid var(--line);border-radius:var(--radius-s);height:var(--control-h);
   padding:0 .625rem;margin-right:var(--s2);cursor:pointer}
-#fwfile:hover::file-selector-button{border-color:var(--dim)}
+#fwfile:hover::file-selector-button,#wwfile:hover::file-selector-button{border-color:var(--dim)}
 #tab-satellites audio{display:block;width:100%;height:2rem}
 /* When pressed | when released, one row per button: the press/release pair
    is read across, and the words are short enough for a phone. */
@@ -1403,11 +1417,11 @@ details.sub>.body{padding:0 0 var(--s4)}
 .sat-btns .hd{font-size:var(--t-label);color:var(--dim)}
 .sat-btns .url{grid-column:2/-1}
 .sat-btns .url label{margin-bottom:var(--s1)}
-fieldset.ww-sats,fieldset.sat-fs{border:0;padding:0;margin:0;min-width:0}
+fieldset.ww-sats,fieldset.ww-mode,fieldset.sat-fs{border:0;padding:0;margin:0;min-width:0}
 /* The Satellites legend names a control the way Threshold beside it does, so
    it is dressed as a label; the two group legends are headings (see
    #enginerow>legend). */
-fieldset.ww-sats>legend{padding:0;margin-bottom:var(--s1);font-size:var(--t-label);
+fieldset.ww-sats>legend,fieldset.ww-mode>legend{padding:0;margin-bottom:var(--s1);font-size:var(--t-label);
   line-height:1.45;color:var(--dim);letter-spacing:.005em}
 fieldset.sat-fs>legend{margin-bottom:var(--s1)}
 .ww-pick{display:flex;flex-wrap:wrap;column-gap:var(--s4)}
@@ -1419,8 +1433,6 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
 .satelliteevents li{padding:2px 0;color:var(--dim)}
 .satelliteevents li b{color:var(--ink);font-weight:600}
 .satelliteevents li,details.sat-row .facts dd{overflow-wrap:anywhere}
-/* The rules are the JSON the hub stores, so they are edited as code is. */
-#routetext{font-family:var(--mono);min-height:12em}
 @media (max-width:30rem){
   /* 14px back for the controls on a phone; the hairlines still say whose. */
   details.sat-row>.body,.sat-hub>details>.body{padding-left:0}
@@ -2329,7 +2341,7 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
        on this tab runs while another tab is open. -->
   <section id="tab-satellites" role="tabpanel" aria-labelledby="tab-btn-satellites" hidden>
     <!-- ONE CARD. The list is the tab; what belongs to one satellite folds
-         under its row (satelliteRow), and the hub's own settings are the four
+         under its row (satelliteRow), and the hub's own settings are the three
          disclosures at the foot. They have no `name`, so any of them can be
          open at once: tuning a threshold while watching Activity is a real
          task. NO role="tab" ANYWHERE IN HERE: the dock sweeps the document for
@@ -2358,24 +2370,32 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
 
         <div class="sat-hub" role="group" aria-label="Hub settings">
 
-          <!-- WAKE WORDS ARE THE HUB'S, AND EACH ONE NAMES ITS SATELLITES
-               (GET and PUT /satellites/wake-words). This is the one editor of
-               the assignment: the owner's words were "you choose the satellite
-               that will have that wake word", so the choice is made on the
-               word, and a satellite's row only says what it listens for.
-               "Every satellite" is "*" on the wire, which also reaches a
-               satellite adopted later; Chosen is a list of ids, which does
-               not. The list edits a copy and Save sends the whole set, because
-               the hub validates the set as one (unique names, known
-               satellites, a threshold it accepts) and a 422 leaves the copy on
-               screen with the reason beside it. Remove is staged until Save
-               and Keep takes it back, so it asks nothing. Push-to-talk is not
-               a wake word and is never listed. -->
+          <!-- A WAKE WORD IS A WHOLE BEHAVIOUR, AND THIS IS ITS ONE EDITOR
+               (GET and PUT /satellites/wake-words). Each word says which
+               satellites hear it and what it does: its mode, a language hint
+               and its action. The owner's words were "you add a new wake
+               word, choose whether it will hint the language, and choose what
+               mode the wake word will be, whether it will be conversation or
+               command, and the action". Routing used to be a rules.json
+               editor of its own; the hub keeps it on the word now and answers
+               PUT /satellites/routing 409, so that disclosure is gone and only
+               its Try box is left, folded in here.
+               Closed, a word is one line (its mode, its satellites and what
+               it does); opened, only the fields its mode and its action use
+               are shown, and the rare ones wait under More. "Every satellite"
+               is "*" on the wire, which also reaches a satellite adopted
+               later. The list edits a copy and Save sends the whole set,
+               because the hub validates the set as one; a 422 leaves the copy
+               on screen with the reason beside it. Remove is staged until
+               Save and Keep takes it back, so it asks nothing. Push-to-talk
+               is not a wake word, but the PLAY button's behaviour is edited
+               the same way, last, and it can never be a trigger. -->
           <details id="sat-wakewords" hidden>
             <summary>Wake words<span class="sum-note" id="ww-sum"></span></summary>
             <div class="body">
-              <div class="hint">A higher threshold ignores more false wakes, and misses more real ones.</div>
+              <div class="hint">Each wake word does one thing: a command, a conversation or a trigger.</div>
               <div id="wwfail" aria-live="polite"></div>
+              <div id="wwwarn"></div>
               <ul class="wws" id="wwlist" role="list"></ul>
               <div class="hint" id="wwnone" hidden>With no wake words, satellites answer only to push-to-talk.</div>
               <div class="row">
@@ -2383,60 +2403,58 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
                 <button class="small tight" id="wwaddgo" type="button">Add</button>
               </div>
               <div class="hint" id="wwaddwhy">It downloads when you save, then wakes only the satellites you choose.</div>
+              <ul class="wws" id="wwptt" role="list" hidden></ul>
               <div class="actions">
                 <button class="primary small" id="wwsave" type="button" disabled>Save wake words</button>
                 <span class="hint" id="wwdirty"></span>
               </div>
               <div id="wwnote" aria-live="polite"></div>
+              <!-- What the Routing disclosure's Test was: a typed sentence
+                   through one word's SAVED action and TTS (POST
+                   /satellites/routing/test), with nothing played anywhere. -->
+              <details class="sub" id="ww-try">
+                <summary>Try a word</summary>
+                <div class="body">
+                  <form class="row" id="routeform">
+                    <div class="tight"><label for="routeword">Wake word</label>
+                      <select id="routeword"></select></div>
+                    <div class="grow"><label for="routesay">Sentence</label>
+                      <input type="text" id="routesay" maxlength="500" placeholder="what time is it"></div>
+                    <button class="small tight" id="routetest" type="submit">Try</button>
+                  </form>
+                  <div class="hint">It runs the saved action and makes the reply, but plays nothing on any satellite.</div>
+                  <div id="routeresult" aria-live="polite"></div>
+                </div>
+              </details>
+              <!-- A model of your own (POST /satellites/wake-words/models, the
+                   .onnx as the body) joins the Add a wake word list like a
+                   built-in. Delete is only for one no word uses: the hub
+                   answers 409 otherwise, so it is greyed with that reason. -->
+              <details class="sub" id="ww-models">
+                <summary>Custom models<span class="sum-note" id="ww-models-sum"></span></summary>
+                <div class="body">
+                  <ul class="fws" id="wwcustom" role="list"></ul>
+                  <div class="row">
+                    <div class="tight"><label for="wwfile">Model (.onnx)</label>
+                      <input type="file" id="wwfile" accept=".onnx,application/octet-stream"></div>
+                    <div class="grow"><label for="wwmodelname">Name</label>
+                      <input type="text" id="wwmodelname" maxlength="64" placeholder="e.g. lumos"
+                             spellcheck="false" autocomplete="off"></div>
+                    <button class="small tight" id="wwupload" type="button">Upload</button>
+                  </div>
+                  <div class="hint">An openWakeWord model you trained; once uploaded, add it like any other.</div>
+                  <div id="wwmodelnote" aria-live="polite"></div>
+                </div>
+              </details>
             </div>
           </details>
 
           <details id="sat-activity">
             <summary>Activity</summary>
             <div class="body">
-              <div class="hint">Buttons, wake words, routing, updates and satellites coming and going, newest first.</div>
+              <div class="hint">Buttons, wake words, conversations, triggers, updates and satellites coming and going.</div>
               <ol class="satelliteevents" id="satelliteevents"></ol>
               <div class="hint" id="evnone">Press a button on a satellite to see its event arrive.</div>
-            </div>
-          </details>
-
-          <!-- ROUTING: what the hub does with the sentence after a wake word
-               (services/satellites/app/router.py). The rules are edited as the
-               JSON the hub stores: a rule is small, every field is in the
-               satellites README, and a form per destination type would be four
-               forms for one list. The hub validates the whole set on PUT,
-               answers 422 naming the field, and keeps the old rules. No secret
-               is ever in here: a rule names an environment variable, and the
-               hub says only whether it is set. Test runs a typed sentence
-               through the rules and plays nothing on any satellite. Hidden on
-               an older hub with no routing (404). -->
-          <details id="sat-routing" hidden>
-            <summary>Routing<span class="sum-note" id="route-sum"></span></summary>
-            <div class="body">
-              <div class="hint">What the hub does with the sentence after a wake word, as the JSON it stores.</div>
-              <label for="routetext">Rules</label>
-              <textarea id="routetext" spellcheck="false" autocomplete="off"
-                        autocapitalize="off"></textarea>
-              <div class="actions">
-                <button class="primary small" id="routesave" type="button" disabled>Save rules</button>
-                <span class="hint" id="routedirty"></span>
-              </div>
-              <div class="hint" id="routeenv"></div>
-              <div id="routenote" aria-live="polite"></div>
-              <fieldset class="sat-fs">
-                <legend>Test a sentence</legend>
-                <div class="row">
-                  <div class="tight"><label for="routesatellite">Satellite</label>
-                    <select id="routesatellite"></select></div>
-                  <div class="tight"><label for="routeword">Wake word</label>
-                    <select id="routeword"></select></div>
-                  <div class="grow"><label for="routesay">Sentence</label>
-                    <input type="text" id="routesay" maxlength="500" placeholder="what time is it"></div>
-                  <button class="small tight" id="routetest" type="button">Test</button>
-                </div>
-                <div class="hint">Test runs the rules and makes the reply, but plays nothing on any satellite.</div>
-                <div id="routeresult" aria-live="polite"></div>
-              </fieldset>
             </div>
           </details>
 
@@ -3858,8 +3876,7 @@ function chosenGlossaries() {
    box somebody is typing in, or shuts a disclosure somebody opened. A row's
    markup is rebuilt only when the satellite is adopted or forgotten, because a
    pending row and an adopted one are different things. */
-const SATELLITES = { rows: new Map(), timer: null, events: null, routingLoaded: false,
-                     routingFilled: "", routing: null, list: [], firmware: [],
+const SATELLITES = { rows: new Map(), timer: null, events: null, list: [], firmware: [],
                      fwFailed: null, seq: 0, seeded: false,
                      /* What the page itself saw. The hub keeps a satellite's
                         last_seen and firmware after it disconnects, but only
@@ -3940,11 +3957,7 @@ const SAT_COPY = {
   fwSkipped: "Skipped {name}: {why}.",
   fwUploaded: "Uploaded {v}.",
   fwChoose: "Choose a .bin first.",
-  routeSaved: "Saved {n}.",
-  routeDirty: "Unsaved changes.",
-  routeClean: "No changes to save.",
-  routeNotJson: "Not JSON: {message}",
-  routeEmpty: "Type a sentence to send through the rules.",
+  routeEmpty: "Type something to send to the word's action.",
   noHub: "This deployment has no satellite hub: voice-satellites is not running.",
   hubError: "The satellite hub did not answer: {message}",
   askReboot: "Reboot {name}? It is back in about ten seconds.",
@@ -3959,8 +3972,6 @@ const SAT_COPY = {
   sumWwFailed: "{words} failed",
   sumWwLoading: "{words} downloading",
   sumWwNone: "none, push-to-talk only",
-  sumRouteNone: "no rules",
-  sumRouteWarned: "{n}, {k}",
   sumFwReady: "{v} is ready for {n}",
   sumFwCurrent: "every satellite is up to date",
   sumFwNone: "no images",
@@ -3976,7 +3987,49 @@ const SAT_COPY = {
   healthFailed: "{n} failed",
   healthDeaf: "{n} not listening",
   healthWords: "{words} failed to download",
-  healthRouting: "routing did not load",
+  healthWordsOff: "wake words did not load",
+  lineTalking: "Conversation with {word}",
+  lineTalkingTurns: "Conversation with {word} · {n}",
+  latency: "{s} s to first sound, median of {n}",
+  /* What each mode does, one line each, under the three buttons. */
+  modeCommand: "The words after it go to its action once, and the answer plays.",
+  modeConversation: "The same, then it keeps listening for follow-ups without the wake word.",
+  modeTrigger: "The word is the command: the hub reports it and Home Assistant decides what it does.",
+  modeNone: "Choose what it does; until then, what follows it goes nowhere.",
+  lineEvery: "every satellite",
+  lineNobody: "no satellite",
+  lineTrigger: "Home Assistant decides",
+  lineNoAction: "No action yet",
+  /* Names and a yes or no from the hub, never a value (GET's `env`). */
+  envSet: "{var} is set on the hub.",
+  envUnset: "{var} is not set on the hub, so this action fails until it is.",
+  envUnknown: "Save, and the hub says whether {var} is set.",
+  fbNone: "Only a conversation word can take over, and there is none yet.",
+  moreReply: "replies on {name}",
+  moreSilent: "replies nowhere",
+  moreVoice: "voice {v}",
+  /* WHAT THE HUB WOULD REFUSE, SAID BEFORE IT IS SENT. Each is checked as
+     router.Behaviour and destinations.py check it, so a Save that the page
+     lets through is one the hub takes. */
+  fixLang: "Write the language as a tag, for example de or nl-BE.",
+  fixUrl: "Write the address in full, starting with https or http.",
+  fixUserinfo: "Leave the user and password out of the address; name a token variable instead.",
+  fixModel: "Name the model to ask, for example llama3.2.",
+  fixEnvNeeded: "Name the variable that holds Home Assistant's token.",
+  fixEnv: "Write the name of the variable that holds the token, never the token itself.",
+  fixFallback: "{word} is not a conversation word, so it cannot take over.",
+  fixFollow: "Keep listening for 1 to 60 seconds.",
+  fixCooldown: "Make the cooldown 0 to 600 seconds.",
+  fixPhrase: "Keep each end phrase to 64 characters.",
+  wwFix: "{word} needs a fix before the wake words can be saved.",
+  wwModelChoose: "Choose an .onnx file first.",
+  wwModelBadName: "Name it with letters, digits, _ and - only.",
+  wwModelBuiltIn: "That is a built-in wake word's name, so give yours another.",
+  wwModelUploaded: "Uploaded {word}. Add it like any other wake word.",
+  wwModelDeleted: "Deleted {word}.",
+  wwModelInUse: "It is a wake word, so remove it from the list first.",
+  sumModelsNone: "none",
+  askModelDelete: "Delete the model {word}? Upload it again to use it.",
 };
 
 function satText(key, vals) {
@@ -4004,6 +4057,14 @@ function rssiWords(dbm) {
   if (typeof dbm !== "number" || !isFinite(dbm)) return "";
   const how = dbm >= -60 ? "strong" : dbm >= -70 ? "fair" : "weak";
   return satText("rssi", { n: String(Math.round(dbm)).replace("-", "−"), how });
+}
+/* How soon its replies begin, from the end of speech: the hub's median over
+   the last 20 spoken replies (GET /satellites carries it as `latency`). */
+function satLatency(n) {
+  const l = n.latency;
+  if (!l || typeof l.p50_first_audio_ms !== "number") return "";
+  return satText("latency", { s: (l.p50_first_audio_ms / 1000).toFixed(1),
+                              n: satCount(l.turns || 0, "reply", "replies") });
 }
 function satName(n) { return n.name || (n.adopted ? n.id : "New satellite"); }
 /* The hub reports the firmware an offline satellite last ran until the hub
@@ -4059,10 +4120,6 @@ async function satellitesRefresh() {
       ? SAT_COPY.noHub : satText("hubError", { message: e.message });
     $("satellitesnone").hidden = false;
     $("satellitesman").hidden = true;
-    /* Hidden with the rest, so it has to be loaded again with the rest: the
-       first load is the only other thing that shows it, and a hub that
-       restarted once would have lost Routing until the page was reloaded. */
-    SATELLITES.routingLoaded = false;
   } else {
     $("satellitesnone").hidden = true;
     $("satellitesman").hidden = false;
@@ -4075,7 +4132,6 @@ async function satellitesRefresh() {
     firmwareRender();
     satellitesHealth();
     satellitesListen();
-    if (!SATELLITES.routingLoaded) routingLoad();
   }
   if (satellitesOpen()) SATELLITES.timer = setTimeout(satellitesRefresh, 3000);
 }
@@ -4194,6 +4250,17 @@ function satState(n, mem) {
       satText("lineNotListening", { error: ear.error }), "failed");
   }
   const listens = satListens(n, mem.words);
+  /* A CONVERSATION IS ONE STATE, NOT TWO. Its phases alternate between
+     listening for a follow-up and answering, and a chip flipping between
+     Listening and Answering every few seconds is noise; the hub's session
+     says which word it is and how far it has got. */
+  const talk = ear.session;
+  if (talk) {
+    const word = wakeName(talk.rule_id || "");
+    return say("talking", "In conversation", "running", talk.turns
+      ? satText("lineTalkingTurns", { word, n: satCount(talk.turns, "turn", "turns") })
+      : satText("lineTalking", { word }), "online");
+  }
   const woke = mem.woke && mem.woke.get(n.id);
   if (ear.conversation === "listening" || (woke && mem.now - woke < 15000)) {
     return say("listening", "Listening", "running", listens, "online");
@@ -4706,6 +4773,7 @@ function satDevice(li, n, s) {
   const last = !n.online && satLastSeen(n, SATELLITES.online);
   const facts = [["Model", n.model], ["Firmware", fw], ["Address", n.address],
     ["Wi-Fi signal", n.online ? rssiWords(st.rssi) : ""],
+    ["Reply time", satLatency(n)],
     n.online ? ["Connected", n.connected_at ? satText("connected", { clock: satClock(n.connected_at) }) : ""]
              : ["Last seen", last ? satClock(last) : ""],
     ["ID", n.id]].filter(f => f[1]);
@@ -4919,7 +4987,7 @@ function satellitesHealth() {
   if (count.deaf) parts.push(satText("healthDeaf", { n: count.deaf }));
   const broken = WAKE.server ? WAKE.server.words.filter(w => w.state === "error").map(w => wwLabel(w.name)) : [];
   if (broken.length) parts.push(satText("healthWords", { words: satList(broken) }));
-  if (SATELLITES.routing && SATELLITES.routing.load_error) parts.push(SAT_COPY.healthRouting);
+  if (WAKE.server && WAKE.server.load_error) parts.push(SAT_COPY.healthWordsOff);
   satSet($("sathealth"), parts.join(" · "));
 }
 
@@ -4927,19 +4995,41 @@ function satellitesHealth() {
 /* TWO COPIES, AND THE LIST NEVER LOSES AN EDIT TO A POLL. `server` is the
    hub's last answer to GET or PUT /satellites/wake-words, states included.
    `draft` is what the list is editing, and null whenever it matches the hub;
-   `removed` holds the words marked for removal in it. The list shows the
-   draft when there is one, so the poll that refreshes a word's state from
-   downloading to ready cannot put a threshold back. Satellite rows read
-   `server` only. */
-const WAKE = { server: null, draft: null, removed: new Set(), failed: null, rows: new Map(),
+   `draftPtt` is push-to-talk's copy, made and dropped with it; `removed`
+   holds the words marked for removal. The list shows the draft when there is
+   one, so the poll that refreshes a word's state from downloading to ready
+   cannot put a threshold or an address back. Satellite rows read `server`
+   only. `stash` keeps the action a word had before it became a trigger, so
+   Trigger and back is not an address typed twice. */
+const WAKE = { server: null, draft: null, draftPtt: null, removed: new Set(), failed: null,
+               rows: new Map(), pttRow: null, stash: new Map(),
                queue: Promise.resolve(), writes: 0, writing: 0, heard: new Map(), broken: "" };
 
-/* ONE WAKE WORD WRITE AT A TIME. Save and Try again each PUT the whole list,
-   so two in flight at once would each carry the other's list from before,
-   and whichever landed last would win. Each `write` runs when the one before
-   it has answered, and builds its body then. `writes` counts them as they
-   start and `writing` while they run, which is how a poll tells that its
-   answer may be older than a save (satellitesRefresh). */
+/* The hub's rules, restated so the page can say what is wrong before a Save
+   and not after a 422. Read against the hub's own source by
+   test_wake_words_contract.py, so neither can move alone. */
+const WAKE_PTT = "ptt";
+const WAKE_THRESHOLD = { usual: 0.5, trigger: 0.7 };
+const WAKE_SHOWN = { follow_up_s: 8, cooldown_s: 3, feedback: "earcon" };
+const WAKE_LANG = /^([a-z]{2,3}(-[A-Za-z0-9]{2,8})*|auto)$/;
+const WAKE_ENV = /^[A-Z][A-Z0-9_]{0,63}$/;
+const WAKE_URL = /^https?:\/\/[^/\s?#]+(\/[^\s]*)?$/;
+const WAKE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+/* The Language select's own options; anything else is Other and a tag. */
+const WAKE_LANGS = ["", "en", "pt-BR", "es", "fr", "it"];
+const WAKE_HA = ["ha_assist", "ha_conversation"];
+const WAKE_MODE_WORD = { command: "Command", conversation: "Conversation", trigger: "Trigger" };
+const WAKE_MODE_HINT = { command: "modeCommand", conversation: "modeConversation", trigger: "modeTrigger" };
+const WAKE_DEST_WORD = { ha_assist: "Home Assistant Assist", ha_conversation: "Home Assistant",
+                         llm: "language model", webhook: "webhook", echo: "echo" };
+
+/* ONE WAKE WORD WRITE AT A TIME. Save, Try again and a model upload each
+   answer with the whole list, so two in flight at once would each carry the
+   other's list from before, and whichever landed last would win. Each
+   `write` runs when the one before it has answered, and builds its body then.
+   `writes` counts them as they start and `writing` while they run, which is
+   how a poll tells that its answer may be older than a save
+   (satellitesRefresh). */
 function wakeTurn(write) {
   const turn = WAKE.queue.then(async () => {
     WAKE.writes++;
@@ -4950,17 +5040,39 @@ function wakeTurn(write) {
   return turn;
 }
 
-/* What PUT takes and nothing more: state and error are the hub's to report. */
+/* WHAT PUT TAKES FOR A WORD AND NOTHING MORE: state and error are the hub's
+   to report. The whole entry goes back, because a field left out keeps its
+   saved value and one sent replaces it whole: an action sent without its
+   `timeout` would reset it. A trigger sends no action at all. */
 function wakeCopy(w) {
-  return { name: w.name, threshold: w.threshold, satellites: [...w.satellites] };
+  return { name: w.name, threshold: w.threshold, satellites: [...w.satellites], mode: w.mode,
+           language: w.language, action: w.mode === "trigger" ? undefined : w.action,
+           silence_ms: w.silence_ms, conversation: w.conversation, trigger: w.trigger };
+}
+/* Push-to-talk's entry: a word's, without a name, a threshold or satellites. */
+function wakePttCopy(p) {
+  return { mode: p.mode, language: p.language, action: p.action, silence_ms: p.silence_ms,
+           conversation: p.conversation, trigger: p.trigger };
+}
+function wakeClone(v) { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
+/* Keys sorted, so the hub's order and the page's compare equal. */
+function wakeStable(v) {
+  if (Array.isArray(v)) return v.map(wakeStable);
+  if (!v || typeof v !== "object") return v;
+  const out = {};
+  for (const k of Object.keys(v).sort()) if (v[k] !== undefined) out[k] = wakeStable(v[k]);
+  return out;
 }
 
 function wakeHas(w, id) { return w.satellites.includes("*") || w.satellites.includes(id); }
+function wakeName(name) { return name === WAKE_PTT ? "push-to-talk" : wwLabel(name); }
 
 /* Order-blind, because ticking a satellite off and on again moves it to the
    end of the list and is still no change. */
-function wakeKey(words) {
-  return JSON.stringify(words.map(w => [w.name, Number(w.threshold), [...w.satellites].sort()]));
+function wakeKey(words, ptt) {
+  return JSON.stringify(wakeStable([
+    words.map(w => ({ ...wakeCopy(w), threshold: Number(w.threshold), satellites: [...w.satellites].sort() })),
+    ptt ? wakePttCopy(ptt) : null]));
 }
 
 function wakeTake(answer) {
@@ -4978,7 +5090,8 @@ function wakeEffective() { return (WAKE.draft || []).filter(w => !WAKE.removed.h
 
 function wakeDraft() {
   if (!WAKE.draft) {
-    WAKE.draft = WAKE.server.words.map(wakeCopy);
+    WAKE.draft = WAKE.server.words.map(w => wakeClone(wakeCopy(w)));
+    WAKE.draftPtt = WAKE.server.ptt ? wakeClone(WAKE.server.ptt) : null;
     WAKE.removed.clear();
     $("wwnote").textContent = "";
   }
@@ -4986,15 +5099,207 @@ function wakeDraft() {
 }
 
 function wakeEdit(name, change) {
-  const w = wakeDraft().find(x => x.name === name);
+  wakeDraft();
+  const w = name === WAKE_PTT ? WAKE.draftPtt : WAKE.draft.find(x => x.name === name);
   if (w) change(w);
   wakeRender();
 }
 
-function wakePut(words) {
+function wakePut(words, ptt) {
   return json("/satellites/wake-words", { method: "PUT", headers: JSON_BODY,
-    body: JSON.stringify({ words }) });
+    body: JSON.stringify(ptt ? { words, ptt } : { words }) });
 }
+
+/* ---- what a word does ---------------------------------------------------- */
+
+/* HOME ASSISTANT'S ADDRESS IS TYPED ONCE. Any word, or push-to-talk, that
+   already names it lends it to the next one. */
+function wakeAnyHa() {
+  const all = [...(WAKE.draft || []), WAKE.draftPtt,
+               ...((WAKE.server && WAKE.server.words) || []), WAKE.server && WAKE.server.ptt];
+  const hit = all.find(x => x && x.action && x.action.destination
+    && WAKE_HA.includes(x.action.destination.type) && x.action.destination.url);
+  return hit ? hit.action.destination : null;
+}
+
+/* A new word's action: Home Assistant's, when the hub already talks to it,
+   and otherwise echo, which is what the hub itself gives a word it was told
+   nothing about and which proves the microphone and the speaker. */
+function wakeNewAction() {
+  const ha = wakeAnyHa();
+  return { destination: ha ? { type: ha.type, url: ha.url, token_env: ha.token_env || "SATELLITES_HA_TOKEN" }
+                           : { type: "echo" },
+           reply_to: "same", voice: null, fallback: null };
+}
+
+/* A new word, staged: every satellite, a command, and the threshold its mode
+   starts at. Nothing leaves the page until Save. */
+function wakeAdd(name) {
+  const w = { name, threshold: WAKE_THRESHOLD.usual, satellites: ["*"], mode: "command",
+              language: null, action: wakeNewAction() };
+  wakeDraft().push(w);
+  wakeRender();
+  return w;
+}
+
+/* A TRIGGER ASKS MORE OF THE DETECTOR, so a threshold still at one mode's
+   starting point moves to the other's; one somebody set is left alone. A
+   trigger has no action, and the one it had waits in `stash`. A conversation
+   hands over to nobody, so its fallback goes. */
+function wakeSetMode(w, mode, name) {
+  if (!WAKE_MODE_WORD[mode] || w.mode === mode) return;
+  if (mode === "trigger" && name === WAKE_PTT) return;
+  const start = m => m === "trigger" ? WAKE_THRESHOLD.trigger : WAKE_THRESHOLD.usual;
+  if (typeof w.threshold === "number" && w.mode && w.threshold === start(w.mode)) w.threshold = start(mode);
+  if (mode === "trigger") {
+    if (w.action) WAKE.stash.set(name || w.name, w.action);
+    w.action = null;
+  } else {
+    if (!w.action) w.action = WAKE.stash.get(name || w.name) || wakeNewAction();
+    if (mode === "conversation" && w.action.fallback) w.action = { ...w.action, fallback: null };
+  }
+  w.mode = mode;
+}
+
+/* A NEW DESTINATION STARTS FROM ITS OWN FIELDS: the hub refuses a field
+   another type owns. The two Home Assistant ones share an address and a
+   token, so moving between them keeps both. */
+function wakeSetDest(w, type) {
+  const was = (w.action && w.action.destination) || {};
+  if (!WAKE_DEST_WORD[type] || was.type === type) return;
+  const d = { type };
+  if (WAKE_HA.includes(type)) {
+    const ha = WAKE_HA.includes(was.type) ? was : wakeAnyHa();
+    d.url = (ha && ha.url) || "";
+    d.token_env = (ha && ha.token_env) || "SATELLITES_HA_TOKEN";
+  } else if (type === "llm") {
+    Object.assign(d, { base_url: "", model: "", api_key_env: "SATELLITES_LLM_API_KEY" });
+  } else if (type === "webhook") d.url = "";
+  w.action = { ...(w.action || { reply_to: "same" }), destination: d };
+}
+
+function wakeNumber(text) { return text === "" ? null : Number(text); }
+
+/* ONE SETTER FOR EVERY FIELD. `key` is the control's data-f: "lang" and "tag"
+   are the language, "dest" the action's type, and "d.", "a.", "c." and "t."
+   a field of the destination, the action, the conversation or the trigger.
+   A required field left empty stays "" so its fix is named; an optional one
+   left empty is unset. A secret is never typed here, only the NAME of the
+   variable that holds it ("d.env", which is token_env or api_key_env). */
+function wakeField(w, key, raw) {
+  const text = String(raw == null ? "" : raw).trim();
+  const [kind, name] = key.split(".");
+  if (key === "lang") { if (text !== "other") w.language = text || null; return; }
+  if (key === "tag") { w.language = text || null; return; }
+  if (key === "dest") { wakeSetDest(w, text); return; }
+  if (kind === "d" && w.action && w.action.destination) {
+    const d = w.action.destination;
+    const field = name !== "env" ? name : d.type === "llm" ? "api_key_env" : "token_env";
+    const needed = ["url", "base_url", "model"].includes(field)
+      || (field === "token_env" && WAKE_HA.includes(d.type));
+    d[field] = text || (needed ? "" : null);
+  } else if (kind === "a" && w.action) {
+    w.action = { ...w.action, [name]: text || (name === "reply_to" ? "same" : null) };
+  } else if (kind === "c") {
+    w.conversation = { ...(w.conversation || {}), [name]: name === "end_phrases"
+      ? (text ? text.split(",").map(p => p.trim()).filter(Boolean) : null) : wakeNumber(text) };
+  } else if (kind === "t") {
+    w.trigger = { ...(w.trigger || {}), [name]: name === "cooldown_s" ? wakeNumber(text) : text };
+  }
+}
+
+function wakeWithin(v, low, high) { return typeof v === "number" && isFinite(v) && v >= low && v <= high; }
+
+/* THE FIRST THING THE HUB WOULD REFUSE IN ONE ENTRY, as a sentence, or "".
+   `words` is the set it would be saved with: a fallback has to name a
+   conversation word in it. A word the hub holds no behaviour for (migrated
+   from a rules.json that did not load) is left to the hub. */
+function wakeProblem(w, words) {
+  if (!w.mode) return "";
+  if (w.mode === "trigger") {
+    const t = w.trigger || {};
+    return "cooldown_s" in t && !wakeWithin(t.cooldown_s, 0, 600) ? SAT_COPY.fixCooldown : "";
+  }
+  if (w.language && !WAKE_LANG.test(w.language)) return SAT_COPY.fixLang;
+  const a = w.action || {}, d = a.destination || { type: "echo" };
+  if (d.type !== "echo") {
+    const url = d.type === "llm" ? d.base_url : d.url;
+    if (!url || url.length > 500 || !WAKE_URL.test(url)) return SAT_COPY.fixUrl;
+    if (url.split("://")[1].split("/")[0].includes("@")) return SAT_COPY.fixUserinfo;
+  }
+  if (d.type === "llm" && !d.model) return SAT_COPY.fixModel;
+  const env = d.type === "llm" ? d.api_key_env : d.token_env;
+  if (WAKE_HA.includes(d.type) && !env) return SAT_COPY.fixEnvNeeded;
+  if (env && !WAKE_ENV.test(env)) return SAT_COPY.fixEnv;
+  if (w.mode === "command" && a.fallback) {
+    const to = words.find(x => x.name === a.fallback);
+    if (!to || to.mode !== "conversation") return satText("fixFallback", { word: wwLabel(a.fallback) });
+  }
+  if (w.mode === "conversation") {
+    const c = w.conversation || {};
+    if ("follow_up_s" in c && !wakeWithin(c.follow_up_s, 1, 60)) return SAT_COPY.fixFollow;
+    if ((c.end_phrases || []).some(p => p.length > 64)) return SAT_COPY.fixPhrase;
+  }
+  return "";
+}
+
+/* The first entry in the draft that the hub would refuse, by name. */
+function wakeFirstProblem() {
+  const words = wakeEffective();
+  const bad = words.find(w => wakeProblem(w, words));
+  if (bad) return wwLabel(bad.name);
+  return WAKE.draftPtt && wakeProblem(WAKE.draftPtt, words) ? "Push-to-talk" : "";
+}
+
+/* ONE LINE FOR A CLOSED WORD: its mode, who hears it, and what it does. */
+function wakeWhere(w) {
+  if (w.satellites.includes("*")) return SAT_COPY.lineEvery;
+  if (!w.satellites.length) return SAT_COPY.lineNobody;
+  return w.satellites.map(id => {
+    const n = SATELLITES.list.find(x => x.id === id);
+    return n ? satName(n) : id;
+  }).join(", ");
+}
+function wakeDoes(a) {
+  const d = (a && a.destination) || {};
+  return d.type === "llm" && d.model ? d.model : WAKE_DEST_WORD[d.type] || WAKE_DEST_WORD.echo;
+}
+function wakeLine(w, ptt) {
+  if (!w.mode) return SAT_COPY.lineNoAction;
+  const parts = [WAKE_MODE_WORD[w.mode]];
+  if (!ptt) parts.push(wakeWhere(w));
+  if (w.mode === "trigger") parts.push(SAT_COPY.lineTrigger);
+  else {
+    parts.push(wakeDoes(w.action));
+    if (w.language) parts.push(w.language);
+  }
+  return parts.join(" · ");
+}
+/* More's note: what it holds that is not the default, so closed it still
+   says whether anything in it was changed. */
+function wakeMoreNote(a) {
+  const said = [];
+  if (a.reply_to === "none") said.push(SAT_COPY.moreSilent);
+  else if (a.reply_to && a.reply_to !== "same") {
+    const n = SATELLITES.list.find(x => x.id === a.reply_to);
+    said.push(satText("moreReply", { name: n ? satName(n) : a.reply_to }));
+  }
+  if (a.voice) said.push(satText("moreVoice", { v: a.voice }));
+  return said.join(", ");
+}
+function wakeEnvHint(name) {
+  if (!name || !WAKE_ENV.test(name)) return "";
+  const env = (WAKE.server && WAKE.server.env) || {};
+  return !(name in env) ? satText("envUnknown", { var: name })
+    : env[name] ? satText("envSet", { var: name }) : satText("envUnset", { var: name });
+}
+/* Kokoro's voices, from the list the Speak tab already holds. */
+function wakeVoices() {
+  const kokoro = (typeof VOICES !== "undefined" && VOICES && VOICES.kokoro) || {};
+  return [...new Set(Object.values(kokoro).filter(Array.isArray).flat())].sort();
+}
+
+/* ---- the list -------------------------------------------------------------- */
 
 function wakeRender() {
   $("sat-wakewords").hidden = !WAKE.server && !WAKE.failed;
@@ -5002,8 +5307,11 @@ function wakeRender() {
      turns every word off until a Save replaces the file. */
   satNoteOnce($("wwfail"), "bad", WAKE.failed ? satText("wwFailed", { message: WAKE.failed })
     : (WAKE.server && WAKE.server.load_error) || "");
-  routingWords();
+  wakeTryWords();
   if (!WAKE.server) { satSet($("ww-sum"), WAKE.failed ? SAT_COPY.sumLoadFailed : ""); return; }
+  /* The hub's own sentences: a word with no action, a reply sent to a
+     satellite it does not know. */
+  satNoteOnce($("wwwarn"), "warn", (WAKE.server.warnings || []).join(" "));
   /* A download that fails after "Saved." leaves that line beside a failure it
      no longer describes, so it goes. A refused save's reason stays. */
   const broken = WAKE.server.words.filter(w => w.state === "error").map(w => w.name).join(" ");
@@ -5011,11 +5319,12 @@ function wakeRender() {
     $("wwnote").textContent = "";
   }
   WAKE.broken = broken;
-  if (WAKE.draft && wakeKey(wakeEffective()) === wakeKey(WAKE.server.words)) {
-    WAKE.draft = null;
+  if (WAKE.draft && wakeKey(wakeEffective(), WAKE.draftPtt) === wakeKey(WAKE.server.words, WAKE.server.ptt)) {
+    WAKE.draft = WAKE.draftPtt = null;
     WAKE.removed.clear();
   }
   const words = WAKE.draft || WAKE.server.words;
+  const effective = WAKE.draft ? wakeEffective() : words;
   const live = new Map(WAKE.server.words.map(w => [w.name, w]));
   const keep = new Set(words.map(w => w.name));
   const box = $("wwlist");
@@ -5026,9 +5335,17 @@ function wakeRender() {
     let row = WAKE.rows.get(w.name);
     if (!row) { row = wakeRow(w.name); WAKE.rows.set(w.name, row); }
     if (box.children[i] !== row) box.insertBefore(row, box.children[i] || null);
-    wakeRowUpdate(row, w, live.get(w.name), WAKE.removed.has(w.name));
+    wakeRowUpdate(row, w, live.get(w.name), WAKE.removed.has(w.name), effective, false);
   });
   $("wwnone").hidden = words.length > 0;
+
+  /* Push-to-talk, last: absent on a hub from before words had behaviours. */
+  const ptt = WAKE.draftPtt || WAKE.server.ptt;
+  $("wwptt").hidden = !ptt;
+  if (ptt) {
+    if (!WAKE.pttRow) { WAKE.pttRow = wakeRow(WAKE_PTT); $("wwptt").append(WAKE.pttRow); }
+    wakeRowUpdate(WAKE.pttRow, ptt, null, false, effective, true);
+  }
 
   /* The hub says which names it can load. A name it cannot, or one already in
      the list, is a 422 the reader could not have avoided. */
@@ -5044,11 +5361,16 @@ function wakeRender() {
   pick.disabled = $("wwaddgo").disabled = !left.length;
   satSet($("wwaddwhy"), left.length ? SAT_COPY.wwAddWhy : SAT_COPY.wwExhausted);
 
+  /* SAVE IS OFF WITH ITS REASON: nothing changed, a word left with nobody to
+     hear it, or an entry the hub would refuse, named, whose row says why. */
   const dirty = !!WAKE.draft;
   const nobody = dirty && wakeEffective().some(w => !w.satellites.length);
-  if ($("wwsave").getAttribute("aria-busy") !== "true") $("wwsave").disabled = !dirty || nobody;
-  satSet($("wwdirty"), nobody ? SAT_COPY.wwNone : dirty ? SAT_COPY.wwDirty : SAT_COPY.wwClean);
+  const fix = dirty ? wakeFirstProblem() : "";
+  if ($("wwsave").getAttribute("aria-busy") !== "true") $("wwsave").disabled = !dirty || nobody || !!fix;
+  satSet($("wwdirty"), nobody ? SAT_COPY.wwNone : fix ? satText("wwFix", { word: fix })
+    : dirty ? SAT_COPY.wwDirty : SAT_COPY.wwClean);
   satSet($("ww-sum"), wakeSummary(dirty));
+  wakeModels();
 }
 
 function wakeSummary(dirty) {
@@ -5061,36 +5383,131 @@ function wakeSummary(dirty) {
   return words.length ? words.map(w => wwLabel(w.name)).join(", ") : SAT_COPY.sumWwNone;
 }
 
-/* One word, built once and kept while the word is in the list. The name is
-   written as text: it is a model name the hub lists, and it reaches a PUT
-   only if the hub offered it. */
+/* ONE WORD, BUILT ONCE AND KEPT while the word is in the list, so a poll
+   never shuts it or empties a box being typed in. A row like a satellite's:
+   closed, a name, its state and one line; open, the mode first, because the
+   mode decides which of the rest there is. data-when names the modes a part
+   belongs to, and the others are hidden rather than greyed: they do not
+   apply, which is not the same as unavailable. The rare fields wait under
+   More. No hole but `u`: the name is written as text. */
 function wakeRowMarkup(u) {
   return `
-  <div class="sat-sum sat-head">
-    <strong class="sat-name"></strong>
-    <span class="sat-state"></span>
-  </div>
-  <div class="grid2">
-    <div><label for="${u}-t">Threshold</label>
-      <div class="slider"><input type="range" id="${u}-t" min="0.1" max="0.95" step="0.05">
-        <output for="${u}-t"></output></div>
-      <div class="hint ww-last"></div></div>
-    <fieldset class="ww-sats">
-      <legend>Satellites</legend>
-      <div class="seg" role="group">
-        <button type="button" aria-pressed="true" data-scope="all">Every satellite</button>
-        <button type="button" aria-pressed="false" data-scope="chosen">Chosen</button>
+  <details class="sat-row">
+    <summary><span class="sat-sum">
+      <span class="sat-name"></span>
+      <span class="sat-state"></span>
+      <span class="sat-line"></span>
+    </span></summary>
+    <div class="body">
+      <div class="ww-error"></div>
+      <fieldset class="ww-mode">
+        <legend>Mode</legend>
+        <div class="seg" role="group">
+          <button type="button" aria-pressed="false" data-mode="command">Command</button>
+          <button type="button" aria-pressed="false" data-mode="conversation">Conversation</button>
+          <button type="button" aria-pressed="false" data-mode="trigger">Trigger</button>
+        </div>
+        <div class="hint ww-modehint"></div>
+      </fieldset>
+      <div class="grid2 ww-listen">
+        <div><label for="${u}-t">Threshold</label>
+          <div class="slider"><input type="range" id="${u}-t" min="0.1" max="0.95" step="0.05">
+            <output for="${u}-t"></output></div>
+          <div class="hint">A higher threshold ignores more false wakes, and misses more real ones.</div>
+          <div class="hint ww-last"></div></div>
+        <fieldset class="ww-sats">
+          <legend>Satellites</legend>
+          <div class="seg" role="group">
+            <button type="button" aria-pressed="true" data-scope="all">Every satellite</button>
+            <button type="button" aria-pressed="false" data-scope="chosen">Chosen</button>
+          </div>
+          <div class="ww-pick" hidden></div>
+          <div class="hint ww-scopehint"></div>
+        </fieldset>
       </div>
-      <div class="ww-pick" hidden></div>
-      <div class="hint ww-scopehint"></div>
-    </fieldset>
-  </div>
-  <div class="ww-error"></div>
-  <div class="actions">
-    <span class="hint ww-rowhint"></span>
-    <button class="small" type="button" data-ww="retry" hidden>Try again</button>
-    <button class="small danger end" type="button" data-ww="remove">Remove</button>
-  </div>`;
+      <div class="grid2" data-when="command conversation">
+        <div><label for="${u}-lang">Language</label>
+          <select id="${u}-lang" data-f="lang">
+            <option value="">Auto (detect)</option>
+            <option value="en">English</option>
+            <option value="pt-BR">Português (Brasil)</option>
+            <option value="es">Español</option>
+            <option value="fr">Français</option>
+            <option value="it">Italiano</option>
+            <option value="other">Other</option>
+          </select></div>
+        <div class="ww-tag" hidden><label for="${u}-tag">Language tag</label>
+          <input type="text" id="${u}-tag" data-f="tag" maxlength="35" placeholder="e.g. de or nl-BE"
+                 spellcheck="false" autocomplete="off"></div>
+        <div><label for="${u}-dest">Action</label>
+          <select id="${u}-dest" data-f="dest">
+            <option value="ha_assist">Home Assistant Assist</option>
+            <option value="ha_conversation">Home Assistant conversation</option>
+            <option value="llm">Language model</option>
+            <option value="webhook">Webhook</option>
+            <option value="echo">Echo what it heard</option>
+          </select></div>
+      </div>
+      <div class="grid2 ww-dest" data-when="command conversation">
+        <div data-dest="ha_assist ha_conversation webhook"><label for="${u}-url">Address</label>
+          <input type="text" inputmode="url" id="${u}-url" data-f="d.url" maxlength="500"
+                 placeholder="https://homeassistant.local:8123" spellcheck="false" autocomplete="off"></div>
+        <div data-dest="llm"><label for="${u}-base">Server</label>
+          <input type="text" inputmode="url" id="${u}-base" data-f="d.base_url" maxlength="500"
+                 placeholder="https://ollama.local:11434/v1" spellcheck="false" autocomplete="off"></div>
+        <div data-dest="llm"><label for="${u}-model">Model</label>
+          <input type="text" id="${u}-model" data-f="d.model" maxlength="120" placeholder="e.g. llama3.2"
+                 spellcheck="false" autocomplete="off"></div>
+        <div data-dest="ha_assist ha_conversation webhook llm"><label for="${u}-env">Token variable</label>
+          <input type="text" id="${u}-env" data-f="d.env" maxlength="64" placeholder="e.g. SATELLITES_HA_TOKEN"
+                 spellcheck="false" autocomplete="off" autocapitalize="characters">
+          <div class="hint ww-envhint"></div></div>
+      </div>
+      <div class="grid2" data-when="command conversation">
+        <div data-when="command"><label for="${u}-fb">If not understood, continue as a conversation with</label>
+          <select id="${u}-fb" data-f="a.fallback"></select>
+          <div class="hint ww-fbhint"></div></div>
+        <div data-when="conversation"><label for="${u}-follow">Keep listening after a reply, seconds</label>
+          <input type="number" id="${u}-follow" data-f="c.follow_up_s" min="1" max="60" step="1"></div>
+      </div>
+      <div class="grid2" data-when="trigger">
+        <div><label for="${u}-feel">When heard</label>
+          <select id="${u}-feel" data-f="t.feedback">
+            <option value="earcon">Chime and flash</option>
+            <option value="none">Nothing</option>
+          </select></div>
+        <div><label for="${u}-cool">Cooldown, seconds</label>
+          <input type="number" id="${u}-cool" data-f="t.cooldown_s" min="0" max="600" step="1"></div>
+      </div>
+      <details class="sub ww-more" data-when="command conversation">
+        <summary>More<span class="sum-note"></span></summary>
+        <div class="body">
+          <div class="grid2">
+            <div><label for="${u}-reply">Reply on</label><select id="${u}-reply" data-f="a.reply_to"></select></div>
+            <div><label for="${u}-voice">Voice</label><select id="${u}-voice" data-f="a.voice"></select></div>
+            <div data-dest="ha_assist"><label for="${u}-pipe">Assist pipeline</label>
+              <input type="text" id="${u}-pipe" data-f="d.pipeline" maxlength="120"
+                     placeholder="the preferred one" spellcheck="false" autocomplete="off"></div>
+            <div data-dest="ha_conversation"><label for="${u}-agent">Conversation agent</label>
+              <input type="text" id="${u}-agent" data-f="d.agent_id" maxlength="120"
+                     placeholder="e.g. conversation.openai" spellcheck="false" autocomplete="off"></div>
+            <div data-when="conversation"><label for="${u}-ends">End phrases</label>
+              <input type="text" id="${u}-ends" data-f="c.end_phrases" maxlength="2000"
+                     placeholder="the usual ones" spellcheck="false" autocomplete="off">
+              <div class="hint">Separate them with commas; left empty, the usual English and Portuguese ones.</div></div>
+          </div>
+          <div data-dest="llm"><label for="${u}-system">System prompt</label>
+            <textarea id="${u}-system" data-f="d.system" maxlength="8000"></textarea></div>
+        </div>
+      </details>
+      <div class="ww-fix"></div>
+      <div class="actions">
+        <span class="hint ww-rowhint"></span>
+        <button class="small" type="button" data-ww="retry" hidden>Try again</button>
+        <button class="small danger end" type="button" data-ww="remove">Remove</button>
+      </div>
+    </div>
+  </details>`;
 }
 
 function wakeRow(name) {
@@ -5099,25 +5516,38 @@ function wakeRow(name) {
   row.dataset.name = name;
   const u = "wake" + (++SATELLITES.seq);
   row.innerHTML = wakeRowMarkup(u);
-  const range = row.querySelector("input[type=range]");
-  range.addEventListener("input", () => {
-    satSet(row.querySelector("output"), Number(range.value).toFixed(2));
-    wakeEdit(name, w => { w.threshold = Number(range.value); });
-  });
   row.addEventListener("click", ev => {
     const b = ev.target.closest("button");
     if (!b || b.disabled) return;
-    if (b.dataset.scope) wakeScope(name, b.dataset.scope);
+    if (b.dataset.mode) wakeEdit(name, w => wakeSetMode(w, b.dataset.mode, name));
+    else if (b.dataset.scope) wakeScope(name, b.dataset.scope);
     else if (b.dataset.ww === "remove") wakeRemove(name, b);
     else if (b.dataset.ww === "retry") wakeRetry(b);
   });
+  /* Text and numbers as they are typed, a select once it is chosen: a select
+     fires both events, and taken twice it would be two edits. */
+  row.addEventListener("input", ev => {
+    const t = ev.target;
+    if (t.type === "range") {
+      satSet(row.querySelector("output"), Number(t.value).toFixed(2));
+      wakeEdit(name, w => { w.threshold = Number(t.value); });
+    } else if (t.dataset.f && t.tagName !== "SELECT") wakeEdit(name, w => wakeField(w, t.dataset.f, t.value));
+  });
   row.addEventListener("change", ev => {
-    const id = ev.target.dataset.sat;
-    if (!id) return;
-    wakeEdit(name, w => {
-      w.satellites = w.satellites.filter(s => s !== id && s !== "*");
-      if (ev.target.checked) w.satellites.push(id);
-    });
+    const t = ev.target;
+    if (t.dataset.sat) {
+      const id = t.dataset.sat;
+      wakeEdit(name, w => {
+        w.satellites = w.satellites.filter(s => s !== id && s !== "*");
+        if (t.checked) w.satellites.push(id);
+      });
+    } else if (t.dataset.f && t.tagName === "SELECT") {
+      /* Other is a choice with nothing to save until a tag is typed, so the
+         row remembers it; the tag field takes the focus. */
+      if (t.dataset.f === "lang") row._other = t.value === "other";
+      wakeEdit(name, w => wakeField(w, t.dataset.f, t.value));
+      if (t.dataset.f === "lang" && row._other) row.querySelector('[data-f="tag"]').focus();
+    }
   });
   return row;
 }
@@ -5170,93 +5600,183 @@ async function wakeRetry(button) {
 
 const WAKE_STATE = { ready: ["Ready", ""], downloading: ["Downloading", "running"], error: ["Failed", "failed"] };
 
-function wakeRowUpdate(row, w, live, removed) {
+/* A value is written only into a control nobody is holding. */
+function wakeValue(el, value) {
+  if (el && el !== document.activeElement) el.value = value == null ? "" : String(value);
+}
+
+function wakeRowUpdate(row, w, live, removed, words, ptt) {
   const q = sel => row.querySelector(sel);
-  const label = wwLabel(w.name);
+  const label = ptt ? "Push-to-talk" : wwLabel(w.name);
   satSet(q(".sat-name"), label);
   /* Ready is plain text, as Online is on a satellite: only a word that is
-     still coming or has failed gets a chip. */
-  const [word, kind] = live ? (WAKE_STATE[live.state] || [live.state, ""]) : ["Not saved yet", ""];
+     still coming, has failed or would be refused gets a chip. */
+  const problem = removed ? "" : wakeProblem(w, words);
+  const [word, kind] = problem ? ["Needs a fix", "warn"] : ptt ? ["Play button", ""]
+    : live ? (WAKE_STATE[live.state] || [live.state, ""]) : ["Not saved yet", ""];
   const chip = q(".sat-state");
   satSet(chip, word);
   const cls = "sat-state" + (kind ? " status " + kind : "");
   if (chip.className !== cls) chip.className = cls;
+  satSet(q(".sat-line"), wakeLine(w, ptt));
   const failed = !!live && live.state === "error";
   satNoteOnce(q(".ww-error"), "bad", failed
     ? satText("wwBroken", { error: live.error || "no reason given" }) : "");
   q('[data-ww="retry"]').hidden = !failed;
-  const range = q("input[type=range]");
-  if (range !== document.activeElement) {
-    range.value = w.threshold;
-    paintRange(range);
-    satSet(q("output"), Number(w.threshold).toFixed(2));
-  }
-  const heard = WAKE.heard.get(w.name);
-  satSet(q(".ww-last"), heard ? satText("wwLast", { score: heard.score.toFixed(2),
-    name: heard.who, clock: satClock(heard.at) }) : "");
-  const every = w.satellites.includes("*");
-  const seg = q(".seg");
-  seg.setAttribute("aria-label", `Which satellites hear ${label}`);
+
+  const seg = q(".ww-mode .seg");
+  seg.setAttribute("aria-label", `What ${label} does`);
   for (const b of seg.querySelectorAll("button")) {
-    b.setAttribute("aria-pressed", String((b.dataset.scope === "all") === every));
-    b.disabled = removed;
+    b.setAttribute("aria-pressed", String(b.dataset.mode === w.mode));
+    /* Push-to-talk is pressed to speak, so it can never be a trigger (the
+       hub refuses one): not offered at all. */
+    b.hidden = ptt && b.dataset.mode === "trigger";
   }
-  const pick = q(".ww-pick");
-  pick.hidden = every;
-  satSet(q(".ww-scopehint"), every ? SAT_COPY.wwAll : "");
-  /* Every adopted satellite, and any id the word still names that the hub no
-     longer lists, so it can be unticked rather than sent back unseen. */
-  const sats = SATELLITES.list.filter(n => n.adopted).map(n => [n.id, satName(n)]);
-  for (const id of w.satellites) {
-    if (id !== "*" && !sats.some(([known]) => known === id)) sats.push([id, id]);
+  satSet(q(".ww-modehint"), SAT_COPY[WAKE_MODE_HINT[w.mode] || "modeNone"]);
+  for (const part of row.querySelectorAll("[data-when]")) {
+    part.hidden = !part.dataset.when.split(" ").includes(w.mode || "");
   }
-  const sig = JSON.stringify(sats);
-  if (pick.dataset.sig !== sig && !pick.contains(document.activeElement)) {
-    pick.dataset.sig = sig;
-    pick.textContent = "";
-    for (const [id, text] of sats) {
-      const line = document.createElement("label");
-      line.className = "checkline";
-      const tick = document.createElement("input");
-      tick.type = "checkbox";
-      tick.dataset.sat = id;
-      line.append(tick, " " + text);
-      pick.append(line);
+
+  q(".ww-listen").hidden = ptt;
+  if (!ptt) {
+    const range = q("input[type=range]");
+    if (range !== document.activeElement) {
+      range.value = w.threshold;
+      paintRange(range);
+      satSet(q("output"), Number(w.threshold).toFixed(2));
+    }
+    const heard = WAKE.heard.get(w.name);
+    satSet(q(".ww-last"), heard ? satText("wwLast", { score: heard.score.toFixed(2),
+      name: heard.who, clock: satClock(heard.at) }) : "");
+    const every = w.satellites.includes("*");
+    const scope = q(".ww-sats .seg");
+    scope.setAttribute("aria-label", `Which satellites hear ${label}`);
+    for (const b of scope.querySelectorAll("button")) {
+      b.setAttribute("aria-pressed", String((b.dataset.scope === "all") === every));
+    }
+    const pick = q(".ww-pick");
+    pick.hidden = every;
+    satSet(q(".ww-scopehint"), every ? SAT_COPY.wwAll : "");
+    /* Every adopted satellite, and any id the word still names that the hub
+       no longer lists, so it can be unticked rather than sent back unseen. */
+    const sats = SATELLITES.list.filter(n => n.adopted).map(n => [n.id, satName(n)]);
+    for (const id of w.satellites) {
+      if (id !== "*" && !sats.some(([known]) => known === id)) sats.push([id, id]);
+    }
+    const sig = JSON.stringify(sats);
+    if (pick.dataset.sig !== sig && !pick.contains(document.activeElement)) {
+      pick.dataset.sig = sig;
+      pick.textContent = "";
+      for (const [id, text] of sats) {
+        const line = document.createElement("label");
+        line.className = "checkline";
+        const tick = document.createElement("input");
+        tick.type = "checkbox";
+        tick.dataset.sat = id;
+        line.append(tick, " " + text);
+        pick.append(line);
+      }
+    }
+    for (const tick of pick.querySelectorAll("input[data-sat]")) {
+      tick.checked = w.satellites.includes(tick.dataset.sat);
     }
   }
-  for (const tick of pick.querySelectorAll("input[data-sat]")) {
-    tick.checked = w.satellites.includes(tick.dataset.sat);
-    tick.disabled = removed;
+
+  if (w.action && (w.mode === "command" || w.mode === "conversation")) wakeActionUpdate(row, w, words);
+  if (w.mode === "trigger") {
+    const t = w.trigger || {};
+    wakeValue(q('[data-f="t.feedback"]'), t.feedback || WAKE_SHOWN.feedback);
+    wakeValue(q('[data-f="t.cooldown_s"]'), "cooldown_s" in t ? t.cooldown_s : WAKE_SHOWN.cooldown_s);
   }
-  range.disabled = removed;
+  satNoteOnce(q(".ww-fix"), "warn", problem);
+
+  /* A word marked for removal is greyed whole, with the reason on its row. */
+  for (const c of row.querySelectorAll(".body input, .body select, .body textarea, .seg button")) {
+    c.disabled = removed;
+  }
   row.toggleAttribute("data-removed", removed);
   satSet(q(".ww-rowhint"), removed ? SAT_COPY.wwRemoved
     : live && live.state === "downloading" ? SAT_COPY.wwDownloading : "");
   const rm = q('[data-ww="remove"]');
+  rm.hidden = ptt;
   satSet(rm, removed ? "Keep" : "Remove");
   rm.classList.toggle("danger", !removed);
   rm.setAttribute("aria-label", `${removed ? "Keep" : "Remove"} ${label}`);
 }
 
+/* THE ACTION'S FIELDS, and only the ones its destination reads. */
+function wakeActionUpdate(row, w, words) {
+  const q = sel => row.querySelector(sel);
+  const a = w.action, d = a.destination || { type: "echo" };
+  const other = !!row._other || !!(w.language && !WAKE_LANGS.includes(w.language));
+  wakeValue(q('[data-f="lang"]'), other ? "other" : w.language || "");
+  q(".ww-tag").hidden = !other;
+  wakeValue(q('[data-f="tag"]'), other ? w.language : "");
+  wakeValue(q('[data-f="dest"]'), d.type);
+  q(".ww-dest").hidden = d.type === "echo";
+  for (const part of row.querySelectorAll("[data-dest]")) {
+    part.hidden = !part.dataset.dest.split(" ").includes(d.type);
+  }
+  const env = d.type === "llm" ? d.api_key_env : d.token_env;
+  for (const [key, value] of [["d.url", d.url], ["d.base_url", d.base_url], ["d.model", d.model],
+                              ["d.env", env], ["d.pipeline", d.pipeline], ["d.agent_id", d.agent_id],
+                              ["d.system", d.system]]) {
+    wakeValue(q(`[data-f="${key}"]`), value);
+  }
+  satSet(q(".ww-envhint"), wakeEnvHint(env));
+
+  /* The words it can hand over to: the conversation words in the set it
+     would be saved with. With none, the only choice is nobody, and why. */
+  const talk = words.filter(x => x.mode === "conversation" && x.name !== w.name);
+  const hand = [["", "Nobody, say it was not understood"], ...talk.map(x => [x.name, wwLabel(x.name)])];
+  if (a.fallback && !talk.some(x => x.name === a.fallback)) hand.push([a.fallback, wwLabel(a.fallback)]);
+  satFillSelect(q('[data-f="a.fallback"]'), hand);
+  wakeValue(q('[data-f="a.fallback"]'), a.fallback || "");
+  satSet(q(".ww-fbhint"), talk.length ? "" : SAT_COPY.fbNone);
+  const c = w.conversation || {};
+  wakeValue(q('[data-f="c.follow_up_s"]'), "follow_up_s" in c ? c.follow_up_s : WAKE_SHOWN.follow_up_s);
+  wakeValue(q('[data-f="c.end_phrases"]'), (c.end_phrases || []).join(", "));
+
+  const sats = SATELLITES.list.filter(n => n.adopted);
+  const where = [["same", "The satellite that heard it"], ["none", "Nowhere, act without a word"],
+                 ...sats.map(n => [n.id, satName(n)])];
+  if (a.reply_to && !where.some(([v]) => v === a.reply_to)) where.push([a.reply_to, a.reply_to]);
+  satFillSelect(q('[data-f="a.reply_to"]'), where);
+  wakeValue(q('[data-f="a.reply_to"]'), a.reply_to || "same");
+  const voices = wakeVoices();
+  const said = [["", "The language's own voice"], ...voices.map(v => [v, v])];
+  if (a.voice && !voices.includes(a.voice)) said.push([a.voice, a.voice]);
+  satFillSelect(q('[data-f="a.voice"]'), said);
+  wakeValue(q('[data-f="a.voice"]'), a.voice || "");
+  satSet(q(".ww-more .sum-note"), wakeMoreNote(a));
+}
+
 $("wwaddgo").addEventListener("click", () => {
   const name = $("wwadd").value;
   if (!name || !WAKE.server) return;
-  /* 0.5, and every satellite: what a name alone in SATELLITES_WAKE_WORDS gets. */
-  wakeDraft().push({ name, threshold: 0.5, satellites: ["*"] });
-  wakeRender();
+  wakeAdd(name);
+  /* Opened here, once, because a word just added is a word to set up; its
+     first question is its mode. */
   const row = WAKE.rows.get(name);
-  if (row) row.querySelector("input[type=range]").focus();
+  if (row) {
+    row.querySelector("details.sat-row").open = true;
+    row.querySelector('[data-mode="command"]').focus();
+  }
 });
 
 async function wakeSave() {
   if (!WAKE.draft || !WAKE.server) return;
+  if (wakeFirstProblem()) { wakeRender(); return; }
   const done = busy($("wwsave"), "Saving…");
   try {
-    /* In turn with Try again, and built when its turn comes. */
+    /* In turn with Try again, and built when its turn comes. Push-to-talk is
+       sent only when it changed: left out, the hub keeps it as it is. */
     await wakeTurn(async () => {
       if (!WAKE.draft) return;
-      const r = await wakePut(wakeEffective().map(wakeCopy));
-      WAKE.draft = null;
+      const ptt = WAKE.draftPtt && wakeKey([], WAKE.draftPtt) !== wakeKey([], WAKE.server.ptt)
+        ? wakePttCopy(WAKE.draftPtt) : null;
+      const r = await wakePut(wakeEffective().map(wakeCopy), ptt);
+      WAKE.draft = WAKE.draftPtt = null;
       WAKE.removed.clear();
       wakeTake(r);
       satSaid($("wwnote"), SAT_COPY.wwSaved);
@@ -5272,6 +5792,76 @@ async function wakeSave() {
   }
 }
 $("wwsave").addEventListener("click", wakeSave);
+
+/* ---- custom models --------------------------------------------------------- */
+
+/* In use is in the saved set or in the draft: the hub refuses the first with
+   409, and deleting the second would make the next Save a 422. */
+function wakeModelInUse(name) {
+  return [...((WAKE.server && WAKE.server.words) || []), ...(WAKE.draft || [])].some(w => w.name === name);
+}
+
+function wakeModels() {
+  const custom = WAKE.server.custom || [];
+  satSet($("ww-models-sum"), custom.length ? custom.map(wwLabel).join(", ") : SAT_COPY.sumModelsNone);
+  const box = $("wwcustom");
+  const sig = JSON.stringify(custom.map(name => [name, wakeModelInUse(name)]));
+  if (box.dataset.sig === sig || box.contains(document.activeElement)) return;
+  box.dataset.sig = sig;
+  box.textContent = "";
+  for (const name of custom) {
+    const used = wakeModelInUse(name);
+    const row = document.createElement("li");
+    row.innerHTML = `
+      <div class="actions"><strong class="sat-name"></strong><span class="hint"></span>
+        <button class="small danger end" type="button">Delete</button></div>`;
+    row.querySelector(".sat-name").textContent = wwLabel(name);
+    row.querySelector(".hint").textContent = used ? SAT_COPY.wwModelInUse : "";
+    const del = row.querySelector("button");
+    del.disabled = used;
+    del.setAttribute("aria-label", `Delete the model ${wwLabel(name)}`);
+    del.addEventListener("click", () => wakeModelDelete(name, del));
+    box.append(row);
+  }
+}
+
+async function wakeModelUpload() {
+  const host = $("wwmodelnote");
+  const file = $("wwfile").files && $("wwfile").files[0];
+  if (!file) { note(host, "warn", SAT_COPY.wwModelChoose); return; }
+  const name = $("wwmodelname").value.trim() || String(file.name || "").replace(/\.onnx$/i, "");
+  if (!WAKE_NAME.test(name) || name === WAKE_PTT) { note(host, "bad", SAT_COPY.wwModelBadName); return; }
+  const custom = (WAKE.server && WAKE.server.custom) || [];
+  if (((WAKE.server && WAKE.server.available) || []).includes(name) && !custom.includes(name)) {
+    note(host, "bad", SAT_COPY.wwModelBuiltIn);
+    return;
+  }
+  const done = busy($("wwupload"), "Uploading…");
+  try {
+    await wakeTurn(async () => {
+      wakeTake(await json(`/satellites/wake-words/models?name=${encodeURIComponent(name)}`,
+        { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file }));
+    });
+    satSaid(host, satText("wwModelUploaded", { word: wwLabel(name) }));
+    $("wwfile").value = $("wwmodelname").value = "";
+  } catch (e) { note(host, "bad", e.message); }
+  finally { done(); wakeRender(); }
+}
+$("wwupload").addEventListener("click", wakeModelUpload);
+
+async function wakeModelDelete(name, button) {
+  const host = $("wwmodelnote");
+  if (wakeModelInUse(name)) { note(host, "warn", SAT_COPY.wwModelInUse); return; }
+  if (!confirm(satText("askModelDelete", { word: wwLabel(name) }))) return;
+  const done = busy(button, "Deleting…");
+  try {
+    await json(`/satellites/wake-words/models/${encodeURIComponent(name)}`, { method: "DELETE" });
+    satSaid(host, satText("wwModelDeleted", { word: wwLabel(name) }));
+    await satellitesRefresh();
+    $("wwfile").focus();
+  } catch (e) { note(host, "bad", e.message); }
+  finally { done(); }
+}
 
 /* ============================================================== firmware == */
 /* Rebuilt only when the list itself changes, so a poll does not take focus
@@ -5401,9 +5991,11 @@ $("fwupload").addEventListener("click", async () => {
 /* THE EVENT LOG IS A STREAM, NOT A POLL: a button press is gone by the next
    three-second tick. EventSource reconnects on its own; it is opened the first
    time the tab is and left open, one connection, for the page's life. The
-   same stream feeds the rows: a wake word lights Listening at once, a routed
-   reply clears it, and "rebooting" is remembered so an update that restarts
-   the satellite reads as Restarting rather than Offline. */
+   same stream feeds the rows: a wake word lights Listening at once, the
+   reply, the end of a conversation or a trigger clears it, a conversation
+   starting or ending asks the hub again so its row says so, and "rebooting"
+   is remembered so an update that restarts the satellite reads as
+   Restarting rather than Offline. */
 function satellitesListen() {
   if (SATELLITES.events || !window.EventSource) return;
   SATELLITES.events = new EventSource("/ui/api/satellites/events");
@@ -5437,7 +6029,13 @@ function satellitesListen() {
         wakeRender();
       }
     }
-    if (ev.type === "routed") SATELLITES.woke.delete(ev.satellite);
+    /* Whatever ends the wait for a command. A trigger publishes no wake
+       event, so its score is taken here for its row's Last heard. */
+    if (SAT_WOKE_ENDS.includes(ev.type)) SATELLITES.woke.delete(ev.satellite);
+    if (ev.type === "triggered" && !ev.injected && typeof ev.score === "number") {
+      WAKE.heard.set(ev.wake_word, { score: ev.score, who, at: ev.at });
+      wakeRender();
+    }
     const ota = row && row._n && row._n.ota;
     if (ev.type === "ota" && ev.state === "rebooting") {
       SATELLITES.restarting.set(ev.satellite, { v: ev.version || (ota && ota.version), at: Date.now() });
@@ -5463,7 +6061,9 @@ function satellitesListen() {
     list.prepend(li);
     while (list.children.length > 50) list.lastChild.remove();
     $("evnone").hidden = true;
-    if (!["button", "wake", "routed"].includes(ev.type) && satellitesOpen()) satellitesRefresh();
+    if (!["button", "wake", "routed", "turn", "triggered"].includes(ev.type) && satellitesOpen()) {
+      satellitesRefresh();
+    }
   };
 }
 
@@ -5471,9 +6071,13 @@ function satEventWhat(ev) {
   return ev.type === "button" ? `${satButtonName(ev.button)} ${ev.action}${ev.held_ms ? ` after ${ev.held_ms} ms` : ""}`
     : ev.type === "ota" ? `update ${ev.state}${ev.pct != null ? " " + ev.pct + "%" : ""}${ev.error ? ": " + ev.error : ""}`
     : ev.type === "wake" ? satelliteHeard(ev)
-    : ev.type === "routed" ? satelliteRouted(ev)
+    : ev.type === "routed" || ev.type === "turn" ? satelliteRouted(ev)
+    : ev.type === "conversation_started" ? satTalkStarted(ev)
+    : ev.type === "conversation_ended" ? satTalkEnded(ev)
+    : ev.type === "triggered" ? satTriggered(ev)
     : ev.type;
 }
+const SAT_WOKE_ENDS = ["routed", "turn", "conversation_ended", "triggered"];
 
 /* One line each for the two listening events. "test" marks what /inject ran:
    a recorded clip, heard by nobody. */
@@ -5484,16 +6088,49 @@ function satelliteHeard(ev) {
   return `${ev.injected ? "test: " : ""}${word}${score}${from}`;
 }
 
+/* A reply, or one turn of a conversation, led by the word whose action ran
+   (rule_id is that word's name). The time is the first sound after the end
+   of speech when the reply played, which is the wait a person hears, and the
+   whole turn otherwise (Try a word plays nothing). */
 function satelliteRouted(ev) {
-  const lead = `${ev.injected ? "test: " : ""}${ev.rule_id ? `rule ${ev.rule_id}` : "no rule"}`;
+  const whose = ev.rule_id ? wakeName(ev.rule_id) : "no action";
+  const lead = `${ev.injected ? "test: " : ""}${ev.type === "turn" ? `${whose}, turn ${ev.turn}` : whose}`;
   if (ev.error) return `${lead} failed: ${ev.error}`;
+  if (ev.ended) return `${lead}: "${ev.transcript || ""}" ended it`;
   const said = ev.transcript ? ` "${ev.transcript}"` : "";
+  const lang = ev.language ? ` (${ev.language})` : "";
   const reply = ev.reply_text ? ` answered "${ev.reply_text}"` : " answered nothing";
-  const ms = ev.timings_ms && ev.timings_ms.total != null ? ` in ${Math.round(ev.timings_ms.total)} ms` : "";
-  return `${lead}:${said}${reply}${ms}${ev.note ? ` (${ev.note})` : ""}`;
+  const first = ev.timeline_ms && ev.timeline_ms.first_audio;
+  const total = ev.timings_ms && ev.timings_ms.total;
+  const ms = first != null ? `, first sound after ${Math.round(first)} ms`
+    : total != null ? ` in ${Math.round(total)} ms` : "";
+  const handed = ev.handed_over_to ? `, handed to ${wakeName(ev.handed_over_to)}` : "";
+  return `${lead}:${said}${lang}${reply}${ms}${handed}${ev.note ? ` (${ev.note})` : ""}`;
 }
 
-/* ================================================================ routing == */
+/* A conversation's two ends. It starts on its own word, or when a command's
+   word hands over to it (reason "fallback"); it ends for one of the reasons
+   the hub names, in words. */
+function satTalkStarted(ev) {
+  const word = wakeName(ev.rule_id || ev.wake_word || "");
+  return ev.reason === "fallback" && ev.from_rule
+    ? `conversation with ${word} started, taking over from ${wakeName(ev.from_rule)}`
+    : `conversation with ${word} started`;
+}
+const SAT_ENDED = { silence: "silence", phrase: "an ending phrase", no_audio: "no audio",
+                    error: "an error", stop: "the stop button", muted: "muted",
+                    mic_off: "microphone off", wake_word: "another wake word",
+                    trigger: "a trigger word", cancelled: "cancelled" };
+function satTalkEnded(ev) {
+  const why = SAT_ENDED[ev.reason] || String(ev.reason || "cancelled").replace(/_/g, " ");
+  return `conversation ended after ${satCount(ev.turns || 0, "turn", "turns")}: ${why}`;
+}
+function satTriggered(ev) {
+  const score = typeof ev.score === "number" ? ` (${ev.score.toFixed(2)})` : "";
+  return `${ev.injected ? "test: " : ""}triggered ${wwLabel(ev.wake_word)}${score}`;
+}
+
+/* ============================================================ try a word == */
 /* A select keeps what was chosen in it across a rebuild, and is not rebuilt
    while it is open in somebody's hand. */
 function satFillSelect(select, options) {
@@ -5506,97 +6143,30 @@ function satFillSelect(select, options) {
   if (options.some(([value]) => value === was)) select.value = was;
 }
 
-/* The test's two choices are the ones a rule can name: any satellite or an
-   adopted one (by id, which the hub resolves to its name), and any wake word,
-   push-to-talk or one of the hub's words. Nothing to guess or misspell. */
-function routingWords() {
-  satFillSelect($("routeword"), [["*", "Any wake word"], ["ptt", "Push-to-talk"],
-    ...(WAKE.server ? WAKE.server.words.map(w => [w.name, wwLabel(w.name)]) : [])]);
-  satFillSelect($("routesatellite"), [["any", "Any satellite"],
-    ...SATELLITES.list.filter(n => n.adopted).map(n => [n.id, satName(n)])]);
+/* THE WORDS WITH AN ACTION TO TRY, and push-to-talk. A trigger's whole effect
+   is its event, so there is nothing of it to run. Read from the saved set,
+   because the hub runs what it holds and not what the page is editing. */
+function wakeTryWords() {
+  const words = WAKE.server ? WAKE.server.words.filter(w => w.mode !== "trigger" && w.action) : [];
+  satFillSelect($("routeword"), [...words.map(w => [w.name, wwLabel(w.name)]), [WAKE_PTT, "Push-to-talk"]]);
 }
 
-async function routingLoad() {
-  SATELLITES.routingLoaded = true;
-  try {
-    /* The rules are written into the box only if nobody has edited them since
-       they were last written there. This runs again after a missed poll, and
-       an edit in progress while the hub restarted is not the hub's to
-       replace. */
-    const r = await json("/satellites/routing");
-    routingShow(r, $("routetext").value === SATELLITES.routingFilled);
-    $("sat-routing").hidden = false;
-  } catch (e) {
-    /* An older hub without routing: the section stays away rather than
-       erring. */
-    SATELLITES.routingLoaded = e.status === 404;
-    SATELLITES.routing = null;
-    $("sat-routing").hidden = true;
-  }
-  satellitesHealth();
-}
-
-function routingShow(r, fill) {
-  SATELLITES.routing = r;
-  if (fill) {
-    SATELLITES.routingFilled = JSON.stringify({ version: 1, rules: r.rules }, null, 2);
-    $("routetext").value = SATELLITES.routingFilled;
-  }
-  const env = Object.entries(r.env || {}).map(([name, set]) => `${name} ${set ? "set" : "not set"}`);
-  satSet($("routeenv"), [r.services && r.services.stt ? null : "SATELLITES_STT_URL not set", ...env]
-    .filter(Boolean).join(" · "));
-  const problems = [r.load_error, ...(r.warnings || [])].filter(Boolean).join(" ");
-  note($("routenote"), r.load_error ? "bad" : "warn", problems);
-  routingDirty();
-  const rules = (r.rules || []).length, warned = (r.warnings || []).length;
-  satSet($("route-sum"), r.load_error ? SAT_COPY.sumLoadFailed
-    : !rules ? SAT_COPY.sumRouteNone
-    : warned ? satText("sumRouteWarned", { n: satCount(rules, "rule", "rules"),
-                                           k: satCount(warned, "warning", "warnings") })
-    : satCount(rules, "rule", "rules"));
-}
-
-/* SAVE RULES IS OFF WITH ITS REASON while the box holds what the hub last
-   sent, as Save wake words is. A file that did not load is the exception:
-   saving it back, changed or not, is how it is replaced. */
-function routingDirty() {
-  const dirty = $("routetext").value !== SATELLITES.routingFilled;
-  const redo = !!(SATELLITES.routing && SATELLITES.routing.load_error);
-  if ($("routesave").getAttribute("aria-busy") !== "true") $("routesave").disabled = !dirty && !redo;
-  satSet($("routedirty"), dirty ? SAT_COPY.routeDirty : redo ? "" : SAT_COPY.routeClean);
-}
-$("routetext").addEventListener("input", routingDirty);
-
-$("routesave").addEventListener("click", async () => {
-  const host = $("routenote");
-  let body;
-  try { body = JSON.parse($("routetext").value); }
-  catch (e) { note(host, "bad", satText("routeNotJson", { message: e.message })); return; }
-  const done = busy($("routesave"), "Saving…");
-  try {
-    const r = await json("/satellites/routing", { method: "PUT", headers: JSON_BODY, body: JSON.stringify(body) });
-    routingShow(r, true);
-    if (!r.load_error && !(r.warnings || []).length) {
-      satSaid(host, satText("routeSaved", { n: satCount(r.rules.length, "rule", "rules") }));
-    }
-    satellitesHealth();
-  } catch (e) { note(host, "bad", e.message); }
-  /* busy() hands back the state from before the press, which was on. */
-  finally { done(); routingDirty(); }
-});
-
-$("routetest").addEventListener("click", async () => {
+/* A typed sentence through one word's action and the reply's TTS, skipping
+   STT; the hub plays nothing. No satellite is named, so a reply meant for
+   another room is only reported. */
+async function wakeTry() {
   const out = $("routeresult");
   const text = $("routesay").value.trim();
   if (!text) { satSaid(out, SAT_COPY.routeEmpty); return; }
-  const done = busy($("routetest"), "Testing…");
+  const done = busy($("routetest"), "Trying…");
   try {
     const o = await json("/satellites/routing/test", { method: "POST", headers: JSON_BODY, body: JSON.stringify({
-      satellite: $("routesatellite").value || "any", wake_word: $("routeword").value || "*", text }) });
+      satellite: "any", wake_word: $("routeword").value || WAKE_PTT, text }) });
     if (o.error) note(out, "bad", satelliteRouted(o)); else satSaid(out, satelliteRouted(o));
   } catch (e) { note(out, "bad", e.message); }
   finally { done(); }
-});
+}
+$("routeform").addEventListener("submit", ev => { ev.preventDefault(); wakeTry(); });
 
 async function loadGlossaries() {
   /* THE WHOLE LISTING, not just the names. The same document says whether this

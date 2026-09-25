@@ -115,11 +115,12 @@ name.
 | `DELETE /satellites/firmware/{sha256}` | |
 | `POST /satellites/ota` | `{"satellite": "<id>|<name>|all", "sha256": "..."}`. Images are only sent to adopted, online satellites of the image's model, and not to a satellite that would refuse the signature. |
 
-The gateway routes all of these. The Satellites tab uses all but three: `GET
-/satellites/{id}`, because the list already carries every satellite; `ptt`,
-which is Home Assistant's; and `inject`, which is for scripts: a button that
-runs a clip through a satellite's real actions would be one press from Home
-Assistant acting on it.
+The gateway routes all of these. The Satellites tab uses all but five: `GET
+/satellites/{id}`, because the list already carries every satellite; `GET` and
+`PUT /satellites/routing`, because routing now lives on each wake word and the
+tab edits it there; `ptt`, which is Home Assistant's; and `inject`, which is
+for scripts: a button that runs a clip through a satellite's real actions
+would be one press from Home Assistant acting on it.
 
 ## The device protocol
 

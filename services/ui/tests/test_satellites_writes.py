@@ -19,8 +19,8 @@ What they prevent:
     second takes back what the first saved;
   * a poll that left before a save and answers after it: the page's copy goes
     back to the list before the save, and the next edit's Save PUTs that;
-  * one missed poll (the hub restarting): Routing is hidden, and it was only
-    ever shown again by the first load, which has already happened.
+  * one missed poll (the hub restarting): everything the hub answers is
+    hidden, and must come back with the next poll rather than on a reload.
 
 The same harness drives test_satellites_ordering.py and
 test_satellites_states.py, which import `run` from here.
@@ -74,7 +74,10 @@ $("tab-satellites").hidden = true;
 const document = { activeElement: null, createElement: () => stand(), getElementById: $ };
 const window = {};
 class Option {}
-const paintRange = () => {}, note = () => {}, confirm = () => true;
+// note() is recorded, so a scenario can read what the reader was told.
+const notes = [];
+const paintRange = () => {}, confirm = () => true;
+const note = (host, kind, text) => { if (text) notes.push([kind, String(text)]); };
 const busy = () => () => {};
 const reason = (p, fallback) => fallback;
 const saved = new Map();
@@ -93,14 +96,21 @@ const hub = {
                  config: {}, status: {}, wake_words: [] }],
   words: [{ name: "alexa", threshold: 0.5, satellites: [], state: "ready", error: null },
           { name: "hey_jarvis", threshold: 0.5, satellites: ["*"], state: "ready", error: null }],
+  // Left undefined, the answer is a hub's from before modes: no ptt, no
+  // custom models, no env. A scenario sets them for the hub after them.
+  available: ["alexa", "hey_jarvis"],
+  ptt: undefined, custom: undefined, env: undefined, warnings: undefined,
   puts: [],
+  bodies: [],
+  calls: [],
   down: false,
   hold: false,
   slow: 0,
   refuse: 0,
 };
-const answer = () => JSON.parse(JSON.stringify({ available: ["alexa", "hey_jarvis"], words: hub.words,
-                                                 load_error: null }));
+const answer = () => JSON.parse(JSON.stringify({ available: hub.available, words: hub.words,
+                                                 ptt: hub.ptt, custom: hub.custom, env: hub.env,
+                                                 warnings: hub.warnings, load_error: null }));
 let held = [];
 function release() { for (const r of held) r(); held = []; }
 async function json(path, options) {
@@ -127,6 +137,8 @@ async function json(path, options) {
     }
     const body = JSON.parse(options.body);
     hub.puts.push(body.words);
+    hub.bodies.push(body);
+    if (body.ptt) hub.ptt = body.ptt;
     // One slow write: the next one must not be built, or sent, until this
     // one has answered. Only the first is slow, so an unqueued second write
     // would land first and the first would put the old list back.
@@ -134,6 +146,28 @@ async function json(path, options) {
     hub.words = body.words.map(w => ({ ...w, state: "ready", error: null }));
     const now = answer();
     await later(); return now;
+  }
+  // A custom model: the .onnx is the body, the name the query.
+  if (method === "POST" && path.startsWith("/satellites/wake-words/models?name=")) {
+    const name = decodeURIComponent(path.split("=")[1]);
+    hub.calls.push([method, path, options.headers && options.headers["Content-Type"]]);
+    hub.custom = [...new Set([...(hub.custom || []), name])];
+    hub.available = [...new Set([...hub.available, name])].sort();
+    await later(); return answer();
+  }
+  if (method === "DELETE" && path.startsWith("/satellites/wake-words/models/")) {
+    const name = decodeURIComponent(path.split("/").pop());
+    hub.calls.push([method, path]);
+    hub.custom = (hub.custom || []).filter(n => n !== name);
+    hub.available = hub.available.filter(n => n !== name);
+    await later(); return null;                        // 204
+  }
+  if (method === "POST" && path === "/satellites/routing/test") {
+    const body = JSON.parse(options.body);
+    hub.calls.push([method, path, body]);
+    await later();
+    return { rule_id: body.wake_word, mode: "command", transcript: body.text, reply_text: "It is four.",
+             error: null, timings_ms: { total: 812 }, timeline_ms: {} };
   }
   throw new Error("the fake hub has no " + method + " " + path);
 }
@@ -240,19 +274,21 @@ def test_a_word_marked_for_removal_is_left_out_of_the_save_and_keep_undoes_it(tm
     assert got["sent"] == ["hey_jarvis"], got
 
 
-def test_one_missed_poll_does_not_hide_routing_until_the_page_is_reloaded(tmp_path):
+def test_one_missed_poll_does_not_hide_the_hub_until_the_page_is_reloaded(tmp_path):
     """The hub restarts, one poll gets 503 and the tab hides everything the hub
-    answers. The next poll shows it again, but Routing is shown only by a
-    routing load, and the first one has already happened."""
+    answers. The next poll shows it again: Routing used to be shown only by
+    its first load, which had already happened, and stayed hidden. Its Try
+    box lives inside Wake words now, which every poll shows."""
     got = run(tmp_path, """
       await satellitesRefresh();
-      await new Promise(r => setTimeout(r, 50));        // the first routing load, not awaited
-      const before = $("sat-routing").hidden;
+      const before = $("sat-wakewords").hidden;
       hub.down = true;  await satellitesRefresh();
+      const gone = $("satellitesman").hidden;
       hub.down = false; await satellitesRefresh();
-      await new Promise(r => setTimeout(r, 50));        // a routing load, if one started
-      console.log(JSON.stringify({ shown_at_first: before === false,
-                                   shown_after_the_hub_is_back: $("sat-routing").hidden === false }));
+      console.log(JSON.stringify({ shown_at_first: before === false, hidden_while_away: gone === true,
+                                   shown_after_the_hub_is_back: $("satellitesman").hidden === false
+                                     && $("sat-wakewords").hidden === false }));
     """)
     assert got["shown_at_first"], got
+    assert got["hidden_while_away"], got
     assert got["shown_after_the_hub_is_back"], got
