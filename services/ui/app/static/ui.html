@@ -738,6 +738,9 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
   .brand .lamp{border:1px solid ButtonText;background:Canvas}
   .brand.lit .lamp{background:Highlight;border-color:Highlight}
   .primary{background:ButtonFace;color:ButtonText;border:1px solid ButtonBorder}
+  /* Every satellite / Chosen is carried by a fill that forced colours paints
+     over; an outline survives it. */
+  .ww .seg button[aria-pressed=true]{outline:2px solid Highlight;outline-offset:-3px}
 }
 
 /* SURFACE 1, AND IT IS A HOLE RATHER THAN A BLOCK. The card used to be the
@@ -806,7 +809,7 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
    deployment cannot use is greyed WITH ITS REASON BESIDE IT, never removed.
    Hiding it is how a second engine stays invisible for its whole life. */
 #enginerow{border:0;padding:0;margin:var(--s4) 0 0;min-width:0}
-#enginerow>legend{padding:0;font-size:var(--t-label);font-weight:600;
+#enginerow>legend,fieldset.sat-fs>legend{padding:0;font-size:var(--t-label);font-weight:600;
   color:var(--dim);letter-spacing:.005em}
 .engine{display:flex;gap:var(--s2);align-items:baseline;padding:var(--s1) 0;
   cursor:pointer}
@@ -829,9 +832,12 @@ details>summary::-webkit-details-marker{display:none}
 /* ONE GLYPH THAT TURNS, rather than two different characters swapped. A
    rotation is an affordance -- it says the thing moves; a character swap is
    two states with nothing between them. Kept under reduced motion: a 1em
-   glyph rotating in place is non-vestibular, and it IS the affordance. */
+   glyph rotating in place is non-vestibular, and it IS the affordance.
+   IT TURNS ABOUT THE GLYPH, NOT THE BOX. The glyph sits at the left of its
+   1em box, so a turn about the box's centre lifted it by a third of an em
+   when open (5px on a satellite's name). .2em is the glyph's own centre. */
 details>summary::before{content:"\203A";display:inline-block;width:1em;
-  color:var(--dim);transition:transform .18s var(--spring)}
+  color:var(--dim);transform-origin:.2em 50%;transition:transform .18s var(--spring)}
 details[open]>summary{color:var(--ink)}
 details[open]>summary::before{transform:rotate(90deg)}
 details .body{padding:0 0 var(--s4)}
@@ -1218,6 +1224,13 @@ details>summary:active{opacity:.72}
      palette the reader forces on top of this one. */
   .brand .lamp{box-shadow:0 0 0 1px var(--ink)}
   .dock .bead{box-shadow:0 0 0 2px var(--ink)}
+  /* A SATELLITE ROW IS A LIST ROW, NOT A PANEL. Boxed like the Expert panels
+     it became a box per satellite, and a box per sub-disclosure inside that:
+     the nesting this tab was rebuilt to remove. The rows keep their
+     hairlines; the hub's four disclosures stay boxed, as the Expert panels. */
+  details.sat-row{border:0;border-radius:0;padding:0;margin-inline:0}
+  details.sub{border:0;border-top:1px solid var(--line);border-radius:0;padding:0;
+    margin-inline:0}
 }
 @media (prefers-contrast:more) and (prefers-color-scheme:dark){
   :root{--line:#8F8779;--dim:#DBD5C9;--card-line:#8F8779;--live:#FF9481}
@@ -1243,6 +1256,13 @@ details>summary:active{opacity:.72}
      padding rather than a box and stays on the line. */
   button.link{display:inline-block;padding-block:.8rem}
   input[type=checkbox],input[type=radio]{width:24px;height:24px}
+  /* The disclosures are the only pressable surfaces on the Satellites tab
+     with no floor of their own; a hub summary is a 12px line. */
+  #tab-satellites details>summary{min-height:44px}
+  /* Beside a 44px select, or the Colour swatch and the file button sit
+     lower than the fields they share a line with. */
+  #tab-satellites input[type=color]{min-height:44px}
+  #fwfile::file-selector-button{min-height:44px}
 }
 @media (max-width:30rem){
   /* Tracking is size-specific, including when the viewport forces the size. */
@@ -1257,87 +1277,154 @@ details>summary:active{opacity:.72}
 }
 
 /* ------------------------------------------------------- satellites -- */
-/* A LIST, NOT A WALL OF CONTROLS. Every satellite used to be a bordered box
-   inside the bordered card with all fifteen of its controls open, so two
-   boards filled a laptop screen and the page read as a settings dump rather
-   than as the house's satellites. A satellite is now one hairline-divided row,
-   the shape the Jobs list already has (three nested rectangles is the stacking
-   the owner rejected there), and what belongs to one satellite folds under it. */
-.satellite{padding:var(--s3) 0;border-top:1px solid var(--line)}
-#satellitelist > .satellite:first-child{border-top:0;padding-top:0}
-.satellite-top,.wakeword-top{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
-.satellite-name{font-size:var(--t-title)}
-#tab-satellites .spacer{flex:1}
-/* THE DOT AND THE PILL SAY THE SAME THING TWICE, on purpose: the dot is what
-   the eye finds scanning down the list, the word is what it means. Waiting and
-   muted are --warn and not --bad. Neither has failed; each wants a person. */
-.satellite-dot{width:10px;height:10px;border-radius:50%;background:var(--line);flex:none}
-.satellite[data-state="online"] .satellite-dot{background:var(--good)}
-.satellite[data-state="pending"] .satellite-dot{background:var(--warn)}
-.satellite[data-state="muted"] .satellite-dot{background:var(--warn)}
+/* ONE CARD, ONE LIST. The tab was five cards -- the satellites, then Wake
+   words, Routing, Firmware and Events at the same weight -- and each satellite
+   opened onto fifteen controls, firmware and addresses included, so the page
+   read as a settings dump rather than as the house's satellites. The owner's
+   words: "the main page should list and manage the satellites, the satellite
+   specific settings should be a collapsible on the satellite", and "settings
+   like firmware etc dont need to be present on the main menu".
+
+   So: one list of hairline rows, each a native <details> that closes to a
+   name, one state word and one dim line. Opened, it holds what changes weekly
+   (levels, speaker, microphone, lights); what is set once or is rare folds one
+   level further down (Try it, Buttons, Device). The hub's own settings sit at
+   the foot of the same card as four dim disclosures, the Expert panels' shape,
+   because "the advanced path sits on the page itself".
+
+   HEALTHY IS QUIET. A satellite that is simply online says Online in dim text;
+   a chip appears only for something happening now (the lamp dot) or something
+   wrong, so the one deviation in a column of calm rows is the thing the eye
+   finds. The same rule runs down the wake words. */
+.sat-headrow{align-items:baseline}
+#sathealth{margin:0 0 0 auto;text-align:right}
+.sat-empty{margin:0;font-weight:600}
+.sats,.wws,.fws{list-style:none;margin:0;padding:0}
+.sats>li,.wws>li,.fws>li{border-top:1px solid var(--line)}
+.sats>li:first-child,.wws>li:first-child,.fws>li:first-child{border-top:0}
+/* A pending row is not a disclosure (nothing is stored until it is adopted),
+   so it is indented by the chevron's width: its name lines up with theirs. */
+.sats>li.pending{padding:var(--s3) 0 var(--s3) 1em}
+.sats>li.pending:first-child{padding-top:0}
+.wws>li,.fws>li{padding:var(--s3) 0}
+.wws>li:first-child,.fws>li:first-child{padding-top:0}
+.sats>li>*+*,.wws>li>*+*,.fws>li>*+*{margin-top:var(--s3)}
+.sats>li>*:empty,.wws>li>*:empty,.fws>li>*:empty{margin-top:0}
+details.sat-row{margin-top:0;border-top:0}
+/* ROOM FOR THE RING. The name and the state word ran to the summary's edges,
+   so the focus ring sat flush against the state word and over the hairline.
+   The summary stands out by --s2 each side (the text does not move) and the
+   ring is drawn inside it, clear of the text and of the hairline. */
+details.sat-row>summary{padding:var(--s3) var(--s2);margin-inline:calc(-1 * var(--s2));
+  font-size:var(--t-body);font-weight:400;color:var(--ink);letter-spacing:0}
+details.sat-row>summary:focus-visible{outline-offset:-2px}
+details.sat-row>summary::before{vertical-align:top}
+.sats>li:first-child>details.sat-row>summary{padding-top:var(--s1);
+  margin-top:calc(-1 * var(--s1))}
+/* A GRID INSIDE THE SUMMARY, NOT ON IT. Safari's grid on <summary> itself is
+   uneven, so the summary stays a block and this span is the two columns: the
+   name takes the slack and truncates first, the state never wraps, and so the
+   states line up down the right-hand side as one column. */
+.sat-sum{display:inline-grid;width:calc(100% - 1em);vertical-align:top;
+  grid-template-columns:minmax(0,1fr) auto;column-gap:var(--s3);row-gap:2px;
+  align-items:baseline}
+.sat-head{display:grid;width:auto}
+.sat-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sat-state{justify-self:end;font-size:var(--t-label);color:var(--dim);white-space:nowrap}
+/* :where(), so a chip's own colour (.status.warn and the rest) still wins. */
+.sat-state:where(.status){font-size:var(--t-micro);color:var(--ink)}
+.sat-line{grid-column:1/-1;font-size:var(--t-label);line-height:1.45;color:var(--dim);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sat-line:empty{display:none}
+.sat-sum .bar-track{grid-column:1/-1;display:block;margin:var(--s1) 0 0}
+/* A span, because nothing but phrasing content may sit in a <summary>; so
+   it is made a block, or its width and height do nothing. */
+.sat-sum .bar-fill{display:block}
+/* Offline dims the NAME by colour, not the row by opacity, so it still clears
+   its contrast floor. The chip beside it is the word that says why. */
+.sat[data-state=offline] .sat-name{color:var(--dim)}
+/* --warn and not --bad: New and Offline each want a person, and neither has
+   failed. */
 .status.warn{background:var(--warn-bg);color:var(--warn);border-color:transparent}
-.satellite-meta{margin-top:var(--s1)}
-.satellite > .row{margin-top:var(--s2)}
-.satellite .row > div{min-width:9rem}
-/* A BUTTON IN THESE ROWS IS AS WIDE AS ITS WORD. .row gives every child a
-   share of the line, which drew Adopt as a bar across the whole card and Stop
-   as wide as the box it stops. The field beside it takes the slack instead. */
-.satellite .row > button,#wakecard .row > button{flex:0 0 auto;min-width:0}
-.satellite .satellite-namefield{flex:0 1 16rem}
-/* THE SETTINGS FOLD HANGS OFF ITS ROW, so the seam every other disclosure
-   draws across the card is dropped here: under a list row it would read as
-   the start of the next satellite. The left rule is what says whose settings
-   these are once the fold is open, the job text's shape. */
-.satellite details{margin-top:var(--s1);border-top:0}
-.satellite details>summary{padding:var(--s2) 0}
-.satellite details .body{padding:var(--s1) 0 var(--s2) var(--s3);
-  border-left:2px solid var(--line)}
-.satellite details .body > * + *{margin-top:var(--s3)}
-.satellite details .body > *:empty{margin-top:0}
-/* Every other slider on the page is sized by .slider; these are not in one. */
-.satellite input[type=range],.wakeword input[type=range]{width:100%;display:block}
-.satellite .satellite-sayfield{flex:1 1 16rem}
-.satellite .satellite-buttonsfield{flex:1 1 20rem}
-.satellite .satellite-buttonsfield input{font-family:var(--mono)}
-.satellite audio{height:2rem;display:block}
-.satellite input[type=color]{width:2.6rem;height:var(--control-h);padding:0;border:0;
-  background:none}
-/* A group of ticks is a fieldset, so a screen reader hears "Wake words" before
-   the names in it. The legend is dressed as a label, which is what it is. */
-.satellite fieldset,.wakeword fieldset{border:0;padding:0;margin:0;min-width:0}
-.satellite legend,.wakeword legend{padding:0;margin-bottom:var(--s1);
-  font-size:var(--t-label);line-height:1.45;color:var(--dim);letter-spacing:.005em}
-.checks{display:flex;flex-wrap:wrap;gap:0 var(--s4);align-items:center}
-/* A tick in a group of ticks lines up with its neighbours, not with a field,
-   so it does not need a field's height: at 2.375rem a list of six satellites
-   read as six separate settings. */
-.checks .checkline{min-height:2rem}
-.checks .hint{margin-top:0}
-.hint-inline{color:var(--dim);font-size:var(--t-label);margin-left:.25em}
-#wakeman > * + *{margin-top:var(--s3)}
-#wakeman > *:empty{margin-top:0}
-.wakeword{padding:var(--s3) 0;border-top:1px solid var(--line)}
-#wakelist > .wakeword:first-child{border-top:0;padding-top:0}
-.wakeword > * + *{margin-top:var(--s2)}
-.wakeword > *:empty{margin-top:0}
-.wakeword-threshold{flex:0 1 14rem}
-.wakeword fieldset{flex:3 1 16rem}
-/* The recess the fold hangs in is drawn in full when the reader asks for more
-   contrast, which the rule above would otherwise cut open along the top. */
-@media (prefers-contrast:more){
-  .satellite details{border-top:1px solid var(--line)}
-}
-.fw{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;padding:var(--s2) 0;
-  border-top:1px solid var(--line)}
-.fw code{font-size:var(--t-label)}
+/* Indented by the chevron, so the body lines up with the name it belongs to. */
+details.sat-row>.body{padding:0 0 var(--s4) 1em}
+details.sat-row>.body>*+*,details.sub>.body>*+*,.sat-hub .body>*+*{margin-top:var(--s3)}
+details.sat-row>.body>*:empty,details.sub>.body>*:empty,.sat-hub .body>*:empty{margin-top:0}
+.sat-hub .body>label+*,details.sub>.body>label+*{margin-top:0}
+details.sat-row>.body>details.sub{margin-top:var(--s4)}
+details.sat-row>.body>details.sub+details.sub{margin-top:0}
+details.sub>.body{padding:0 0 var(--s4)}
+#satellitesman>.sat-hub{margin-top:var(--s5)}
+.sat-hub>details{margin-top:0}
+/* One left edge down the card: the hub's bodies are indented by the chevron
+   as the satellites' are, so a wake word's name lines up with a satellite's. */
+.sat-hub>details>.body{padding-left:1em}
+/* A CLOSED DISCLOSURE STILL SAYS SOMETHING. The note after a summary's title
+   is its state ("3 rules", "v0.3.1 is ready for 2 satellites"), so the hub's
+   four lines inform without being opened. */
+.sum-note{margin-left:var(--s2);font-weight:400;color:var(--dim)}
+.sat-listens{margin:0}
+#tab-satellites .actions .hint{margin-top:0}
+/* Forget and Delete are last and pushed to the line end, where a hand
+   travelling along the row does not land on them by momentum. */
+#tab-satellites .actions .end,#tab-satellites .row>.end{margin-left:auto}
+#tab-satellites .grow{flex:1 1 16rem}
+/* A select is as wide as its longest option, and a satellite can be called
+   anything: held to the line, a 64-character name clips inside its own
+   control instead of widening the page (the Routing test's Satellite). */
+#tab-satellites .row > .tight{max-width:100%}
+#tab-satellites select{max-width:100%}
+/* A block, or the swatch sits on a text baseline and its field stands taller
+   than the select beside it; and the swatch fills its box, where the
+   browser's own inset drew a 28px chip beside 38px controls. */
+#tab-satellites input[type=color]{display:block;width:2.6rem;height:var(--control-h);
+  padding:0;border:0;background:none;cursor:pointer}
+#tab-satellites input[type=color]::-webkit-color-swatch-wrapper{padding:0}
+#tab-satellites input[type=color]::-webkit-color-swatch{border:1px solid var(--field-line);
+  border-radius:var(--radius-s)}
+#tab-satellites input[type=color]::-moz-color-swatch{border:1px solid var(--field-line);
+  border-radius:var(--radius-s)}
+.sat-lights select{height:var(--control-h)}
+/* Four one-word patterns need no 15rem floor, so Show keeps its line on a
+   phone. */
+#tab-satellites .row>.sat-pattern{flex:1 1 8rem;min-width:8rem}
+/* The one control the browser still drew itself: its button takes the .small
+   button's dress, and the file name reads as a hint. */
+#fwfile{font-size:var(--t-label);color:var(--dim);max-width:100%}
+#fwfile::file-selector-button{font:inherit;color:var(--ink);background:var(--panel);
+  border:1px solid var(--line);border-radius:var(--radius-s);height:var(--control-h);
+  padding:0 .625rem;margin-right:var(--s2);cursor:pointer}
+#fwfile:hover::file-selector-button{border-color:var(--dim)}
+#tab-satellites audio{display:block;width:100%;height:2rem}
+/* When pressed | when released, one row per button: the press/release pair
+   is read across, and the words are short enough for a phone. */
+.sat-btns{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,1fr);
+  gap:var(--s2) var(--s3);align-items:center}
+.sat-btns .hd{font-size:var(--t-label);color:var(--dim)}
+.sat-btns .url{grid-column:2/-1}
+.sat-btns .url label{margin-bottom:var(--s1)}
+fieldset.ww-sats,fieldset.sat-fs{border:0;padding:0;margin:0;min-width:0}
+/* The Satellites legend names a control the way Threshold beside it does, so
+   it is dressed as a label; the two group legends are headings (see
+   #enginerow>legend). */
+fieldset.ww-sats>legend{padding:0;margin-bottom:var(--s1);font-size:var(--t-label);
+  line-height:1.45;color:var(--dim);letter-spacing:.005em}
+fieldset.sat-fs>legend{margin-bottom:var(--s1)}
+.ww-pick{display:flex;flex-wrap:wrap;column-gap:var(--s4)}
+/* Struck through AND said in words beside it (Removed when you save), so the
+   staged removal never depends on the line alone. */
+.ww[data-removed] .sat-name{color:var(--dim);text-decoration:line-through}
 .satelliteevents{list-style:none;margin:0;padding:0;font-size:var(--t-label);
   font-variant-numeric:tabular-nums;max-height:14rem;overflow:auto}
 .satelliteevents li{padding:2px 0;color:var(--dim)}
 .satelliteevents li b{color:var(--ink);font-weight:600}
+.satelliteevents li,details.sat-row .facts dd{overflow-wrap:anywhere}
 /* The rules are the JSON the hub stores, so they are edited as code is. */
 #routetext{font-family:var(--mono);min-height:12em}
-#routecard .grow{flex:1 1 16rem}
-#routecard .grow input{width:100%}
+@media (max-width:30rem){
+  /* 14px back for the controls on a phone; the hairlines still say whose. */
+  details.sat-row>.body,.sat-hub>details>.body{padding-left:0}
+}
 </style>
 </head>
 <body>
@@ -2241,114 +2328,154 @@ details>summary:active{opacity:.72}
        /ui/api/satellites, the same allowlist as the rest of the page. Nothing
        on this tab runs while another tab is open. -->
   <section id="tab-satellites" role="tabpanel" aria-labelledby="tab-btn-satellites" hidden>
-    <!-- THE LIST. One row per satellite, with only what belongs on a list: its
-         state, one line about it, Adopt for a new one and Blink to find it.
-         Everything that belongs to one satellite is in the Settings fold on its
-         row, closed until somebody opens it, and satellitesRender() never
-         rebuilds a row, so a fold left open stays open through every poll. -->
+    <!-- ONE CARD. The list is the tab; what belongs to one satellite folds
+         under its row (satelliteRow), and the hub's own settings are the four
+         disclosures at the foot. They have no `name`, so any of them can be
+         open at once: tuning a threshold while watching Activity is a real
+         task. NO role="tab" ANYWHERE IN HERE: the dock sweeps the document for
+         [role=tab], and a strip in this panel would join it.
+         Everything hub-dependent is inside #satellitesman, hidden until the
+         hub answers, so a deployment with no hub shows one sentence and not an
+         empty heading over nothing. -->
     <div class="card">
-      <h2 class="tight">Satellites</h2>
+      <div class="row sat-headrow">
+        <h2 class="tight" id="sat-h" tabindex="-1">Satellites</h2>
+        <!-- Written only when its words change (satellitesHealth), so it
+             announces "1 offline" once and not on every 3 s poll. Empty when
+             all is well. -->
+        <span class="hint tight" id="sathealth" aria-live="polite"></span>
+      </div>
       <div class="hint" id="satellitesnone">Asking the satellite hub what is on the network…</div>
       <div id="satellitesman" hidden>
-        <div class="hint" id="satellitesempty" hidden>None yet. A new satellite opens a
-          Wi-Fi network named <code>calliope-sat-…</code>; join it to set it up.</div>
-        <div id="satellitelist"></div>
-      </div>
-    </div>
-
-    <!-- WAKE WORDS ARE THE HUB'S, AND EACH ONE NAMES ITS SATELLITES
-         (GET and PUT /satellites/wake-words). "All satellites" is "*" on the
-         wire, which also reaches a satellite adopted later; ticking satellites
-         one by one is a list of ids, which does not. The card edits a copy and
-         Save sends the whole list, because the hub validates the set as one
-         (unique names, known satellites, a threshold it accepts) and a 422
-         leaves the copy on screen with the reason beside it. A satellite's own
-         fold edits the same assignment one tick at a time. Removing a word
-         stops it on every satellite at once, so Save asks first. Push-to-talk
-         is not a wake word and is never listed. -->
-    <div class="card" id="wakecard" hidden>
-      <h2 class="tight">Wake words</h2>
-      <div class="hint" id="wakefail"></div>
-      <div id="wakeman">
-        <div id="wakelist"></div>
-        <div class="hint" id="wakenone" hidden>None. Push-to-talk still works.</div>
-        <div class="row">
-          <div><label for="wakeadd">Add wake word</label>
-            <select id="wakeadd"></select></div>
-          <button class="small" id="wakeaddgo" type="button">Add</button>
+        <div id="satellitesempty" hidden>
+          <p class="sat-empty">No satellites yet.</p>
+          <div class="hint">Join the Wi-Fi network a new satellite opens, named <code>calliope-sat-XXXX</code>, to set it up.</div>
+          <div class="hint">Once it is on your Wi-Fi, it turns up in this list, ready to adopt.</div>
         </div>
-        <div class="actions">
-          <button class="primary small" id="wakesave" type="button" disabled>Save</button>
-          <button class="small" id="wakediscard" type="button" disabled>Discard changes</button>
-          <span class="hint" id="wakedirty"></span>
+        <!-- role="list" because Safari drops list semantics under
+             list-style:none. -->
+        <ul class="sats" id="satellitelist" role="list" aria-labelledby="sat-h"></ul>
+
+        <div class="sat-hub" role="group" aria-label="Hub settings">
+
+          <!-- WAKE WORDS ARE THE HUB'S, AND EACH ONE NAMES ITS SATELLITES
+               (GET and PUT /satellites/wake-words). This is the one editor of
+               the assignment: the owner's words were "you choose the satellite
+               that will have that wake word", so the choice is made on the
+               word, and a satellite's row only says what it listens for.
+               "Every satellite" is "*" on the wire, which also reaches a
+               satellite adopted later; Chosen is a list of ids, which does
+               not. The list edits a copy and Save sends the whole set, because
+               the hub validates the set as one (unique names, known
+               satellites, a threshold it accepts) and a 422 leaves the copy on
+               screen with the reason beside it. Remove is staged until Save
+               and Keep takes it back, so it asks nothing. Push-to-talk is not
+               a wake word and is never listed. -->
+          <details id="sat-wakewords" hidden>
+            <summary>Wake words<span class="sum-note" id="ww-sum"></span></summary>
+            <div class="body">
+              <div class="hint">A higher threshold ignores more false wakes, and misses more real ones.</div>
+              <div id="wwfail" aria-live="polite"></div>
+              <ul class="wws" id="wwlist" role="list"></ul>
+              <div class="hint" id="wwnone" hidden>With no wake words, satellites answer only to push-to-talk.</div>
+              <div class="row">
+                <div><label for="wwadd">Add a wake word</label><select id="wwadd"></select></div>
+                <button class="small tight" id="wwaddgo" type="button">Add</button>
+              </div>
+              <div class="hint" id="wwaddwhy">It downloads when you save, then wakes only the satellites you choose.</div>
+              <div class="actions">
+                <button class="primary small" id="wwsave" type="button" disabled>Save wake words</button>
+                <span class="hint" id="wwdirty"></span>
+              </div>
+              <div id="wwnote" aria-live="polite"></div>
+            </div>
+          </details>
+
+          <details id="sat-activity">
+            <summary>Activity</summary>
+            <div class="body">
+              <div class="hint">Buttons, wake words, routing, updates and satellites coming and going, newest first.</div>
+              <ol class="satelliteevents" id="satelliteevents"></ol>
+              <div class="hint" id="evnone">Press a button on a satellite to see its event arrive.</div>
+            </div>
+          </details>
+
+          <!-- ROUTING: what the hub does with the sentence after a wake word
+               (services/satellites/app/router.py). The rules are edited as the
+               JSON the hub stores: a rule is small, every field is in the
+               satellites README, and a form per destination type would be four
+               forms for one list. The hub validates the whole set on PUT,
+               answers 422 naming the field, and keeps the old rules. No secret
+               is ever in here: a rule names an environment variable, and the
+               hub says only whether it is set. Test runs a typed sentence
+               through the rules and plays nothing on any satellite. Hidden on
+               an older hub with no routing (404). -->
+          <details id="sat-routing" hidden>
+            <summary>Routing<span class="sum-note" id="route-sum"></span></summary>
+            <div class="body">
+              <div class="hint">What the hub does with the sentence after a wake word, as the JSON it stores.</div>
+              <label for="routetext">Rules</label>
+              <textarea id="routetext" spellcheck="false" autocomplete="off"
+                        autocapitalize="off"></textarea>
+              <div class="actions">
+                <button class="primary small" id="routesave" type="button" disabled>Save rules</button>
+                <span class="hint" id="routedirty"></span>
+              </div>
+              <div class="hint" id="routeenv"></div>
+              <div id="routenote" aria-live="polite"></div>
+              <fieldset class="sat-fs">
+                <legend>Test a sentence</legend>
+                <div class="row">
+                  <div class="tight"><label for="routesatellite">Satellite</label>
+                    <select id="routesatellite"></select></div>
+                  <div class="tight"><label for="routeword">Wake word</label>
+                    <select id="routeword"></select></div>
+                  <div class="grow"><label for="routesay">Sentence</label>
+                    <input type="text" id="routesay" maxlength="500" placeholder="what time is it"></div>
+                  <button class="small tight" id="routetest" type="button">Test</button>
+                </div>
+                <div class="hint">Test runs the rules and makes the reply, but plays nothing on any satellite.</div>
+                <div id="routeresult" aria-live="polite"></div>
+              </fieldset>
+            </div>
+          </details>
+
+          <!-- Last, because it is the thing the owner asked to have out of the
+               way. Per-satellite progress shows on the satellite's own row. -->
+          <details id="sat-firmware">
+            <summary>Firmware<span class="sum-note" id="fw-sum"></span></summary>
+            <div class="body">
+              <div class="hint">An update stays only if the satellite reaches the hub again; otherwise it rolls back.</div>
+              <div id="fwfail" aria-live="polite"></div>
+              <ul class="fws" id="fwlist" role="list"></ul>
+              <div class="hint" id="fwnone" hidden>No images yet: upload a .bin built for your satellites.</div>
+              <fieldset class="sat-fs">
+                <legend>Upload an image</legend>
+                <div class="row">
+                  <div class="tight"><label for="fwfile">Image (.bin)</label>
+                    <input type="file" id="fwfile" accept=".bin,application/octet-stream"></div>
+                  <div class="tight"><label for="fwversion">Version</label>
+                    <input type="text" id="fwversion" maxlength="64" placeholder="e.g. v0.3.1"></div>
+                  <div class="tight"><label for="fwmodel">Model</label>
+                    <input type="text" id="fwmodel" maxlength="64" value="esp32-korvo-v1.1"></div>
+                  <!-- A satellite built with a signing key installs only signed
+                       images, and refuses an unsigned one at the end of the
+                       transfer. The signature is made on the developer's
+                       machine (clients/korvo-satellite/scripts), never here:
+                       the page only carries it. -->
+                  <div class="tight"><label for="fwsig">Signature</label>
+                    <input type="text" id="fwsig" maxlength="200" placeholder="unsigned" spellcheck="false"
+                           autocomplete="off"></div>
+                  <button class="primary small tight" id="fwupload" type="button">Upload</button>
+                </div>
+                <div class="hint">A satellite built with a signing key refuses an image with no Signature.</div>
+              </fieldset>
+              <div id="fwnote" aria-live="polite"></div>
+            </div>
+          </details>
+
         </div>
       </div>
-      <div id="wakenote" aria-live="polite"></div>
-    </div>
-
-    <!-- ROUTING: what the hub does with the sentence after a wake word
-         (services/satellites/app/router.py). The rules are edited as the JSON
-         the hub stores: a rule is small, every field is in the satellites
-         README, and a form per destination type would be four forms for one
-         list. The hub
-         validates the whole set on PUT, answers 422 naming the field, and keeps
-         the old rules. No secret is ever in here: a rule names an environment
-         variable, and the hub says only whether it is set. Test runs a typed
-         sentence through the rules and plays nothing on any satellite. -->
-    <div class="card" id="routecard" hidden>
-      <h2 class="tight">Routing</h2>
-      <label for="routetext">Rules</label>
-      <textarea id="routetext" spellcheck="false" autocomplete="off"
-                autocapitalize="off"></textarea>
-      <div class="actions">
-        <button class="primary small" id="routesave" type="button">Save</button>
-        <span class="spacer"></span>
-        <span class="hint" id="routeenv"></span>
-      </div>
-      <div id="routenote" aria-live="polite"></div>
-      <div class="row">
-        <div class="tight"><label for="routesatellite">Satellite</label>
-          <input type="text" id="routesatellite" maxlength="64" placeholder="kitchen"></div>
-        <div class="tight"><label for="routeword">Wake word</label>
-          <input type="text" id="routeword" maxlength="64" value="hey_jarvis" list="routewords">
-          <datalist id="routewords"></datalist></div>
-        <div class="grow"><label for="routesay">Sentence</label>
-          <input type="text" id="routesay" maxlength="500" placeholder="what time is it"></div>
-        <button class="small" id="routetest" type="button">Test</button>
-      </div>
-      <div id="routeresult" aria-live="polite"></div>
-    </div>
-
-    <div class="card" id="fwcard" hidden>
-      <h2 class="tight">Firmware</h2>
-      <div class="row">
-        <div class="tight"><label for="fwfile">Image (.bin)</label>
-          <input type="file" id="fwfile" accept=".bin,application/octet-stream"></div>
-        <div class="tight"><label for="fwversion">Version</label>
-          <input type="text" id="fwversion" maxlength="64" placeholder="e.g. v0.2.0"></div>
-        <div class="tight"><label for="fwmodel">Model</label>
-          <input type="text" id="fwmodel" maxlength="64" value="esp32-korvo-v1.1"></div>
-        <!-- A satellite built with a signing key installs only signed images,
-             and refuses an unsigned one at the end of the transfer. The
-             signature is made on the developer's machine
-             (clients/korvo-satellite/scripts), never here: the page only
-             carries it. -->
-        <div class="tight"><label for="fwsig">Signature</label>
-          <input type="text" id="fwsig" maxlength="200" placeholder="unsigned" spellcheck="false"
-                 autocomplete="off"></div>
-        <button class="small" id="fwupload" type="button">Upload</button>
-      </div>
-      <div id="fwlist"></div>
-      <div class="hint">An update stays only if the satellite reaches the hub
-        again; otherwise it rolls back.</div>
-      <div id="fwnote" aria-live="polite"></div>
-    </div>
-
-    <div class="card" id="evcard" hidden>
-      <h2 class="tight">Events</h2>
-      <div class="hint">Buttons, wake words, routing, updates and satellites coming and going,
-        newest first.</div>
-      <ol class="satelliteevents" id="satelliteevents"></ol>
     </div>
   </section>
 
@@ -3728,453 +3855,1090 @@ function chosenGlossaries() {
 /* The satellite hub, services/satellites. Polled every 3 s while this tab is
    open and not at all otherwise. Rows are built once per satellite and updated
    in place, so a poll never takes a slider out from under a finger, empties a
-   box somebody is typing in, or shuts a Settings fold somebody opened. */
-const SATELLITES = { cards: new Map(), timer: null, events: null, routingLoaded: false,
-                     routingFilled: "", list: [], seq: 0 };
+   box somebody is typing in, or shuts a disclosure somebody opened. A row's
+   markup is rebuilt only when the satellite is adopted or forgotten, because a
+   pending row and an adopted one are different things. */
+const SATELLITES = { rows: new Map(), timer: null, events: null, routingLoaded: false,
+                     routingFilled: "", routing: null, list: [], firmware: [],
+                     fwFailed: null, seq: 0, seeded: false,
+                     /* What the page itself saw. The hub keeps a satellite's
+                        last_seen and firmware after it disconnects, but only
+                        in memory, so these stand in across a hub restart.
+                        An update's outcome the hub keeps only while the
+                        satellite is connected, so the page remembers when one
+                        said it was rebooting into an update, when one broke
+                        off mid-transfer, and when it last heard a wake
+                        word. */
+                     online: new Map(), fw: new Map(), restarting: new Map(),
+                     otaFailed: new Map(), woke: new Map() };
 const JSON_BODY = { "Content-Type": "application/json" };
+
+/* EVERY SENTENCE THE TAB BUILDS IN SCRIPT, IN ONE PLACE. The page's hint test
+   measures the markup and cannot see a row built here, so these have a fence
+   of their own (test_satellites.py): at most 100 characters with the holes
+   filled by realistic values, one thought each, and no "above" or "below".
+   A {hole} is filled by satText() and the result is only ever written as
+   text; nothing here is markup. */
+const SAT_COPY = {
+  pendBlink: "Blink lights its ring for five seconds, so you can tell identical boxes apart.",
+  pendOffline: "It has to be online to be adopted.",
+  whyOffline: "It is offline, so settings you change here are sent when it reconnects.",
+  whyMuted: "It is muted on the device, and only its Rec button turns the microphones back on.",
+  tryOffline: "Offline, so nothing here reaches it.",
+  trySpeaker: "Turn Speaker on to use Say and Play a tone.",
+  tryMic: "Turn Microphone on to use Listen 5 s.",
+  tryLights: "Turn Lights on to show a pattern.",
+  tryMany: "Turn {list} on to use everything here.",
+  tryMuted: "Muted on the device, so Listen 5 s hears nothing.",
+  devOffline: "Offline, so Reboot, Move and Update wait for it to reconnect.",
+  devUpdating: "Reboot, Move and Update wait until this update finishes.",
+  btnLocalVol: "Turn this off to map Vol + and Vol − to something else.",
+  /* The scheme without its colon and slashes: test_ui.py keeps every plain
+     http address out of this file, so a fetch to one cannot hide in copy. */
+  btnBadUrl: "Write the webhook as a full web address, starting with https or http.",
+  moveBadUrl: "Write the address as ws://host:port or wss://host:port.",
+  moving: "Moving. Forget it here once the other hub has adopted it.",
+  updAvail: "{v} is available for this model.",
+  updSkipped: "Not started: {why}.",
+  sayEmpty: "Type something for it to say first.",
+  blinking: "Blinking white for five seconds.",
+  recording: "Recording five seconds…",
+  channels: "Four channels: the speaker loopback, then the three microphones.",
+  adopted: "{name} adopted.",
+  renamed: "{old} is now called {new}.",
+  lastEvent: "Last event: {what}, {time}",
+  linePending: "Waiting to be adopted · ID {id}",
+  lineSeen: "Seen {clock}, now offline · ID {id}",
+  lineGone: "Now offline · ID {id}",
+  lineUpdating: "Updating to {v}. It reboots when the transfer ends.",
+  lineRestarting: "Installing {v}. It comes back on its own.",
+  lineFailed: "Update to {v} failed: {error}",
+  lineOffline: "Last seen {clock}",
+  lineNotListening: "Not listening for wake words: {error}",
+  lineUpdated: "Now on {v}",
+  lineListens: "Listens for {words}",
+  linePtt: "Push-to-talk only",
+  lineLoading: "{words} is downloading",
+  lineLoadingMany: "{words} are downloading",
+  lineBroken: "{words} failed to download",
+  wwAll: "Includes satellites adopted later.",
+  wwNone: "Pick at least one satellite, or choose Every satellite.",
+  wwDirty: "Unsaved changes.",
+  wwClean: "No changes to save.",
+  wwRemoved: "Removed when you save.",
+  wwAddWhy: "It downloads when you save, then wakes only the satellites you choose.",
+  wwExhausted: "Every available wake word is already added.",
+  wwDownloading: "Satellites listen for it once it has downloaded.",
+  wwLast: "Last heard at {score} on {name}, {clock}.",
+  wwSaved: "Saved.",
+  /* The hub's reason is often an exception's own words, so the sentence
+     around it says what failed; Try again beside it is the way out. */
+  wwBroken: "It did not download: {error}",
+  wwFailed: "The wake word list did not load: {message}",
+  fwFailed: "The firmware list did not load: {message}",
+  fwStarted: "Updating {n}.",
+  fwSkipped: "Skipped {name}: {why}.",
+  fwUploaded: "Uploaded {v}.",
+  fwChoose: "Choose a .bin first.",
+  routeSaved: "Saved {n}.",
+  routeDirty: "Unsaved changes.",
+  routeClean: "No changes to save.",
+  routeNotJson: "Not JSON: {message}",
+  routeEmpty: "Type a sentence to send through the rules.",
+  noHub: "This deployment has no satellite hub: voice-satellites is not running.",
+  hubError: "The satellite hub did not answer: {message}",
+  askReboot: "Reboot {name}? It is back in about ten seconds.",
+  askForget: "Forget {name}? It stops streaming and waits to be adopted again.",
+  askMove: "Move {name} to {url}? It reboots and waits to be adopted by that hub.",
+  askUpdate: "Update {name} to {v}? It reboots when the transfer ends.",
+  askUpdateAll: "Update every satellite to {v}? Each one reboots when its transfer ends.",
+  askRollback: "Roll back every satellite to {v}, an older image? Each one reboots when its transfer ends.",
+  askDelete: "Delete firmware {v}? Satellites already on it keep it.",
+  sumLoadFailed: "did not load",
+  sumWwDirty: "unsaved changes",
+  sumWwFailed: "{words} failed",
+  sumWwLoading: "{words} downloading",
+  sumWwNone: "none, push-to-talk only",
+  sumRouteNone: "no rules",
+  sumRouteWarned: "{n}, {k}",
+  sumFwReady: "{v} is ready for {n}",
+  sumFwCurrent: "every satellite is up to date",
+  sumFwNone: "no images",
+  sumUpdate: "{fw} · update available",
+  sumUpdating: "{fw} · updating to {v}",
+  sumBtnNone: "nothing mapped",
+  talks: "{b} talks",
+  stops: "{b} stops",
+  hooks: "{b} calls a webhook",
+  rssi: "{n} dBm, {how}",
+  connected: "since {clock}",
+  healthOffline: "{n} offline",
+  healthFailed: "{n} failed",
+  healthDeaf: "{n} not listening",
+  healthWords: "{words} failed to download",
+  healthRouting: "routing did not load",
+};
+
+function satText(key, vals) {
+  return SAT_COPY[key].replace(/\{(\w+)\}/g, (hole, k) =>
+    vals && vals[k] !== undefined && vals[k] !== null ? String(vals[k]) : hole);
+}
+function satCount(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
+function satList(items) {
+  return items.length < 2 ? items.join("")
+    : items.slice(0, -1).join(", ") + " and " + items[items.length - 1];
+}
+/* A wake word as people say it: hey_jarvis is "hey jarvis". The model name
+   stays the value everywhere a request is made. */
+function wwLabel(name) { return String(name || "").replace(/_/g, " "); }
+/* A CLOCK TIME, NOT "2 min ago". A relative time changes on every poll, which
+   is text moving under the reader for no news at all. */
+function satClock(ts) {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? time
+    : `${d.toLocaleDateString([], { day: "numeric", month: "short" })}, ${time}`;
+}
+function rssiWords(dbm) {
+  if (typeof dbm !== "number" || !isFinite(dbm)) return "";
+  const how = dbm >= -60 ? "strong" : dbm >= -70 ? "fair" : "weak";
+  return satText("rssi", { n: String(Math.round(dbm)).replace("-", "−"), how });
+}
+function satName(n) { return n.name || (n.adopted ? n.id : "New satellite"); }
+/* The hub reports the firmware an offline satellite last ran until the hub
+   restarts; after that, the page's own memory of it is all there is. */
+function satFirmware(n) { return n.firmware || SATELLITES.fw.get(n.id) || null; }
+/* Likewise when it was last seen. The hub's time comes first: it is when the
+   satellite actually left, where the page's is the last poll that found it,
+   which is hours stale if the tab was closed at the time. */
+function satLastSeen(n, online) { return n.last_seen || (online && online.get(n.id)) || null; }
+
+/* Only a text node that changed is written, so a poll does not disturb a
+   selection and a live region hears only news. */
+function satSet(el, text) { if (el.textContent !== text) el.textContent = text; }
+/* An action's result as a quiet line, where note() is for what went wrong. */
+function satSaid(host, text) {
+  host.textContent = "";
+  if (!text) return;
+  const line = document.createElement("div");
+  line.className = "hint";
+  line.textContent = text;
+  host.append(line);
+}
+/* A STANDING CONDITION, WRITTEN ONCE. These hosts announce, and the poll
+   that finds the same failure every 3 s must not announce it every 3 s. */
+function satNoteOnce(host, kind, text) {
+  const said = text ? `${kind}:${text}` : "";
+  if (host.dataset.said === said) return;
+  host.dataset.said = said;
+  note(host, kind, text);
+}
 
 function satellitesOpen() { const p = $("tab-satellites"); return !!p && !p.hidden; }
 
+/* THE THREE LISTS ARE ASKED FOR TOGETHER AND FAIL APART. allSettled, so the
+   firmware list or the wake words failing costs their own section and not the
+   tab; only the satellite list failing is "the hub did not answer". A hub from
+   before per-satellite wake words answers that path 404 (wakeTake). */
 async function satellitesRefresh() {
   clearTimeout(SATELLITES.timer);
   /* A WAKE WORD ANSWER THAT A SAVE OVERTOOK IS DROPPED. The hub keeps no
      version, so the page counts its own writes: a GET that left while a PUT
      was in flight, or was still out when one started, may answer with the
-     list from before that PUT. Taken as the hub's copy, the next tick would
-     be built from it and put the old assignment back. The PUT's own answer is
-     the newer copy, and the next poll brings anything else. */
+     list from before that PUT. Taken as the hub's copy, the next edit would
+     be built from it and its Save would put the old assignment back. The
+     PUT's own answer is the newer copy, and the next poll brings anything
+     else. */
   const since = WAKE.writes, idle = !WAKE.writing;
-  try {
-    /* THE WAKE WORDS ARE ASKED FOR ALONGSIDE, AND MAY FAIL ON THEIR OWN. A hub
-       from before per-satellite wake words answers this path 404, and that
-       must cost the Wake words card, not the whole tab. */
-    const [n, f, w] = await Promise.all([json("/satellites"), json("/satellites/firmware"),
-      json("/satellites/wake-words").catch(e => e)]);
-    $("satellitesnone").hidden = true;
-    $("satellitesman").hidden = $("fwcard").hidden = $("evcard").hidden = false;
-    SATELLITES.list = n.satellites;
-    if (idle && WAKE.writes === since) wakeTake(w);
-    satellitesRender(n.satellites);
-    wakeRender();
-    firmwareRender(f.firmware);
-    satellitesListen();
-    if (!SATELLITES.routingLoaded) routingLoad();
-  } catch (e) {
+  const [n, f, w] = await Promise.allSettled([json("/satellites"),
+    json("/satellites/firmware"), json("/satellites/wake-words")]);
+  if (n.status === "rejected") {
+    const e = n.reason;
     $("satellitesnone").textContent = (e.status === 404 || e.status === 503)
-      ? "This deployment has no satellite hub: voice-satellites is not running."
-      : `The satellite hub did not answer: ${e.message}`;
+      ? SAT_COPY.noHub : satText("hubError", { message: e.message });
     $("satellitesnone").hidden = false;
-    $("satellitesman").hidden = $("fwcard").hidden = $("evcard").hidden = true;
-    $("routecard").hidden = $("wakecard").hidden = true;
+    $("satellitesman").hidden = true;
     /* Hidden with the rest, so it has to be loaded again with the rest: the
        first load is the only other thing that shows it, and a hub that
-       restarted once would have lost the card until the page was reloaded. */
+       restarted once would have lost Routing until the page was reloaded. */
     SATELLITES.routingLoaded = false;
+  } else {
+    $("satellitesnone").hidden = true;
+    $("satellitesman").hidden = false;
+    SATELLITES.list = n.value.satellites || [];
+    if (idle && WAKE.writes === since) wakeTake(w.status === "fulfilled" ? w.value : w.reason);
+    SATELLITES.fwFailed = f.status === "rejected" ? f.reason.message : null;
+    if (f.status === "fulfilled") SATELLITES.firmware = f.value.firmware || [];
+    satellitesRender(SATELLITES.list);
+    wakeRender();
+    firmwareRender();
+    satellitesHealth();
+    satellitesListen();
+    if (!SATELLITES.routingLoaded) routingLoad();
   }
   if (satellitesOpen()) SATELLITES.timer = setTimeout(satellitesRefresh, 3000);
 }
 
+/* A ROW MOVES ONLY WHEN IT IS ADDED, ADOPTED OR RENAMED, never on a poll, so
+   the row under a finger stays under it. New satellites waiting to be adopted
+   come first, in the order the page first saw them; then the adopted ones by
+   name; then ones that were only seen and have gone. */
 function satellitesRender(list) {
-  const box = $("satellitelist");
   $("satellitesempty").hidden = list.length > 0;
   const pending = list.filter(n => n.online && !n.adopted).length;
   $("satellitecount").textContent = pending ? String(pending) : "";
+  /* Open rows are remembered per viewer. With nothing remembered and only one
+     satellite, it starts open: there is no list to scan, only it. */
+  const remembered = store.get("sat.open", null);
+  const lone = !SATELLITES.seeded && remembered === null
+    && list.filter(n => n.adopted).length === 1;
+  const now = Date.now() / 1000;
   const seen = new Set();
   for (const n of list) {
     seen.add(n.id);
-    let card = SATELLITES.cards.get(n.id);
-    if (!card) { card = satelliteCard(n.id); SATELLITES.cards.set(n.id, card); box.appendChild(card); }
-    satelliteUpdate(card, n);
+    if (n.online) {
+      SATELLITES.online.set(n.id, now);
+      if (n.firmware) SATELLITES.fw.set(n.id, n.firmware);
+      /* Back, so a broken-off update is behind it. */
+      SATELLITES.otaFailed.delete(n.id);
+    }
+    let li = SATELLITES.rows.get(n.id);
+    if (!li) {
+      li = satelliteRow(n);
+      SATELLITES.rows.set(n.id, li);
+      satPlace(li, n);
+      if (n.adopted && (lone || (Array.isArray(remembered) && remembered.includes(n.id)))) {
+        li.querySelector("details.sat-row").open = true;
+      }
+    } else if ((li.dataset.adopted === "1") !== !!n.adopted) {
+      /* Adopted or forgotten somewhere else. */
+      satelliteBuild(li, n);
+      satPlace(li, n);
+    } else if (n.adopted && li._n && li._n.name !== n.name) {
+      satPlace(li, n);
+    }
+    satelliteUpdate(li, n);
   }
-  for (const [id, card] of SATELLITES.cards) {
-    if (!seen.has(id)) { card.remove(); SATELLITES.cards.delete(id); }
+  for (const [id, li] of SATELLITES.rows) {
+    if (!seen.has(id)) { li.remove(); SATELLITES.rows.delete(id); }
   }
+  SATELLITES.seeded = true;
 }
 
-/* ONE ROW, BUILT ONCE. The top line and the Adopt row are the list; the
-   Settings fold is the satellite. Nothing the device reports goes into this
-   markup: its name and id come from its own hello, and anyone on the network
-   can say hello, so they are written as text by satelliteUpdate(). The only
-   interpolation is `u`, a counter this page owns, which gives each label the
-   id its control needs. */
-function satelliteCard(id) {
-  const card = document.createElement("div");
-  card.className = "satellite";
-  card.dataset.id = id;
-  const u = "sat" + (++SATELLITES.seq);
-  card.innerHTML = `
-    <div class="satellite-top">
-      <span class="satellite-dot" aria-hidden="true"></span>
-      <strong class="satellite-name"></strong>
-      <span class="status satellite-state"></span>
-      <span class="spacer"></span>
-      <button class="small" data-act="identify" type="button">Blink</button>
-      <button class="small danger" data-act="dismiss" type="button">Forget</button>
-    </div>
-    <div class="hint satellite-meta"></div>
-    <div class="row satellite-pending">
-      <div class="satellite-namefield"><label for="${u}-name">Name</label>
-        <input type="text" id="${u}-name" class="satellite-newname" maxlength="64" placeholder="kitchen"></div>
-      <button class="primary small" data-act="adopt" type="button">Adopt</button>
-    </div>
-    <details class="satellite-settings">
-      <summary>Settings</summary>
-      <div class="body">
-        <div class="row">
-          <div><label for="${u}-vol">Volume <span class="satellite-vol"></span></label>
-            <input type="range" id="${u}-vol" min="0" max="100" step="5" class="satellite-volume"></div>
-          <div><label for="${u}-gain">Mic gain <span class="satellite-gain"></span></label>
-            <input type="range" id="${u}-gain" min="0" max="36" step="3" class="satellite-micgain"></div>
-        </div>
-        <div class="checks">
-          <label class="checkline"><input type="checkbox" class="satellite-mic"> Microphone</label>
-          <label class="checkline"><input type="checkbox" class="satellite-spk"> Speaker</label>
-          <label class="checkline"><input type="checkbox" class="satellite-lights"> Lights</label>
-          <label class="checkline"><input type="checkbox" class="satellite-volbuttons"> Volume buttons</label>
-        </div>
-        <fieldset class="satellite-words">
-          <legend>Wake words</legend>
-          <div class="checks satellite-wordlist"></div>
-        </fieldset>
-        <div class="row">
-          <div class="satellite-buttonsfield"><label for="${u}-buttons">Buttons</label>
-            <input type="text" id="${u}-buttons" class="satellite-buttons" maxlength="1000"
-                   spellcheck="false" autocomplete="off" placeholder="play=ptt set=stop"></div>
-        </div>
-        <div class="row">
-          <div class="satellite-sayfield"><label for="${u}-say">Say</label>
-            <input type="text" id="${u}-say" class="satellite-say" maxlength="500"
-                   placeholder="Something for it to say"></div>
-          <button class="small" data-act="say" type="button">Say</button>
-          <button class="small" data-act="tone" type="button">Tone</button>
-          <button class="small" data-act="listen" type="button">Listen 5 s</button>
-          <button class="small" data-act="stop" type="button">Stop</button>
-        </div>
-        <audio class="satellite-audio" controls hidden></audio>
-        <div class="row">
-          <div class="tight"><label for="${u}-colour">Colour</label>
-            <input type="color" id="${u}-colour" class="satellite-colour" value="#d4507f"></div>
-          <div class="tight"><label for="${u}-mode">Pattern</label>
-            <select id="${u}-mode" class="satellite-mode">
-              <option>off</option><option>solid</option><option selected>pulse</option><option>spin</option>
-            </select></div>
-          <button class="small" data-act="lights" type="button">Set lights</button>
-        </div>
-        <div class="actions">
-          <button class="small" data-act="rename" type="button">Rename</button>
-          <button class="small" data-act="reboot" type="button">Reboot</button>
-          <button class="small" data-act="move" type="button">Move to another hub</button>
-          <span class="spacer"></span>
-          <button class="small danger" data-act="forget" type="button">Forget</button>
-        </div>
-        <div class="hint satellite-ident"></div>
+function satGroup(n) { return n.adopted ? 1 : n.online ? 0 : 2; }
+function satBefore(a, b) {
+  const ga = satGroup(a._n), gb = satGroup(b._n);
+  if (ga !== gb) return ga < gb;
+  if (ga !== 1) return a._seq < b._seq;
+  const c = satName(a._n).localeCompare(satName(b._n), undefined, { sensitivity: "base" });
+  return c ? c < 0 : a._n.id < b._n.id;
+}
+/* Moving a node blurs whatever inside it had focus, so it is handed back. */
+function satPlace(li, n) {
+  li._n = n;
+  const box = $("satellitelist");
+  const held = document.activeElement;
+  const next = [...box.children].find(other => other !== li && satBefore(li, other)) || null;
+  if (li.parentNode !== box || li.nextSibling !== next) box.insertBefore(li, next);
+  if (held && held !== document.activeElement && li.contains(held)) held.focus({ preventScroll: true });
+}
+
+/* WHAT ONE SATELLITE IS DOING, AS ONE WORD AND ONE LINE. Pure: the same
+   satellite and the same memory give the same answer, which is what lets a
+   test walk the table. The first match wins and the order is the point. An
+   update beats everything; and a satellite rebooting into new firmware is
+   not "Offline": the hub drops the update with the session, so without the
+   remembered `rebooting` event every successful update flashed a warning.
+   `kind` is the chip: "" is plain dim text, because healthy is quiet;
+   "neutral" is a chip with no colour; the rest are the page's .status
+   colours. `key` is what the health line counts. */
+function satState(n, mem) {
+  const ota = n.ota || {}, v = ota.version || "new firmware";
+  const ear = n.listening || {}, cfg = n.config || {}, st = n.status || {};
+  const say = (key, word, kind, line, dataState, bar) =>
+    ({ key, word, kind, line, dataState, bar: bar === undefined ? null : bar });
+  if (!n.adopted) {
+    return n.online ? say("new", "New", "warn", satText("linePending", { id: n.id }), "pending")
+      : say("seen", "Seen", "neutral", n.last_seen
+        ? satText("lineSeen", { clock: satClock(n.last_seen), id: n.id })
+        : satText("lineGone", { id: n.id }), "seen");
+  }
+  if (["requested", "started", "progress"].includes(ota.state)) {
+    const pct = typeof ota.pct === "number" ? Math.round(ota.pct) : null;
+    return say("updating", pct === null ? "Updating" : `Updating ${pct}%`, "running",
+      satText("lineUpdating", { v }), "updating", pct === null ? 0 : pct / 100);
+  }
+  const back = mem.restarting && mem.restarting.get(n.id);
+  if ((n.online && ota.state === "rebooting")
+      || (!n.online && back && mem.now - back.at < 120000)) {
+    return say("restarting", "Restarting", "running",
+      satText("lineRestarting", { v: (back && back.v) || v }), "updating");
+  }
+  /* An update that broke off mid-transfer ends the session it was on, and the
+     hub's record of it with it, so without the remembered `failed` event it
+     read as plain Offline. Kept as long as the hub keeps a result (600 s). */
+  const lost = !n.online && mem.failed && mem.failed.get(n.id);
+  if (ota.state === "failed" || (lost && mem.now - lost.at < 600000)) {
+    const f = ota.state === "failed" ? { v, error: ota.error } : { v: lost.v || v, error: lost.error };
+    return say("failed", "Update failed", "failed",
+      satText("lineFailed", { v: f.v, error: f.error || "no reason given" }), "failed");
+  }
+  if (!n.online) {
+    const last = satLastSeen(n, mem.online);
+    return say("offline", "Offline", "warn",
+      last ? satText("lineOffline", { clock: satClock(last) }) : "", "offline");
+  }
+  if (ear.state === "off" && ear.error) {
+    return say("deaf", "Not listening", "failed",
+      satText("lineNotListening", { error: ear.error }), "failed");
+  }
+  const listens = satListens(n, mem.words);
+  const woke = mem.woke && mem.woke.get(n.id);
+  if (ear.conversation === "listening" || (woke && mem.now - woke < 15000)) {
+    return say("listening", "Listening", "running", listens, "online");
+  }
+  if (ear.conversation === "routing" || ear.conversation === "replying") {
+    return say("answering", "Answering", "running", listens, "online");
+  }
+  if (ota.state === "verified") return say("updated", "Updated", "done", satText("lineUpdated", { v }), "online");
+  if (st.muted) return say("muted", "Muted", "neutral", listens, "online");
+  if (cfg.mic_enabled === false) return say("micoff", "Mic off", "neutral", listens, "online");
+  return say("online", "Online", "", listens, "online");
+}
+
+function satMem() {
+  return { now: Date.now(), restarting: SATELLITES.restarting, failed: SATELLITES.otaFailed,
+           woke: SATELLITES.woke, online: SATELLITES.online,
+           words: WAKE.server ? WAKE.server.words : null };
+}
+
+/* WHAT IT LISTENS FOR, from the SAVED assignment and never from an unsaved
+   edit, so a row cannot claim a word nobody has saved. A word is heard only
+   once it has downloaded, so one still coming is named as such. One that
+   failed is named only on a row it leaves with no word at all: the health
+   line and the Wake words summary already say it once, and repeated on
+   every row it was the same failure five times. Empty on a hub with no wake
+   word assignment at all. */
+function satListens(n, words) {
+  let mine;
+  if (words) mine = words.filter(w => wakeHas(w, n.id));
+  else if (Array.isArray(n.wake_words)) mine = n.wake_words.map(name => ({ name, state: "ready" }));
+  else return "";
+  const named = state => mine.filter(w => w.state === state).map(w => wwLabel(w.name));
+  const ready = named("ready"), loading = named("downloading"), broken = named("error");
+  const parts = [ready.length ? satText("lineListens", { words: ready.join(", ") }) : SAT_COPY.linePtt];
+  if (loading.length) {
+    parts.push(satText(loading.length > 1 ? "lineLoadingMany" : "lineLoading", { words: satList(loading) }));
+  }
+  if (broken.length && !ready.length) parts.push(satText("lineBroken", { words: satList(broken) }));
+  return parts.join("; ");
+}
+
+/* THE TWO ROW TEMPLATES. Nothing the device reports goes into this markup: a
+   satellite chooses its own name in its hello, and anyone on the network can
+   say hello, so every name, id and address is written as text afterwards. The
+   only interpolation is `u`, a counter this page owns, which gives each label
+   the id its control needs.
+   A pending row is not a disclosure: nothing is stored about it until it is
+   adopted, and Adopt is the one thing to do with it. */
+function satPendingMarkup(u) {
+  return `
+  <div class="sat-sum sat-head">
+    <span class="sat-name"></span>
+    <span class="sat-state"></span>
+    <span class="sat-line"></span>
+  </div>
+  <form class="row sat-adopt">
+    <div class="sat-newname"><label for="${u}-newname">Name</label>
+      <input type="text" id="${u}-newname" maxlength="64" placeholder="e.g. kitchen" autocomplete="off"></div>
+    <button class="primary small tight" type="submit" data-needs="online">Adopt</button>
+    <button class="small tight" type="button" data-act="identify" data-needs="online">Blink</button>
+    <button class="small tight danger end" type="button" data-act="dismiss" hidden>Forget</button>
+  </form>
+  <div class="hint sat-pendhint"></div>
+  <div class="sat-note" aria-live="polite"></div>`;
+}
+
+/* THE ADOPTED ROW, THREE LEVELS DEEP ON PURPOSE. Closed: the name, one state
+   word and one line (what it listens for, or why it is not well), and nothing
+   pressable, because a summary is a button. Open: what people change weekly.
+   One more level: Try it (each one makes a noise or lights the ring), Buttons
+   (set once) and Device, which holds the firmware, the address and every
+   consequential action; the "firmware etc." the owner asked to have out of
+   the main view. Stop is kept with the other sounds: it cuts off what the
+   satellite is saying, the same thing its own Set button does. */
+function satAdoptedMarkup(u) {
+  return `
+  <details class="sat-row">
+    <summary><span class="sat-sum">
+      <span class="sat-name"></span>
+      <span class="sat-state"></span>
+      <span class="sat-line"></span>
+      <span class="bar-track" aria-hidden="true" hidden><span class="bar-fill"></span></span>
+    </span></summary>
+    <div class="body">
+      <div class="hint sat-why"></div>
+      <div class="grid2">
+        <div><label for="${u}-vol">Volume</label>
+          <div class="slider"><input type="range" id="${u}-vol" min="0" max="100" step="5" data-cfg="volume">
+            <output for="${u}-vol"></output></div></div>
+        <div><label for="${u}-gain">Mic gain</label>
+          <div class="slider"><input type="range" id="${u}-gain" min="0" max="36" step="3" data-cfg="mic_gain_db">
+            <output for="${u}-gain"></output></div></div>
       </div>
-    </details>
-    <div class="hint satellite-note" aria-live="polite"></div>`;
-  card.addEventListener("click", ev => {
+      <div class="row sat-switches">
+        <label class="checkline tight"><input type="checkbox" data-cfg="speaker_enabled"> Speaker</label>
+        <label class="checkline tight"><input type="checkbox" data-cfg="mic_enabled"> Microphone</label>
+        <label class="checkline tight"><input type="checkbox" data-cfg="lights_enabled"> Lights</label>
+      </div>
+      <p class="sat-listens"><button class="link" type="button" data-act="wakewords">Change wake words</button></p>
+      <details class="sub sat-try">
+        <summary>Try it</summary>
+        <div class="body">
+          <div class="hint sat-tryhint"></div>
+          <form class="row sat-sayform">
+            <div class="grow"><label for="${u}-say">Say</label>
+              <input type="text" id="${u}-say" maxlength="500" placeholder="Something for it to say"></div>
+            <button class="small tight" type="submit" data-needs="online speaker">Say</button>
+          </form>
+          <div class="actions">
+            <button class="small" type="button" data-act="identify" data-needs="online">Blink</button>
+            <button class="small" type="button" data-act="tone" data-needs="online speaker">Play a tone</button>
+            <button class="small" type="button" data-act="listen" data-needs="online mic unmuted">Listen 5 s</button>
+            <button class="small" type="button" data-act="stop" data-needs="online">Stop</button>
+          </div>
+          <audio controls hidden></audio>
+          <div class="row sat-lights">
+            <div class="tight"><label for="${u}-colour">Colour</label>
+              <input type="color" id="${u}-colour" value="#d4507f"></div>
+            <div class="sat-pattern"><label for="${u}-mode">Light pattern</label>
+              <select id="${u}-mode">
+                <option value="solid">Solid</option><option value="pulse" selected>Pulse</option>
+                <option value="spin">Spin</option><option value="off">Off</option>
+              </select></div>
+            <button class="small tight" type="button" data-act="lights" data-needs="online lights">Show</button>
+          </div>
+          <div class="hint sat-last"></div>
+          <div class="sat-note" aria-live="polite"></div>
+        </div>
+      </details>
+      <details class="sub sat-buttons">
+        <summary>Buttons<span class="sum-note"></span></summary>
+        <div class="body">
+          <label class="checkline"><input type="checkbox" data-cfg="local_volume_buttons"> Volume buttons change the volume</label>
+          <div class="hint sat-localvol"></div>
+          <div class="sat-btns" role="group" aria-label="Button actions">
+            <span></span><span class="hd" aria-hidden="true">When pressed</span><span class="hd" aria-hidden="true">When released</span>
+          </div>
+          <div class="hint">Talk listens as if it heard a wake word, and Stop cuts off what it is saying.</div>
+          <div class="hint">Rec is the privacy mute and cannot be remapped.</div>
+          <div class="sat-note" aria-live="polite"></div>
+        </div>
+      </details>
+      <details class="sub sat-device">
+        <summary>Device<span class="sum-note"></span></summary>
+        <div class="body">
+          <dl class="facts"></dl>
+          <div class="actions sat-update" hidden>
+            <button class="small" type="button" data-act="update" data-needs="online idle"></button>
+            <span class="hint"></span>
+          </div>
+          <form class="row sat-rename">
+            <div><label for="${u}-name">Name</label>
+              <input type="text" id="${u}-name" maxlength="64" autocomplete="off" spellcheck="false"></div>
+            <button class="small tight" type="submit">Rename</button>
+          </form>
+          <div class="actions">
+            <button class="small" type="button" data-act="reboot" data-needs="online idle">Reboot</button>
+            <button class="small" type="button" data-act="move" data-needs="online idle"
+                    aria-expanded="false" aria-controls="${u}-move">Move to another hub</button>
+            <button class="small danger end" type="button" data-act="forget">Forget</button>
+          </div>
+          <div class="hint sat-devhint"></div>
+          <div id="${u}-move" hidden>
+            <form class="row sat-moveform">
+              <div class="grow"><label for="${u}-hub">New hub address</label>
+                <input type="text" inputmode="url" id="${u}-hub" maxlength="120"
+                       placeholder="wss://hub.local:8443" spellcheck="false" autocomplete="off"></div>
+              <button class="small tight" type="submit">Move</button>
+            </form>
+            <div class="hint">It saves the address, reboots and waits to be adopted by that hub.</div>
+          </div>
+          <div class="sat-note" aria-live="polite"></div>
+        </div>
+      </details>
+      <div class="sat-note" aria-live="polite"></div>
+    </div>
+  </details>`;
+}
+
+/* One row, and its listeners, once. They are delegated from the <li>, so the
+   rebuild on adoption does not need them wired again. */
+function satelliteRow(n) {
+  const li = document.createElement("li");
+  li.className = "sat";
+  li.dataset.id = n.id;
+  li._seq = ++SATELLITES.seq;
+  li._n = n;
+  satelliteBuild(li, n);
+  li.addEventListener("click", ev => {
     const b = ev.target.closest("button[data-act]");
-    if (b) satelliteAct(card, b.dataset.act, b);
+    if (b) satelliteAct(li, b.dataset.act, b);
   });
-  const q = sel => card.querySelector(sel);
-  q(".satellite-volume").addEventListener("input", ev => { q(".satellite-vol").textContent = ev.target.value + "%"; });
-  q(".satellite-volume").addEventListener("change", ev => satellitePatch(card, { volume: +ev.target.value }));
-  q(".satellite-micgain").addEventListener("input", ev => { q(".satellite-gain").textContent = ev.target.value + " dB"; });
-  q(".satellite-micgain").addEventListener("change", ev => satellitePatch(card, { mic_gain_db: +ev.target.value }));
-  q(".satellite-mic").addEventListener("change", ev => satellitePatch(card, { mic_enabled: ev.target.checked }));
-  q(".satellite-spk").addEventListener("change", ev => satellitePatch(card, { speaker_enabled: ev.target.checked }));
-  q(".satellite-lights").addEventListener("change", ev => satellitePatch(card, { lights_enabled: ev.target.checked }));
-  q(".satellite-volbuttons").addEventListener("change", ev =>
-    satellitePatch(card, { local_volume_buttons: ev.target.checked }));
-  q(".satellite-buttons").addEventListener("change", ev => {
-    const mapping = parseButtons(ev.target.value);
-    if (mapping) satellitePatch(card, { buttons: mapping });
-    else q(".satellite-note").textContent = "Write each as button=action, as in play=ptt set=stop.";
+  /* Say, Adopt, Rename and Move are forms, so Enter sends them. */
+  li.addEventListener("submit", ev => {
+    ev.preventDefault();
+    const form = ev.target;
+    const act = form.classList.contains("sat-adopt") ? "adopt"
+      : form.classList.contains("sat-sayform") ? "say"
+      : form.classList.contains("sat-rename") ? "rename"
+      : form.classList.contains("sat-moveform") ? "movego" : null;
+    if (act) satelliteAct(li, act, ev.submitter || form.querySelector("button[type=submit]"));
   });
-  /* Delegated, because the ticks are rebuilt when the hub's words change. */
-  q(".satellite-wordlist").addEventListener("change", ev => {
-    if (ev.target.dataset.word) satelliteWordToggle(card, ev.target);
+  li.addEventListener("input", ev => {
+    const t = ev.target;
+    if (t.type === "range" && t.dataset.cfg) satLevelSay(t);
+    if (t.closest(".sat-rename")) t.dataset.edited = "1";
   });
-  return card;
+  /* A LEVEL IS SENT ON change, NOT ON input: the release of the thumb, not
+     every step it passes through on the way. */
+  li.addEventListener("change", ev => {
+    const t = ev.target;
+    if (t.dataset.cfg) {
+      satellitePatch(li, { [t.dataset.cfg]: t.type === "checkbox" ? t.checked : Number(t.value) },
+        satNoteFor(li, t));
+    } else if (t.dataset.btn) satButtonPicked(li, t);
+    else if (t.dataset.hook) satButtonsSave(li);
+  });
+  li.addEventListener("keydown", ev => {
+    if (ev.key === "Escape" && ev.target.closest(".sat-moveform")) {
+      ev.preventDefault();
+      satMoveOpen(li, false, true);
+    }
+  });
+  /* toggle does not bubble; captured here, it still arrives. */
+  li.addEventListener("toggle", ev => {
+    if (!ev.target.classList || !ev.target.classList.contains("sat-row")) return;
+    const open = new Set(store.get("sat.open", []) || []);
+    if (ev.target.open) open.add(li.dataset.id); else open.delete(li.dataset.id);
+    store.set("sat.open", [...open]);
+  }, true);
+  return li;
 }
 
-const SATELLITE_STATE = {
-  online:  ["online", " done"],
-  pending: ["waiting to be adopted", " warn"],
-  muted:   ["muted", " warn"],
-  offline: ["offline", ""]
-};
+function satelliteBuild(li, n) {
+  const u = "sat" + (++SATELLITES.seq);
+  li.dataset.u = u;
+  li.dataset.adopted = n.adopted ? "1" : "";
+  li.classList.toggle("pending", !n.adopted);
+  li.innerHTML = n.adopted ? satAdoptedMarkup(u) : satPendingMarkup(u);
+}
 
-function satelliteUpdate(card, n) {
-  const q = sel => card.querySelector(sel);
-  const st = n.status || {};
-  const cfg = n.config || {};
-  const state = !n.adopted ? (n.online ? "pending" : "offline")
-    : !n.online ? "offline" : st.muted ? "muted" : "online";
-  const name = n.name || n.id;
-  card.dataset.state = state;
-  q(".satellite-name").textContent = name;
-  q(".satellite-state").textContent = SATELLITE_STATE[state][0];
-  q(".satellite-state").className = "status satellite-state" + SATELLITE_STATE[state][1];
-  const ota = n.ota && n.ota.state && n.ota.state !== "verified"
-    ? `update ${n.ota.state}${n.ota.pct != null ? " " + n.ota.pct + "%" : ""}${n.ota.error ? ": " + n.ota.error : ""}` : null;
-  /* An adopted satellite that hears no wake word looks exactly like one that
-     works until somebody talks to it, so the list says so. */
-  const deaf = n.adopted && Array.isArray(n.wake_words) && !n.wake_words.length ? "no wake word" : null;
-  q(".satellite-meta").textContent = [n.model, n.firmware,
-    st.rssi != null ? `${st.rssi} dBm` : null, ota, deaf].filter(Boolean).join(" · ");
-  q(".satellite-pending").hidden = n.adopted || !n.online;
-  /* A satellite seen once and never adopted has no fold to forget it from,
-     and the hub keeps it until it restarts, so its row carries the one
-     control it needs. */
-  q('[data-act="dismiss"]').hidden = n.adopted || n.online;
-  q(".satellite-settings").hidden = !n.adopted;
-  q("summary").setAttribute("aria-label", `Settings for ${name}`);
-  q(".satellite-ident").textContent = [n.id, n.address].filter(Boolean).join(" · ");
+/* Where an action's result is written: the note at the foot of the section
+   the button is in, so Listen 5 s answers inside Try it and not a screen
+   away under Device. */
+function satNoteFor(li, from) {
+  const scope = (from && from.closest && from.closest(".body")) || li;
+  return scope.querySelector(":scope > .sat-note")
+    || li.querySelector("details.sat-row > .body > .sat-note") || li.querySelector(".sat-note");
+}
 
-  /* WHAT NEEDS THE SATELLITE CONNECTED IS GREYED WHILE IT IS NOT, and the
-     pill beside its name is the reason. Its settings stay live: the hub keeps
-     them and hands them over when it is back. Say and Tone are off with the
-     speaker and Set lights with the lights, so the page never offers what
-     the board would swallow or the hub refuses (409 speaker_disabled and
-     lights_disabled). */
-  const speaker = cfg.speaker_enabled !== false, lit = cfg.lights_enabled !== false;
-  const hearing = cfg.mic_enabled !== false && !st.muted;
-  const act = a => q(`[data-act="${a}"]`);
-  act("identify").disabled = !n.online;
-  for (const a of ["stop", "reboot", "move"]) act(a).disabled = !n.online;
-  act("say").disabled = act("tone").disabled = !n.online || !speaker;
-  act("listen").disabled = !n.online || !hearing;
-  act("lights").disabled = !n.online || !lit;
-
-  /* A VALUE IS WRITTEN ONLY INTO A CONTROL NOBODY IS HOLDING. The whole row
-     used to be skipped while anything in it had focus, so a Blink pressed
-     once froze every value in the row until the reader went somewhere else. */
+/* EVERY POLL, IN PLACE. Nothing here rebuilds markup or opens or closes a
+   disclosure, and a value is written only into a control nobody is holding:
+   a slider being dragged or a box being typed in keeps what the reader put
+   there. */
+function satelliteUpdate(li, n) {
+  li._n = n;
+  const q = sel => li.querySelector(sel);
+  const s = satState(n, satMem());
+  const name = satName(n);
+  li.dataset.state = s.dataState;
+  satSet(q(".sat-name"), name);
+  const chip = q(".sat-state");
+  satSet(chip, s.word);
+  const cls = "sat-state" + (s.kind ? " status" + (s.kind === "neutral" ? "" : " " + s.kind) : "");
+  if (chip.className !== cls) chip.className = cls;
+  satSet(q(".sat-line"), s.line);
+  satNeeds(li, n, s);
+  if (!n.adopted) {
+    /* Forget is for a satellite that was only seen: it has no row to forget
+       it from otherwise, and the hub keeps it until it restarts. */
+    q('[data-act="dismiss"]').hidden = !!n.online;
+    /* Nothing can be named until it is back, so a satellite that has gone
+       keeps no field for it: the row is a word, a reason and Forget. */
+    const named = q(".sat-newname");
+    if (!named.contains(document.activeElement)) named.hidden = !n.online;
+    satSet(q(".sat-pendhint"), n.online ? SAT_COPY.pendBlink : SAT_COPY.pendOffline);
+    return;
+  }
+  const bar = q(".bar-track");
+  bar.hidden = s.bar === null;
+  if (s.bar !== null) {
+    q(".bar-fill").style.transform = `scaleX(${Math.max(0, Math.min(1, s.bar)).toFixed(4)})`;
+  }
+  const cfg = n.config || {}, st = n.status || {};
+  satSet(q(".sat-why"), !n.online ? SAT_COPY.whyOffline : st.muted ? SAT_COPY.whyMuted : "");
+  satLevel(q('[data-cfg="volume"]'), cfg.volume);
+  satLevel(q('[data-cfg="mic_gain_db"]'), cfg.mic_gain_db);
   const idle = el => el !== document.activeElement;
-  const vol = q(".satellite-volume"), gain = q(".satellite-micgain");
-  if (cfg.volume != null && idle(vol)) {
-    vol.value = cfg.volume; q(".satellite-vol").textContent = cfg.volume + "%"; paintRange(vol);
+  for (const key of ["speaker_enabled", "mic_enabled", "lights_enabled", "local_volume_buttons"]) {
+    const box = q(`[data-cfg="${key}"]`);
+    if (idle(box)) box.checked = cfg[key] !== false;
   }
-  if (cfg.mic_gain_db != null && idle(gain)) {
-    gain.value = cfg.mic_gain_db; q(".satellite-gain").textContent = cfg.mic_gain_db + " dB"; paintRange(gain);
-  }
-  for (const [sel, on] of [[".satellite-mic", cfg.mic_enabled !== false],
-                           [".satellite-spk", speaker], [".satellite-lights", lit],
-                           [".satellite-volbuttons", cfg.local_volume_buttons !== false]]) {
-    if (idle(q(sel))) q(sel).checked = on;
-  }
-  if (idle(q(".satellite-buttons"))) q(".satellite-buttons").value = formatButtons(cfg.buttons);
-  satelliteWords(card, n);
+  const link = q('[data-act="wakewords"]');
+  link.parentElement.hidden = !WAKE.server && !WAKE.failed;
+  link.setAttribute("aria-label", `Change wake words for ${name}`);
+  satSet(q(".sat-tryhint"), satTryHint(n));
+  satSet(q(".sat-last"), li._last || "");
+  satButtons(li, n);
+  satDevice(li, n, s);
 }
 
-/* THE SATELLITE'S OWN SIDE OF THE WAKE WORD ASSIGNMENT: one tick per word the
-   hub has, on when the word names this satellite or names every one ("*"),
-   which is marked so that unticking it is not a surprise. Rebuilt only when
-   the hub's list of words changes and nobody is in it; otherwise the ticks
-   are set in place. Hidden on a hub that has no such route. */
-function satelliteWords(card, n) {
-  const set = card.querySelector(".satellite-words");
-  const box = card.querySelector(".satellite-wordlist");
-  set.hidden = !WAKE.server;
-  if (!WAKE.server || WAKE.busy) return;
-  const words = WAKE.server.words;
-  const names = words.map(w => w.name).join("\n");
-  if (box.dataset.names !== names && !box.contains(document.activeElement)) {
-    box.dataset.names = names;
-    box.textContent = "";
-    if (!words.length) {
-      const none = document.createElement("span");
-      none.className = "hint";
-      none.textContent = "The hub has no wake words.";
-      box.append(none);
-    }
-    for (const w of words) {
-      const label = document.createElement("label");
-      label.className = "checkline";
-      const tick = document.createElement("input");
-      tick.type = "checkbox";
-      tick.dataset.word = w.name;
-      const every = document.createElement("span");
-      every.className = "hint-inline";
-      every.textContent = "every satellite";
-      label.append(tick, " " + w.name, every);
-      box.append(label);
-    }
-  }
-  for (const tick of box.querySelectorAll("input[data-word]")) {
-    const w = words.find(x => x.name === tick.dataset.word);
-    if (!w) continue;
-    tick.checked = wakeHas(w, n.id);
-    tick.parentElement.querySelector(".hint-inline").hidden = !w.satellites.includes("*");
+/* WHAT A CONTROL NEEDS, SAID ON THE CONTROL. data-needs names the conditions
+   and this greys the control when one fails; the reason is written beside it
+   (satTryHint, .sat-devhint, .sat-pendhint). A control is never hidden for
+   being unavailable. Settings are not in here at all: offline, they are
+   saved and handed over when it reconnects (the hub's greet()). A button
+   mid-request is left as busy() set it. */
+function satNeeds(li, n, s) {
+  const cfg = n.config || {}, st = n.status || {};
+  const have = { online: !!n.online, speaker: cfg.speaker_enabled !== false,
+                 mic: cfg.mic_enabled !== false, unmuted: !st.muted,
+                 lights: cfg.lights_enabled !== false, idle: s.dataState !== "updating" };
+  for (const b of li.querySelectorAll("[data-needs]")) {
+    if (b.getAttribute("aria-busy") === "true") continue;
+    b.disabled = !b.dataset.needs.split(" ").every(need => have[need]);
   }
 }
 
-function satellitesWordsAll() {
-  for (const n of SATELLITES.list) {
-    const card = SATELLITES.cards.get(n.id);
-    if (card) satelliteWords(card, n);
-  }
+function satTryHint(n) {
+  if (!n.online) return SAT_COPY.tryOffline;
+  const cfg = n.config || {}, st = n.status || {};
+  const off = [["Speaker", "trySpeaker", cfg.speaker_enabled === false],
+               ["Microphone", "tryMic", cfg.mic_enabled === false],
+               ["Lights", "tryLights", cfg.lights_enabled === false]].filter(x => x[2]);
+  const said = off.length > 1 ? [satText("tryMany", { list: satList(off.map(x => x[0])) })]
+    : off.map(x => SAT_COPY[x[1]]);
+  if (st.muted && cfg.mic_enabled !== false) said.push(SAT_COPY.tryMuted);
+  return said.join(" ");
 }
 
-/* One tick in a satellite's fold is one PUT of the whole list, built from the
-   HUB'S copy and never from the card's unsaved one: a tick must not publish
-   somebody's half-finished edit of a threshold. It waits its turn behind any
-   save still in flight (wakeTurn) and is built when its turn comes, from the
-   answer to the one before: two ticks built from the same copy would each put
-   back what the other changed. */
-async function satelliteWordToggle(card, tick) {
-  if (!WAKE.server) return;
-  const note = card.querySelector(".satellite-note");
-  const name = tick.dataset.word, id = card.dataset.id, on = tick.checked;
-  WAKE.busy++;
-  tick.disabled = true;
-  try {
-    await wakeTurn(async () => {
-      if (!WAKE.server) throw new Error("The hub no longer lists wake words.");
-      const known = SATELLITES.list.map(n => n.id);
-      const r = await json("/satellites/wake-words", { method: "PUT", headers: JSON_BODY,
-        body: JSON.stringify({ words: wakeAssign(WAKE.server.words, name, id, on, known) }) });
-      /* The card may be holding unsaved edits. The same change goes into
-         them, or its Save would put back what this tick just took away. */
-      if (WAKE.draft) WAKE.draft = wakeAssign(WAKE.draft, name, id, on, known);
-      wakeTake(r);
-    });
-    note.textContent = "";
-  } catch (e) {
-    tick.checked = !on;
-    note.textContent = e.message;
-  } finally {
-    WAKE.busy--;
-    tick.disabled = false;
-    wakeRender();
-    satellitesWordsAll();
-  }
+/* paintRange() after every value set in code: a value set without an input
+   event leaves the track painted at its old fill. */
+function satLevel(input, value) {
+  if (value === undefined || value === null || input === document.activeElement) return;
+  if (String(input.value) !== String(value)) input.value = value;
+  satLevelSay(input);
+  paintRange(input);
+}
+function satLevelSay(input) {
+  const v = Number(input.value), db = input.dataset.cfg === "mic_gain_db";
+  satSet(input.parentElement.querySelector("output"), db ? `${v} dB` : `${v}%`);
+  input.setAttribute("aria-valuetext", db ? `${v} dB` : `${v} percent`);
 }
 
-/* A SATELLITE'S BUTTON MAPPING AS ONE LINE: button=action, or
-   button.release=action for the release, separated by spaces. Actions are ptt
-   (talk as if the wake word had been heard), stop, none, or webhook:<url>. The
-   hub validates; this only turns the line into the shape PATCH takes, and a
-   line it cannot read is not sent at all. Split on whitespace only, because a
-   URL may hold "=". */
-function parseButtons(line) {
+/* ---- Buttons ---------------------------------------------------------- */
+/* A GRID OF CHOICES, NOT A LINE OF SYNTAX. The mapping used to be typed as
+   "play=ptt set.release=stop", which nobody can guess. The hub replaces the
+   whole mapping on PATCH, so every change sends all of it, built from every
+   select; "none" is left out, and a webhook carries its address. */
+const SAT_ACTIONS = [["ptt", "Talk"], ["stop", "Stop"], ["none", "Nothing"], ["webhook", "Webhook"]];
+const SAT_BUTTONS = { play: "Play", set: "Set", mode: "Mode", vol_up: "Vol +",
+                      vol_down: "Vol −", rec: "Rec" };
+/* The hub's ButtonAction pattern, so nothing is sent that it would refuse. */
+const SAT_WEBHOOK = /^https?:\/\/[^\s/?#@]+(\/\S*)?$/;
+
+function satButtonName(key) {
+  const k = String(key);
+  return SAT_BUTTONS[k] || (k.charAt(0).toUpperCase() + k.slice(1)).replace(/_/g, " ");
+}
+/* The buttons the firmware reports, less Rec (its own privacy mute, which
+   the hub refuses to map) and less the volume pair while the satellite uses
+   them itself; plus any button already mapped, so nothing stored is hidden.
+   A satellite not seen since the hub started has no report, so the three
+   buttons every board has stand in. */
+function satButtonKeys(n) {
+  const cfg = n.config || {}, mapping = cfg.buttons || {};
+  const caps = n.caps && Array.isArray(n.caps.buttons)
+    ? n.caps.buttons.filter(b => typeof b === "string") : [];
+  const local = cfg.local_volume_buttons !== false;
+  const keys = (caps.length ? caps : ["play", "set", "mode"])
+    .filter(k => k !== "rec" && !(local && (k === "vol_up" || k === "vol_down")));
+  for (const k of Object.keys(mapping)) if (k !== "rec" && !keys.includes(k)) keys.push(k);
+  /* Play, Set and Mode first, the order the note reads them in ("Play talks,
+     Set stops"), rather than the order the firmware happens to list them. */
+  const rank = k => { const at = Object.keys(SAT_BUTTONS).indexOf(k); return at < 0 ? 99 : at; };
+  return keys.sort((a, b) => rank(a) - rank(b));
+}
+function satMapping(entries) {
   const mapping = {};
-  for (const token of line.trim().split(/\s+/).filter(Boolean)) {
-    const at = token.indexOf("=");
-    if (at <= 0) return null;
-    const [button, action = "press"] = token.slice(0, at).split(".");
-    (mapping[button] = mapping[button] || {})[action] = token.slice(at + 1);
+  for (const e of entries) {
+    if (e.action === "none" || e.button === "rec") continue;
+    let act = e.action;
+    if (act === "webhook") {
+      if (!SAT_WEBHOOK.test(e.url) || e.url.length > 480) return { error: SAT_COPY.btnBadUrl };
+      act = "webhook:" + e.url;
+    }
+    (mapping[e.button] = mapping[e.button] || {})[e.edge] = act;
   }
-  return mapping;
+  return { mapping };
+}
+function satButtonsNote(mapping, keys) {
+  const said = edge => keys.map(key => {
+    const act = (mapping[key] || {})[edge] || "", b = satButtonName(key);
+    return act === "ptt" ? satText("talks", { b }) : act === "stop" ? satText("stops", { b })
+      : act.startsWith("webhook:") ? satText("hooks", { b }) : null;
+  }).filter(Boolean);
+  const press = said("press"), release = press.length ? [] : said("release");
+  return [...press, ...release].join(", ") || SAT_COPY.sumBtnNone;
 }
 
-function formatButtons(mapping) {
-  return Object.entries(mapping || {}).flatMap(([button, acts]) =>
-    Object.entries(acts).map(([when, what]) =>
-      `${button}${when === "press" ? "" : "." + when}=${what}`)).join(" ");
+function satButtons(li, n) {
+  const cfg = n.config || {}, mapping = cfg.buttons || {};
+  const grid = li.querySelector(".sat-btns");
+  const keys = satButtonKeys(n);
+  const u = li.dataset.u;
+  if (grid.dataset.keys !== keys.join(" ") && !grid.contains(document.activeElement)) {
+    grid.dataset.keys = keys.join(" ");
+    while (grid.children.length > 3) grid.lastChild.remove();
+    keys.forEach((key, i) => {
+      const label = satButtonName(key);
+      const cell = document.createElement("span");
+      cell.className = "bn";
+      cell.textContent = label;
+      grid.append(cell);
+      const boxes = [];
+      for (const [edge, when] of [["press", "when pressed"], ["release", "when released"]]) {
+        const pick = document.createElement("select");
+        pick.dataset.btn = key;
+        pick.dataset.edge = edge;
+        pick.dataset.url = `${u}-b${i}-${edge}`;
+        pick.setAttribute("aria-label", `${label}, ${when}`);
+        for (const [value, text] of SAT_ACTIONS) pick.append(new Option(text, value));
+        grid.append(pick);
+        const box = document.createElement("div");
+        box.className = "url";
+        box.hidden = true;
+        const name = document.createElement("label");
+        name.htmlFor = pick.dataset.url;
+        name.textContent = `${label}, ${when}: webhook URL`;
+        const field = document.createElement("input");
+        field.type = "text";
+        field.inputMode = "url";
+        field.id = pick.dataset.url;
+        field.maxLength = 480;
+        field.placeholder = "https://…";
+        field.spellcheck = false;
+        field.autocomplete = "off";
+        field.dataset.hook = key;
+        box.append(name, field);
+        boxes.push(box);
+      }
+      grid.append(...boxes);
+    });
+  }
+  /* A select somebody changed is theirs until the hub has taken it: a
+     Webhook with no address yet is not in the stored mapping, and the poll
+     would otherwise put it back to Nothing under the address being typed. */
+  for (const pick of grid.querySelectorAll("select[data-btn]")) {
+    const field = grid.querySelector(`#${pick.dataset.url}`);
+    const act = (mapping[pick.dataset.btn] || {})[pick.dataset.edge] || "none";
+    const hook = act.startsWith("webhook:");
+    if (!pick.dataset.pending && pick !== document.activeElement) {
+      pick.value = hook ? "webhook" : SAT_ACTIONS.some(([v]) => v === act) ? act : "none";
+      if (hook && field !== document.activeElement) field.value = act.slice(8);
+    }
+    field.parentElement.hidden = pick.value !== "webhook";
+  }
+  satSet(li.querySelector(".sat-localvol"), cfg.local_volume_buttons !== false ? SAT_COPY.btnLocalVol : "");
+  satSet(li.querySelector(".sat-buttons .sum-note"), satButtonsNote(mapping, keys));
+}
+
+function satButtonPicked(li, pick) {
+  const field = li.querySelector(`#${pick.dataset.url}`);
+  field.parentElement.hidden = pick.value !== "webhook";
+  pick.dataset.pending = "1";
+  /* Webhook with no address yet: the address is the next thing to write. */
+  if (pick.value === "webhook" && !field.value.trim()) { field.focus(); return; }
+  satButtonsSave(li);
+}
+
+async function satButtonsSave(li) {
+  const picks = [...li.querySelectorAll("select[data-btn]")];
+  const made = satMapping(picks.map(pick => ({ button: pick.dataset.btn, edge: pick.dataset.edge,
+    action: pick.value, url: li.querySelector(`#${pick.dataset.url}`).value.trim() })));
+  const host = li.querySelector(".sat-buttons .sat-note");
+  if (made.error) { note(host, "bad", made.error); return; }
+  if (await satellitePatch(li, { buttons: made.mapping }, host)) {
+    for (const pick of picks) delete pick.dataset.pending;
+  }
+}
+
+/* ---- Device ----------------------------------------------------------- */
+function satNewest(model) {
+  let best = null;
+  for (const f of SATELLITES.firmware) {
+    if (f.model === model && (!best || f.uploaded_at > best.uploaded_at)) best = f;
+  }
+  return best;
+}
+/* The version an update is installing, while it is: transferring, rebooting
+   into it, or restarting (the page's memory, as satState reads it). */
+function satGoingTo(n) {
+  const ota = n.ota || {};
+  if (["requested", "started", "progress", "rebooting"].includes(ota.state)) return ota.version || null;
+  const back = !n.online && SATELLITES.restarting.get(n.id);
+  return back && Date.now() - back.at < 120000 ? back.v || null : null;
+}
+/* The newest image for this satellite's model, when it is not what it runs
+   and not what it is installing now: a satellite mid-update was offered, and
+   counted in Firmware for, the very update it was taking. */
+function satImageFor(n) {
+  const fw = satFirmware(n);
+  if (!n.adopted || !n.model || !fw) return null;
+  const img = satNewest(n.model);
+  return img && img.version !== fw && img.version !== satGoingTo(n) ? img : null;
+}
+
+function satDevice(li, n, s) {
+  const st = n.status || {}, fw = satFirmware(n);
+  const last = !n.online && satLastSeen(n, SATELLITES.online);
+  const facts = [["Model", n.model], ["Firmware", fw], ["Address", n.address],
+    ["Wi-Fi signal", n.online ? rssiWords(st.rssi) : ""],
+    n.online ? ["Connected", n.connected_at ? satText("connected", { clock: satClock(n.connected_at) }) : ""]
+             : ["Last seen", last ? satClock(last) : ""],
+    ["ID", n.id]].filter(f => f[1]);
+  const dl = li.querySelector(".facts");
+  const sig = JSON.stringify(facts);
+  if (dl.dataset.sig !== sig) {
+    dl.dataset.sig = sig;
+    dl.textContent = "";
+    for (const [term, value] of facts) {
+      const dt = document.createElement("dt"), dd = document.createElement("dd");
+      dt.textContent = term;
+      dd.textContent = value;
+      dl.append(dt, dd);
+    }
+  }
+  const img = satImageFor(n);
+  li._img = img;
+  const box = li.querySelector(".sat-update");
+  box.hidden = !img;
+  if (img) {
+    const go = box.querySelector("button");
+    if (go.getAttribute("aria-busy") !== "true") satSet(go, `Update to ${img.version}`);
+    satSet(box.querySelector(".hint"), satText("updAvail", { v: img.version }));
+  }
+  const going = satGoingTo(n);
+  satSet(li.querySelector(".sat-device .sum-note"), img ? satText("sumUpdate", { fw })
+    : going && fw ? satText("sumUpdating", { fw, v: going }) : fw || "");
+  const field = li.querySelector(".sat-rename input");
+  if (field !== document.activeElement && !field.dataset.edited) field.value = n.name || "";
+  satSet(li.querySelector(".sat-devhint"), !n.online ? SAT_COPY.devOffline
+    : s.dataState === "updating" ? SAT_COPY.devUpdating : "");
+}
+
+/* The one disclosure built by hand, so it carries aria-expanded itself; the
+   <details> on the tab get theirs from the browser. */
+function satMoveOpen(li, open, refocus) {
+  const button = li.querySelector('[data-act="move"]');
+  const box = li.querySelector(`#${li.dataset.u}-move`);
+  button.setAttribute("aria-expanded", String(open));
+  box.hidden = !open;
+  if (open) box.querySelector("input").focus();
+  else if (refocus) button.focus();
+}
+
+/* To the one editor of the assignment, which is on the wake word. */
+function satGoWakeWords() {
+  const box = $("sat-wakewords");
+  box.open = true;
+  box.scrollIntoView({ block: "start", behavior: MENISCUS.calm.matches ? "auto" : "smooth" });
+  box.querySelector("summary").focus({ preventScroll: true });
 }
 
 /* The hub answers a PATCH with the whole satellite, so the row shows the
    change now rather than on the next poll: a rename used to take 3 s to
    appear, which reads as a rename that did not work. */
-async function satellitePatch(card, change) {
-  const note = card.querySelector(".satellite-note");
+async function satellitePatch(li, change, host) {
+  host = host || satNoteFor(li, null);
   try {
-    const n = await json(`/satellites/${card.dataset.id}`, { method: "PATCH", headers: JSON_BODY,
+    const n = await json(`/satellites/${li.dataset.id}`, { method: "PATCH", headers: JSON_BODY,
       body: JSON.stringify(change) });
-    note.textContent = "";
-    if (n && n.id) satelliteUpdate(card, n);
-  } catch (e) { note.textContent = e.message; }
+    host.textContent = "";
+    if (n && n.id) satelliteUpdate(li, n);
+    return true;
+  } catch (e) { note(host, "bad", e.message); return false; }
 }
 
 function hexColour(hex) {
   return [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
 }
 
-async function satelliteAct(card, act, button) {
-  const id = card.dataset.id;
-  const q = sel => card.querySelector(sel);
-  const note = q(".satellite-note");
-  const name = q(".satellite-name").textContent;
-  note.textContent = "";
-  button.disabled = true;
+const SAT_BUSY = { adopt: "Adopting…", identify: "Blinking…", dismiss: "Forgetting…",
+                   say: "Saying…", tone: "Playing…", listen: "Recording…", stop: "Stopping…",
+                   lights: "Showing…", rename: "Renaming…", reboot: "Rebooting…",
+                   movego: "Moving…", forget: "Forgetting…", update: "Updating…" };
+
+async function satelliteAct(li, act, button) {
+  const n = li._n || {}, id = li.dataset.id, name = satName(n);
+  const q = sel => li.querySelector(sel);
+  const host = satNoteFor(li, button);
+  if (act === "wakewords") { satGoWakeWords(); return; }
+  if (act === "move") { satMoveOpen(li, button.getAttribute("aria-expanded") !== "true"); return; }
+  /* The questions are asked before anything is greyed, so a No leaves the
+     row exactly as it was. A satellite that was only ever seen has nothing
+     to lose, so Forget on it asks nothing. */
+  const url = act === "movego" ? q(".sat-moveform input").value.trim() : "";
+  if (act === "movego" && (!/^wss?:\/\/[^/\s]+$/.test(url) || url.length > 120)) {
+    note(host, "bad", SAT_COPY.moveBadUrl);
+    return;
+  }
+  const text = act === "say" ? q(".sat-sayform input").value.trim() : "";
+  if (act === "say" && !text) { satSaid(host, SAT_COPY.sayEmpty); return; }
+  const renamed = act === "rename" ? q(".sat-rename input").value.trim() : "";
+  if (act === "rename" && !renamed) return;
+  const img = li._img;
+  if (act === "update" && !img) return;
+  const ask = act === "reboot" ? satText("askReboot", { name })
+    : act === "forget" ? satText("askForget", { name })
+    : act === "movego" ? satText("askMove", { name, url })
+    : act === "update" ? satText("askUpdate", { name, v: img.version }) : null;
+  if (ask && !confirm(ask)) return;
+  host.textContent = "";
+  const done = busy(button, SAT_BUSY[act]);
   try {
     if (act === "adopt") {
-      await json(`/satellites/${id}/adopt`, { method: "POST", headers: JSON_BODY,
-        body: JSON.stringify({ name: q(".satellite-newname").value.trim() }) });
-      /* Opened once, here, because the next thing anybody does with a
-         satellite they have just adopted is set it up. The poll never
-         touches the fold. */
-      q(".satellite-settings").open = true;
+      const r = await json(`/satellites/${id}/adopt`, { method: "POST", headers: JSON_BODY,
+        body: JSON.stringify({ name: q(".sat-adopt input").value.trim() }) });
+      satelliteBuild(li, r);
+      satPlace(li, r);
+      satelliteUpdate(li, r);
+      /* Opened here, once, because the next question about a satellite just
+         adopted is always what it listens for. The poll never opens it. */
+      const row = li.querySelector("details.sat-row");
+      row.open = true;
+      row.querySelector("summary").focus();
+      satSaid(row.querySelector(":scope > .body > .sat-note"), satText("adopted", { name: satName(r) }));
     } else if (act === "identify") {
       await json(`/satellites/${id}/identify`, { method: "POST" });
-      note.textContent = "Blinking white for five seconds.";
+      satSaid(host, SAT_COPY.blinking);
     } else if (act === "say") {
-      const text = q(".satellite-say").value.trim();
-      if (!text) { note.textContent = "Type something for it to say first."; return; }
-      await json(`/satellites/${id}/say`, { method: "POST", headers: JSON_BODY, body: JSON.stringify({ text }) });
+      await json(`/satellites/${id}/say`, { method: "POST", headers: JSON_BODY,
+        body: JSON.stringify({ text }) });
     } else if (act === "tone") {
       await json(`/satellites/${id}/tone`, { method: "POST", headers: JSON_BODY,
         body: JSON.stringify({ frequency: 440, seconds: 1 }) });
     } else if (act === "stop") {
       await json(`/satellites/${id}/flush`, { method: "POST" });
     } else if (act === "listen") {
-      note.textContent = "Recording five seconds…";
+      satSaid(host, SAT_COPY.recording);
       const r = await api(`/satellites/${id}/listen?seconds=5`);
-      if (!r.ok) { let p = null; try { p = await r.json(); } catch {}
-        throw new Error(reason(p, `${r.status} ${r.statusText}`)); }
-      const a = q(".satellite-audio");
-      if (a.src) URL.revokeObjectURL(a.src);
-      a.src = URL.createObjectURL(await r.blob());
-      a.hidden = false;
-      note.textContent = "Four channels: the speaker loopback, then the three microphones.";
+      if (!r.ok) {
+        let p = null;
+        try { p = await r.json(); } catch {}
+        throw new Error(reason(p, `${r.status} ${r.statusText}`));
+      }
+      const player = q(".sat-try audio");
+      if (player.src) URL.revokeObjectURL(player.src);
+      player.src = URL.createObjectURL(await r.blob());
+      player.hidden = false;
+      satSaid(host, SAT_COPY.channels);
     } else if (act === "lights") {
       await json(`/satellites/${id}/lights`, { method: "POST", headers: JSON_BODY, body: JSON.stringify({
-        mode: q(".satellite-mode").value, color: hexColour(q(".satellite-colour").value), brightness: 96 }) });
+        mode: q(".sat-try select").value, color: hexColour(q(".sat-try input[type=color]").value),
+        brightness: 96 }) });
     } else if (act === "rename") {
-      const renamed = prompt("New name", name);
-      if (renamed && renamed.trim()) await satellitePatch(card, { name: renamed.trim() });
+      const r = await json(`/satellites/${id}`, { method: "PATCH", headers: JSON_BODY,
+        body: JSON.stringify({ name: renamed }) });
+      const field = q(".sat-rename input");
+      delete field.dataset.edited;
+      satPlace(li, r);
+      satelliteUpdate(li, r);
+      field.focus({ preventScroll: true });
+      satSaid(host, satText("renamed", { old: name, new: satName(r) }));
     } else if (act === "reboot") {
-      if (!confirm("Reboot this satellite? It is back in about ten seconds.")) return;
       await json(`/satellites/${id}/reboot`, { method: "POST" });
-    } else if (act === "move") {
+    } else if (act === "movego") {
       /* The other hub sees it as new and waiting, with nothing carried over,
          and this one keeps its record until somebody forgets it here. */
-      const url = (prompt("The other hub's address", "wss://") || "").trim();
-      if (!url || url === "wss://") return;
-      if (!confirm(`Move ${name} to ${url}? It reboots onto that hub and waits there to be adopted.`)) return;
       await json(`/satellites/${id}/set-hub`, { method: "POST", headers: JSON_BODY,
         body: JSON.stringify({ url }) });
-      note.textContent = "Moving. Forget it here once the other hub has adopted it.";
-    } else if (act === "forget") {
-      if (!confirm("Forget this satellite? It stops streaming and waits to be adopted again.")) return;
+      satMoveOpen(li, false, true);
+      satSaid(host, SAT_COPY.moving);
+    } else if (act === "update") {
+      const r = await json("/satellites/ota", { method: "POST", headers: JSON_BODY,
+        body: JSON.stringify({ satellite: id, sha256: img.sha256 }) });
+      const why = (r.skipped || {})[id];
+      if (why) note(host, "bad", satText("updSkipped", { why }));
+    } else if (act === "forget" || act === "dismiss") {
       await json(`/satellites/${id}/forget`, { method: "POST" });
-    } else if (act === "dismiss") {
-      /* Never adopted and not connected: there is nothing to lose, so no
-         question first. */
-      await json(`/satellites/${id}/forget`, { method: "POST" });
+      satForgotten(li);
     }
     satellitesRefresh();
   } catch (e) {
-    note.textContent = e.message;
+    note(host, "bad", e.message);
   } finally {
-    button.disabled = false;
+    done();
   }
 }
 
-/* ============================================================ wake words == */
-/* TWO COPIES, AND THE CARD NEVER LOSES AN EDIT TO A POLL. `server` is the
-   hub's last answer to GET or PUT /satellites/wake-words, states included.
-   `draft` is what the card is editing, and null whenever it matches the hub.
-   The card shows the draft when there is one, so the poll that refreshes a
-   word's state from downloading to ready cannot put a threshold back. */
-const WAKE = { server: null, draft: null, failed: null, rows: new Map(), busy: 0, saving: false,
-               queue: Promise.resolve(), writes: 0, writing: 0 };
+/* The row goes at once, and focus goes to the row that took its place, so a
+   keyboard is not left on a button that no longer exists. */
+function satForgotten(li) {
+  const rows = [...$("satellitelist").children];
+  const at = rows.indexOf(li);
+  const next = rows[at + 1] || rows[at - 1];
+  li.remove();
+  SATELLITES.rows.delete(li.dataset.id);
+  const target = next && (next.querySelector("details.sat-row > summary")
+    || next.querySelector(".sat-adopt input"));
+  (target || $("sat-h")).focus();
+}
 
-/* ONE WAKE WORD WRITE AT A TIME. Every tick and every Save PUTs the whole
-   list, so two in flight at once would each carry the other's list from
-   before, and whichever landed last would win. Each `write` runs when the one
-   before it has answered, and builds its body then. `writes` counts them as
-   they start and `writing` while they run, which is how a poll tells that its
+/* Rows that did not change on the hub but read something that did: the
+   wake words (what a row listens for) or an event. */
+function satellitesPaint() {
+  for (const li of SATELLITES.rows.values()) if (li._n) satelliteUpdate(li, li._n);
+  satellitesHealth();
+}
+
+/* ONE LINE BESIDE THE HEADING FOR WHAT IS WRONG, and nothing when all is
+   well. Muted and Mic off are choices, not faults, and are not counted. */
+function satellitesHealth() {
+  const mem = satMem(), count = { offline: 0, failed: 0, deaf: 0 };
+  for (const n of SATELLITES.list) {
+    if (!n.adopted) continue;
+    const key = satState(n, mem).key;
+    if (key in count) count[key]++;
+  }
+  const parts = [];
+  if (count.offline) parts.push(satText("healthOffline", { n: count.offline }));
+  if (count.failed) parts.push(satText("healthFailed", { n: satCount(count.failed, "update", "updates") }));
+  if (count.deaf) parts.push(satText("healthDeaf", { n: count.deaf }));
+  const broken = WAKE.server ? WAKE.server.words.filter(w => w.state === "error").map(w => wwLabel(w.name)) : [];
+  if (broken.length) parts.push(satText("healthWords", { words: satList(broken) }));
+  if (SATELLITES.routing && SATELLITES.routing.load_error) parts.push(SAT_COPY.healthRouting);
+  satSet($("sathealth"), parts.join(" · "));
+}
+
+/* ============================================================ wake words == */
+/* TWO COPIES, AND THE LIST NEVER LOSES AN EDIT TO A POLL. `server` is the
+   hub's last answer to GET or PUT /satellites/wake-words, states included.
+   `draft` is what the list is editing, and null whenever it matches the hub;
+   `removed` holds the words marked for removal in it. The list shows the
+   draft when there is one, so the poll that refreshes a word's state from
+   downloading to ready cannot put a threshold back. Satellite rows read
+   `server` only. */
+const WAKE = { server: null, draft: null, removed: new Set(), failed: null, rows: new Map(),
+               queue: Promise.resolve(), writes: 0, writing: 0, heard: new Map(), broken: "" };
+
+/* ONE WAKE WORD WRITE AT A TIME. Save and Try again each PUT the whole list,
+   so two in flight at once would each carry the other's list from before,
+   and whichever landed last would win. Each `write` runs when the one before
+   it has answered, and builds its body then. `writes` counts them as they
+   start and `writing` while they run, which is how a poll tells that its
    answer may be older than a save (satellitesRefresh). */
 function wakeTurn(write) {
   const turn = WAKE.queue.then(async () => {
@@ -4193,23 +4957,6 @@ function wakeCopy(w) {
 
 function wakeHas(w, id) { return w.satellites.includes("*") || w.satellites.includes(id); }
 
-/* ONE SATELLITE IN OR OUT OF ONE WORD, on a copy of the list. Unticking a
-   satellite from a word that names every satellite ("*") leaves the word on
-   every OTHER satellite the hub knows, by id, which is the only reading that
-   keeps what the others hear. It also means a satellite adopted later no
-   longer gets the word, and the Wake words card shows that as the per-satellite
-   ticks it now is. */
-function wakeAssign(words, name, id, on, known) {
-  return words.map(w => {
-    if (w.name !== name) return wakeCopy(w);
-    const every = w.satellites.includes("*");
-    const sats = every ? (on ? ["*"] : known.filter(k => k !== id))
-      : w.satellites.filter(s => s !== id);
-    if (on && !sats.includes("*")) sats.push(id);
-    return { name: w.name, threshold: w.threshold, satellites: sats };
-  });
-}
-
 /* Order-blind, because ticking a satellite off and on again moves it to the
    end of the list and is still no change. */
 function wakeKey(words) {
@@ -4219,16 +4966,21 @@ function wakeKey(words) {
 function wakeTake(answer) {
   WAKE.failed = null;
   if (!(answer instanceof Error)) { WAKE.server = answer; return; }
-  /* 404 is a hub from before per-satellite wake words: no card and no ticks.
-     Anything else is a hiccup, and the last good copy stays on screen. */
-  if (answer.status === 404) { WAKE.server = WAKE.draft = null; return; }
+  /* 404 is a hub from before per-satellite wake words: no list and no
+     "Change wake words". Anything else is a hiccup, and the last good copy
+     stays on screen with the reason beside it. */
+  if (answer.status === 404) { WAKE.server = WAKE.draft = null; WAKE.removed.clear(); return; }
   WAKE.failed = answer.message;
 }
+
+/* The draft less the words marked for removal: what Save sends. */
+function wakeEffective() { return (WAKE.draft || []).filter(w => !WAKE.removed.has(w.name)); }
 
 function wakeDraft() {
   if (!WAKE.draft) {
     WAKE.draft = WAKE.server.words.map(wakeCopy);
-    $("wakenote").textContent = "";
+    WAKE.removed.clear();
+    $("wwnote").textContent = "";
   }
   return WAKE.draft;
 }
@@ -4239,20 +4991,34 @@ function wakeEdit(name, change) {
   wakeRender();
 }
 
+function wakePut(words) {
+  return json("/satellites/wake-words", { method: "PUT", headers: JSON_BODY,
+    body: JSON.stringify({ words }) });
+}
+
 function wakeRender() {
-  $("wakecard").hidden = !WAKE.server && !WAKE.failed;
+  $("sat-wakewords").hidden = !WAKE.server && !WAKE.failed;
   /* load_error is the hub saying its own wake_words.json did not load, which
      turns every word off until a Save replaces the file. */
-  $("wakefail").textContent = WAKE.failed ? `The wake words did not load: ${WAKE.failed}`
-    : (WAKE.server && WAKE.server.load_error) || "";
-  $("wakeman").hidden = !WAKE.server;
+  satNoteOnce($("wwfail"), "bad", WAKE.failed ? satText("wwFailed", { message: WAKE.failed })
+    : (WAKE.server && WAKE.server.load_error) || "");
   routingWords();
-  if (!WAKE.server) return;
-  if (WAKE.draft && wakeKey(WAKE.draft) === wakeKey(WAKE.server.words)) WAKE.draft = null;
+  if (!WAKE.server) { satSet($("ww-sum"), WAKE.failed ? SAT_COPY.sumLoadFailed : ""); return; }
+  /* A download that fails after "Saved." leaves that line beside a failure it
+     no longer describes, so it goes. A refused save's reason stays. */
+  const broken = WAKE.server.words.filter(w => w.state === "error").map(w => w.name).join(" ");
+  if (broken && broken !== WAKE.broken && $("wwnote").querySelector(":scope > .hint")) {
+    $("wwnote").textContent = "";
+  }
+  WAKE.broken = broken;
+  if (WAKE.draft && wakeKey(wakeEffective()) === wakeKey(WAKE.server.words)) {
+    WAKE.draft = null;
+    WAKE.removed.clear();
+  }
   const words = WAKE.draft || WAKE.server.words;
   const live = new Map(WAKE.server.words.map(w => [w.name, w]));
   const keep = new Set(words.map(w => w.name));
-  const box = $("wakelist");
+  const box = $("wwlist");
   for (const [name, row] of WAKE.rows) {
     if (!keep.has(name)) { row.remove(); WAKE.rows.delete(name); }
   }
@@ -4260,256 +5026,434 @@ function wakeRender() {
     let row = WAKE.rows.get(w.name);
     if (!row) { row = wakeRow(w.name); WAKE.rows.set(w.name, row); }
     if (box.children[i] !== row) box.insertBefore(row, box.children[i] || null);
-    wakeRowUpdate(row, w, live.get(w.name));
+    wakeRowUpdate(row, w, live.get(w.name), WAKE.removed.has(w.name));
   });
-  $("wakenone").hidden = words.length > 0;
+  $("wwnone").hidden = words.length > 0;
 
+  /* The hub says which names it can load. A name it cannot, or one already in
+     the list, is a 422 the reader could not have avoided. */
   const left = (WAKE.server.available || []).filter(a => !keep.has(a));
-  const pick = $("wakeadd");
+  const pick = $("wwadd");
   if (pick.dataset.sig !== left.join("\n") && pick !== document.activeElement) {
     pick.dataset.sig = left.join("\n");
     const was = pick.value;
     pick.textContent = "";
-    for (const a of left) pick.append(new Option(a, a));
-    if (!left.length) pick.append(new Option("Every model is in use", ""));
+    for (const a of left) pick.append(new Option(wwLabel(a), a));
     if (left.includes(was)) pick.value = was;
   }
-  pick.disabled = $("wakeaddgo").disabled = !left.length;
+  pick.disabled = $("wwaddgo").disabled = !left.length;
+  satSet($("wwaddwhy"), left.length ? SAT_COPY.wwAddWhy : SAT_COPY.wwExhausted);
+
   const dirty = !!WAKE.draft;
-  $("wakesave").disabled = !dirty || WAKE.saving;
-  $("wakediscard").disabled = !dirty || WAKE.saving;
-  $("wakedirty").textContent = dirty ? "Not saved yet." : "";
+  const nobody = dirty && wakeEffective().some(w => !w.satellites.length);
+  if ($("wwsave").getAttribute("aria-busy") !== "true") $("wwsave").disabled = !dirty || nobody;
+  satSet($("wwdirty"), nobody ? SAT_COPY.wwNone : dirty ? SAT_COPY.wwDirty : SAT_COPY.wwClean);
+  satSet($("ww-sum"), wakeSummary(dirty));
+}
+
+function wakeSummary(dirty) {
+  if (dirty) return SAT_COPY.sumWwDirty;
+  if (WAKE.server.load_error) return SAT_COPY.sumLoadFailed;
+  const words = WAKE.server.words;
+  const named = state => words.filter(w => w.state === state).map(w => wwLabel(w.name));
+  if (named("error").length) return satText("sumWwFailed", { words: satList(named("error")) });
+  if (named("downloading").length) return satText("sumWwLoading", { words: satList(named("downloading")) });
+  return words.length ? words.map(w => wwLabel(w.name)).join(", ") : SAT_COPY.sumWwNone;
 }
 
 /* One word, built once and kept while the word is in the list. The name is
    written as text: it is a model name the hub lists, and it reaches a PUT
    only if the hub offered it. */
+function wakeRowMarkup(u) {
+  return `
+  <div class="sat-sum sat-head">
+    <strong class="sat-name"></strong>
+    <span class="sat-state"></span>
+  </div>
+  <div class="grid2">
+    <div><label for="${u}-t">Threshold</label>
+      <div class="slider"><input type="range" id="${u}-t" min="0.1" max="0.95" step="0.05">
+        <output for="${u}-t"></output></div>
+      <div class="hint ww-last"></div></div>
+    <fieldset class="ww-sats">
+      <legend>Satellites</legend>
+      <div class="seg" role="group">
+        <button type="button" aria-pressed="true" data-scope="all">Every satellite</button>
+        <button type="button" aria-pressed="false" data-scope="chosen">Chosen</button>
+      </div>
+      <div class="ww-pick" hidden></div>
+      <div class="hint ww-scopehint"></div>
+    </fieldset>
+  </div>
+  <div class="ww-error"></div>
+  <div class="actions">
+    <span class="hint ww-rowhint"></span>
+    <button class="small" type="button" data-ww="retry" hidden>Try again</button>
+    <button class="small danger end" type="button" data-ww="remove">Remove</button>
+  </div>`;
+}
+
 function wakeRow(name) {
-  const row = document.createElement("div");
-  row.className = "wakeword";
+  const row = document.createElement("li");
+  row.className = "ww";
+  row.dataset.name = name;
   const u = "wake" + (++SATELLITES.seq);
-  row.innerHTML = `
-    <div class="wakeword-top">
-      <strong class="wakeword-name"></strong>
-      <span class="status wakeword-state"></span>
-      <span class="spacer"></span>
-      <button class="small danger" data-wake="remove" type="button">Remove</button>
-    </div>
-    <div class="hint wakeword-error"></div>
-    <div class="row fields">
-      <div class="wakeword-threshold"><label for="${u}-t">Threshold <span class="wakeword-value"></span></label>
-        <input type="range" id="${u}-t" min="0.1" max="0.95" step="0.05"></div>
-      <fieldset>
-        <legend>Satellites</legend>
-        <div class="checks">
-          <label class="checkline"><input type="checkbox" class="wakeword-all"> All satellites</label>
-          <span class="checks wakeword-each"></span>
-        </div>
-      </fieldset>
-    </div>`;
+  row.innerHTML = wakeRowMarkup(u);
   const range = row.querySelector("input[type=range]");
   range.addEventListener("input", () => {
-    row.querySelector(".wakeword-value").textContent = Number(range.value).toFixed(2);
+    satSet(row.querySelector("output"), Number(range.value).toFixed(2));
     wakeEdit(name, w => { w.threshold = Number(range.value); });
   });
-  /* Unticking All starts from every satellite ticked, so the next untick is
-     the one satellite that should not have it, not a list built from nothing. */
-  row.querySelector(".wakeword-all").addEventListener("change", ev => wakeEdit(name, w => {
-    w.satellites = ev.target.checked ? ["*"] : SATELLITES.list.map(n => n.id);
-  }));
-  row.querySelector(".wakeword-each").addEventListener("change", ev => {
+  row.addEventListener("click", ev => {
+    const b = ev.target.closest("button");
+    if (!b || b.disabled) return;
+    if (b.dataset.scope) wakeScope(name, b.dataset.scope);
+    else if (b.dataset.ww === "remove") wakeRemove(name, b);
+    else if (b.dataset.ww === "retry") wakeRetry(b);
+  });
+  row.addEventListener("change", ev => {
     const id = ev.target.dataset.sat;
     if (!id) return;
     wakeEdit(name, w => {
-      w.satellites = w.satellites.filter(s => s !== id);
+      w.satellites = w.satellites.filter(s => s !== id && s !== "*");
       if (ev.target.checked) w.satellites.push(id);
     });
-  });
-  row.querySelector('[data-wake="remove"]').addEventListener("click", () => {
-    WAKE.draft = wakeDraft().filter(w => w.name !== name);
-    wakeRender();
   });
   return row;
 }
 
-const WAKE_STATE = { ready: " done", downloading: " running", error: " failed" };
+/* EVERY SATELLITE OR CHOSEN, A MODE AND NOT A LIST. Choosing starts from
+   every adopted satellite ticked, so the next untick is the one that should
+   not have it rather than a list built from nothing. Satellite names are
+   never inside the .seg: it does not wrap, and six names would overflow a
+   phone. */
+function wakeScope(name, scope) {
+  wakeEdit(name, w => {
+    if (scope === "all") w.satellites = ["*"];
+    else if (w.satellites.includes("*")) {
+      w.satellites = SATELLITES.list.filter(n => n.adopted).map(n => n.id);
+    }
+  });
+}
 
-function wakeRowUpdate(row, w, live) {
+/* REMOVE IS STAGED, AND KEEP TAKES IT BACK, so it needs no question: nothing
+   leaves the hub until Save. A word that was never saved has nothing to
+   keep, so it simply goes. */
+function wakeRemove(name, button) {
+  if (!WAKE.server.words.some(w => w.name === name)) {
+    WAKE.draft = wakeDraft().filter(w => w.name !== name);
+    wakeRender();
+    $("wwadd").focus();
+    return;
+  }
+  wakeDraft();
+  if (WAKE.removed.has(name)) WAKE.removed.delete(name); else WAKE.removed.add(name);
+  wakeRender();
+  button.focus();
+}
+
+/* A failed download is tried again by saving the saved set again: the hub's
+   PUT is its retry. The draft, if there is one, is left as it is. */
+async function wakeRetry(button) {
+  if (!WAKE.server) return;
+  const done = busy(button, "Trying…");
+  try {
+    await wakeTurn(async () => { wakeTake(await wakePut(WAKE.server.words.map(wakeCopy))); });
+  } catch (e) {
+    note($("wwnote"), "bad", e.message);
+  } finally {
+    done();
+    wakeRender();
+    satellitesPaint();
+  }
+}
+
+const WAKE_STATE = { ready: ["Ready", ""], downloading: ["Downloading", "running"], error: ["Failed", "failed"] };
+
+function wakeRowUpdate(row, w, live, removed) {
   const q = sel => row.querySelector(sel);
-  q(".wakeword-name").textContent = w.name;
-  const state = live ? live.state : "not saved";
-  q(".wakeword-state").textContent = state;
-  q(".wakeword-state").className = "status wakeword-state" + (WAKE_STATE[state] || "");
-  q(".wakeword-error").textContent = live && live.state === "error" ? (live.error || "") : "";
+  const label = wwLabel(w.name);
+  satSet(q(".sat-name"), label);
+  /* Ready is plain text, as Online is on a satellite: only a word that is
+     still coming or has failed gets a chip. */
+  const [word, kind] = live ? (WAKE_STATE[live.state] || [live.state, ""]) : ["Not saved yet", ""];
+  const chip = q(".sat-state");
+  satSet(chip, word);
+  const cls = "sat-state" + (kind ? " status " + kind : "");
+  if (chip.className !== cls) chip.className = cls;
+  const failed = !!live && live.state === "error";
+  satNoteOnce(q(".ww-error"), "bad", failed
+    ? satText("wwBroken", { error: live.error || "no reason given" }) : "");
+  q('[data-ww="retry"]').hidden = !failed;
   const range = q("input[type=range]");
   if (range !== document.activeElement) {
     range.value = w.threshold;
     paintRange(range);
-    q(".wakeword-value").textContent = Number(w.threshold).toFixed(2);
+    satSet(q("output"), Number(w.threshold).toFixed(2));
   }
+  const heard = WAKE.heard.get(w.name);
+  satSet(q(".ww-last"), heard ? satText("wwLast", { score: heard.score.toFixed(2),
+    name: heard.who, clock: satClock(heard.at) }) : "");
   const every = w.satellites.includes("*");
-  q(".wakeword-all").checked = every;
-  /* Every satellite the hub knows, and any id the word still names that the
-     hub no longer lists, so it can be unticked rather than sent back unseen. */
-  const sats = SATELLITES.list.map(n => [n.id, n.name || n.id]);
+  const seg = q(".seg");
+  seg.setAttribute("aria-label", `Which satellites hear ${label}`);
+  for (const b of seg.querySelectorAll("button")) {
+    b.setAttribute("aria-pressed", String((b.dataset.scope === "all") === every));
+    b.disabled = removed;
+  }
+  const pick = q(".ww-pick");
+  pick.hidden = every;
+  satSet(q(".ww-scopehint"), every ? SAT_COPY.wwAll : "");
+  /* Every adopted satellite, and any id the word still names that the hub no
+     longer lists, so it can be unticked rather than sent back unseen. */
+  const sats = SATELLITES.list.filter(n => n.adopted).map(n => [n.id, satName(n)]);
   for (const id of w.satellites) {
     if (id !== "*" && !sats.some(([known]) => known === id)) sats.push([id, id]);
   }
-  const each = q(".wakeword-each");
   const sig = JSON.stringify(sats);
-  if (each.dataset.sig !== sig && !each.contains(document.activeElement)) {
-    each.dataset.sig = sig;
-    each.textContent = "";
-    for (const [id, label] of sats) {
+  if (pick.dataset.sig !== sig && !pick.contains(document.activeElement)) {
+    pick.dataset.sig = sig;
+    pick.textContent = "";
+    for (const [id, text] of sats) {
       const line = document.createElement("label");
       line.className = "checkline";
       const tick = document.createElement("input");
       tick.type = "checkbox";
       tick.dataset.sat = id;
-      line.append(tick, " " + label);
-      each.append(line);
+      line.append(tick, " " + text);
+      pick.append(line);
     }
   }
-  /* Under All the satellites are ticked and greyed together: they have it,
-     and All is the control that says so. */
-  for (const tick of each.querySelectorAll("input[data-sat]")) {
-    tick.checked = every || w.satellites.includes(tick.dataset.sat);
-    tick.disabled = every;
+  for (const tick of pick.querySelectorAll("input[data-sat]")) {
+    tick.checked = w.satellites.includes(tick.dataset.sat);
+    tick.disabled = removed;
   }
+  range.disabled = removed;
+  row.toggleAttribute("data-removed", removed);
+  satSet(q(".ww-rowhint"), removed ? SAT_COPY.wwRemoved
+    : live && live.state === "downloading" ? SAT_COPY.wwDownloading : "");
+  const rm = q('[data-ww="remove"]');
+  satSet(rm, removed ? "Keep" : "Remove");
+  rm.classList.toggle("danger", !removed);
+  rm.setAttribute("aria-label", `${removed ? "Keep" : "Remove"} ${label}`);
 }
 
-$("wakeaddgo").addEventListener("click", () => {
-  const name = $("wakeadd").value;
+$("wwaddgo").addEventListener("click", () => {
+  const name = $("wwadd").value;
   if (!name || !WAKE.server) return;
   /* 0.5, and every satellite: what a name alone in SATELLITES_WAKE_WORDS gets. */
   wakeDraft().push({ name, threshold: 0.5, satellites: ["*"] });
   wakeRender();
+  const row = WAKE.rows.get(name);
+  if (row) row.querySelector("input[type=range]").focus();
 });
 
-$("wakediscard").addEventListener("click", () => {
-  WAKE.draft = null;
-  $("wakenote").textContent = "";
-  wakeRender();
-});
-
-$("wakesave").addEventListener("click", async () => {
+async function wakeSave() {
   if (!WAKE.draft || !WAKE.server) return;
-  const gone = WAKE.server.words.map(w => w.name).filter(name => !WAKE.draft.some(w => w.name === name));
-  if (gone.length && !confirm(`Stop listening for ${gone.join(", ")} on every satellite?`)) return;
-  const done = busy($("wakesave"), "Saving…");
-  WAKE.saving = true;
+  const done = busy($("wwsave"), "Saving…");
   try {
-    /* In turn with the ticks, and built when its turn comes: a tick that was
-       still saving when Save was pressed has gone into the draft by then. */
+    /* In turn with Try again, and built when its turn comes. */
     await wakeTurn(async () => {
       if (!WAKE.draft) return;
-      const words = WAKE.draft.map(wakeCopy);
-      const r = await json("/satellites/wake-words", { method: "PUT", headers: JSON_BODY,
-        body: JSON.stringify({ words }) });
+      const r = await wakePut(wakeEffective().map(wakeCopy));
       WAKE.draft = null;
+      WAKE.removed.clear();
       wakeTake(r);
-      note($("wakenote"), "ok", `Saved ${r.words.length} wake word(s).`);
+      satSaid($("wwnote"), SAT_COPY.wwSaved);
     });
   } catch (e) {
     /* THE DRAFT STAYS. A 422 names the field, and the edit it refused is the
        thing the reader needs in front of them to fix it. */
-    note($("wakenote"), "bad", e.message);
+    note($("wwnote"), "bad", e.message);
   } finally {
-    WAKE.saving = false;
     done();
     wakeRender();
-    satellitesWordsAll();
+    satellitesPaint();
   }
-});
+}
+$("wwsave").addEventListener("click", wakeSave);
 
-function firmwareRender(list) {
+/* ============================================================== firmware == */
+/* Rebuilt only when the list itself changes, so a poll does not take focus
+   off Update every satellite while somebody is deciding. */
+function firmwareRender() {
+  const list = SATELLITES.firmware;
+  satNoteOnce($("fwfail"), "bad", SATELLITES.fwFailed
+    ? satText("fwFailed", { message: SATELLITES.fwFailed }) : "");
+  $("fwnone").hidden = list.length > 0 || !!SATELLITES.fwFailed;
   const box = $("fwlist");
-  box.textContent = "";
-  for (const fw of list) {
-    const row = document.createElement("div");
-    row.className = "fw";
-    const when = new Date(fw.uploaded_at * 1000).toLocaleString();
-    row.innerHTML = `<strong></strong><code></code><span class="hint"></span><span class="spacer" style="flex:1"></span>
-      <button class="small" data-fw="all" type="button">Update every satellite</button>
-      <button class="small danger" data-fw="delete" type="button">Delete</button>`;
-    row.querySelector("strong").textContent = fw.version;
-    row.querySelector("code").textContent = fw.sha256.slice(0, 12);
-    row.querySelector(".hint").textContent = [fw.model, `${(fw.size / 1048576).toFixed(2)} MB`,
-      fw.signature ? "signed" : "unsigned", when].join(" · ");
-    row.addEventListener("click", ev => {
-      const b = ev.target.closest("button[data-fw]");
-      if (b) firmwareAct(fw, b.dataset.fw, b);
-    });
-    box.appendChild(row);
+  const sig = JSON.stringify(list.map(f => [f.sha256, f.version, f.model, f.size, !!f.signature,
+    f.uploaded_at]));
+  if (box.dataset.sig !== sig) {
+    box.dataset.sig = sig;
+    box.textContent = "";
+    for (const fw of list) box.append(firmwareRow(fw, satNewest(fw.model) === fw));
   }
+  satSet($("fw-sum"), firmwareSummary());
+  /* The model the house runs, unless somebody has typed one. */
+  const model = $("fwmodel");
+  const common = satCommonModel();
+  if (common && !model.dataset.touched && model !== document.activeElement) model.value = common;
+}
+
+/* UPDATE EVERY SATELLITE IS ON THE NEWEST IMAGE ONLY. It was on every image
+   at one weight, so the older one's button downgraded the whole house and
+   its question did not say so. An older image offers a roll back instead,
+   named as one, and its question says the image is older. */
+function firmwareRow(fw, newest) {
+  const row = document.createElement("li");
+  row.className = "fw";
+  row.innerHTML = `
+    <div class="sat-sum sat-head"><strong class="sat-name"></strong><code class="sat-state"></code>
+      <span class="sat-line"></span></div>
+    <div class="actions">
+      <button class="small" type="button" data-fw="all">Update every satellite</button>
+      <button class="small" type="button" data-fw="back">Roll back every satellite</button>
+      <button class="small danger end" type="button" data-fw="delete">Delete</button>
+    </div>`;
+  row.querySelector(newest ? '[data-fw="back"]' : '[data-fw="all"]').remove();
+  const go = row.querySelector('[data-fw="all"], [data-fw="back"]');
+  go.setAttribute("aria-label", `${go.textContent} to ${fw.version}`);
+  row.querySelector(".sat-name").textContent = fw.version;
+  row.querySelector(".sat-state").textContent = String(fw.sha256).slice(0, 12);
+  row.querySelector(".sat-line").textContent = [fw.model, `${(fw.size / 1048576).toFixed(2)} MB`,
+    fw.signature ? "signed" : "unsigned", satClock(fw.uploaded_at)].join(" · ");
+  row.querySelector('[data-fw="delete"]').setAttribute("aria-label", `Delete firmware ${fw.version}`);
+  row.addEventListener("click", ev => {
+    const b = ev.target.closest("button[data-fw]");
+    if (b) firmwareAct(fw, b.dataset.fw, b);
+  });
+  return row;
+}
+
+function firmwareSummary() {
+  if (SATELLITES.fwFailed) return SAT_COPY.sumLoadFailed;
+  const list = SATELLITES.firmware;
+  if (!list.length) return SAT_COPY.sumFwNone;
+  const due = SATELLITES.list.map(satImageFor).filter(Boolean)
+    .sort((a, b) => b.uploaded_at - a.uploaded_at);
+  if (due.length) {
+    return satText("sumFwReady", { v: due[0].version, n: satCount(due.length, "satellite", "satellites") });
+  }
+  const current = SATELLITES.list.some(n => n.adopted && satNewest(n.model)
+    && satFirmware(n) === satNewest(n.model).version);
+  return current ? SAT_COPY.sumFwCurrent : satCount(list.length, "image", "images");
+}
+
+function satCommonModel() {
+  const count = new Map();
+  for (const n of SATELLITES.list) if (n.adopted && n.model) count.set(n.model, (count.get(n.model) || 0) + 1);
+  let best = null;
+  for (const [model, k] of count) if (!best || k > count.get(best)) best = model;
+  return best;
 }
 
 async function firmwareAct(fw, act, button) {
-  const note = $("fwnote");
-  button.disabled = true;
+  const host = $("fwnote");
+  const ask = act === "all" ? "askUpdateAll" : act === "back" ? "askRollback" : "askDelete";
+  if (!confirm(satText(ask, { v: fw.version }))) return;
+  const done = busy(button, act === "all" ? "Updating…" : act === "back" ? "Rolling back…" : "Deleting…");
   try {
-    if (act === "all") {
+    if (act === "all" || act === "back") {
       const r = await json("/satellites/ota", { method: "POST", headers: JSON_BODY,
         body: JSON.stringify({ satellite: "all", sha256: fw.sha256 }) });
-      const skipped = Object.entries(r.skipped || {}).map(([n, why]) => `${n}: ${why}`);
-      note.textContent = `Updating ${r.started.length} satellite(s).` + (skipped.length ? ` Skipped ${skipped.join("; ")}.` : "");
-    } else if (act === "delete") {
-      if (!confirm(`Delete firmware ${fw.version}?`)) return;
-      await json(`/satellites/firmware/${fw.sha256}`, { method: "DELETE" });
+      const said = [satText("fwStarted", { n: satCount((r.started || []).length, "satellite", "satellites") })];
+      for (const [sid, why] of Object.entries(r.skipped || {})) {
+        const li = SATELLITES.rows.get(sid);
+        said.push(satText("fwSkipped", { name: li && li._n ? satName(li._n) : sid, why }));
+      }
+      satSaid(host, said.join(" "));
       satellitesRefresh();
+    } else if (act === "delete") {
+      const at = [...$("fwlist").children].indexOf(button.closest("li"));
+      await json(`/satellites/firmware/${fw.sha256}`, { method: "DELETE" });
+      await satellitesRefresh();
+      /* Focus to the image that took its place, or to the upload. */
+      const rows = $("fwlist").children;
+      const next = rows[at] || rows[at - 1];
+      (next ? next.querySelector("button") : $("fwfile")).focus();
     }
-  } catch (e) { note.textContent = e.message; }
-  finally { button.disabled = false; }
+  } catch (e) { note(host, "bad", e.message); }
+  finally { done(); }
 }
 
+$("fwmodel").addEventListener("input", () => { $("fwmodel").dataset.touched = "1"; });
+
 $("fwupload").addEventListener("click", async () => {
-  const file = $("fwfile").files[0], note = $("fwnote");
-  if (!file) { note.textContent = "Choose a .bin first."; return; }
+  const file = $("fwfile").files[0], host = $("fwnote");
+  if (!file) { note(host, "warn", SAT_COPY.fwChoose); return; }
   const version = $("fwversion").value.trim() || file.name.replace(/\.bin$/, "");
   const model = $("fwmodel").value.trim();
+  const sig = $("fwsig").value.trim();
+  const done = busy($("fwupload"), "Uploading…");
   try {
-    const sig = $("fwsig").value.trim();
     await json(`/satellites/firmware?model=${encodeURIComponent(model)}&version=${encodeURIComponent(version)}`
       + (sig ? `&signature=${encodeURIComponent(sig)}` : ""),
       { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
-    note.textContent = `Uploaded ${version}.`;
+    satSaid(host, satText("fwUploaded", { v: version }));
     $("fwfile").value = $("fwsig").value = "";
     satellitesRefresh();
-  } catch (e) { note.textContent = e.message; }
+  } catch (e) { note(host, "bad", e.message); }
+  finally { done(); }
 });
 
+/* ================================================================ events == */
 /* THE EVENT LOG IS A STREAM, NOT A POLL: a button press is gone by the next
    three-second tick. EventSource reconnects on its own; it is opened the first
-   time the tab is and left open, one connection, for the page's life. */
+   time the tab is and left open, one connection, for the page's life. The
+   same stream feeds the rows: a wake word lights Listening at once, a routed
+   reply clears it, and "rebooting" is remembered so an update that restarts
+   the satellite reads as Restarting rather than Offline. */
 function satellitesListen() {
   if (SATELLITES.events || !window.EventSource) return;
   SATELLITES.events = new EventSource("/ui/api/satellites/events");
   SATELLITES.events.onmessage = m => {
     let ev; try { ev = JSON.parse(m.data); } catch { return; }
-    if (ev.type === "status") return;  // every ten seconds per satellite: noise here
-    /* A word finished downloading, or failed. The card takes each word's
+    /* Every ten seconds per satellite: noise here. */
+    if (ev.type === "status") return;
+    /* A word finished downloading, or failed. The list takes each word's
        state from the event rather than waiting for the next poll, and the log
        leaves it out: it belongs to no one satellite. ONLY the states: the
        event comes over another connection than a save's answer, so the
        assignment in it may be from before a save that has already answered,
-       and taken whole it would be the copy the next tick is built from. */
+       and taken whole it would be the copy the next edit is built from. */
     if (ev.type === "wake_words") {
       if (WAKE.server && Array.isArray(ev.words)) {
         const states = new Map(ev.words.map(w => [w.name, w]));
         WAKE.server = { ...WAKE.server, words: WAKE.server.words.map(w => states.has(w.name)
           ? { ...w, state: states.get(w.name).state, error: states.get(w.name).error } : w) };
         wakeRender();
-        satellitesWordsAll();
+        satellitesPaint();
       }
       return;
     }
-    const card = SATELLITES.cards.get(ev.satellite);
-    const who = card ? card.querySelector(".satellite-name").textContent : ev.satellite;
-    const what = ev.type === "button" ? `${ev.button} ${ev.action}${ev.held_ms ? ` after ${ev.held_ms} ms` : ""}`
-      : ev.type === "ota" ? `update ${ev.state}${ev.pct != null ? " " + ev.pct + "%" : ""}${ev.error ? ": " + ev.error : ""}`
-      : ev.type === "wake" ? satelliteHeard(ev)
-      : ev.type === "routed" ? satelliteRouted(ev)
-      : ev.type;
+    const row = SATELLITES.rows.get(ev.satellite);
+    const who = row && row._n ? satName(row._n) : ev.satellite;
+    const what = satEventWhat(ev);
+    if (ev.type === "wake" && !ev.injected) {
+      SATELLITES.woke.set(ev.satellite, Date.now());
+      if (typeof ev.score === "number" && ev.wake_word !== "ptt") {
+        WAKE.heard.set(ev.wake_word, { score: ev.score, who, at: ev.at });
+        wakeRender();
+      }
+    }
+    if (ev.type === "routed") SATELLITES.woke.delete(ev.satellite);
+    const ota = row && row._n && row._n.ota;
+    if (ev.type === "ota" && ev.state === "rebooting") {
+      SATELLITES.restarting.set(ev.satellite, { v: ev.version || (ota && ota.version), at: Date.now() });
+      SATELLITES.otaFailed.delete(ev.satellite);
+    }
+    /* The hub sends this one without a version when the transfer broke off,
+       so the version is the one the row last showed it taking. */
+    if (ev.type === "ota" && ev.state === "failed") {
+      SATELLITES.otaFailed.set(ev.satellite, { v: ev.version || (ota && ota.version), error: ev.error,
+                                               at: Date.now() });
+      SATELLITES.restarting.delete(ev.satellite);
+    }
+    if (row) {
+      row._last = satText("lastEvent", { what, time: new Date(ev.at * 1000).toLocaleTimeString() });
+      if (row._n) satelliteUpdate(row, row._n);
+    }
     const li = document.createElement("li");
     li.innerHTML = "<span></span> <b></b> ";
     li.querySelector("span").textContent = new Date(ev.at * 1000).toLocaleTimeString();
@@ -4518,15 +5462,24 @@ function satellitesListen() {
     const list = $("satelliteevents");
     list.prepend(li);
     while (list.children.length > 50) list.lastChild.remove();
+    $("evnone").hidden = true;
     if (!["button", "wake", "routed"].includes(ev.type) && satellitesOpen()) satellitesRefresh();
   };
+}
+
+function satEventWhat(ev) {
+  return ev.type === "button" ? `${satButtonName(ev.button)} ${ev.action}${ev.held_ms ? ` after ${ev.held_ms} ms` : ""}`
+    : ev.type === "ota" ? `update ${ev.state}${ev.pct != null ? " " + ev.pct + "%" : ""}${ev.error ? ": " + ev.error : ""}`
+    : ev.type === "wake" ? satelliteHeard(ev)
+    : ev.type === "routed" ? satelliteRouted(ev)
+    : ev.type;
 }
 
 /* One line each for the two listening events. "test" marks what /inject ran:
    a recorded clip, heard by nobody. */
 function satelliteHeard(ev) {
-  const word = ev.wake_word === "ptt" ? "push-to-talk" : `heard ${ev.wake_word}`;
-  const score = ev.score != null ? ` (${ev.score.toFixed(2)})` : "";
+  const word = ev.wake_word === "ptt" ? "push-to-talk" : `heard ${wwLabel(ev.wake_word)}`;
+  const score = typeof ev.score === "number" ? ` (${ev.score.toFixed(2)})` : "";
   const from = ev.direction != null ? ` from ${Math.round(ev.direction)}°` : "";
   return `${ev.injected ? "test: " : ""}${word}${score}${from}`;
 }
@@ -4541,15 +5494,26 @@ function satelliteRouted(ev) {
 }
 
 /* ================================================================ routing == */
-/* The test box's suggestions: the hub's words, push-to-talk and "*", which
-   are the three things a rule's wake_word can say. */
+/* A select keeps what was chosen in it across a rebuild, and is not rebuilt
+   while it is open in somebody's hand. */
+function satFillSelect(select, options) {
+  const sig = JSON.stringify(options);
+  if (select.dataset.sig === sig || select === document.activeElement) return;
+  select.dataset.sig = sig;
+  const was = select.value;
+  select.textContent = "";
+  for (const [value, text] of options) select.append(new Option(text, value));
+  if (options.some(([value]) => value === was)) select.value = was;
+}
+
+/* The test's two choices are the ones a rule can name: any satellite or an
+   adopted one (by id, which the hub resolves to its name), and any wake word,
+   push-to-talk or one of the hub's words. Nothing to guess or misspell. */
 function routingWords() {
-  const list = $("routewords");
-  const names = [...(WAKE.server ? WAKE.server.words.map(w => w.name) : []), "ptt", "*"];
-  if (list.dataset.sig === names.join("\n")) return;
-  list.dataset.sig = names.join("\n");
-  list.textContent = "";
-  for (const name of names) list.append(new Option(name, name));
+  satFillSelect($("routeword"), [["*", "Any wake word"], ["ptt", "Push-to-talk"],
+    ...(WAKE.server ? WAKE.server.words.map(w => [w.name, wwLabel(w.name)]) : [])]);
+  satFillSelect($("routesatellite"), [["any", "Any satellite"],
+    ...SATELLITES.list.filter(n => n.adopted).map(n => [n.id, satName(n)])]);
 }
 
 async function routingLoad() {
@@ -4561,49 +5525,76 @@ async function routingLoad() {
        replace. */
     const r = await json("/satellites/routing");
     routingShow(r, $("routetext").value === SATELLITES.routingFilled);
-    $("routecard").hidden = false;
+    $("sat-routing").hidden = false;
   } catch (e) {
-    /* An older hub without routing: the card stays away rather than erring. */
+    /* An older hub without routing: the section stays away rather than
+       erring. */
     SATELLITES.routingLoaded = e.status === 404;
-    $("routecard").hidden = true;
+    SATELLITES.routing = null;
+    $("sat-routing").hidden = true;
   }
+  satellitesHealth();
 }
 
 function routingShow(r, fill) {
+  SATELLITES.routing = r;
   if (fill) {
     SATELLITES.routingFilled = JSON.stringify({ version: 1, rules: r.rules }, null, 2);
     $("routetext").value = SATELLITES.routingFilled;
   }
   const env = Object.entries(r.env || {}).map(([name, set]) => `${name} ${set ? "set" : "not set"}`);
-  $("routeenv").textContent = [r.services && r.services.stt ? null : "SATELLITES_STT_URL not set", ...env]
-    .filter(Boolean).join(" · ");
-  $("routenote").textContent = [r.load_error, ...(r.warnings || [])].filter(Boolean).join(" ");
+  satSet($("routeenv"), [r.services && r.services.stt ? null : "SATELLITES_STT_URL not set", ...env]
+    .filter(Boolean).join(" · "));
+  const problems = [r.load_error, ...(r.warnings || [])].filter(Boolean).join(" ");
+  note($("routenote"), r.load_error ? "bad" : "warn", problems);
+  routingDirty();
+  const rules = (r.rules || []).length, warned = (r.warnings || []).length;
+  satSet($("route-sum"), r.load_error ? SAT_COPY.sumLoadFailed
+    : !rules ? SAT_COPY.sumRouteNone
+    : warned ? satText("sumRouteWarned", { n: satCount(rules, "rule", "rules"),
+                                           k: satCount(warned, "warning", "warnings") })
+    : satCount(rules, "rule", "rules"));
 }
 
+/* SAVE RULES IS OFF WITH ITS REASON while the box holds what the hub last
+   sent, as Save wake words is. A file that did not load is the exception:
+   saving it back, changed or not, is how it is replaced. */
+function routingDirty() {
+  const dirty = $("routetext").value !== SATELLITES.routingFilled;
+  const redo = !!(SATELLITES.routing && SATELLITES.routing.load_error);
+  if ($("routesave").getAttribute("aria-busy") !== "true") $("routesave").disabled = !dirty && !redo;
+  satSet($("routedirty"), dirty ? SAT_COPY.routeDirty : redo ? "" : SAT_COPY.routeClean);
+}
+$("routetext").addEventListener("input", routingDirty);
+
 $("routesave").addEventListener("click", async () => {
-  const note = $("routenote");
+  const host = $("routenote");
   let body;
   try { body = JSON.parse($("routetext").value); }
-  catch (e) { note.textContent = `Not JSON: ${e.message}`; return; }
+  catch (e) { note(host, "bad", satText("routeNotJson", { message: e.message })); return; }
   const done = busy($("routesave"), "Saving…");
   try {
     const r = await json("/satellites/routing", { method: "PUT", headers: JSON_BODY, body: JSON.stringify(body) });
     routingShow(r, true);
-    if (!note.textContent) note.textContent = `Saved ${r.rules.length} rule(s).`;
-  } catch (e) { note.textContent = e.message; }
-  finally { done(); }
+    if (!r.load_error && !(r.warnings || []).length) {
+      satSaid(host, satText("routeSaved", { n: satCount(r.rules.length, "rule", "rules") }));
+    }
+    satellitesHealth();
+  } catch (e) { note(host, "bad", e.message); }
+  /* busy() hands back the state from before the press, which was on. */
+  finally { done(); routingDirty(); }
 });
 
 $("routetest").addEventListener("click", async () => {
   const out = $("routeresult");
   const text = $("routesay").value.trim();
-  if (!text) { out.textContent = "Type a sentence to send through the rules."; return; }
+  if (!text) { satSaid(out, SAT_COPY.routeEmpty); return; }
   const done = busy($("routetest"), "Testing…");
   try {
     const o = await json("/satellites/routing/test", { method: "POST", headers: JSON_BODY, body: JSON.stringify({
-      satellite: $("routesatellite").value.trim() || "any", wake_word: $("routeword").value.trim() || "*", text }) });
-    out.textContent = satelliteRouted(o);
-  } catch (e) { out.textContent = e.message; }
+      satellite: $("routesatellite").value || "any", wake_word: $("routeword").value || "*", text }) });
+    if (o.error) note(out, "bad", satelliteRouted(o)); else satSaid(out, satelliteRouted(o));
+  } catch (e) { note(out, "bad", e.message); }
   finally { done(); }
 });
 
