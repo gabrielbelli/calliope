@@ -900,6 +900,10 @@ services:
       SATELLITES_WAKE_WORDS: "hey_jarvis:0.5"
       # On the volume, so a model fetched once is not fetched again.
       SATELLITES_MODEL_DIR: /data/models
+      # Keep the last ten commands' surroundings as WAV files under
+      # /data/debug, to listen to one that came back empty. It records the
+      # room, so it is off unless switched on to diagnose.
+      # SATELLITES_DEBUG_AUDIO: "1"
       # The audio front-end, on by default. "0" hands the first microphone to
       # the wake words as it arrives; for comparing, not for keeping.
       # SATELLITES_FRONTEND: "1"

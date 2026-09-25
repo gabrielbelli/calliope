@@ -63,6 +63,9 @@ class Command:
     audio: bytes              # mono s16le 16 kHz; b"" when nothing was said
     reason: str               # the Endpointer's: silence | max_length | no_speech
     had_speech: bool
+    # Only with debug_s: what the Ear heard around this command, processed and
+    # raw (first microphone), as mono s16le 16 kHz.
+    debug: dict | None = None
 
     @property
     def seconds(self) -> float:
@@ -74,7 +77,7 @@ HISTORY_S = 2.0
 
 class Ear:
     def __init__(self, *, rate: int = RATE, channels: int = 4, frontend: bool = True,
-                 wake: WakeWords | None = None):
+                 wake: WakeWords | None = None, debug_s: float = 0.0):
         if rate != RATE:
             # The wake word models and the router are 16 kHz only; resampling
             # a microphone here would hide a satellite that is misconfigured.
@@ -100,6 +103,12 @@ class Ear:
         # detector's word actually ended (WakeWords.latency_s).
         self._history = np.zeros(0, np.int16)
         self._ptt: str | None = None
+        # SATELLITES_DEBUG_AUDIO: the last debug_s of output and of the first
+        # microphone, attached to each Command so a missed command can be
+        # listened to instead of guessed at. Off (0) unless asked for.
+        self.debug_s = debug_s
+        self._dbg_proc = np.zeros(0, np.int16)
+        self._dbg_raw = np.zeros(0, np.int16)
 
     # ---- called from the event loop, between process() calls ------------------
 
@@ -148,6 +157,11 @@ class Ear:
         start = self.samples
         self.samples += len(mono)
         events: list[Heard | Command] = []
+        if self.debug_s:
+            keep = int(self.debug_s * self.rate)
+            self._dbg_proc = np.concatenate((self._dbg_proc, mono))[-keep:]
+            raw = np.ascontiguousarray(frames[:, self.first_mic], dtype=np.int16)
+            self._dbg_raw = np.concatenate((self._dbg_raw, raw))[-keep:]
 
         word, self._ptt = self._ptt, None
         if word:
@@ -191,7 +205,9 @@ class Ear:
     def _endpoint(self, mono: np.ndarray, events: list) -> None:
         ep = self.endpointer
         if ep is not None and len(mono) and ep.feed(mono):
-            events.append(Command(ep.audio, ep.reason or "silence", ep.had_speech))
+            debug = ({"processed": self._dbg_proc.tobytes(), "raw": self._dbg_raw.tobytes()}
+                     if self.debug_s else None)
+            events.append(Command(ep.audio, ep.reason or "silence", ep.had_speech, debug))
             self.state = "busy"
             self.endpointer = None
 

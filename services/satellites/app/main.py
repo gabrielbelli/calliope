@@ -109,6 +109,13 @@ TTS_VOICE = os.environ.get("SATELLITES_TTS_VOICE", "bm_george")
 WAKE_WORDS = os.environ.get("SATELLITES_WAKE_WORDS", "hey_jarvis:0.5")
 MODEL_DIR = Path(os.environ.get("SATELLITES_MODEL_DIR") or DATA_DIR / "models")
 FRONTEND = os.environ.get("SATELLITES_FRONTEND", "1").strip() != "0"
+# SATELLITES_DEBUG_AUDIO=1: keep the last DEBUG_KEEP commands' surroundings as
+# WAV files under <data>/debug (processed and raw first microphone), so a
+# command that came back empty can be listened to. It records the room; off
+# by default, and nothing is kept beyond the last DEBUG_KEEP.
+DEBUG_AUDIO = os.environ.get("SATELLITES_DEBUG_AUDIO", "0").strip() == "1"
+DEBUG_AUDIO_S = 16.0 if DEBUG_AUDIO else 0.0
+DEBUG_KEEP = 10
 # Where the Containerfile put the default wake word at build time. Copied onto
 # the volume at start-up (wakeword.ensure_models), so a first start needs no
 # network and extra models still go to SATELLITES_MODEL_DIR.
@@ -710,7 +717,7 @@ class Hub:
         if s.listener is not None and not s.listener.done():
             return
         try:
-            s.ear = listening.Ear(rate=s.mic_rate, channels=s.mic_channels,
+            s.ear = listening.Ear(debug_s=DEBUG_AUDIO_S, rate=s.mic_rate, channels=s.mic_channels,
                                   frontend=self.voice.frontend)
         except ValueError as e:
             s.listen_error = str(e)
@@ -912,7 +919,7 @@ async def listen_loop(h: Hub, s: Session) -> None:
             events = await loop.run_in_executor(EXECUTOR, ear.process, frames)
         except Exception:
             log.exception("satellite %s: listening failed; starting it again", s.id)
-            s.ear = listening.Ear(rate=s.mic_rate, channels=s.mic_channels,
+            s.ear = listening.Ear(debug_s=DEBUG_AUDIO_S, rate=s.mic_rate, channels=s.mic_channels,
                                   frontend=h.voice.frontend)
             if s.conversation is not None:
                 s.conversation.cancel()
@@ -934,10 +941,26 @@ async def listen_loop(h: Hub, s: Session) -> None:
             elif dropped:
                 continue  # the command after a dropped wake word
             elif s.conversation is not None:
+                if isinstance(ev, listening.Command) and ev.debug:
+                    loop.run_in_executor(EXECUTOR, _save_debug, s.id, ev)
                 s.conversation.deliver(ev)
         if s.conversation is not None and s.conversation.phase == "listening":
             await s.conversation.point(ear.direction)
 
+
+
+def _save_debug(sid: str, command: "listening.Command") -> None:
+    """Write one command's surroundings under <data>/debug and keep the last
+    DEBUG_KEEP; runs in the thread pool."""
+    d = DATA_DIR / "debug"
+    d.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for kind in ("processed", "raw"):
+        (d / f"{stamp}-{sid}-{kind}.wav").write_bytes(audio.wav(command.debug[kind], listening.RATE, 1))
+    (d / f"{stamp}-{sid}-command.wav").write_bytes(audio.wav(command.audio, listening.RATE, 1))
+    for old in sorted(d.glob("*.wav"))[:-DEBUG_KEEP * 3]:
+        old.unlink(missing_ok=True)
+    log.info("satellite %s: debug audio saved as %s-*", sid, stamp)
 
 def ring(direction: float, leds: int, colour: tuple[int, int, int]) -> list[list[int]]:
     """A pixels frame pointing at `direction`: full at the nearest LED, soft on

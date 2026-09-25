@@ -453,7 +453,9 @@ class Endpointer:
     # of it is the wake word itself, not a command said in the same breath.
     WAKE_TAIL = 15       # frames: 300 ms
     # How long, after the wake word, a person may pause before the command.
-    REOPEN_S = 2.5
+    # 4 s, as long as a command may take to start at all (start_timeout_s):
+    # the second live try on orko waited 2.5 s and heard nothing more.
+    REOPEN_S = 4.0
 
     def preroll(self, pcm: np.ndarray) -> None:
         """Audio from before the detector fired, rewound by its latency.

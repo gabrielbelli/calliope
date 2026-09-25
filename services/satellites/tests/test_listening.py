@@ -147,3 +147,17 @@ def test_a_late_detector_does_not_cost_the_command_its_first_words():
     got = np.frombuffer(command.audio, "<i2")
     # All of the speech, including the 0.5 s spoken before the detector fired.
     assert command.had_speech and len(got) >= len(speech)
+
+
+def test_debug_audio_is_attached_only_when_asked_for():
+    """SATELLITES_DEBUG_AUDIO records the room; an Ear without debug_s must
+    attach nothing, and one with it must attach both channels."""
+    audio = np.concatenate((room_floor(0.3), np.full(10, MARK, np.int16), voiced(0.8),
+                            room_floor(1.2, seed=1)))
+    quiet = [e for e in run(Ear(channels=1, frontend=False, wake=Marker()), audio)
+             if isinstance(e, Command)]
+    assert quiet and quiet[0].debug is None
+    loud = [e for e in run(Ear(channels=1, frontend=False, wake=Marker(), debug_s=3.0), audio)
+            if isinstance(e, Command)]
+    assert loud and set(loud[0].debug) == {"processed", "raw"}
+    assert 0 < len(loud[0].debug["processed"]) <= 3 * 16000 * 2
