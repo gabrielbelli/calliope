@@ -205,3 +205,25 @@ def test_adopting_a_dark_node_keeps_it_dark(client):
         assert welcome["type"] == "welcome"
         assert welcome["config"]["lights_enabled"] is False
         assert welcome["config"]["volume"] == 35
+
+
+def test_forgetting_a_node_that_was_only_seen_removes_it(client):
+    """It used to stay on the Nodes tab as "seen, not adopted" until the hub
+    restarted, with Forget answering 204 and changing nothing."""
+    with client.websocket_connect("/nodes/ws") as ws:
+        ws.send_json(hello())
+        assert ws.receive_json() == {"type": "pending"}
+    assert [n["id"] for n in client.get("/nodes").json()["nodes"]] == [NID]
+    assert client.post(f"/nodes/{NID}/forget").status_code == 204
+    assert client.get("/nodes").json()["nodes"] == []
+
+
+def test_a_finished_update_leaves_the_card_after_a_while(client, app, monkeypatch):
+    with client.websocket_connect("/nodes/ws") as ws:
+        adopt(client, ws)
+        ws.send_json({"type": "ota", "state": "failed", "error": "bad signature", "version": "x"})
+        client.get("/nodes")
+        assert client.get("/nodes/kitchen").json()["ota"]["error"] == "bad signature"
+        later = app.time.time() + app.OTA_RESULT_S + 1
+        monkeypatch.setattr(app.time, "time", lambda: later)
+        assert client.get("/nodes/kitchen").json()["ota"] is None

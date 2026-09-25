@@ -294,6 +294,21 @@ class Voice:
                 "frontend": self.frontend, "model_dir": str(self.model_dir)}
 
 
+
+# How long a finished update stays on a node's card. A refused image is worth
+# seeing when it happens; hours later "update failed: bad signature" reads as
+# a fault in the node, which was the node doing its job.
+OTA_RESULT_S = 600
+
+
+def _ota_view(s: "Session | None") -> dict | None:
+    if s is None or not s.ota:
+        return None
+    done = s.ota.get("finished_at")
+    if done is not None and time.time() - done > OTA_RESULT_S:
+        return None
+    return {k: v for k, v in s.ota.items() if k != "image"}
+
 class Hub:
     def __init__(self, store: Store):
         self.store = store
@@ -345,7 +360,7 @@ class Hub:
             "config": rec.config if rec else None,
             "status": s.status if s else {},
             "caps": s.caps if s else {},
-            "ota": {k: v for k, v in s.ota.items() if k != "image"} if s and s.ota else None,
+            "ota": _ota_view(s),
             "listening": self._listening(s),
             "earcons": self._earcons(s),
         }
@@ -963,6 +978,7 @@ async def on_message(s: Session, msg: dict) -> None:
         s.ota.update({"state": state, "pct": msg.get("pct"), "error": msg.get("error")})
         if state in ("failed", "verified"):
             s.ota.pop("image", None)
+            s.ota["finished_at"] = time.time()
         hub.publish({"type": "ota", "node": s.id, "state": state, "pct": msg.get("pct"),
                      "version": msg.get("version"), "error": msg.get("error")})
         log.info("node %s ota %s %s", s.id, state, msg.get("error") or "")
@@ -1156,6 +1172,11 @@ async def forget(nid: str) -> Response:
     nid = hub.resolve(nid)
     s = hub.sessions.get(nid)
     hub.store.forget(nid)
+    # A node that is not connected leaves no trace. Without this, a node that
+    # was only ever seen stayed on the Nodes tab as "seen, not adopted" until
+    # the hub restarted, and Forget -- the one control it had -- did nothing.
+    if s is None:
+        hub.seen.pop(nid, None)
     if s is not None:
         s.adopted = False
         hub.stop_listening(s)
