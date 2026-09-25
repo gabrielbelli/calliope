@@ -21,13 +21,24 @@ out of `GATEWAY_API_KEYS`, is [ADR 0013](../../docs/adr/0013-nodes-one-door.md).
 
 ## Status
 
-- **Working on the first board:** adoption, config, lights, a four-channel
-  capture over Wi-Fi with no dropped packets, and a 1.1 MB over-the-air update
-  in 15 s with rollback, through the gateway relay.
-- **Built and tested against fakes, not yet run on the board:** the audio
-  front-end, wake words, the endpointer, routing, earcons, ducking, button
-  actions, MQTT and signed firmware. What the tests and the image measured is
-  under [Listening](#listening).
+Measured on orko (25 Sep 2026) with the first board, an ESP32-Korvo, adopted
+over `wss://orko.gabrielbelli.com:30080`:
+
+- **Working on the board:** adoption (keeping the node's own settings), config,
+  lights off, a four-channel stream with no dropped frames, and live listening:
+  front-end plus wake word at a real-time factor of 0.09 on orko's Xeon, 24 % of
+  one core, 215 MiB.
+- **Signed updates, on the board:** a signed 1.17 MB release image installed in
+  20 s, including through the Nodes tab's route. The hub will not send an
+  unsigned image to a node that advertises a key. With the hub bypassed, an
+  image signed by another key was refused by the node itself
+  (`bad signature`), and the node stayed on its image.
+- **The listening path on orko, from recorded clips (`/inject`):** "hey jarvis,
+  what time is it" is detected (score 0.995), transcribed by Parakeet as "What
+  time is it?", routed by the default echo rule, and answered by Kokoro
+  (1.3 s). "The weather is fine today" is ignored.
+- **Not yet heard live:** a wake word spoken in the room. Earcons and ducking
+  have not played on the board yet; its speaker is off.
 
 ## Adoption
 
