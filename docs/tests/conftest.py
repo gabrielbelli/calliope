@@ -86,7 +86,7 @@ def source() -> str:
     return _source()
 
 
-KEY = re.compile(r"\b(?:TTS|GATEWAY|STT|UI|NODES|AIV|RUNLOG)_[A-Z0-9_]+\b")
+KEY = re.compile(r"\b(?:TTS|GATEWAY|STT|UI|SATELLITES|AIV|RUNLOG)_[A-Z0-9_]+\b")
 
 
 def keys_read_by_code(text: str, source_text: str) -> set[str]:

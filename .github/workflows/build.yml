@@ -90,8 +90,8 @@ jobs:
               # ffmpeg and no audio library at all, because the decoding this
               # feature needs happens in the browser.
               "ui":       {"image": "calliope-ui",       "base": "python:3.13-slim-trixie"},
-              # The node hub: fastapi, httpx and numpy, no model.
-              "nodes":    {"image": "calliope-nodes",    "base": "python:3.13-slim-trixie"},
+              # The satellite hub: fastapi, httpx and numpy, no model.
+              "satellites": {"image": "calliope-satellites", "base": "python:3.13-slim-trixie"},
           }
           # Native runners per architecture rather than qemu. Every one of
           # these images has RUN instructions (apt, pip), and emulated arm64
@@ -375,9 +375,9 @@ jobs:
         working-directory: services/ui
         run: pytest -q
 
-  nodes:
+  satellites:
     needs: changes
-    if: contains(fromJSON(needs.changes.outputs.services), 'nodes')
+    if: contains(fromJSON(needs.changes.outputs.services), 'satellites')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -391,17 +391,17 @@ jobs:
       # plain install fails right here.
       - name: Install
         run: |
-          pip install -r services/nodes/requirements-dev.txt
-          pip install --no-deps -r services/nodes/requirements-nodeps.txt
+          pip install -r services/satellites/requirements-dev.txt
+          pip install --no-deps -r services/satellites/requirements-nodeps.txt
       # The wake word tests fetch openWakeWord's models (5.4 MB) from its
       # GitHub release once per run, and skip with the reason if they cannot.
       - name: Test
-        working-directory: services/nodes
+        working-directory: services/satellites
         run: pytest -q
 
   # --------------------------------------------------------- the images --
   build:
-    needs: [changes, common, stt, tts, tts-long, gateway, ui, nodes]
+    needs: [changes, common, stt, tts, tts-long, gateway, ui, satellites]
     # A `needs` job that is SKIPPED skips its dependents too, and skipping is
     # the normal case here — that is the whole point of the filter. So the
     # condition is written out: run unless something actually failed, and only
@@ -513,15 +513,15 @@ jobs:
       # onnxruntime, scipy, scikit-learn and webrtcvad all ship compiled
       # per-architecture wheels, and openwakeword is installed --no-deps, so a
       # module it imports that nobody pinned builds cleanly and fails on the
-      # first node; importing openwakeword.model is what would catch that.
+      # first satellite; importing openwakeword.model is what would catch that.
       # The last line loads the wake word the image carries, from its own
       # directory, with no network: that is the promise the image makes.
-      - name: Check the runtime imports on this architecture (nodes)
-        if: matrix.service == 'nodes'
+      - name: Check the runtime imports on this architecture (satellites)
+        if: matrix.service == 'satellites'
         run: |
-          buildah run --user root "$(buildah from localhost/build:nodes-${{ matrix.arch }})" -- \
+          buildah run --user root "$(buildah from localhost/build:satellites-${{ matrix.arch }})" -- \
             python -c 'import app.main, app.listening, app.frontend, app.router, app.mqtt, app.signing, app.earcons, voice_common.audio, numpy, httpx, fastapi, uvicorn, websockets, onnxruntime, webrtcvad, openwakeword.model, aiomqtt, cryptography; print("ok", numpy.__version__, onnxruntime.__version__)'
-          buildah run --user root "$(buildah from localhost/build:nodes-${{ matrix.arch }})" -- \
+          buildah run --user root "$(buildah from localhost/build:satellites-${{ matrix.arch }})" -- \
             python -c 'from app.wakeword import WakeWords; WakeWords({"hey_jarvis": 0.5}, "/srv/models"); print("hey_jarvis loads from the image")'
 
       # The page is the product here, and it is COPYd rather than built, so the

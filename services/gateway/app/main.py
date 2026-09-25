@@ -1134,7 +1134,8 @@ UI_PATHS = (
     ("GET", "/ui/api/{rest:path}"),
     ("PUT", "/ui/api/{rest:path}"),
     ("DELETE", "/ui/api/{rest:path}"),
-    # PATCH arrived with the Nodes tab (PATCH /nodes/{id}, a node's settings).
+    # PATCH arrived with the Satellites tab (PATCH /satellites/{id}, a
+    # satellite's settings).
     ("PATCH", "/ui/api/{rest:path}"),
 )
 
@@ -1157,92 +1158,108 @@ for _method, _path in UI_PATHS:
                       include_in_schema=False)
 
 
-# ------------------------------------------------------------------- nodes --
+# -------------------------------------------------------------- satellites --
 #
-# voice-nodes, the hub for thin audio devices (clients/korvo-node). Optional:
-# GATEWAY_NODES_URL="" leaves every route below answering 503 and keeps it out
-# of /health, so a deployment without the hub is unchanged.
+# voice-satellites, the hub for thin audio devices (clients/korvo-satellite).
+# Optional: GATEWAY_SATELLITES_URL="" leaves every route below answering 503
+# and keeps it out of /health, so a deployment without the hub is unchanged.
 #
 # Like everything else here the paths are flat and explicit, and the device
 # socket is the one WebSocket this gateway relays.
-NODES = Backend(
-    name="voice-nodes",
-    url=os.getenv("GATEWAY_NODES_URL", "http://voice-nodes:8003").rstrip("/"),
-    # 120 s: the slowest routes are /nodes/{id}/say, which waits for Kokoro,
-    # /nodes/{id}/listen, which records for up to 60 s by design, and the two
-    # that run a sentence through STT, an assistant and TTS (/nodes/routing/test
-    # and /nodes/{id}/inject), each stage under its own ceiling of 15-30 s.
-    read_timeout=float(os.getenv("GATEWAY_NODES_TIMEOUT", "120")),
+SATELLITES = Backend(
+    name="voice-satellites",
+    url=os.getenv("GATEWAY_SATELLITES_URL", "http://voice-satellites:8003").rstrip("/"),
+    # 120 s: the slowest routes are /satellites/{id}/say, which waits for
+    # Kokoro, /satellites/{id}/listen, which records for up to 60 s by design,
+    # and the two that run a sentence through STT, an assistant and TTS
+    # (/satellites/routing/test and /satellites/{id}/inject), each stage under
+    # its own ceiling of 15-30 s.
+    read_timeout=float(os.getenv("GATEWAY_SATELLITES_TIMEOUT", "120")),
     timeout_help="A listen records for as long as it was asked to, up to 60 s; "
                  "a say waits for the whole sentence to be synthesised, and a "
                  "routing test for the assistant. Ask for less.",
 )
 
-NODES_PATHS = (
-    ("GET", "/nodes"),
-    ("GET", "/nodes/events"),
-    ("GET", "/nodes/firmware"),
-    ("POST", "/nodes/firmware"),
-    ("DELETE", "/nodes/firmware/{sha256}"),
-    ("POST", "/nodes/ota"),
-    # Above /nodes/{nid}, as in voice-nodes itself: here both would reach the
-    # same backend path, but PUT and the POST below have no /nodes/{nid} twin
-    # and would answer 405 if they were left to it.
-    ("GET", "/nodes/routing"),
-    ("PUT", "/nodes/routing"),
-    ("POST", "/nodes/routing/test"),
-    ("GET", "/nodes/{nid}"),
-    ("PATCH", "/nodes/{nid}"),
-    ("GET", "/nodes/{nid}/listen"),
+SATELLITES_PATHS = (
+    ("GET", "/satellites"),
+    ("GET", "/satellites/events"),
+    ("GET", "/satellites/firmware"),
+    ("POST", "/satellites/firmware"),
+    ("DELETE", "/satellites/firmware/{sha256}"),
+    ("POST", "/satellites/ota"),
+    # Above /satellites/{nid}, as in voice-satellites itself: here both would
+    # reach the same backend path, but PUT and the POST below have no
+    # /satellites/{nid} twin and would answer 405 if they were left to it.
+    ("GET", "/satellites/routing"),
+    ("PUT", "/satellites/routing"),
+    ("POST", "/satellites/routing/test"),
+    # The wake words and the satellites each is assigned to: above
+    # /satellites/{nid} for the same reason, PUT again having no twin there.
+    ("GET", "/satellites/wake-words"),
+    ("PUT", "/satellites/wake-words"),
+    ("GET", "/satellites/{nid}"),
+    ("PATCH", "/satellites/{nid}"),
+    ("GET", "/satellites/{nid}/listen"),
     # inject is routed for scripts that verify the listening path with a
     # recorded clip, behind the same keys as everything else here; the page
     # never calls it (see NOT_ON_PAGE in tests/test_gateway.py).
-    *(("POST", f"/nodes/{{nid}}/{action}") for action in (
+    *(("POST", f"/satellites/{{nid}}/{action}") for action in (
         "adopt", "forget", "identify", "reboot", "lights", "tone", "say",
         "flush", "set-hub", "inject")),
 )
 
 
-async def _to_nodes(request: Request) -> Response:
-    if not NODES.url:
-        return _unreachable(NODES)
+async def _to_satellites(request: Request) -> Response:
+    if not SATELLITES.url:
+        return _unreachable(SATELLITES)
     streaming = request.method in ("POST", "PUT", "PATCH")
-    return await _proxy(request, NODES,
+    return await _proxy(request, SATELLITES,
                         content=request.stream() if streaming else None)
 
 
-for _method, _path in NODES_PATHS:
-    app.add_api_route(_path, _to_nodes, methods=[_method],
+for _method, _path in SATELLITES_PATHS:
+    app.add_api_route(_path, _to_satellites, methods=[_method],
                       include_in_schema=False)
 
 
-@app.websocket("/nodes/ws")
-async def nodes_socket(client: WebSocket) -> None:
-    """Relay one device connection to voice-nodes, frame for frame.
+# THE DEVICE SOCKET HAS TWO PATHS AND ONE HANDLER. The feature was called
+# "nodes" until 2026-09-25, and a board in the field runs firmware that
+# connects to /nodes/ws. Its next firmware arrives over that same socket, so a
+# gateway that stopped answering the old path would strand the board on the
+# old image with USB as the only way back. Both paths relay to the hub's
+# /satellites/ws; the hub answers the old one too, for the same reason.
+SATELLITES_SOCKET = "/satellites/ws"
+LEGACY_SATELLITES_SOCKET = "/nodes/ws"
+
+
+@app.websocket(SATELLITES_SOCKET)
+@app.websocket(LEGACY_SATELLITES_SOCKET)
+async def satellites_socket(client: WebSocket) -> None:
+    """Relay one device connection to voice-satellites, frame for frame.
 
     NOT BEHIND GATEWAY_API_KEYS, deliberately, and the key middleware could not
     see it anyway: it is an http middleware and this is a websocket scope. A
     device is never given a gateway key -- one baked into firmware would be in
-    every flash dump -- so what a connection may do is decided by voice-nodes,
-    by the token it issued on adoption. An unadopted device can say hello and
-    be told "pending"; nothing else passes until someone adopts it through the
-    authenticated routes above.
+    every flash dump -- so what a connection may do is decided by
+    voice-satellites, by the token it issued on adoption. An unadopted device
+    can say hello and be told "pending"; nothing else passes until someone
+    adopts it through the authenticated routes above.
     """
-    if not NODES.url:
+    if not SATELLITES.url:
         await client.close(code=1013)
         return
     await client.accept()
     peer = client.client.host if client.client else ""
-    target = NODES.url.replace("http", "ws", 1) + "/nodes/ws"
+    target = SATELLITES.url.replace("http", "ws", 1) + SATELLITES_SOCKET
     try:
         upstream = await ws_connect(
             target, additional_headers={"X-Forwarded-For": peer},
             open_timeout=CONNECT_TIMEOUT, max_size=2**20,
             # The device pings this socket and uvicorn answers; the hop to
-            # voice-nodes is a container on the same network.
+            # voice-satellites is a container on the same network.
             ping_interval=None)
     except (OSError, TimeoutError) as exc:
-        log.warning("nodes: cannot reach %s for %s: %s", target, peer, exc)
+        log.warning("satellites: cannot reach %s for %s: %s", target, peer, exc)
         await client.close(code=1013)
         return
 
@@ -1452,8 +1469,8 @@ async def health() -> Response:
     stt, tts, long = await asyncio.gather(_probe(STT), _probe(TTS), _probe(LONG))
     backends = {"stt": stt, "tts": tts, "tts_long": long}
     # The hub is optional; configured, it counts like any other backend.
-    if NODES.url:
-        backends["nodes"] = await _probe(NODES)
+    if SATELLITES.url:
+        backends["satellites"] = await _probe(SATELLITES)
     # `ok` only if all three answered. A backend that answered 200 while still
     # loading its model is still `ok` here — it answered, and its own body
     # says "loading" for anyone reading past the first field.

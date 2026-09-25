@@ -38,7 +38,11 @@ not directory names, and they are deliberately not renamed to match the layout.
 `stt-stack` is what `GATEWAY_STT_URL` resolves, in that file, in the gateway's
 own image defaults and in what is already deployed; the named volumes and
 container names are keyed on them too, so renaming would orphan the models
-already on disk to rename a hostname nobody types.
+already on disk to rename a hostname nobody types. The one exception is
+`voice-nodes`, renamed `voice-satellites` with the feature
+([ADR 0013](adr/0013-satellites-one-door.md#renamed)): its volume keeps the name
+`nodes-data`, and the old container has to be removed when the rename is
+deployed.
 
 ### Why each process is its own image
 
@@ -1406,7 +1410,7 @@ runs 0001–0010, 0012 and 0013; there is no 0011.
 | [0009 — A third engine, and the first one this container cannot run](adr/0009-a-third-engine-that-cannot-run-here.md) | superseded by 0010 |
 | [0010 — The third engine was measured on the card it was for, and retired](adr/0010-the-third-engine-was-measured-and-retired.md) | accepted |
 | [0012 — One branch: `main` is the branch, a `v*` tag is a release](adr/0012-one-branch.md) | accepted |
-| [0013 — Nodes come in through the one door, and their socket is not behind a key](adr/0013-nodes-one-door.md) | accepted |
+| [0013 — Satellites come in through the one door, and their socket is not behind a key](adr/0013-satellites-one-door.md) | accepted |
 
 0009 is kept rather than deleted because every engineering fact in it is still
 true; what it got wrong is its own first sentence, that this deployment offers a

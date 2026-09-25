@@ -1,0 +1,24 @@
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+httpx==0.28.1
+numpy==2.3.4
+./packages/common[audio]
+# Wake words (app/wakeword.py). openwakeword itself is in
+# requirements-nodeps.txt: its metadata still demands tflite-runtime on Linux,
+# which has no wheel past CPython 3.11, so it is installed with --no-deps and
+# these are what `import openwakeword` really needs. Only onnxruntime runs a
+# model; the other four are imported by openwakeword's own module.
+onnxruntime==1.30.0
+scipy==1.18.1
+scikit-learn==1.9.1
+tqdm==4.70.1
+requests==2.34.2
+# The endpointer's voice activity detector.
+webrtcvad-wheels==2.0.14
+# Home Assistant over MQTT (app/mqtt.py); imported only when SATELLITES_MQTT_URL
+# is set.
+aiomqtt==2.5.1
+paho-mqtt==2.1.0
+# Firmware signatures (app/signing.py); imported only when
+# SATELLITES_FIRMWARE_PUBKEY is set.
+cryptography==50.0.1

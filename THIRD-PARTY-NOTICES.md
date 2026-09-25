@@ -49,10 +49,10 @@ yt-dlp is used **as a metadata probe only** — `extract_info(download=False)`,
 to resolve a pasted link to a title, duration and size so the user can confirm
 before anything is fetched. The fetching itself is MeTube's job.
 
-### pip dependencies of the node hub (`services/nodes`)
+### pip dependencies of the satellite hub (`services/satellites`)
 
 In addition to fastapi, uvicorn, httpx and numpy above. Pinned in
-`services/nodes/requirements.txt`, except openwakeword, which is in
+`services/satellites/requirements.txt`, except openwakeword, which is in
 `requirements-nodeps.txt` and installed with `--no-deps` (its metadata still
 asks for tflite-runtime, which has no wheel for Python 3.13).
 
@@ -75,12 +75,12 @@ and nothing here changes them.
 **onnxruntime reports usage to Microsoft on Linux unless told not to.** Its
 Linux wheel carries Microsoft's 1DS telemetry client, which posts to
 `mobile.events.data.microsoft.com` and keeps a device id under
-`~/.cache/Microsoft`. Measured in the nodes image with that host pointed at the
-container's own loopback: two connections within 15 s of a session and the id
-written, and with `ORT_DISABLE_TELEMETRY=1` neither. The Containerfile sets it
-and `app/wakeword.py` sets it before anything imports onnxruntime. This is a
-term of use rather than a licence one, and it is recorded here because a hub
-that listens in a house must not phone home by default.
+`~/.cache/Microsoft`. Measured in the satellites image with that host pointed
+at the container's own loopback: two connections within 15 s of a session and
+the id written, and with `ORT_DISABLE_TELEMETRY=1` neither. The Containerfile
+sets it and `app/wakeword.py` sets it before anything imports onnxruntime. This
+is a term of use rather than a licence one, and it is recorded here because a
+hub that listens in a house must not phone home by default.
 
 ### openWakeWord's pre-trained models — **CC BY-NC-SA 4.0**, David Scripka
 
@@ -93,11 +93,12 @@ feature models (`melspectrogram.onnx`, `embedding_model.onnx`) included; the
 embedding model reimplements Google's `speech_embedding`, which Google
 published under Apache-2.0.
 
-**The nodes image carries `hey_jarvis` and the two feature models**, fetched at
-build time and checked against the SHA-256 pinned in `app/wakeword.py`, so that
-a first start needs no network. The attribution travels beside them as
-`/srv/models/NOTICE.md` (from `services/nodes/MODELS-NOTICE.md`). What that
-means for anyone handling the image:
+**The satellites image carries `hey_jarvis` and the two feature models**,
+fetched at build time and checked against the SHA-256 pinned in
+`app/wakeword.py`, so that a first start needs no network. The attribution
+travels beside them as `/srv/models/NOTICE.md` (from
+`services/satellites/MODELS-NOTICE.md`). What that means for anyone handling
+the image:
 
 - **Non-commercial only.** Running it at home is what it is for. Anyone who
   wants to use or ship the image commercially must build it without the models
@@ -107,12 +108,12 @@ means for anyone handling the image:
 - **No changes are made to the files.** ShareAlike binds adaptations, and none
   is made; a model trained here from them would be one.
 
-Other built-in names are fetched at start-up into `NODES_MODEL_DIR` on the data
-volume, from the same release and under the same licence.
+Other built-in names are fetched at start-up into `SATELLITES_MODEL_DIR` on the
+data volume, from the same release and under the same licence.
 
 ---
 
-### Node firmware (`clients/korvo-node`)
+### Satellite firmware (`clients/korvo-satellite`)
 
 Fetched by PlatformIO at build time and linked into the firmware image; none of
 it is in this tree. The two LGPL libraries are linked unmodified, and the whole
@@ -189,15 +190,15 @@ SOFTWARE.
 
 ### `xiph/speexdsp` `mdf.c` — BSD-3-Clause — Copyright (C) 2003-2008 Jean-Marc Valin
 
-The echo canceller in `services/nodes/app/frontend.py` is ported from Speex's
-MDF echo canceller (`libspeexdsp/mdf.c`): the foreground/background two-path
-logic and its thresholds (`VAR1_UPDATE`, `VAR2_UPDATE`, `VAR_BACKTRACK`), the
-leak estimate and its rates (`spec_average`, `beta0`, `beta_max`, `MIN_LEAK`),
-and the learning-rate formulas from Valin's paper as `mdf.c` implements them.
-Changed from the original: vectorised over microphones in numpy, floating point
-only, one reference channel, and no DC notch or pre-emphasis. BSD-3-Clause is
-compatible with BSD-2-Clause; mdf.c's own notice is at the top of
-`frontend.py`, and in full here:
+The echo canceller in `services/satellites/app/frontend.py` is ported from
+Speex's MDF echo canceller (`libspeexdsp/mdf.c`): the foreground/background
+two-path logic and its thresholds (`VAR1_UPDATE`, `VAR2_UPDATE`,
+`VAR_BACKTRACK`), the leak estimate and its rates (`spec_average`, `beta0`,
+`beta_max`, `MIN_LEAK`), and the learning-rate formulas from Valin's paper as
+`mdf.c` implements them. Changed from the original: vectorised over microphones
+in numpy, floating point only, one reference channel, and no DC notch or
+pre-emphasis. BSD-3-Clause is compatible with BSD-2-Clause; mdf.c's own notice
+is at the top of `frontend.py`, and in full here:
 
 ```
 Copyright (C) 2003-2008 Jean-Marc Valin
@@ -234,7 +235,7 @@ POSSIBILITY OF SUCH DAMAGE.
 ### `espressif/esp-adf` `esp_codec_dev` — Apache-2.0 — Copyright 2023 Espressif Systems (Shanghai) CO LTD
 
 The ES7210 and ES8311 register sequences in
-`clients/korvo-node/src/codec.cpp` are ported from
+`clients/korvo-satellite/src/codec.cpp` are ported from
 `components/esp_codec_dev/device/es7210/es7210.c` and `es8311/es8311.c`,
 specialised to the Korvo's one configuration. Apache-2.0 is compatible with
 BSD-2-Clause for this use; the notice and a statement of what changed are at
@@ -247,9 +248,9 @@ rather than code.
 No code from these was copied verbatim. Credited because the ideas were load
 bearing, and because a reader deserves to know where to look for the original.
 
-### The node hub's front-end: papers, not code
+### The satellite hub's front-end: papers, not code
 
-`services/nodes/app/frontend.py` implements, from their publications:
+`services/satellites/app/frontend.py` implements, from their publications:
 J.-M. Valin, "On adjusting the learning rate in frequency domain echo
 cancellation with double-talk" (2007), whose Speex implementation is under
 **Copied** above; T. Gerkmann and R. C. Hendriks, "Unbiased MMSE-based noise

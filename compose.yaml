@@ -26,7 +26,9 @@
 # in whatever is already deployed. They are also what the named volumes and
 # container_names are keyed on, so renaming them would orphan the models
 # already on disk to rename a hostname nobody types. A directory is not a
-# hostname.
+# hostname. One service has been renamed since, voice-nodes to
+# voice-satellites, with its volume left under the old name; its block says
+# what that costs.
 #
 # THE OTHER REAL CHANGE HERE IS A DELETION, and it predates the monorepo. The
 # three backends had `ports: ["8000:8000"]` and friends, so anything that could
@@ -100,10 +102,11 @@ services:
       GATEWAY_TTS_URL: http://tts-stack:8001
       GATEWAY_TTS_LONG_URL: http://tts-long:8002
       GATEWAY_UI_URL: http://voice-ui:8090
-      # The node hub (services/nodes), optional. It is also where the devices'
-      # own socket, /nodes/ws, is relayed -- through this one published port,
-      # over the same certificate. Set to "" to run the stack without it.
-      GATEWAY_NODES_URL: http://voice-nodes:8003
+      # The satellite hub (services/satellites), optional. It is also where the
+      # devices' own socket, /satellites/ws, is relayed -- through this one
+      # published port, over the same certificate. Set to "" to run the stack
+      # without it.
+      GATEWAY_SATELLITES_URL: http://voice-satellites:8003
 
       # WHICH `model` STRINGS GO TO tts-long. Default: "chatterbox,tts-long".
       # Everything else -- including a name nobody recognises -- goes to
@@ -849,17 +852,28 @@ services:
     # at the health pills and find out what is still loading.
 
 
-  # THE NODE HUB. Thin audio devices -- a mic array, a speaker and a ring of
-  # lights on Wi-Fi (clients/korvo-node) -- connect to wss://<this host>:30080
-  # /nodes/ws through the gateway, are adopted here, and are told what to do.
-  # It listens as well: echo cancellation, beamforming and noise suppression
-  # on each node's microphones (numpy), wake words (openWakeWord on ONNX
-  # Runtime, CPU), an endpointer, then STT, a rule's destination and TTS on
-  # the services above. No GPU. Optional; deleting this block and setting
-  # GATEWAY_NODES_URL to "" leaves the rest of the stack unchanged.
-  voice-nodes:
-    container_name: voice-nodes
-    image: ghcr.io/gabrielbelli/calliope-nodes:v0.2.0
+  # THE SATELLITE HUB. Thin audio devices -- a mic array, a speaker and a ring
+  # of lights on Wi-Fi (clients/korvo-satellite) -- connect to
+  # wss://<this host>:30080/satellites/ws through the gateway, are adopted
+  # here, and are told what to do. It listens as well: echo cancellation,
+  # beamforming and noise suppression on each satellite's microphones (numpy),
+  # wake words (openWakeWord on ONNX Runtime, CPU), an endpointer, then STT, a
+  # rule's destination and TTS on the services above. No GPU. Optional;
+  # deleting this block and setting GATEWAY_SATELLITES_URL to "" leaves the
+  # rest of the stack unchanged.
+  #
+  # THE ONE SERVICE THAT WAS RENAMED, from voice-nodes (2026-09-25). What the
+  # rule at the top of this file protects is kept: the volume below keeps its
+  # old name, and the only thing that resolves this hostname is
+  # GATEWAY_SATELLITES_URL, in this same file. What the rename costs is the old
+  # container. An `up` without --remove-orphans leaves voice-nodes running
+  # (restart: unless-stopped) on the same volume as this one and, with MQTT
+  # set, under the same Home Assistant unique ids, so it takes the entities
+  # back each time it restarts. Deploy with --remove-orphans, or remove
+  # voice-nodes by hand, and check that it is gone (ADR 0013, "Renamed").
+  voice-satellites:
+    container_name: voice-satellites
+    image: ghcr.io/gabrielbelli/calliope-satellites:v0.2.0
     pull_policy: always
     restart: unless-stopped
     expose:
@@ -867,47 +881,62 @@ services:
     environment:
       # Where "say" and every spoken reply get their voice: tts-stack's OpenAI
       # route, asked for pcm.
-      NODES_TTS_URL: http://tts-stack:8001
-      NODES_TTS_VOICE: bm_george
+      SATELLITES_TTS_URL: http://tts-stack:8001
+      SATELLITES_TTS_VOICE: bm_george
       # Where the command after a wake word is transcribed: stt-stack's OpenAI
       # route. Unset, wake words are still heard and published, and every
       # conversation ends with routing saying there is no STT.
-      NODES_STT_URL: http://stt-stack:8000
-      # The wake words, each with its threshold (0-1, higher is stricter).
-      # hey_jarvis is in the image; another built-in name (alexa, hey_mycroft,
-      # hey_rhasspy, weather) is fetched once from openWakeWord's release into
-      # NODES_MODEL_DIR, and a file of your own there, <name>.onnx, loads by
-      # its name. "" means no wake words; the PLAY button still talks.
-      NODES_WAKE_WORDS: "hey_jarvis:0.5"
+      SATELLITES_STT_URL: http://stt-stack:8000
+      # The wake words the hub starts with, each with its threshold (higher is
+      # stricter), all on every satellite. READ ONCE: on the first start it is
+      # written to wake_words.json on the volume, and from then on the
+      # Satellites tab (PUT /satellites/wake-words) decides which words each
+      # satellite hears; editing this line changes nothing until that file is
+      # deleted. hey_jarvis is in the image; another built-in name (alexa,
+      # hey_mycroft, hey_rhasspy, weather) is fetched once from openWakeWord's
+      # release into SATELLITES_MODEL_DIR when a word first names it, and a
+      # file of your own there, <name>.onnx, loads by its name. "" means no
+      # wake words; the PLAY button still talks.
+      SATELLITES_WAKE_WORDS: "hey_jarvis:0.5"
       # On the volume, so a model fetched once is not fetched again.
-      NODES_MODEL_DIR: /data/models
+      SATELLITES_MODEL_DIR: /data/models
       # The audio front-end, on by default. "0" hands the first microphone to
       # the wake words as it arrives; for comparing, not for keeping.
-      # NODES_FRONTEND: "1"
-      # Home Assistant over MQTT: every adopted node as one device, with its
-      # switches, volume, buttons and wake words (services/nodes/README.md).
-      # Unset, there is no MQTT at all. The password is in the URL, so this
-      # belongs in the app's secret settings rather than in this file.
-      # NODES_MQTT_URL: "mqtt://calliope:password@homeassistant.lan:1883"
+      # SATELLITES_FRONTEND: "1"
+      # Home Assistant over MQTT: every adopted satellite as one device, with
+      # its switches, volume, buttons and wake words
+      # (services/satellites/README.md). Unset, there is no MQTT at all. The
+      # password is in the URL, so this belongs in the app's secret settings
+      # rather than in this file.
+      # SATELLITES_MQTT_URL: "mqtt://calliope:password@homeassistant.lan:1883"
       # The token for a routing rule of type ha_conversation, which names this
-      # variable rather than holding the token: rules.json is returned by
-      # GET /nodes/routing, and a secret in it would be one request away from
+      # variable rather than holding the token: rules.json is returned by GET
+      # /satellites/routing, and a secret in it would be one request away from
       # anyone with an API key. A long-lived access token from your Home
       # Assistant profile page; like the MQTT password, a secret setting.
-      # NODES_HA_TOKEN: "<long-lived access token>"
-    # 1 CPU and 512 MiB, measured with the image on arm64, nodes played by a
-    # script inside the container streaming four channels in real time: the
+      # SATELLITES_HA_TOKEN: "<long-lived access token>"
+    # 1 CPU and 512 MiB, measured with the image on arm64, satellites played by
+    # a script inside the container streaming four channels in real time: the
     # hub's peak resident memory was 228 MiB idle with hey_jarvis loaded, 239
-    # MiB with one node, 289 MiB with three and 326 MiB with six, every wake
-    # word heard and no microphone frame dropped. The limit that was here,
-    # 256m, is under the idle figure. Three nodes used 35-39% of a core with
-    # the script that played them counted in; six still dropped nothing.
+    # MiB with one satellite, 289 MiB with three and 326 MiB with six, every
+    # wake word heard and no microphone frame dropped. The limit that was here,
+    # 256m, is under the idle figure. Three satellites used 35-39% of a core
+    # with the script that played them counted in; six still dropped nothing.
     cpus: 1
     mem_limit: 512m
     volumes:
-      # Adopted nodes (tokens only as hashes), the routing rules, uploaded
-      # firmware images and fetched wake word models. Named, because losing
-      # it un-adopts every node in the house.
+      # Adopted satellites (tokens only as hashes), the routing rules, which
+      # wake words each satellite hears, uploaded firmware images and fetched
+      # wake word models. Named, because losing it un-adopts every satellite
+      # in the house.
+      #
+      # STILL nodes-data, AFTER THE RENAME TO SATELLITES (2026-09-25), AND ON
+      # PURPOSE. Compose keys a named volume on the project and this key and on
+      # nothing else, so a new key is a new, empty volume on the next `up`:
+      # every board back to pending, rules.json gone (routing falls back to the
+      # echo rule), wake_words.json, the firmware store and the fetched models
+      # with it. The hub's own migration (nodes.json to satellites.json) can
+      # only run on the volume that holds nodes.json.
       - nodes-data:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8003/health')"]
@@ -938,5 +967,8 @@ volumes:
   tts-long-models:
   tts-long-out:
   voices:
-  # The node hub's adoptions, rules, firmware store and wake word models.
+  # The satellite hub's adoptions, rules, firmware store and wake word models.
+  # Named for the feature's old name, which is also what the deployed volume is
+  # called: renaming the key here would hand the hub an empty one (see the
+  # voice-satellites block).
   nodes-data:

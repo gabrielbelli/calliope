@@ -1297,9 +1297,9 @@ NOT_ROUTED: dict[tuple[str, str, str], str] = {
 # reaches: voice-ui's PROXIED leaves them out on purpose. Same rule as above,
 # every entry carries its reason.
 NOT_ON_PAGE: dict[tuple[str, str, str], str] = {
-    ("nodes", "POST", "/nodes/{nid}/inject"):
-        "a test hook: a recorded clip through a node's wake word, endpoint and "
-        "routing path, for a script verifying the pipeline with nobody in "
+    ("satellites", "POST", "/satellites/{nid}/inject"):
+        "a test hook: a recorded clip through a satellite's wake word, endpoint "
+        "and routing path, for a script verifying the pipeline with nobody in "
         "earshot. A button for it on the page would be one press from a real "
         "rule acting on a clip, with Home Assistant on the other end.",
 }
@@ -1357,7 +1357,7 @@ def _declared_routes(service: str) -> set[tuple[str, str]]:
         tree = ast.parse(module.read_text(encoding="utf-8"))
         # One router per module in this estate, so its prefix is the module's.
         # ITS NAME IS WHATEVER IT IS ASSIGNED TO. This reader once knew only
-        # `router`, and services/nodes/app/router.py names its APIRouter
+        # `router`, and services/satellites/app/router.py names its APIRouter
         # `routes` (the module is already called router): its three routes
         # were invisible here, so the fence could not have said they were
         # missing from either table.
@@ -1706,7 +1706,7 @@ def test_every_backend_route_is_routed_or_named_as_unrouted():
     proxied = {(method, _pattern(path)) for method, path in _proxied_table()}
 
     unreachable: list[str] = []
-    for service in ("stt", "tts", "tts-long", "nodes"):
+    for service in ("stt", "tts", "tts-long", "satellites"):
         for method, path in sorted(_declared_routes(service)):
             if (service, method, path) in NOT_ROUTED:
                 continue
@@ -1742,7 +1742,7 @@ def test_no_allowlist_entry_points_at_nothing():
     from app import main as gateway_main
 
     backends = {(method, _pattern(path))
-                for service in ("stt", "tts", "tts-long", "nodes")
+                for service in ("stt", "tts", "tts-long", "satellites")
                 for method, path in _declared_routes(service)}
     voice_ui = {(method, _pattern(path))
                 for method, path in _declared_routes("ui")}
@@ -1821,13 +1821,66 @@ def test_the_proxied_reader_handles_an_annotated_assignment(tmp_path):
 
 
 def test_the_route_reader_follows_an_apirouter_whatever_it_is_called():
-    """services/nodes/app/router.py names its APIRouter `routes`, and a reader
-    that knew only `router` saw none of its three routes: the fence above
-    could not have reported them missing."""
-    nodes = _declared_routes("nodes")
-    for pair in (("GET", "/nodes/routing"), ("PUT", "/nodes/routing"),
-                 ("POST", "/nodes/routing/test")):
-        assert pair in nodes, f"the reader does not see {pair} in services/nodes"
+    """services/satellites/app/router.py names its APIRouter `routes`, and a
+    reader that knew only `router` saw none of its three routes: the fence
+    above could not have reported them missing."""
+    satellites = _declared_routes("satellites")
+    for pair in (("GET", "/satellites/routing"), ("PUT", "/satellites/routing"),
+                 ("POST", "/satellites/routing/test")):
+        assert pair in satellites, (
+            f"the reader does not see {pair} in services/satellites")
+
+
+async def test_the_wake_word_routes_reach_the_hub_and_are_not_taken_for_a_satellite_id(
+        monkeypatch):
+    """The page assigns wake words to satellites with a GET and a PUT on
+    /satellites/wake-words. Matched as /satellites/{nid}, the PUT would be a
+    405 here, since no PUT is routed under that pattern, and the GET would
+    only work by accident. Both have to arrive at the hub on their own path,
+    the PUT with its body intact."""
+    hub = MockBackend("voice-satellites")
+    body = {"words": [{"name": "alexa", "threshold": 0.6, "satellites": ["94b97e7b8be8"]}]}
+    async with gateway(monkeypatch, satellites=hub) as (client, _):
+        got = await client.get("/satellites/wake-words")
+        put = await client.put("/satellites/wake-words", json=body)
+    assert (got.status_code, put.status_code) == (200, 200)
+    assert [(r["method"], r["path"]) for r in hub.seen] == [
+        ("GET", "/satellites/wake-words"), ("PUT", "/satellites/wake-words")]
+    assert json.loads(hub.seen[1]["body"]) == body
+
+
+def test_a_board_on_firmware_from_before_the_rename_is_still_relayed_to_the_hub(
+        monkeypatch):
+    """The device socket was /nodes/ws until 2026-09-25, and a board in the
+    field connects there until it is updated -- over that same socket. A
+    gateway that answered only /satellites/ws would strand the board on its
+    old image with USB as the only way back. Both paths are one handler, and
+    both reach the hub's new path, which the hub answers as well as the old."""
+    from starlette.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    main = reload_gateway(monkeypatch)
+    sockets = {r.path: r.endpoint for r in main.app.routes
+               if r.path in (main.SATELLITES_SOCKET, main.LEGACY_SATELLITES_SOCKET)}
+    assert sockets == {"/satellites/ws": main.satellites_socket,
+                       "/nodes/ws": main.satellites_socket}
+
+    dialled: list[str] = []
+
+    async def no_hub(target, **_):
+        # Refused rather than faked end to end: what is under test is where
+        # each path is relayed to, and the relay itself is unchanged.
+        dialled.append(target)
+        raise OSError("no hub in a unit test")
+
+    monkeypatch.setattr(main, "ws_connect", no_hub)
+    with TestClient(main.app) as client:
+        for path in ("/nodes/ws", "/satellites/ws"):
+            with client.websocket_connect(path) as ws:
+                with pytest.raises(WebSocketDisconnect) as closed:
+                    ws.receive_text()
+            assert closed.value.code == 1013, path
+    assert dialled == ["ws://satellites.test/satellites/ws"] * 2
 
 
 @pytest.mark.parametrize("method,path", [

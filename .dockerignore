@@ -55,4 +55,4 @@ compose.yaml
 
 # Device firmware is not part of any image, and a PlatformIO build tree is
 # hundreds of megabytes of toolchain output.
-clients/korvo-node
+clients/korvo-satellite

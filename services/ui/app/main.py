@@ -189,35 +189,41 @@ PROXIED: tuple[tuple[str, str], ...] = (
     ("GET", "/glossaries/{name}"),
     ("PUT", "/glossaries/{name}"),
     ("DELETE", "/glossaries/{name}"),
-    # THE NODES TAB (services/nodes). Every route the hub answers that a person
-    # has a control for, and nothing else: the device socket /nodes/ws is not
-    # here because a browser never opens it. PATCH is the first of its method
-    # in this table, and the gateway's /ui/api passthrough carries it too.
-    ("GET", "/nodes"),
-    ("GET", "/nodes/events"),
-    ("GET", "/nodes/firmware"),
-    ("POST", "/nodes/firmware"),
-    ("DELETE", "/nodes/firmware/{sha256}"),
-    ("POST", "/nodes/ota"),
-    # The Routing card: the rules, and a typed sentence through them that
-    # plays nowhere. POST /nodes/{nid}/inject is deliberately absent: it runs a
-    # clip through a node's real rules, which is a script's job and not a
+    # THE SATELLITES TAB (services/satellites). Every route the hub answers
+    # that a person has a control for, and nothing else: the device socket
+    # /satellites/ws is not here because a browser never opens it. PATCH is the
+    # first of its method in this table, and the gateway's /ui/api passthrough
+    # carries it too.
+    ("GET", "/satellites"),
+    ("GET", "/satellites/events"),
+    ("GET", "/satellites/firmware"),
+    ("POST", "/satellites/firmware"),
+    ("DELETE", "/satellites/firmware/{sha256}"),
+    ("POST", "/satellites/ota"),
+    # The Routing card: the rules, and a typed sentence through them that plays
+    # nowhere. POST /satellites/{nid}/inject is deliberately absent: it runs a
+    # clip through a satellite's real rules, which is a script's job and not a
     # button's (NOT_ON_PAGE in services/gateway/tests/test_gateway.py).
-    ("GET", "/nodes/routing"),
-    ("PUT", "/nodes/routing"),
-    ("POST", "/nodes/routing/test"),
-    ("GET", "/nodes/{nid}"),
-    ("PATCH", "/nodes/{nid}"),
-    ("GET", "/nodes/{nid}/listen"),
-    ("POST", "/nodes/{nid}/adopt"),
-    ("POST", "/nodes/{nid}/forget"),
-    ("POST", "/nodes/{nid}/identify"),
-    ("POST", "/nodes/{nid}/reboot"),
-    ("POST", "/nodes/{nid}/lights"),
-    ("POST", "/nodes/{nid}/tone"),
-    ("POST", "/nodes/{nid}/say"),
-    ("POST", "/nodes/{nid}/flush"),
-    ("POST", "/nodes/{nid}/set-hub"),
+    ("GET", "/satellites/routing"),
+    ("PUT", "/satellites/routing"),
+    ("POST", "/satellites/routing/test"),
+    # The wake words, each with its threshold, the satellites it is assigned
+    # to and whether its model is ready; PUT replaces them all. The tab
+    # assigns words to satellites with these.
+    ("GET", "/satellites/wake-words"),
+    ("PUT", "/satellites/wake-words"),
+    ("GET", "/satellites/{nid}"),
+    ("PATCH", "/satellites/{nid}"),
+    ("GET", "/satellites/{nid}/listen"),
+    ("POST", "/satellites/{nid}/adopt"),
+    ("POST", "/satellites/{nid}/forget"),
+    ("POST", "/satellites/{nid}/identify"),
+    ("POST", "/satellites/{nid}/reboot"),
+    ("POST", "/satellites/{nid}/lights"),
+    ("POST", "/satellites/{nid}/tone"),
+    ("POST", "/satellites/{nid}/say"),
+    ("POST", "/satellites/{nid}/flush"),
+    ("POST", "/satellites/{nid}/set-hub"),
 )
 
 # Routes whose request body is an upload and must therefore never be buffered

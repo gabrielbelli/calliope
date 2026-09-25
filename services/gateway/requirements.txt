@@ -8,8 +8,9 @@
 fastapi==0.121.2
 uvicorn[standard]==0.38.0
 httpx==0.28.1
-# The client half of the /nodes/ws relay. uvicorn[standard] already installs
-# it for the server half; pinned here because this module now imports it.
+# The client half of the /satellites/ws relay. uvicorn[standard] already
+# installs it for the server half; pinned here because this module now imports
+# it.
 websockets==17.1
 
 # The OpenAI error envelope, shared with services/stt, services/tts and

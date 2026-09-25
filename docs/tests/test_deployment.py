@@ -219,7 +219,7 @@ DEAD_CLAIM = re.compile(
     re.IGNORECASE)
 
 DOCS = ("compose.yaml",
-        "services/nodes/README.md",
+        "services/satellites/README.md",
         "services/tts-long/README.md",
         "services/gateway/README.md",
         "services/ui/README.md",
@@ -267,7 +267,7 @@ def test_no_commented_out_knob_in_compose_is_read_by_nothing(compose_text, sourc
     """
     suggested = set()
     for line in compose_text.splitlines():
-        m = re.match(r'^\s*#\s*((?:TTS|GATEWAY|STT|UI|NODES|AIV|RUNLOG)_[A-Z0-9_]+):\s*"',
+        m = re.match(r'^\s*#\s*((?:TTS|GATEWAY|STT|UI|SATELLITES|AIV|RUNLOG)_[A-Z0-9_]+):\s*"',
                      line)
         if m:
             suggested.add(m.group(1))
@@ -380,34 +380,34 @@ def test_no_per_engine_key_is_set_for_an_engine_this_deployment_does_not_offer(
         f"engine they belong to.")
 
 
-# -- the node hub ------------------------------------------------------------
+# -- the satellite hub -------------------------------------------------------
 
-NODES = "voice-nodes"
-NODES_DIR = "services/nodes"
-NODES_KEY = re.compile(r"""["'](NODES_[A-Z0-9_]+)["']""")
+SATELLITES = "voice-satellites"
+SATELLITES_DIR = "services/satellites"
+SATELLITES_KEY = re.compile(r"""["'](SATELLITES_[A-Z0-9_]+)["']""")
 
 
-def test_every_setting_the_node_hub_reads_is_in_its_readme(root, compose_text):
+def test_every_setting_the_satellite_hub_reads_is_in_its_readme(root, compose_text):
     """A setting that is only in the code is found by reading the code.
 
     The hub grew nine settings in one change (wake words, the model directory,
     the front-end, STT, three for MQTT, two secret names), each read by a
     different module. The README's table is where an operator looks, so every
-    NODES_ key the service's own code reads has to be in it, and so does every
-    one compose.yaml sets or suggests for it.
+    SATELLITES_ key the service's own code reads has to be in it, and so does
+    every one compose.yaml sets or suggests for it.
     """
-    readme = (root / NODES_DIR / "README.md").read_text(encoding="utf-8")
+    readme = (root / SATELLITES_DIR / "README.md").read_text(encoding="utf-8")
     code = "\n".join(p.read_text(encoding="utf-8")
-                     for p in sorted((root / NODES_DIR / "app").glob("*.py")))
-    read = set(NODES_KEY.findall(code))
-    assert {"NODES_WAKE_WORDS", "NODES_STT_URL", "NODES_MQTT_URL"} <= read, \
+                     for p in sorted((root / SATELLITES_DIR / "app").glob("*.py")))
+    read = set(SATELLITES_KEY.findall(code))
+    assert {"SATELLITES_WAKE_WORDS", "SATELLITES_STT_URL", "SATELLITES_MQTT_URL"} <= read, \
         "the reader found none of the keys it was written for"
-    block = compose_text[compose_text.index(f"  {NODES}:"):]
+    block = compose_text[compose_text.index(f"  {SATELLITES}:"):]
     block = block[:block.index("\n\n\n")]
-    in_compose = set(re.findall(r"\b(NODES_[A-Z0-9_]+)\b", block))
+    in_compose = set(re.findall(r"\b(SATELLITES_[A-Z0-9_]+)\b", block))
     missing = sorted(k for k in read | in_compose if f"`{k}`" not in readme)
     assert not missing, (
-        f"{NODES_DIR}/README.md does not document {missing}, which the hub reads "
+        f"{SATELLITES_DIR}/README.md does not document {missing}, which the hub reads "
         "or compose.yaml sets")
 
 
@@ -420,7 +420,7 @@ def _pins(path) -> dict[str, str]:
     return pins
 
 
-def test_every_package_the_node_image_pins_is_in_the_notices_with_its_version(root):
+def test_every_package_the_satellite_image_pins_is_in_the_notices_with_its_version(root):
     """Ten packages arrived with the listening path, one of them installed in a
     second step with --no-deps, and each with its own licence: one is MPL-2.0,
     one EPL-2.0 or BSD-3-Clause, and one's models are non-commercial. The
@@ -429,7 +429,7 @@ def test_every_package_the_node_image_pins_is_in_the_notices_with_its_version(ro
     notices = (root / "THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
     pins = {}
     for name in ("requirements.txt", "requirements-nodeps.txt"):
-        pins |= _pins(root / NODES_DIR / name)
+        pins |= _pins(root / SATELLITES_DIR / name)
     assert "openwakeword" in pins and "onnxruntime" in pins, "the reader found no pins"
     rows = {m.group(1).lower(): m.group(2) for m in
             re.finditer(r"^\| *([A-Za-z0-9_.\[\]-]+) *\| *([0-9][^ |]*) *\|", notices, re.M)}
@@ -439,25 +439,25 @@ def test_every_package_the_node_image_pins_is_in_the_notices_with_its_version(ro
     assert not wrong, f"THIRD-PARTY-NOTICES.md does not list these as pinned: {wrong}"
 
 
-def test_the_node_image_tells_onnx_runtime_not_to_report_to_microsoft(root, env_of):
+def test_the_satellite_image_tells_onnx_runtime_not_to_report_to_microsoft(root, env_of):
     """onnxruntime 1.30's Linux wheel posts usage to Microsoft and keeps a
     device id unless ORT_DISABLE_TELEMETRY is set. Measured in the image: two
     connections to its collector within 15 s of a session without it, none with
     it. The image sets it for every process; the deployment must not undo it."""
-    containerfile = (root / NODES_DIR / "Containerfile").read_text(encoding="utf-8")
+    containerfile = (root / SATELLITES_DIR / "Containerfile").read_text(encoding="utf-8")
     env_block = containerfile[containerfile.rindex("\nENV "):]
     env_block = env_block[:env_block.index("\n\n")]
     assert "ORT_DISABLE_TELEMETRY=1" in env_block
-    assert env_of(NODES).get("ORT_DISABLE_TELEMETRY", "1") in ("1", "true", "yes", "on", "y")
+    assert env_of(SATELLITES).get("ORT_DISABLE_TELEMETRY", "1") in ("1", "true", "yes", "on", "y")
 
 
-def test_the_node_image_carries_the_models_attribution_beside_them(root):
+def test_the_satellite_image_carries_the_models_attribution_beside_them(root):
     """The wake word models are CC BY-NC-SA 4.0: sharing an image that carries
     them is allowed non-commercially and with attribution, and the attribution
     is a file that has to travel into the image with them."""
-    containerfile = (root / NODES_DIR / "Containerfile").read_text(encoding="utf-8")
-    notice = (root / NODES_DIR / "MODELS-NOTICE.md").read_text(encoding="utf-8")
-    assert re.search(r"^COPY services/nodes/MODELS-NOTICE\.md ", containerfile, re.M), \
+    containerfile = (root / SATELLITES_DIR / "Containerfile").read_text(encoding="utf-8")
+    notice = (root / SATELLITES_DIR / "MODELS-NOTICE.md").read_text(encoding="utf-8")
+    assert re.search(r"^COPY services/satellites/MODELS-NOTICE\.md ", containerfile, re.M), \
         "the attribution is not copied into the image"
     assert re.search(r"cp \S*MODELS-NOTICE\.md /srv/models/NOTICE\.md", containerfile), \
         "the attribution does not land beside the models"
