@@ -394,6 +394,7 @@ class Voice:
 
     def describe(self) -> dict:
         return {"available": wakewords_config.available(self.model_dir), "words": self.views(),
+                "custom": wakewords_config.custom(self.model_dir),
                 "load_error": self.assignment.load_error}
 
     def health(self) -> dict:
@@ -1532,6 +1533,39 @@ async def put_wake_words(body: WakeWordsBody) -> dict:
         for w in words) or "none")
     hub.spawn(hub.voice.reconcile(), name="wake-words")
     return hub.voice.describe()
+
+
+@app.post("/satellites/wake-words/models")
+async def upload_wake_word_model(request: Request,
+                                 name: str = Query(..., max_length=64)) -> dict:
+    """Add (or replace) a custom wake word: the .onnx as the raw body. It is
+    checked to be an openWakeWord classifier before it is written, then
+    offered in `available` like a built-in and assigned the same way. A
+    replaced model is picked up by every satellite that listens for it."""
+    data = await request.body()
+    try:
+        wakewords_config.check_model(name, data)
+    except ValueError as e:
+        raise ApiError(422, str(e), code="invalid_wake_word_model") from None
+    d = hub.voice.model_dir
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / f".{name}.onnx.upload"
+    tmp.write_bytes(data)
+    os.replace(tmp, d / f"{name}.onnx")
+    log.info("custom wake word model %s stored (%d bytes)", name, len(data))
+    hub.spawn(hub.voice.reconcile(), name="wake-words")
+    return hub.voice.describe()
+
+
+@app.delete("/satellites/wake-words/models/{name}")
+async def delete_wake_word_model(name: str) -> Response:
+    if name not in wakewords_config.custom(hub.voice.model_dir):
+        raise ApiError(404, f"no custom wake word model named {name!r}", code="not_found")
+    if name in hub.voice.assignment.thresholds():
+        raise ApiError(409, f"{name!r} is still a wake word; remove it from the list first",
+                       code="wake_word_in_use")
+    (hub.voice.model_dir / f"{name}.onnx").unlink(missing_ok=True)
+    return Response(status_code=204)
 
 
 @app.get("/satellites/firmware")

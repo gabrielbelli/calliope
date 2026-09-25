@@ -257,3 +257,42 @@ def seed_words(spec: str) -> list[Word]:
     # The same rules the file is loaded by, so a seed can never write a file
     # the next start refuses (a name like "../x" parses as a name above).
     return check([asdict(w) for w in words])
+
+
+# ---- custom models --------------------------------------------------------
+
+MAX_MODEL_BYTES = 5 * 1024 * 1024   # openWakeWord classifiers are ~0.2-1 MB
+
+
+def custom(model_dir: str | Path) -> list[str]:
+    """The names in available() that are someone's own <name>.onnx, not a
+    built-in: the ones that can be uploaded over and deleted."""
+    return [n for n in available(model_dir) if n not in wakeword.MODELS]
+
+
+def check_model(name: str, data: bytes) -> None:
+    """Refuse anything that is not an openWakeWord classifier before it lands
+    in the model directory, where the next detector build would load it and
+    fail for every satellite at once. Raises ValueError saying why."""
+    if not wakeword.NAME.match(name) or name == PTT:
+        raise ValueError(f"{name!r} is not a usable wake word name: letters, digits, _ and - only")
+    if name in wakeword.MODELS:
+        raise ValueError(f"{name!r} is a built-in model; give your own another name")
+    if f"{name}.onnx" in wakeword.FEATURES:
+        raise ValueError(f"{name!r} is one of the shared feature models")
+    if not data:
+        raise ValueError("empty body: send the .onnx file as the request body")
+    if len(data) > MAX_MODEL_BYTES:
+        raise ValueError(f"{len(data)} bytes; a wake word model is under {MAX_MODEL_BYTES}")
+    import onnxruntime as ort
+
+    try:
+        sess = ort.InferenceSession(data, providers=["CPUExecutionProvider"])
+    except Exception as e:  # onnxruntime raises its own types for a bad graph
+        raise ValueError(f"not an ONNX model onnxruntime can load: {e}") from None
+    inputs = sess.get_inputs()
+    shape = list(inputs[0].shape) if inputs else []
+    # An openWakeWord classifier reads 16 frames of the 96-wide embedding.
+    if len(inputs) != 1 or shape[-2:] != [16, 96]:
+        raise ValueError(f"not an openWakeWord classifier: its input is {shape}, "
+                         "expected [batch, 16, 96]")

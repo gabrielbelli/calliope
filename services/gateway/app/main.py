@@ -1197,6 +1197,8 @@ SATELLITES_PATHS = (
     # /satellites/{nid} for the same reason, PUT again having no twin there.
     ("GET", "/satellites/wake-words"),
     ("PUT", "/satellites/wake-words"),
+    ("POST", "/satellites/wake-words/models"),
+    ("DELETE", "/satellites/wake-words/models/{name}"),
     ("GET", "/satellites/{nid}"),
     ("PATCH", "/satellites/{nid}"),
     ("GET", "/satellites/{nid}/listen"),

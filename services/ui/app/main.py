@@ -212,6 +212,8 @@ PROXIED: tuple[tuple[str, str], ...] = (
     # assigns words to satellites with these.
     ("GET", "/satellites/wake-words"),
     ("PUT", "/satellites/wake-words"),
+    ("POST", "/satellites/wake-words/models"),
+    ("DELETE", "/satellites/wake-words/models/{name}"),
     ("GET", "/satellites/{nid}"),
     ("PATCH", "/satellites/{nid}"),
     ("GET", "/satellites/{nid}/listen"),

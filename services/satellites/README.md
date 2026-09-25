@@ -88,6 +88,8 @@ name.
 | `GET /satellites/events` | Server-sent events: buttons, wake words, routing, status, updates, satellites coming and going, a wake word's model becoming ready |
 | `GET /satellites/wake-words` | `{"available", "words", "load_error"}`: the names the hub can load, and each word with its `threshold`, `satellites`, `state` and `error`. [Wake words](#wake-words). |
 | `PUT /satellites/wake-words` | `{"words": [{"name", "threshold", "satellites"}]}`: replace them all, live. A bad set is a 422 and the old one stays. |
+| `POST /satellites/wake-words/models?name=` | A custom wake word: the `.onnx` as the raw body, checked to be an openWakeWord classifier (input `[batch, 16, 96]`, under 5 MB) before it is written. Then offered in `available` and assigned like a built-in. |
+| `DELETE /satellites/wake-words/models/{name}` | Only a custom model, and only once no wake word uses it (409 otherwise). |
 | `GET /satellites/{id}` | One satellite |
 | `PATCH /satellites/{id}` | `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `local_volume_buttons`, `lights_enabled`, `buttons` |
 | `POST /satellites/{id}/adopt` | `{"name": "..."}` |

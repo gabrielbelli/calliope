@@ -585,3 +585,44 @@ def test_a_recorded_hey_jarvis_is_heard_only_on_the_satellite_it_is_assigned_to(
     assert bedroom["heard"] is None
     assert kitchen["heard"]["wake_word"] == "hey_jarvis" and kitchen["heard"]["score"] >= 0.5
     assert kitchen["outcome"]["transcript"] == "what time is it"
+
+
+# ---- custom models: uploaded, offered, assigned, deleted -------------------------
+
+
+def test_a_custom_model_is_offered_and_can_be_assigned_like_a_built_in(model_dir, client, app):
+    """The user's own words (hey_claude and the like) are trained elsewhere
+    and uploaded; once in, they are wake words like any other."""
+    body = (model_dir / wakeword.MODELS["hey_jarvis"][0]).read_bytes()
+    r = client.post("/satellites/wake-words/models", params={"name": "hey_claude"}, content=body)
+    assert r.status_code == 200, r.text
+    assert "hey_claude" in r.json()["available"] and r.json()["custom"] == ["hey_claude"]
+    assert (app.hub.voice.model_dir / "hey_claude.onnx").read_bytes() == body
+
+
+def test_a_file_that_is_not_a_wake_word_classifier_never_reaches_the_model_directory(client, app):
+    """The next detector build loads every model in the directory; one bad
+    file there would stop wake words on every satellite at once."""
+    for name, body in (("hey_claude", b"not onnx at all"), ("hey_claude", b"")):
+        r = client.post("/satellites/wake-words/models", params={"name": name}, content=body)
+        assert r.status_code == 422
+    assert not list(app.hub.voice.model_dir.glob("hey_claude*"))
+
+
+def test_a_built_in_name_cannot_be_overwritten(model_dir, client):
+    body = (model_dir / wakeword.MODELS["hey_jarvis"][0]).read_bytes()
+    r = client.post("/satellites/wake-words/models", params={"name": "hey_jarvis"}, content=body)
+    assert r.status_code == 422 and "built-in" in r.json()["error"]["message"]
+
+
+def test_a_custom_model_still_in_use_cannot_be_deleted(model_dir, client, app):
+    body = (model_dir / wakeword.MODELS["hey_jarvis"][0]).read_bytes()
+    client.post("/satellites/wake-words/models", params={"name": "hey_claude"}, content=body)
+    words = client.get("/satellites/wake-words").json()["words"]
+    put = [{k: w[k] for k in ("name", "threshold", "satellites")} for w in words]
+    put.append({"name": "hey_claude", "threshold": 0.5, "satellites": ["*"]})
+    assert client.put("/satellites/wake-words", json={"words": put}).status_code == 200
+    assert client.delete("/satellites/wake-words/models/hey_claude").status_code == 409
+    client.put("/satellites/wake-words", json={"words": put[:-1]})
+    assert client.delete("/satellites/wake-words/models/hey_claude").status_code == 204
+    assert "hey_claude" not in client.get("/satellites/wake-words").json()["available"]
