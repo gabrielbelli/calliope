@@ -1,0 +1,48 @@
+say:
+  target:
+    entity:
+      integration: calliope
+  fields:
+    text:
+      required: true
+      example: "Dinner is ready."
+      selector:
+        text:
+          multiline: true
+    voice:
+      example: "pf_dora"
+      selector:
+        text:
+
+tone:
+  target:
+    entity:
+      integration: calliope
+  fields:
+    frequency:
+      default: 440
+      selector:
+        number:
+          min: 50
+          max: 8000
+          step: 1
+          unit_of_measurement: Hz
+          mode: box
+    seconds:
+      default: 1
+      selector:
+        number:
+          min: 0.05
+          max: 10
+          step: 0.05
+          unit_of_measurement: s
+
+push_to_talk:
+  target:
+    entity:
+      integration: calliope
+  fields:
+    wake_word:
+      example: "hey_jarvis"
+      selector:
+        text:

@@ -1,0 +1,53 @@
+{
+  "entity": {
+    "event": {
+      "voice": {
+        "default": "mdi:account-voice"
+      }
+    },
+    "sensor": {
+      "last_command": {
+        "default": "mdi:text-to-speech"
+      },
+      "last_wake_word": {
+        "default": "mdi:account-voice"
+      }
+    },
+    "switch": {
+      "microphone": {
+        "default": "mdi:microphone",
+        "state": {
+          "off": "mdi:microphone-off"
+        }
+      },
+      "speaker": {
+        "default": "mdi:speaker",
+        "state": {
+          "off": "mdi:speaker-off"
+        }
+      },
+      "lights": {
+        "default": "mdi:led-on",
+        "state": {
+          "off": "mdi:led-off"
+        }
+      }
+    },
+    "number": {
+      "volume": {
+        "default": "mdi:volume-high"
+      }
+    }
+  },
+  "services": {
+    "say": {
+      "service": "mdi:account-voice"
+    },
+    "tone": {
+      "service": "mdi:sine-wave"
+    },
+    "push_to_talk": {
+      "service": "mdi:microphone-message"
+    }
+  }
+}

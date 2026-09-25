@@ -1,0 +1,210 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Conectar ao Calliope",
+        "description": "O endereço do gateway do Calliope: a porta que serve a API e a página.",
+        "data": {
+          "url": "URL",
+          "api_key": "Chave de API",
+          "verify_ssl": "Verificar o certificado TLS"
+        },
+        "data_description": {
+          "url": "Por exemplo {example_url}",
+          "api_key": "Só se o gateway definir GATEWAY_API_KEYS. Deixe vazio para um gateway sem chave.",
+          "verify_ssl": "Desative só para um certificado autoassinado."
+        }
+      },
+      "reauth_confirm": {
+        "title": "O Calliope recusou a chave de API",
+        "description": "Informe uma chave aceita pelo GATEWAY_API_KEYS do gateway.",
+        "data": {
+          "api_key": "Chave de API"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "O Calliope não respondeu nesse endereço.",
+      "invalid_auth": "O Calliope recusou a chave de API.",
+      "invalid_url": "Informe uma URL que comece com http:// ou https://.",
+      "not_calliope": "Algo respondeu, mas não é um gateway do Calliope."
+    },
+    "abort": {
+      "already_configured": "Este gateway do Calliope já está configurado.",
+      "reauth_successful": "A nova chave funciona."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Conexão com o Calliope",
+        "data": {
+          "url": "URL",
+          "api_key": "Chave de API",
+          "verify_ssl": "Verificar o certificado TLS"
+        },
+        "data_description": {
+          "url": "Por exemplo {example_url}",
+          "api_key": "Só se o gateway definir GATEWAY_API_KEYS. Deixe vazio para um gateway sem chave.",
+          "verify_ssl": "Desative só para um certificado autoassinado."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "O Calliope não respondeu nesse endereço.",
+      "invalid_auth": "O Calliope recusou a chave de API.",
+      "invalid_url": "Informe uma URL que comece com http:// ou https://.",
+      "not_calliope": "Algo respondeu, mas não é um gateway do Calliope."
+    }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "wake_word": "Palavra de ativação {subtype} ouvida",
+      "trigger_word": "Palavra de gatilho {subtype} ouvida",
+      "command": "Comando transcrito",
+      "button_press": "{subtype} pressionado",
+      "button_release": "{subtype} solto",
+      "conversation_started": "Conversa iniciada",
+      "conversation_ended": "Conversa encerrada"
+    },
+    "trigger_subtype": {
+      "play": "Botão PLAY",
+      "set": "Botão SET",
+      "mode": "Botão MODE",
+      "rec": "Botão REC",
+      "vol_up": "Botão VOL+",
+      "vol_down": "Botão VOL-",
+      "hey_jarvis": "Hey Jarvis",
+      "hey_mycroft": "Hey Mycroft",
+      "hey_rhasspy": "Hey Rhasspy",
+      "alexa": "Alexa",
+      "weather": "Weather",
+      "ptt": "apertar para falar"
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "online": {
+        "name": "Conectado"
+      }
+    },
+    "event": {
+      "voice": {
+        "name": "Voz",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "wake_word": "Palavra de ativação",
+              "trigger_word": "Palavra de gatilho",
+              "command": "Comando",
+              "button_press": "Botão pressionado",
+              "button_release": "Botão solto",
+              "conversation_started": "Conversa iniciada",
+              "conversation_ended": "Conversa encerrada"
+            }
+          }
+        }
+      }
+    },
+    "number": {
+      "volume": {
+        "name": "Volume"
+      }
+    },
+    "sensor": {
+      "wifi_signal": {
+        "name": "Sinal do Wi-Fi"
+      },
+      "last_command": {
+        "name": "Último comando"
+      },
+      "last_wake_word": {
+        "name": "Última palavra de ativação"
+      }
+    },
+    "stt": {
+      "parakeet": {
+        "name": "Parakeet"
+      },
+      "whisper": {
+        "name": "Whisper"
+      }
+    },
+    "switch": {
+      "microphone": {
+        "name": "Microfone"
+      },
+      "speaker": {
+        "name": "Alto-falante"
+      },
+      "lights": {
+        "name": "Luzes"
+      }
+    },
+    "tts": {
+      "kokoro": {
+        "name": "Kokoro"
+      }
+    }
+  },
+  "exceptions": {
+    "hub_refused": {
+      "message": "O hub do Calliope recusou a alteração: {error}"
+    },
+    "satellite_refused": {
+      "message": "O Calliope não conseguiu fazer isso em {satellite}: {error}"
+    },
+    "no_satellites": {
+      "message": "O alvo não contém nenhum satélite do Calliope."
+    },
+    "push_to_talk_unsupported": {
+      "message": "Este hub do Calliope ainda não tem a rota de apertar para falar (POST /satellites/ID/ptt). Pressione PLAY no satélite ou atualize o hub."
+    },
+    "tts_failed": {
+      "message": "O Calliope não conseguiu sintetizar a fala: {error}"
+    },
+    "no_voice": {
+      "message": "O Calliope não tem voz para {language}."
+    }
+  },
+  "services": {
+    "say": {
+      "name": "Falar",
+      "description": "Fala um texto nos satélites, com o Kokoro, pelo hub.",
+      "fields": {
+        "text": {
+          "name": "Texto",
+          "description": "O que falar. No máximo 2000 caracteres."
+        },
+        "voice": {
+          "name": "Voz",
+          "description": "Uma voz do Kokoro, por exemplo pf_dora ou bm_george. Vazio usa a voz padrão do hub."
+        }
+      }
+    },
+    "tone": {
+      "name": "Tom",
+      "description": "Toca um tom senoidal nos satélites.",
+      "fields": {
+        "frequency": {
+          "name": "Frequência",
+          "description": "Em hertz, de 50 a 8000."
+        },
+        "seconds": {
+          "name": "Duração",
+          "description": "Em segundos, até 10."
+        }
+      }
+    },
+    "push_to_talk": {
+      "name": "Apertar para falar",
+      "description": "Começa a ouvir nos satélites, como um toque em PLAY.",
+      "fields": {
+        "wake_word": {
+          "name": "Palavra de ativação",
+          "description": "Ouve como se esta palavra de ativação tivesse sido dita, para valer o modo e a ação dela. Vazio usa os do apertar para falar."
+        }
+      }
+    }
+  }
+}

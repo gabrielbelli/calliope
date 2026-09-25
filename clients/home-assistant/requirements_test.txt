@@ -1,0 +1,10 @@
+# Pinned to Home Assistant 2026.8.1, the version the integration targets.
+# pytest-homeassistant-custom-component 0.13.355 pins homeassistant==2026.8.1.
+pytest-homeassistant-custom-component==0.13.355
+# Requirements of the core components the tests load (their manifests in 2026.8.1).
+mutagen==1.48.1
+ha-ffmpeg==3.2.2
+pymicro-vad==1.0.1
+pyspeex-noise==1.0.2
+hassil==3.11.0
+home-assistant-intents==2026.7.30

@@ -1,0 +1,210 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Calliope",
+        "description": "The address of the Calliope gateway: the port that serves both the API and the page.",
+        "data": {
+          "url": "URL",
+          "api_key": "API key",
+          "verify_ssl": "Verify the TLS certificate"
+        },
+        "data_description": {
+          "url": "For example {example_url}",
+          "api_key": "Only if the gateway sets GATEWAY_API_KEYS. Leave empty for a keyless gateway.",
+          "verify_ssl": "Turn off only for a self-signed certificate."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Calliope refused the API key",
+        "description": "Enter a key that the gateway's GATEWAY_API_KEYS accepts.",
+        "data": {
+          "api_key": "API key"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Calliope did not answer at that address.",
+      "invalid_auth": "Calliope refused the API key.",
+      "invalid_url": "Enter a URL that starts with http:// or https://.",
+      "not_calliope": "Something answered, but it is not a Calliope gateway."
+    },
+    "abort": {
+      "already_configured": "This Calliope gateway is already set up.",
+      "reauth_successful": "The new key works."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Calliope connection",
+        "data": {
+          "url": "URL",
+          "api_key": "API key",
+          "verify_ssl": "Verify the TLS certificate"
+        },
+        "data_description": {
+          "url": "For example {example_url}",
+          "api_key": "Only if the gateway sets GATEWAY_API_KEYS. Leave empty for a keyless gateway.",
+          "verify_ssl": "Turn off only for a self-signed certificate."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Calliope did not answer at that address.",
+      "invalid_auth": "Calliope refused the API key.",
+      "invalid_url": "Enter a URL that starts with http:// or https://.",
+      "not_calliope": "Something answered, but it is not a Calliope gateway."
+    }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "wake_word": "Wake word {subtype} heard",
+      "trigger_word": "Trigger word {subtype} heard",
+      "command": "Command transcribed",
+      "button_press": "{subtype} pressed",
+      "button_release": "{subtype} released",
+      "conversation_started": "Conversation started",
+      "conversation_ended": "Conversation ended"
+    },
+    "trigger_subtype": {
+      "play": "PLAY button",
+      "set": "SET button",
+      "mode": "MODE button",
+      "rec": "REC button",
+      "vol_up": "VOL+ button",
+      "vol_down": "VOL- button",
+      "hey_jarvis": "Hey Jarvis",
+      "hey_mycroft": "Hey Mycroft",
+      "hey_rhasspy": "Hey Rhasspy",
+      "alexa": "Alexa",
+      "weather": "Weather",
+      "ptt": "push-to-talk"
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "online": {
+        "name": "Online"
+      }
+    },
+    "event": {
+      "voice": {
+        "name": "Voice",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "wake_word": "Wake word",
+              "trigger_word": "Trigger word",
+              "command": "Command",
+              "button_press": "Button pressed",
+              "button_release": "Button released",
+              "conversation_started": "Conversation started",
+              "conversation_ended": "Conversation ended"
+            }
+          }
+        }
+      }
+    },
+    "number": {
+      "volume": {
+        "name": "Volume"
+      }
+    },
+    "sensor": {
+      "wifi_signal": {
+        "name": "Wi-Fi signal"
+      },
+      "last_command": {
+        "name": "Last command"
+      },
+      "last_wake_word": {
+        "name": "Last wake word"
+      }
+    },
+    "stt": {
+      "parakeet": {
+        "name": "Parakeet"
+      },
+      "whisper": {
+        "name": "Whisper"
+      }
+    },
+    "switch": {
+      "microphone": {
+        "name": "Microphone"
+      },
+      "speaker": {
+        "name": "Speaker"
+      },
+      "lights": {
+        "name": "Lights"
+      }
+    },
+    "tts": {
+      "kokoro": {
+        "name": "Kokoro"
+      }
+    }
+  },
+  "exceptions": {
+    "hub_refused": {
+      "message": "The Calliope hub refused the change: {error}"
+    },
+    "satellite_refused": {
+      "message": "Calliope could not do that on {satellite}: {error}"
+    },
+    "no_satellites": {
+      "message": "The target contains no Calliope satellite."
+    },
+    "push_to_talk_unsupported": {
+      "message": "This Calliope hub has no push-to-talk route yet (POST /satellites/ID/ptt). Press PLAY on the satellite, or update the hub."
+    },
+    "tts_failed": {
+      "message": "Calliope could not synthesise the speech: {error}"
+    },
+    "no_voice": {
+      "message": "Calliope has no voice for {language}."
+    }
+  },
+  "services": {
+    "say": {
+      "name": "Say",
+      "description": "Speaks text on satellites, with Kokoro through the hub.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "What to say. At most 2000 characters."
+        },
+        "voice": {
+          "name": "Voice",
+          "description": "A Kokoro voice, for example bm_george or pf_dora. Empty uses the hub's default voice."
+        }
+      }
+    },
+    "tone": {
+      "name": "Tone",
+      "description": "Plays a sine tone on satellites.",
+      "fields": {
+        "frequency": {
+          "name": "Frequency",
+          "description": "In hertz, 50 to 8000."
+        },
+        "seconds": {
+          "name": "Duration",
+          "description": "In seconds, up to 10."
+        }
+      }
+    },
+    "push_to_talk": {
+      "name": "Push to talk",
+      "description": "Starts listening on satellites, as a press of PLAY does.",
+      "fields": {
+        "wake_word": {
+          "name": "Wake word",
+          "description": "Listen as if this wake word had been heard, so its mode and action apply. Empty uses push-to-talk's own."
+        }
+      }
+    }
+  }
+}
