@@ -96,7 +96,8 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator, NamedTuple
 
 import httpx
-from fastapi import FastAPI, Request
+from websockets.asyncio.client import connect as ws_connect
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import Response, StreamingResponse
 from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -1154,6 +1155,114 @@ for _method, _path in UI_PATHS:
                       include_in_schema=False)
 
 
+# ------------------------------------------------------------------- nodes --
+#
+# voice-nodes, the hub for thin audio devices (clients/korvo-node). Optional:
+# GATEWAY_NODES_URL="" leaves every route below answering 503 and keeps it out
+# of /health, so a deployment without the hub is unchanged.
+#
+# Like everything else here the paths are flat and explicit, and the device
+# socket is the one WebSocket this gateway relays.
+NODES = Backend(
+    name="voice-nodes",
+    url=os.getenv("GATEWAY_NODES_URL", "http://voice-nodes:8003").rstrip("/"),
+    # 120 s: the slowest route is /nodes/{id}/say, which waits for Kokoro, and
+    # /nodes/{id}/listen, which records for up to 60 s by design.
+    read_timeout=float(os.getenv("GATEWAY_NODES_TIMEOUT", "120")),
+    timeout_help="A listen records for as long as it was asked to, up to 60 s; "
+                 "a say waits for the whole sentence to be synthesised. Ask "
+                 "for less.",
+)
+
+NODES_PATHS = (
+    ("GET", "/nodes"),
+    ("GET", "/nodes/events"),
+    ("GET", "/nodes/firmware"),
+    ("POST", "/nodes/firmware"),
+    ("DELETE", "/nodes/firmware/{sha256}"),
+    ("POST", "/nodes/ota"),
+    ("GET", "/nodes/{nid}"),
+    ("PATCH", "/nodes/{nid}"),
+    ("GET", "/nodes/{nid}/listen"),
+    *(("POST", f"/nodes/{{nid}}/{action}") for action in (
+        "adopt", "forget", "identify", "reboot", "lights", "tone", "say",
+        "flush", "set-hub")),
+)
+
+
+async def _to_nodes(request: Request) -> Response:
+    if not NODES.url:
+        return _unreachable(NODES)
+    streaming = request.method in ("POST", "PUT", "PATCH")
+    return await _proxy(request, NODES,
+                        content=request.stream() if streaming else None)
+
+
+for _method, _path in NODES_PATHS:
+    app.add_api_route(_path, _to_nodes, methods=[_method],
+                      include_in_schema=False)
+
+
+@app.websocket("/nodes/ws")
+async def nodes_socket(client: WebSocket) -> None:
+    """Relay one device connection to voice-nodes, frame for frame.
+
+    NOT BEHIND GATEWAY_API_KEYS, deliberately, and the key middleware could not
+    see it anyway: it is an http middleware and this is a websocket scope. A
+    device is never given a gateway key -- one baked into firmware would be in
+    every flash dump -- so what a connection may do is decided by voice-nodes,
+    by the token it issued on adoption. An unadopted device can say hello and
+    be told "pending"; nothing else passes until someone adopts it through the
+    authenticated routes above.
+    """
+    if not NODES.url:
+        await client.close(code=1013)
+        return
+    await client.accept()
+    peer = client.client.host if client.client else ""
+    target = NODES.url.replace("http", "ws", 1) + "/nodes/ws"
+    try:
+        upstream = await ws_connect(
+            target, additional_headers={"X-Forwarded-For": peer},
+            open_timeout=CONNECT_TIMEOUT, max_size=2**20,
+            # The device pings this socket and uvicorn answers; the hop to
+            # voice-nodes is a container on the same network.
+            ping_interval=None)
+    except (OSError, TimeoutError) as exc:
+        log.warning("nodes: cannot reach %s for %s: %s", target, peer, exc)
+        await client.close(code=1013)
+        return
+
+    async def up() -> None:
+        while True:
+            msg = await client.receive()
+            if msg["type"] == "websocket.disconnect":
+                return
+            if msg.get("bytes") is not None:
+                await upstream.send(msg["bytes"])
+            elif msg.get("text") is not None:
+                await upstream.send(msg["text"])
+
+    async def down() -> None:
+        async for msg in upstream:
+            if isinstance(msg, bytes):
+                await client.send_bytes(msg)
+            else:
+                await client.send_text(msg)
+
+    tasks = [asyncio.create_task(up()), asyncio.create_task(down())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            t.cancel()
+        await upstream.close()
+        try:
+            await client.close()
+        except RuntimeError:
+            pass  # already closed by the device
+
+
 # --------------------------------------------------------------- long jobs --
 #
 # Flat and unprefixed, which is load-bearing: tts-long's 202 carries
@@ -1329,6 +1438,9 @@ async def health() -> Response:
     """
     stt, tts, long = await asyncio.gather(_probe(STT), _probe(TTS), _probe(LONG))
     backends = {"stt": stt, "tts": tts, "tts_long": long}
+    # The hub is optional; configured, it counts like any other backend.
+    if NODES.url:
+        backends["nodes"] = await _probe(NODES)
     # `ok` only if all three answered. A backend that answered 200 while still
     # loading its model is still `ok` here — it answered, and its own body
     # says "loading" for anyone reading past the first field.

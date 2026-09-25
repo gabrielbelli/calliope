@@ -1,0 +1,38 @@
+# voice-nodes: the hub for thin audio devices (clients/korvo-node).
+#
+# Build from the repository root, like every image here, because
+# packages/common is a path dependency and must be inside the context:
+#
+#   docker build -f services/nodes/Containerfile -t calliope-nodes .
+#
+# NO MODEL, NO GPU, NO SUBPROCESS. The image is fastapi, uvicorn, httpx and
+# numpy (for the test tone and the 24 -> 48 kHz resample of Kokoro's output).
+# State is one JSON file and the uploaded firmware images, on the /data volume.
+#
+# No HEALTHCHECK here, for the reason the other Containerfiles give: CI builds
+# OCI images with buildah, which drops it. The check lives in compose.yaml.
+FROM python:3.13-slim-trixie
+
+# setpriv, for voice-entrypoint.sh to drop to uid 1000 after the chown.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends util-linux \
+ && rm -rf /var/lib/apt/lists/* \
+ && command -v setpriv
+
+WORKDIR /srv
+COPY packages/common/ ./packages/common/
+COPY services/nodes/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY services/nodes/app/ ./app/
+
+ENV NODES_DATA_DIR=/data \
+    VOICE_CHOWN_DIRS=/data \
+    VOICE_TLS_PREFIX=NODES \
+    PYTHONUNBUFFERED=1
+
+RUN useradd --create-home --uid 1000 nodes
+VOLUME ["/data"]
+EXPOSE 8003
+ENTRYPOINT ["voice-entrypoint.sh"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8003"]

@@ -1,0 +1,5 @@
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+httpx==0.28.1
+numpy==2.3.4
+./packages/common[audio]
