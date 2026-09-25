@@ -1277,6 +1277,12 @@ details>summary:active{opacity:.72}
   font-variant-numeric:tabular-nums;max-height:14rem;overflow:auto}
 .nodeevents li{padding:2px 0;color:var(--dim)}
 .nodeevents li b{color:var(--ink);font-weight:600}
+/* The rules are the JSON the hub stores, so they are edited as code is. */
+#routetext{font-family:var(--mono);min-height:12em}
+#routecard .grow{flex:1 1 16rem}
+#routecard .grow input{width:100%}
+.node .node-buttonsfield{flex:1 1 20rem}
+.node .node-buttonsfield input{width:100%;font-family:var(--mono)}
 </style>
 </head>
 <body>
@@ -2189,6 +2195,37 @@ details>summary:active{opacity:.72}
       </div>
     </div>
 
+    <!-- ROUTING: what the hub does with the sentence after a wake word
+         (services/nodes/app/router.py). The rules are edited as the JSON the
+         hub stores: a rule is small, every field is in the nodes README, and a
+         form per destination type would be four forms for one list. The hub
+         validates the whole set on PUT, answers 422 naming the field, and keeps
+         the old rules. No secret is ever in here: a rule names an environment
+         variable, and the hub says only whether it is set. Test runs a typed
+         sentence through the rules and plays nothing on any node. -->
+    <div class="card" id="routecard" hidden>
+      <h2 class="tight">Routing</h2>
+      <label for="routetext">Rules</label>
+      <textarea id="routetext" spellcheck="false" autocomplete="off"
+                autocapitalize="off"></textarea>
+      <div class="actions">
+        <button class="primary small" id="routesave" type="button">Save</button>
+        <span class="spacer"></span>
+        <span class="hint" id="routeenv"></span>
+      </div>
+      <div id="routenote" aria-live="polite"></div>
+      <div class="row">
+        <div class="tight"><label for="routenode">Node</label>
+          <input type="text" id="routenode" maxlength="64" placeholder="kitchen"></div>
+        <div class="tight"><label for="routeword">Wake word</label>
+          <input type="text" id="routeword" maxlength="64" value="hey_jarvis"></div>
+        <div class="grow"><label for="routesay">Sentence</label>
+          <input type="text" id="routesay" maxlength="500" placeholder="what time is it"></div>
+        <button class="small" id="routetest" type="button">Test</button>
+      </div>
+      <div id="routeresult" aria-live="polite"></div>
+    </div>
+
     <div class="card" id="fwcard" hidden>
       <h2 class="tight">Firmware</h2>
       <div class="row">
@@ -2198,6 +2235,13 @@ details>summary:active{opacity:.72}
           <input type="text" id="fwversion" maxlength="64" placeholder="e.g. v0.2.0"></div>
         <div class="tight"><label for="fwmodel">Model</label>
           <input type="text" id="fwmodel" maxlength="64" value="esp32-korvo-v1.1"></div>
+        <!-- A node built with a signing key installs only signed images, and
+             refuses an unsigned one at the end of the transfer. The signature
+             is made on the developer's machine (clients/korvo-node/scripts),
+             never here: the page only carries it. -->
+        <div class="tight"><label for="fwsig">Signature</label>
+          <input type="text" id="fwsig" maxlength="200" placeholder="unsigned" spellcheck="false"
+                 autocomplete="off"></div>
         <button class="small" id="fwupload" type="button">Upload</button>
       </div>
       <div id="fwlist"></div>
@@ -2208,7 +2252,7 @@ details>summary:active{opacity:.72}
 
     <div class="card" id="evcard" hidden>
       <h2 class="tight">Events</h2>
-      <div class="hint">Button presses, updates and nodes coming and going, newest first.</div>
+      <div class="hint">Buttons, wake words, routing, updates and nodes coming and going, newest first.</div>
       <ol class="nodeevents" id="nodeevents"></ol>
     </div>
   </section>
@@ -3590,7 +3634,7 @@ function chosenGlossaries() {
    not at all otherwise. Cards are built once per node and updated in place,
    so a poll never takes a slider out from under a finger or empties a box
    somebody is typing in. */
-const NODES = { cards: new Map(), timer: null, events: null };
+const NODES = { cards: new Map(), timer: null, events: null, routingLoaded: false };
 const JSON_BODY = { "Content-Type": "application/json" };
 
 function nodesOpen() { const p = $("tab-nodes"); return !!p && !p.hidden; }
@@ -3604,12 +3648,14 @@ async function nodesRefresh() {
     nodesRender(n.nodes);
     firmwareRender(f.firmware);
     nodesListen();
+    if (!NODES.routingLoaded) routingLoad();
   } catch (e) {
     $("nodesnone").textContent = (e.status === 404 || e.status === 503)
       ? "This deployment has no node hub: voice-nodes is not running."
       : `The node hub did not answer: ${e.message}`;
     $("nodesnone").hidden = false;
     $("nodesman").hidden = $("fwcard").hidden = $("evcard").hidden = true;
+    $("routecard").hidden = true;
   }
   if (nodesOpen()) NODES.timer = setTimeout(nodesRefresh, 3000);
 }
@@ -3666,6 +3712,11 @@ function nodeCard(id) {
         <button class="small" data-act="tone" type="button">Tone</button>
         <button class="small" data-act="listen" type="button">Listen 5 s</button>
       </div>
+      <div class="row">
+        <div class="node-buttonsfield"><label>Buttons</label>
+          <input type="text" class="node-buttons" maxlength="1000" spellcheck="false"
+                 autocomplete="off" placeholder="play=ptt set=stop"></div>
+      </div>
       <audio class="node-audio" controls hidden></audio>
       <div class="row">
         <div class="tight"><label>Lights</label>
@@ -3692,6 +3743,11 @@ function nodeCard(id) {
   q(".node-mic").addEventListener("change", ev => nodePatch(card, { mic_enabled: ev.target.checked }));
   q(".node-spk").addEventListener("change", ev => nodePatch(card, { speaker_enabled: ev.target.checked }));
   q(".node-lights").addEventListener("change", ev => nodePatch(card, { lights_enabled: ev.target.checked }));
+  q(".node-buttons").addEventListener("change", ev => {
+    const mapping = parseButtons(ev.target.value);
+    if (mapping) nodePatch(card, { buttons: mapping });
+    else q(".node-note").textContent = "Write each as button=action, as in play=ptt set=stop.";
+  });
   return card;
 }
 
@@ -3719,7 +3775,30 @@ function nodeUpdate(card, n) {
     q(".node-mic").checked = !!cfg.mic_enabled;
     q(".node-spk").checked = !!cfg.speaker_enabled;
     q(".node-lights").checked = cfg.lights_enabled !== false;
+    q(".node-buttons").value = formatButtons(cfg.buttons);
   }
+}
+
+/* A NODE'S BUTTON MAPPING AS ONE LINE: button=action, or button.release=action
+   for the release, separated by spaces. Actions are ptt (talk as if the wake
+   word had been heard), stop, none, or webhook:<url>. The hub validates; this
+   only turns the line into the shape PATCH takes, and a line it cannot read
+   is not sent at all. Split on whitespace only, because a URL may hold "=". */
+function parseButtons(line) {
+  const mapping = {};
+  for (const token of line.trim().split(/\s+/).filter(Boolean)) {
+    const at = token.indexOf("=");
+    if (at <= 0) return null;
+    const [button, action = "press"] = token.slice(0, at).split(".");
+    (mapping[button] = mapping[button] || {})[action] = token.slice(at + 1);
+  }
+  return mapping;
+}
+
+function formatButtons(mapping) {
+  return Object.entries(mapping || {}).flatMap(([button, acts]) =>
+    Object.entries(acts).map(([when, what]) =>
+      `${button}${when === "press" ? "" : "." + when}=${what}`)).join(" ");
 }
 
 async function nodePatch(card, change) {
@@ -3797,7 +3876,8 @@ function firmwareRender(list) {
       <button class="small danger" data-fw="delete" type="button">Delete</button>`;
     row.querySelector("strong").textContent = fw.version;
     row.querySelector("code").textContent = fw.sha256.slice(0, 12);
-    row.querySelector(".hint").textContent = `${fw.model} · ${(fw.size / 1048576).toFixed(2)} MB · ${when}`;
+    row.querySelector(".hint").textContent = [fw.model, `${(fw.size / 1048576).toFixed(2)} MB`,
+      fw.signature ? "signed" : "unsigned", when].join(" · ");
     row.addEventListener("click", ev => {
       const b = ev.target.closest("button[data-fw]");
       if (b) firmwareAct(fw, b.dataset.fw, b);
@@ -3830,10 +3910,12 @@ $("fwupload").addEventListener("click", async () => {
   const version = $("fwversion").value.trim() || file.name.replace(/\.bin$/, "");
   const model = $("fwmodel").value.trim();
   try {
-    await json(`/nodes/firmware?model=${encodeURIComponent(model)}&version=${encodeURIComponent(version)}`,
+    const sig = $("fwsig").value.trim();
+    await json(`/nodes/firmware?model=${encodeURIComponent(model)}&version=${encodeURIComponent(version)}`
+      + (sig ? `&signature=${encodeURIComponent(sig)}` : ""),
       { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
     note.textContent = `Uploaded ${version}.`;
-    $("fwfile").value = "";
+    $("fwfile").value = $("fwsig").value = "";
     nodesRefresh();
   } catch (e) { note.textContent = e.message; }
 });
@@ -3851,6 +3933,8 @@ function nodesListen() {
     const who = card ? card.querySelector(".node-name").textContent : ev.node;
     const what = ev.type === "button" ? `${ev.button} ${ev.action}${ev.held_ms ? ` after ${ev.held_ms} ms` : ""}`
       : ev.type === "ota" ? `update ${ev.state}${ev.pct != null ? " " + ev.pct + "%" : ""}${ev.error ? ": " + ev.error : ""}`
+      : ev.type === "wake" ? nodeHeard(ev)
+      : ev.type === "routed" ? nodeRouted(ev)
       : ev.type;
     const li = document.createElement("li");
     li.innerHTML = "<span></span> <b></b> ";
@@ -3860,9 +3944,75 @@ function nodesListen() {
     const list = $("nodeevents");
     list.prepend(li);
     while (list.children.length > 50) list.lastChild.remove();
-    if (ev.type !== "button" && nodesOpen()) nodesRefresh();
+    if (!["button", "wake", "routed"].includes(ev.type) && nodesOpen()) nodesRefresh();
   };
 }
+
+/* One line each for the two listening events. "test" marks what /inject ran:
+   a recorded clip, heard by nobody. */
+function nodeHeard(ev) {
+  const word = ev.wake_word === "ptt" ? "push-to-talk" : `heard ${ev.wake_word}`;
+  const score = ev.score != null ? ` (${ev.score.toFixed(2)})` : "";
+  const from = ev.direction != null ? ` from ${Math.round(ev.direction)}°` : "";
+  return `${ev.injected ? "test: " : ""}${word}${score}${from}`;
+}
+
+function nodeRouted(ev) {
+  const lead = `${ev.injected ? "test: " : ""}${ev.rule_id ? `rule ${ev.rule_id}` : "no rule"}`;
+  if (ev.error) return `${lead} failed: ${ev.error}`;
+  const said = ev.transcript ? ` "${ev.transcript}"` : "";
+  const reply = ev.reply_text ? ` answered "${ev.reply_text}"` : " answered nothing";
+  const ms = ev.timings_ms && ev.timings_ms.total != null ? ` in ${Math.round(ev.timings_ms.total)} ms` : "";
+  return `${lead}:${said}${reply}${ms}${ev.note ? ` (${ev.note})` : ""}`;
+}
+
+/* ================================================================ routing == */
+async function routingLoad() {
+  NODES.routingLoaded = true;
+  try {
+    routingShow(await json("/nodes/routing"), true);
+    $("routecard").hidden = false;
+  } catch (e) {
+    /* An older hub without routing: the card stays away rather than erring. */
+    NODES.routingLoaded = e.status === 404;
+    $("routecard").hidden = true;
+  }
+}
+
+function routingShow(r, fill) {
+  if (fill) $("routetext").value = JSON.stringify({ version: 1, rules: r.rules }, null, 2);
+  const env = Object.entries(r.env || {}).map(([name, set]) => `${name} ${set ? "set" : "not set"}`);
+  $("routeenv").textContent = [r.services && r.services.stt ? null : "NODES_STT_URL not set", ...env]
+    .filter(Boolean).join(" · ");
+  $("routenote").textContent = [r.load_error, ...(r.warnings || [])].filter(Boolean).join(" ");
+}
+
+$("routesave").addEventListener("click", async () => {
+  const note = $("routenote");
+  let body;
+  try { body = JSON.parse($("routetext").value); }
+  catch (e) { note.textContent = `Not JSON: ${e.message}`; return; }
+  const done = busy($("routesave"), "Saving…");
+  try {
+    const r = await json("/nodes/routing", { method: "PUT", headers: JSON_BODY, body: JSON.stringify(body) });
+    routingShow(r, true);
+    if (!note.textContent) note.textContent = `Saved ${r.rules.length} rule(s).`;
+  } catch (e) { note.textContent = e.message; }
+  finally { done(); }
+});
+
+$("routetest").addEventListener("click", async () => {
+  const out = $("routeresult");
+  const text = $("routesay").value.trim();
+  if (!text) { out.textContent = "Type a sentence to send through the rules."; return; }
+  const done = busy($("routetest"), "Testing…");
+  try {
+    const o = await json("/nodes/routing/test", { method: "POST", headers: JSON_BODY, body: JSON.stringify({
+      node: $("routenode").value.trim() || "any", wake_word: $("routeword").value.trim() || "*", text }) });
+    out.textContent = nodeRouted(o);
+  } catch (e) { out.textContent = e.message; }
+  finally { done(); }
+});
 
 async function loadGlossaries() {
   /* THE WHOLE LISTING, not just the names. The same document says whether this

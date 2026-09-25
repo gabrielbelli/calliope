@@ -80,6 +80,16 @@ adopted. From there the stack sets its volume and lights, plays speech or a
 tone on it, records from its microphones, and updates its firmware over the
 air. An update the node cannot bring back to the hub rolls itself back.
 
+The hub also listens. It cleans each node's microphones (echo cancellation,
+beamforming, noise suppression), waits for a wake word ("hey jarvis" by
+default) or a press of PLAY, transcribes what follows on `stt-stack`, sends it
+where a rule says (Home Assistant, any OpenAI-compatible LLM, a webhook, or
+straight back as an echo), and speaks the answer on the node the rule names.
+Home Assistant can also see every node as a device over MQTT. None of the
+listening has run on a board yet; it is tested against fakes and a recorded
+voice, and `POST /nodes/{id}/inject` runs a clip through it with nobody in
+earshot.
+
 The first board is Espressif's ESP32-Korvo v1.1 (three microphones, a speaker
 loopback for echo cancellation, twelve LEDs, six buttons).
 [`services/nodes`](services/nodes/README.md) is the hub and the protocol;
@@ -290,7 +300,7 @@ configuration table.
 | [`services/tts-long`](services/tts-long/README.md) | The queue, both engines, cloning, the optional GPU runner |
 | [`services/gateway`](services/gateway/README.md) | Routing, authentication, `/health` |
 | [`services/ui`](services/ui/README.md) | The page and the routes behind it |
-| [`services/nodes`](services/nodes/README.md) | The node hub, adoption, the device protocol, OTA |
+| [`services/nodes`](services/nodes/README.md) | The node hub, adoption, the device protocol, OTA, wake words, routing, MQTT |
 | [`packages/common`](packages/common/README.md) | Auth, the error envelope, `/health`, the entrypoint |
 | [`clients/macos-player`](clients/macos-player/README.md) | The capsule, the reader, the OpenClip action |
 | [`clients/korvo-node`](clients/korvo-node/README.md) | Node firmware: first flash, Wi-Fi setup, buttons, updates |

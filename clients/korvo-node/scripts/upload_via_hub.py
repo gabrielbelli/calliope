@@ -1,13 +1,23 @@
 # `pio run -e ota -t upload`: instead of esptool, hand the image to the hub and
 # ask it to update a node. The node pulls the image over its own connection and
 # only keeps it once it has reached the hub again (rollback otherwise).
+#
+# The image is signed here, on the developer's machine, with the private key at
+# CALLIOPE_SIGNING_KEY (default ~/.config/calliope/firmware-signing.pem). The hub
+# only carries the signature. A node built with a public key checks it itself,
+# so whoever controls the hub still cannot install their own firmware.
 import json
 import os
 import ssl
 import sys
+import urllib.parse
 import urllib.request
 
 Import("env")  # noqa: F821
+
+project = env.subst("$PROJECT_DIR")  # noqa: F821
+sys.path.insert(0, os.path.join(project, "scripts"))  # SCons scripts have no __file__
+import firmware_signing  # noqa: E402
 
 
 def call(url, data, key, content_type):
@@ -19,21 +29,38 @@ def call(url, data, key, content_type):
         return json.loads(r.read() or b"{}")
 
 
+def fw_version(env):
+    # A define is a (name, value) pair or a bare name, depending on how it was
+    # added, so unpacking every entry as a pair breaks on the first bare one.
+    for d in env["CPPDEFINES"]:
+        if isinstance(d, (tuple, list)) and len(d) == 2 and d[0] == "FW_VERSION":
+            return str(d[1]).strip('\\"')
+    return "unknown"
+
+
 def upload(source, target, env):
     base = os.environ.get("CALLIOPE_URL", "https://orko.gabrielbelli.com:30080").rstrip("/")
     node = os.environ.get("CALLIOPE_NODE")
     key = os.environ.get("CALLIOPE_API_KEY")
     if not node:
         sys.exit("CALLIOPE_NODE is not set: a node id, its name, or 'all'")
-    image = str(source[0])
-    version = next(
-        (v for k, v in env["CPPDEFINES"] if isinstance(k, str) and k == "FW_VERSION"), "unknown"
-    ).strip('\\"')
-    with open(image, "rb") as f:
-        fw = call(
-            f"{base}/nodes/firmware?model=esp32-korvo-v1.1&version={version}",
-            f.read(), key, "application/octet-stream",
+    version = fw_version(env)
+    with open(str(source[0]), "rb") as f:
+        image = f.read()
+    query = {"model": "esp32-korvo-v1.1", "version": version}
+    try:
+        sig = firmware_signing.sign_for_upload(
+            image,
+            os.environ.get("CALLIOPE_SIGNING_KEY") or firmware_signing.DEFAULT_PRIVATE_KEY,
+            os.environ.get("CALLIOPE_FIRMWARE_PUBKEY")
+            or os.path.join(project, "keys", "firmware-signing.pub.pem"),
         )
+    except firmware_signing.SigningError as e:
+        sys.exit(str(e))
+    if sig:
+        query["signature"] = sig
+    fw = call(f"{base}/nodes/firmware?{urllib.parse.urlencode(query)}",
+              image, key, "application/octet-stream")
     print(f"hub stored firmware {fw['sha256'][:12]} ({fw['size']} bytes, {version})")
     res = call(f"{base}/nodes/ota", json.dumps({"node": node, "sha256": fw["sha256"]}).encode(),
                key, "application/json")

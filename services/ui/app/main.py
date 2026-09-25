@@ -199,6 +199,13 @@ PROXIED: tuple[tuple[str, str], ...] = (
     ("POST", "/nodes/firmware"),
     ("DELETE", "/nodes/firmware/{sha256}"),
     ("POST", "/nodes/ota"),
+    # The Routing card: the rules, and a typed sentence through them that
+    # plays nowhere. POST /nodes/{nid}/inject is deliberately absent: it runs a
+    # clip through a node's real rules, which is a script's job and not a
+    # button's (NOT_ON_PAGE in services/gateway/tests/test_gateway.py).
+    ("GET", "/nodes/routing"),
+    ("PUT", "/nodes/routing"),
+    ("POST", "/nodes/routing/test"),
     ("GET", "/nodes/{nid}"),
     ("PATCH", "/nodes/{nid}"),
     ("GET", "/nodes/{nid}/listen"),

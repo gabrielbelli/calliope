@@ -7,6 +7,7 @@
 #define FRAME_MIC 1       // device -> hub: 16-byte header + s16le frames
 #define FRAME_SPEAKER 2   // hub -> device: 16-byte header + mono s16le
 #define FRAME_FIRMWARE 3  // hub -> device: 8-byte header (kind, pad, offset) + image bytes
+#define FRAME_EARCON 4    // hub -> device: same 8-byte header + earcon bytes (earcon_put)
 #define FRAME_HEADER 16
 
 void hub_begin();  // after Wi-Fi is up

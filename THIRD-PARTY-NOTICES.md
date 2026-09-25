@@ -49,6 +49,67 @@ yt-dlp is used **as a metadata probe only** — `extract_info(download=False)`,
 to resolve a pasted link to a title, duration and size so the user can confirm
 before anything is fetched. The fetching itself is MeTube's job.
 
+### pip dependencies of the node hub (`services/nodes`)
+
+In addition to fastapi, uvicorn, httpx and numpy above. Pinned in
+`services/nodes/requirements.txt`, except openwakeword, which is in
+`requirements-nodeps.txt` and installed with `--no-deps` (its metadata still
+asks for tflite-runtime, which has no wheel for Python 3.13).
+
+| Package | Version | Licence | What for |
+|---|---|---|---|
+| openwakeword | 0.6.0 | Apache-2.0 (the code; its models are not, see below) | wake words |
+| onnxruntime | 1.30.0 | MIT | runs the wake word models |
+| scipy | 1.18.1 | BSD-3-Clause | imported by openwakeword |
+| scikit-learn | 1.9.1 | BSD-3-Clause | imported by openwakeword |
+| tqdm | 4.70.1 | MPL-2.0 AND MIT | imported by openwakeword |
+| requests | 2.34.2 | Apache-2.0 | imported by openwakeword |
+| webrtcvad-wheels | 2.0.14 | MIT (the wrapper); compiles in WebRTC's VAD, BSD-3-Clause, Copyright The WebRTC project authors | the endpointer |
+| aiomqtt | 2.5.1 | BSD-3-Clause | Home Assistant over MQTT |
+| paho-mqtt | 2.1.0 | EPL-2.0 OR BSD-3-Clause, taken as BSD-3-Clause | under aiomqtt |
+| cryptography | 50.0.1 | Apache-2.0 OR BSD-3-Clause | firmware signatures |
+
+MPL-2.0 (tqdm) is file-level copyleft: it binds changes to tqdm's own files,
+and nothing here changes them.
+
+**onnxruntime reports usage to Microsoft on Linux unless told not to.** Its
+Linux wheel carries Microsoft's 1DS telemetry client, which posts to
+`mobile.events.data.microsoft.com` and keeps a device id under
+`~/.cache/Microsoft`. Measured in the nodes image with that host pointed at the
+container's own loopback: two connections within 15 s of a session and the id
+written, and with `ORT_DISABLE_TELEMETRY=1` neither. The Containerfile sets it
+and `app/wakeword.py` sets it before anything imports onnxruntime. This is a
+term of use rather than a licence one, and it is recorded here because a hub
+that listens in a house must not phone home by default.
+
+### openWakeWord's pre-trained models — **CC BY-NC-SA 4.0**, David Scripka
+
+Not the code's licence. openWakeWord's README: *"All of the included
+pre-trained models are licensed under the Creative Commons
+Attribution-NonCommercial-ShareAlike 4.0 International license due to the
+inclusion of datasets with unknown or restrictive licensing as part of the
+training data."* That covers every model in its v0.5.1 release, the two shared
+feature models (`melspectrogram.onnx`, `embedding_model.onnx`) included; the
+embedding model reimplements Google's `speech_embedding`, which Google
+published under Apache-2.0.
+
+**The nodes image carries `hey_jarvis` and the two feature models**, fetched at
+build time and checked against the SHA-256 pinned in `app/wakeword.py`, so that
+a first start needs no network. The attribution travels beside them as
+`/srv/models/NOTICE.md` (from `services/nodes/MODELS-NOTICE.md`). What that
+means for anyone handling the image:
+
+- **Non-commercial only.** Running it at home is what it is for. Anyone who
+  wants to use or ship the image commercially must build it without the models
+  (`--build-arg WAKE_WORDS=` leaves `/srv/models` out entirely) and use models
+  licensed for that.
+- **Attribution** is the notice file; do not strip it from a derived image.
+- **No changes are made to the files.** ShareAlike binds adaptations, and none
+  is made; a model trained here from them would be one.
+
+Other built-in names are fetched at start-up into `NODES_MODEL_DIR` on the data
+volume, from the same release and under the same licence.
+
 ---
 
 ### Node firmware (`clients/korvo-node`)
@@ -126,6 +187,50 @@ SOFTWARE.
 
 ---
 
+### `xiph/speexdsp` `mdf.c` — BSD-3-Clause — Copyright (C) 2003-2008 Jean-Marc Valin
+
+The echo canceller in `services/nodes/app/frontend.py` is ported from Speex's
+MDF echo canceller (`libspeexdsp/mdf.c`): the foreground/background two-path
+logic and its thresholds (`VAR1_UPDATE`, `VAR2_UPDATE`, `VAR_BACKTRACK`), the
+leak estimate and its rates (`spec_average`, `beta0`, `beta_max`, `MIN_LEAK`),
+and the learning-rate formulas from Valin's paper as `mdf.c` implements them.
+Changed from the original: vectorised over microphones in numpy, floating point
+only, one reference channel, and no DC notch or pre-emphasis. BSD-3-Clause is
+compatible with BSD-2-Clause; mdf.c's own notice is at the top of
+`frontend.py`, and in full here:
+
+```
+Copyright (C) 2003-2008 Jean-Marc Valin
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+1. Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+3. The name of the author may not be used to endorse or promote products
+derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT,
+INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+```
+
+---
+
 ### `espressif/esp-adf` `esp_codec_dev` — Apache-2.0 — Copyright 2023 Espressif Systems (Shanghai) CO LTD
 
 The ES7210 and ES8311 register sequences in
@@ -141,6 +246,17 @@ rather than code.
 
 No code from these was copied verbatim. Credited because the ideas were load
 bearing, and because a reader deserves to know where to look for the original.
+
+### The node hub's front-end: papers, not code
+
+`services/nodes/app/frontend.py` implements, from their publications:
+J.-M. Valin, "On adjusting the learning rate in frequency domain echo
+cancellation with double-talk" (2007), whose Speex implementation is under
+**Copied** above; T. Gerkmann and R. C. Hendriks, "Unbiased MMSE-based noise
+power estimation with low complexity and low tracking delay" (2012), for the
+noise tracker; and the MVDR beamformer and decision-directed Wiener gain, which
+are textbook. Silero, which openWakeWord can run as a VAD, was measured for
+the endpointer and not used; `app/wakeword.py` says why.
 
 ### `devnen/Chatterbox-TTS-Server` — MIT — Copyright (c) 2025 devnen
 

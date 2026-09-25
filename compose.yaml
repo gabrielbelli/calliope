@@ -852,9 +852,11 @@ services:
   # THE NODE HUB. Thin audio devices -- a mic array, a speaker and a ring of
   # lights on Wi-Fi (clients/korvo-node) -- connect to wss://<this host>:30080
   # /nodes/ws through the gateway, are adopted here, and are told what to do.
-  # No model and no GPU: fastapi, httpx and numpy for the test tone and the
-  # 24 -> 48 kHz resample of Kokoro's output. Optional; deleting this block and
-  # setting GATEWAY_NODES_URL to "" leaves the rest of the stack unchanged.
+  # It listens as well: echo cancellation, beamforming and noise suppression
+  # on each node's microphones (numpy), wake words (openWakeWord on ONNX
+  # Runtime, CPU), an endpointer, then STT, a rule's destination and TTS on
+  # the services above. No GPU. Optional; deleting this block and setting
+  # GATEWAY_NODES_URL to "" leaves the rest of the stack unchanged.
   voice-nodes:
     container_name: voice-nodes
     image: ghcr.io/gabrielbelli/calliope-nodes:v0.2.0
@@ -863,14 +865,49 @@ services:
     expose:
       - "8003"
     environment:
-      # Where "say" gets its voice: tts-stack's OpenAI route, asked for pcm.
+      # Where "say" and every spoken reply get their voice: tts-stack's OpenAI
+      # route, asked for pcm.
       NODES_TTS_URL: http://tts-stack:8001
       NODES_TTS_VOICE: bm_george
+      # Where the command after a wake word is transcribed: stt-stack's OpenAI
+      # route. Unset, wake words are still heard and published, and every
+      # conversation ends with routing saying there is no STT.
+      NODES_STT_URL: http://stt-stack:8000
+      # The wake words, each with its threshold (0-1, higher is stricter).
+      # hey_jarvis is in the image; another built-in name (alexa, hey_mycroft,
+      # hey_rhasspy, weather) is fetched once from openWakeWord's release into
+      # NODES_MODEL_DIR, and a file of your own there, <name>.onnx, loads by
+      # its name. "" means no wake words; the PLAY button still talks.
+      NODES_WAKE_WORDS: "hey_jarvis:0.5"
+      # On the volume, so a model fetched once is not fetched again.
+      NODES_MODEL_DIR: /data/models
+      # The audio front-end, on by default. "0" hands the first microphone to
+      # the wake words as it arrives; for comparing, not for keeping.
+      # NODES_FRONTEND: "1"
+      # Home Assistant over MQTT: every adopted node as one device, with its
+      # switches, volume, buttons and wake words (services/nodes/README.md).
+      # Unset, there is no MQTT at all. The password is in the URL, so this
+      # belongs in the app's secret settings rather than in this file.
+      # NODES_MQTT_URL: "mqtt://calliope:password@homeassistant.lan:1883"
+      # The token for a routing rule of type ha_conversation, which names this
+      # variable rather than holding the token: rules.json is returned by
+      # GET /nodes/routing, and a secret in it would be one request away from
+      # anyone with an API key. A long-lived access token from your Home
+      # Assistant profile page; like the MQTT password, a secret setting.
+      # NODES_HA_TOKEN: "<long-lived access token>"
+    # 1 CPU and 512 MiB, measured with the image on arm64, nodes played by a
+    # script inside the container streaming four channels in real time: the
+    # hub's peak resident memory was 228 MiB idle with hey_jarvis loaded, 239
+    # MiB with one node, 289 MiB with three and 326 MiB with six, every wake
+    # word heard and no microphone frame dropped. The limit that was here,
+    # 256m, is under the idle figure. Three nodes used 35-39% of a core with
+    # the script that played them counted in; six still dropped nothing.
     cpus: 1
-    mem_limit: 256m
+    mem_limit: 512m
     volumes:
-      # Adopted nodes (tokens only as hashes) and uploaded firmware images.
-      # Named, because losing it un-adopts every node in the house.
+      # Adopted nodes (tokens only as hashes), the routing rules, uploaded
+      # firmware images and fetched wake word models. Named, because losing
+      # it un-adopts every node in the house.
       - nodes-data:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8003/health')"]
@@ -901,5 +938,5 @@ volumes:
   tts-long-models:
   tts-long-out:
   voices:
-  # The node hub's adoptions and firmware store.
+  # The node hub's adoptions, rules, firmware store and wake word models.
   nodes-data:

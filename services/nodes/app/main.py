@@ -2,21 +2,27 @@
 
 A node is a microphone array, a speaker and a ring of lights on Wi-Fi. It makes
 no decisions: it streams its microphones here and plays, lights and reports
-whatever it is told. This service adopts nodes, holds their settings, and is
-the one place audio and firmware reach them from.
+whatever it is told. This service adopts nodes, holds their settings, listens
+for wake words on their microphones, routes what follows to an assistant, and
+is the one place audio and firmware reach them from.
 
     WS    /nodes/ws                      the device connection (protocol: README)
     GET   /nodes                         every node seen since start, adopted or not
-    GET   /nodes/events                  server-sent events: buttons, status, updates
+    GET   /nodes/events                  server-sent events: buttons, wake words, routing
     GET   /nodes/firmware                uploaded images
-    POST  /nodes/firmware?model&version  raw body: a firmware image
+    POST  /nodes/firmware?model&version&signature   raw body: a firmware image
     DELETE /nodes/firmware/{sha256}
     POST  /nodes/ota                     {"node": id|name|"all", "sha256": ...}
+    GET   /nodes/routing                 the rules (router.py)
+    PUT   /nodes/routing                 replace them
+    POST  /nodes/routing/test            a typed sentence through a rule, played nowhere
     GET   /nodes/{id}
-    PATCH /nodes/{id}                    name and config
+    PATCH /nodes/{id}                    name, config and the button mapping
     POST  /nodes/{id}/adopt | forget | identify | reboot | lights | tone | say
                    | flush | set-hub
     GET   /nodes/{id}/listen?seconds=5   a WAV of the raw microphone channels
+    POST  /nodes/{id}/inject?play=0      a 16 kHz mono WAV through the wake word,
+                                         endpoint and routing path, as if heard
 
 EVERYTHING IS UNDER /nodes, INCLUDING THE SOCKET, because the gateway mounts
 backend paths flat and never rewrites them. The gateway relays /nodes/ws as a
@@ -29,37 +35,65 @@ connection may DO is decided by the adoption token. An unadopted connection
 can say hello and receive "pending", nothing else: no microphone audio is
 accepted from it and nothing is sent to it but that one word, until someone
 with access to the API adopts it.
+
+THE LISTENING PATH, per adopted node. The socket loop hands microphone frames
+to a bounded queue (the oldest frame goes when it is full, and is counted); one
+task per node drains it and runs listening.Ear (front-end, wake words,
+endpointer) in a thread pool, so the event loop never does signal work. A wake
+word starts a Conversation: the "wake" earcon if the node holds it, the ring
+pointed at the talker, the node ducked, then the command, the router, and the
+reply on whichever node the rule names. One conversation per node at a time.
+
+A NODE WITH LIGHTS OFF IS NEVER SENT "lights". Every lights message this hub
+sends goes through Hub.send_lights, which reads the node's lights_enabled at
+the moment of sending; POST /nodes/{id}/lights answers 409 for such a node
+rather than go around it. The ring stays dark in a bedroom because the hub
+does not ask, not only because the firmware would refuse.
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import re
 import struct
 import time
+import wave
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Annotated, Any, AsyncIterator, Literal
 
 import httpx
 import numpy as np
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 from voice_common import auth, errors, health
 from voice_common import logging as voice_logging
 from voice_common.errors import ApiError
 
-from . import audio
-from .store import DEFAULT_CONFIG, Store
+from . import audio, earcons, listening, signing, wakeword
+from . import router as routing
+from .mqtt import MqttBridge
+from .store import DEFAULT_CONFIG, Store, node_config
 
 log = voice_logging.setup("voice-nodes", "NODES")
 
 DATA_DIR = Path(os.environ.get("NODES_DATA_DIR", "/data"))
 TTS_URL = os.environ.get("NODES_TTS_URL", "").rstrip("/")
 TTS_VOICE = os.environ.get("NODES_TTS_VOICE", "bm_george")
+# Unset means hey_jarvis at 0.5; set to "" for no wake words at all, which
+# leaves push-to-talk and /inject?wake_word= working.
+WAKE_WORDS = os.environ.get("NODES_WAKE_WORDS", "hey_jarvis:0.5")
+MODEL_DIR = Path(os.environ.get("NODES_MODEL_DIR") or DATA_DIR / "models")
+FRONTEND = os.environ.get("NODES_FRONTEND", "1").strip() != "0"
+# Where the Containerfile put the default wake word at build time. Copied onto
+# the volume at start-up (wakeword.ensure_models), so a first start needs no
+# network and extra models still go to NODES_MODEL_DIR.
+BAKED_MODELS = Path(__file__).resolve().parent.parent / "models"
 MAX_FIRMWARE = 4 * 1024 * 1024  # one OTA slot on the Korvo
 
 FRAME_MIC, FRAME_SPEAKER, FRAME_FIRMWARE = 1, 2, 3
@@ -71,6 +105,32 @@ OTA_CHUNK = 8 * 1024
 SPEAKER_CHUNK_MS = 20
 SPEAKER_LEAD_S = 0.3  # how far ahead of real time playback is kept
 
+# One second of 20 ms frames. The listener drains the queue in batches, so it
+# only fills when the thread pool falls a second behind; then the oldest audio
+# goes, because a wake word from a second ago is worth less than one now.
+MIC_QUEUE = 50
+MIC_BATCH = 25
+# How long a conversation waits for its command after the wake word: the
+# endpointer's own ceiling is 10 s of audio, so this only trips when the audio
+# stops arriving (a node muted or gone mid-command).
+COMMAND_WAIT_S = 15.0
+# Ducking lowers the hub's audio on the node while it listens, on the volume
+# scale and never above the volume itself. The duck carries its own timeout,
+# so a hub that dies mid-conversation cannot leave a node quiet for good; the
+# firmware also lifts it on disconnect.
+DUCK_LEVEL = 20
+DUCK_MS = 60_000
+EARCON_RETRY_S = 5.0   # the node formats its earcon storage in the background
+EARCON_RETRIES = 24
+LISTEN_COLOUR = (40, 110, 255)
+LIGHTS_MIN_S = 0.15    # at most one direction update this often
+MAX_INJECT_S = 60
+WAKE_GRACE_S = 1.5
+DEFAULT_EARCONS = earcons.defaults()
+
+FIRMWARE_KEY: Any | None = None
+EXECUTOR: ThreadPoolExecutor | None = None
+
 
 def node_id(mac: str) -> str:
     return re.sub(r"[^0-9a-f]", "", mac.lower())
@@ -81,8 +141,8 @@ def node_id(mac: str) -> str:
 
 class Session:
     """One connected device. Starlette sockets are not safe to send on from two
-    coroutines at once, and the speaker loop, the OTA pump and API calls all
-    send, so every send takes the lock."""
+    coroutines at once, and the speaker loop, the OTA pump, conversations and
+    API calls all send, so every send takes the lock."""
 
     def __init__(self, ws: WebSocket, hello: dict):
         self.ws = ws
@@ -96,7 +156,19 @@ class Session:
         self.status: dict = {}
         self.taps: set[asyncio.Queue] = set()
         self.speaker: asyncio.Queue[bytes] = asyncio.Queue()
+        self.speaker_gen = 0      # bumped by a flush; the loop drops the item in hand
+        self.playing = False
         self.ota: dict | None = None
+        self.mic: asyncio.Queue[bytes] = asyncio.Queue(maxsize=MIC_QUEUE)
+        self.mic_dropped = 0
+        self.ear: listening.Ear | None = None
+        self.listener: asyncio.Task | None = None
+        self.listen_error: str | None = None
+        self.conversation: Conversation | None = None
+        self.earcons: earcons.Sync | None = None
+        self.earcon_asks = 0
+        self.lit = False          # the hub's own layer is showing something
+        self.duck_holds = 0       # conversations that want this node ducked
         self.update(hello)
 
     def update(self, hello: dict) -> None:
@@ -125,13 +197,40 @@ class Session:
     def mic_channels(self) -> int:
         return self.caps.get("mic", {}).get("channels", 4)
 
+    def offer_mic(self, pcm: bytes) -> None:
+        """Queue one microphone frame for the listener, dropping the oldest
+        when the queue is full. Never waits: this runs in the socket loop,
+        and a socket loop that waits stops reading the node."""
+        if self.mic.full():
+            self.mic.get_nowait()
+            self.mic_dropped += 1
+            if self.mic_dropped in (1, 10, 100) or self.mic_dropped % 1000 == 0:
+                log.warning("node %s: listening is behind, %d microphone frames dropped",
+                            self.id, self.mic_dropped)
+        self.mic.put_nowait(pcm)
+
+    def flush_speaker(self) -> bool:
+        """Drop queued audio and the rest of the item playing. True when there
+        was any. The node's own buffer (300 ms) needs a "flush" message too."""
+        had = self.playing or not self.speaker.empty()
+        while not self.speaker.empty():
+            self.speaker.get_nowait()
+        self.speaker_gen += 1
+        return had
+
     async def speaker_loop(self) -> None:
         seq = 0
         chunk = self.spk_rate * 2 * SPEAKER_CHUNK_MS // 1000
         while True:
             pcm = await self.speaker.get()
+            gen = self.speaker_gen
+            self.playing = True
             start, sent = time.monotonic(), 0.0
             for off in range(0, len(pcm), chunk):
+                # Checked per chunk: a reply is one item, and a flush that only
+                # emptied the queue would let a two-minute answer play on.
+                if self.speaker_gen != gen:
+                    break
                 piece = pcm[off:off + chunk]
                 await self.send_bytes(struct.pack("<BBBBIQ", FRAME_SPEAKER, 0, 1, 0, seq, 0) + piece)
                 seq = (seq + 1) & 0xFFFFFFFF
@@ -139,6 +238,60 @@ class Session:
                 ahead = sent - (time.monotonic() - start)
                 if ahead > SPEAKER_LEAD_S:
                     await asyncio.sleep(ahead - SPEAKER_LEAD_S)
+            self.playing = False
+
+
+async def _quietly(coro) -> bool:
+    """A send to a node that may have gone: a conversation cleaning up after a
+    disconnect must not raise out of its finally block."""
+    try:
+        await coro
+        return True
+    except Exception as e:  # a closed socket raises several different things
+        log.debug("send failed: %s", e)
+        return False
+
+
+class Voice:
+    """The wake word models, loaded once and shared by every node's Ear
+    (wakeword.WakeWords.clone). Loading happens in the background at start-up:
+    until it is done, and if it fails, nodes still stream, adopt and take
+    push-to-talk; only wake words wait."""
+
+    def __init__(self, spec: str, model_dir: Path, frontend: bool):
+        self.model_dir = model_dir
+        self.frontend = frontend
+        self.error: str | None = None
+        try:
+            self.models = listening.parse_wake_words(spec)
+        except ValueError as e:
+            self.models = {}
+            self.error = f"NODES_WAKE_WORDS: {e}"
+            log.error("wake words are off: %s", self.error)
+        self.base: wakeword.WakeWords | None = None
+        self.state = "loading" if self.models else "off"
+
+    async def load(self) -> None:
+        if not self.models:
+            return
+        try:
+            await asyncio.to_thread(wakeword.ensure_models, list(self.models), self.model_dir,
+                                    seeds=[BAKED_MODELS])
+            self.base = await asyncio.to_thread(wakeword.WakeWords, dict(self.models),
+                                                self.model_dir)
+            self.state = "ready"
+            log.info("wake words ready: %s", ", ".join(f"{n} at {t:g}" for n, t in self.models.items()))
+        except Exception as e:
+            self.state, self.error = "failed", f"{type(e).__name__}: {e}"
+            log.error("wake words are off: %s", self.error)
+
+    def stream(self) -> wakeword.WakeWords | None:
+        """A stream of its own for one node; runs in the thread pool."""
+        return self.base.clone() if self.base is not None else None
+
+    def health(self) -> dict:
+        return {"state": self.state, "wake_words": self.models, "error": self.error,
+                "frontend": self.frontend, "model_dir": str(self.model_dir)}
 
 
 class Hub:
@@ -147,12 +300,33 @@ class Hub:
         self.sessions: dict[str, Session] = {}
         self.seen: dict[str, dict] = {}  # unadopted nodes, in memory only
         self.listeners: set[asyncio.Queue] = set()
+        self.voice = Voice("", MODEL_DIR, False)
+        self.bridge: MqttBridge | None = None
+        self.http: httpx.AsyncClient | None = None  # button webhooks
+        self.tasks: set[asyncio.Task] = set()
 
     def publish(self, event: dict) -> None:
         event = {"at": time.time()} | event
         for q in list(self.listeners):
             if q.qsize() < 256:
                 q.put_nowait(event)
+        # An injected clip is a test: it must not fire the household's
+        # automations through Home Assistant.
+        if self.bridge is not None and not event.get("injected"):
+            self.bridge.publish_event(event)
+
+    def spawn(self, coro, name: str | None = None) -> asyncio.Task:
+        """A background task the hub keeps a reference to (asyncio holds only
+        a weak one) and whose failure is logged rather than lost."""
+        task = asyncio.create_task(coro, name=name)
+        self.tasks.add(task)
+
+        def done(t: asyncio.Task) -> None:
+            self.tasks.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                log.error("background task %s failed", t.get_name(), exc_info=t.exception())
+        task.add_done_callback(done)
+        return task
 
     def describe(self, nid: str) -> dict:
         rec = self.store.nodes.get(nid)
@@ -172,7 +346,28 @@ class Hub:
             "status": s.status if s else {},
             "caps": s.caps if s else {},
             "ota": {k: v for k, v in s.ota.items() if k != "image"} if s and s.ota else None,
+            "listening": self._listening(s),
+            "earcons": self._earcons(s),
         }
+
+    @staticmethod
+    def _listening(s: Session | None) -> dict | None:
+        # getattr throughout: tests stand a SimpleNamespace in for a Session.
+        ear = getattr(s, "ear", None)
+        if ear is None:
+            err = getattr(s, "listen_error", None)
+            return {"state": "off", "error": err} if err else None
+        conv = getattr(s, "conversation", None)
+        return ear.stats() | {"mic_dropped": s.mic_dropped,
+                              "conversation": conv.phase if conv else None}
+
+    @staticmethod
+    def _earcons(s: Session | None) -> dict | None:
+        sync = getattr(s, "earcons", None)
+        if sync is None:
+            return None
+        return {"ready": sync.ready, "have": sorted(e for e in sync.want if sync.has(e)),
+                "failed": sync.failed}
 
     def find(self, ref: str) -> list[str]:
         """A node id (with or without colons), a node name, or "all"."""
@@ -199,33 +394,467 @@ class Hub:
             raise ApiError(409, f"node {nid} is not adopted", code="node_not_adopted")
         return s
 
+    def config(self, s: Session) -> dict:
+        rec = self.store.nodes.get(s.id)
+        return rec.config if rec else {}
+
     async def greet(self, s: Session) -> None:
         """Answer a hello: welcome with the config, or pending."""
         rec = self.store.nodes.get(s.id)
         token = s.hello.get("token") or None
         if rec and rec.accepts(token):
             s.adopted = True
-            await s.send_json({"type": "welcome", "name": rec.name, "config": rec.config})
+            await s.send_json({"type": "welcome", "name": rec.name, "config": node_config(rec.config)})
             self.publish({"type": "online", "node": s.id, "name": rec.name, "firmware": s.fw})
+            await self.sync_earcons(s)
+            self.start_listening(s)
         else:
             s.adopted = False
+            self.stop_listening(s)
+            s.earcons = None
             if rec and token:
                 log.warning("node %s presented a token that does not match its adoption", s.id)
             self.seen[s.id] = {"model": s.model, "fw": s.fw, "last_seen": time.time()}
             await s.send_json({"type": "pending"})
             self.publish({"type": "pending", "node": s.id, "address": s.address})
 
+    # -- listening ----------------------------------------------------------
+
+    def may_listen(self, s: Session) -> bool:
+        cfg = self.config(s)
+        return s.adopted and cfg.get("mic_enabled", True) and not s.status.get("muted")
+
+    def start_listening(self, s: Session) -> None:
+        if s.listener is not None and not s.listener.done():
+            return
+        try:
+            s.ear = listening.Ear(rate=s.mic_rate, channels=s.mic_channels,
+                                  frontend=self.voice.frontend)
+        except ValueError as e:
+            s.listen_error = str(e)
+            log.warning("node %s will not be listened to: %s", s.id, e)
+            return
+        s.listen_error = None
+        s.listener = asyncio.create_task(listen_loop(self, s), name=f"listen-{s.id}")
+
+    def stop_listening(self, s: Session) -> None:
+        if s.listener is not None:
+            s.listener.cancel()
+            s.listener = None
+        if s.conversation is not None:
+            s.conversation.cancel()
+        s.ear = None
+        while not s.mic.empty():
+            s.mic.get_nowait()
+
+    def heard(self, s: Session, heard: listening.Heard) -> None:
+        if s.conversation is not None:
+            return  # one conversation per node; the Ear already drops these
+        rec = self.store.nodes.get(s.id)
+        conv = Conversation(self, s.id, rec.name if rec else "", heard, session=s)
+        s.conversation = conv
+        conv.start()
+
+    async def push_to_talk(self, s: Session, word: str = listening.PTT) -> None:
+        if s.conversation is not None or s.ear is None:
+            return
+        if not self.may_listen(s):
+            # Nothing would arrive to be heard. Say so, rather than open a
+            # conversation that can only time out.
+            log.info("node %s: push-to-talk while its microphone is off or muted", s.id)
+            await self.earcon(s, "error")
+            return
+        s.ear.push_to_talk(word)
+
+    async def stop(self, s: Session) -> None:
+        """What the "stop" button and POST /nodes/{id}/flush do: silence the
+        node now and drop whatever it was in the middle of."""
+        s.flush_speaker()
+        await s.send_json({"type": "flush"})
+        if s.conversation is not None:
+            s.conversation.cancel()
+
+    # -- what a node can see and hear ------------------------------------------
+
+    def lights_allowed(self, s: Session) -> bool:
+        return bool(s.adopted and self.config(s).get("lights_enabled", True))
+
+    async def send_lights(self, s: Session, msg: dict) -> bool:
+        """THE ONLY PLACE THIS HUB SENDS "lights". lights_enabled is read here,
+        at the moment of sending, never cached by a caller: a conversation
+        that started lit must still go dark mid-way if the setting changes."""
+        if not self.lights_allowed(s):
+            return False
+        if not await _quietly(s.send_json({"type": "lights", **msg})):
+            return False
+        s.lit = msg.get("mode") != "off"
+        return True
+
+    async def earcon(self, s: Session | None, eid: str) -> bool:
+        if (s is None or not s.adopted or s.earcons is None or not s.earcons.has(eid)
+                or not self.config(s).get("speaker_enabled", True)):
+            return False
+        return await _quietly(s.send_json(earcons.play_message(eid)))
+
+    async def hold_duck(self, s: Session) -> None:
+        s.duck_holds += 1
+        if s.duck_holds == 1 and s.caps.get("duck"):
+            await _quietly(s.send_json({"type": "duck", "level": DUCK_LEVEL, "ms": DUCK_MS}))
+
+    async def release_duck(self, s: Session) -> None:
+        if s.duck_holds <= 0:
+            return
+        s.duck_holds -= 1
+        if s.duck_holds == 0 and s.caps.get("duck"):
+            await _quietly(s.send_json({"type": "unduck"}))
+
+    # -- earcons --------------------------------------------------------------
+
+    async def sync_earcons(self, s: Session) -> None:
+        """Older firmware ignores earcon messages without a word, so the hello
+        is asked first. The node answers earcon_list with what it holds; Sync
+        uploads whatever is missing or different, one at a time."""
+        if not earcons.supported(s.caps):
+            s.earcons = None
+            return
+        s.earcons = earcons.Sync(DEFAULT_EARCONS)
+        s.earcon_asks = 0
+        await s.send_json({"type": "earcon_list"})
+
+    async def on_earcons(self, s: Session, msg: dict) -> None:
+        sync = s.earcons
+        out = sync.handle(msg)
+        if isinstance(out, bytes):
+            await s.send_bytes(out)
+        elif out is not None:
+            await s.send_json(out)
+        if msg.get("type") == "earcons" and not sync.ready:
+            # First mount after a blank partition: the node formats it in the
+            # background, which has not been timed on the board yet.
+            if s.earcon_asks < EARCON_RETRIES:
+                s.earcon_asks += 1
+                self.spawn(self._ask_earcons_later(s, sync), name=f"earcons-{s.id}")
+            else:
+                log.warning("node %s: its earcon storage never became ready", s.id)
+        if msg.get("type") == "earcon_failed":
+            log.warning("node %s: earcon %s %s failed: %s", s.id, msg.get("op"),
+                        msg.get("id"), msg.get("error"))
+        if sync.done and msg.get("type") in ("earcons", "earcon_stored", "earcon_failed"):
+            log.info("node %s earcons: %s", s.id,
+                     ", ".join(e for e in sync.want if sync.has(e)) or "none")
+
+    async def _ask_earcons_later(self, s: Session, sync: earcons.Sync) -> None:
+        await asyncio.sleep(EARCON_RETRY_S)
+        if self.sessions.get(s.id) is s and s.earcons is sync and not sync.ready:
+            await _quietly(s.send_json({"type": "earcon_list"}))
+
+    # -- buttons --------------------------------------------------------------
+
+    async def on_button(self, s: Session, button: str, action: str, held_ms: int | None) -> None:
+        mapping = self.config(s).get("buttons") or {}
+        act = (mapping.get(button) or {}).get(action)
+        if not act or act == "none":
+            return
+        if act == "ptt":
+            await self.push_to_talk(s)
+        elif act == "stop":
+            await self.stop(s)
+        elif act.startswith("webhook:"):
+            rec = self.store.nodes.get(s.id)
+            self.spawn(self._button_webhook(act.removeprefix("webhook:"), {
+                "node": rec.name if rec else s.id, "node_id": s.id, "button": button,
+                "action": action, "held_ms": held_ms}), name=f"button-{s.id}")
+
+    async def _button_webhook(self, url: str, body: dict) -> None:
+        # Redirects are not followed (the client says so), and the whole call
+        # is bounded, as every call router.py makes is.
+        try:
+            async with asyncio.timeout(10):
+                r = await self.http.post(url, json=body)
+            if r.status_code >= 400:
+                log.warning("button webhook %s answered %d", url, r.status_code)
+        except Exception as e:
+            log.warning("button webhook %s failed: %s", url, e or type(e).__name__)
+
 
 hub: Hub
 
 
+# ---- the listening path -------------------------------------------------------
+
+
+async def listen_loop(h: Hub, s: Session) -> None:
+    """Drain one node's microphone queue through its Ear, off the event loop.
+
+    Never dies of a fault in the signal code: the Ear is rebuilt and the next
+    frame is processed, because a listener that stopped would leave a node
+    that looks fine and never answers."""
+    loop = asyncio.get_running_loop()
+    step = s.mic_channels * 2
+    while True:
+        chunks = [await s.mic.get()]
+        while len(chunks) < MIC_BATCH and not s.mic.empty():
+            chunks.append(s.mic.get_nowait())
+        ear = s.ear
+        if ear is None:
+            return
+        if not h.may_listen(s):
+            ear.cancel_ptt()
+            continue
+        if ear.wake is None and h.voice.base is not None:
+            ear.wake = await loop.run_in_executor(EXECUTOR, h.voice.stream)
+        if ear.state != "idle" and s.conversation is None:
+            ear.release()
+        data = b"".join(c for c in chunks if len(c) % step == 0)
+        if not data:
+            continue
+        frames = np.frombuffer(data, dtype="<i2").reshape(-1, s.mic_channels)
+        try:
+            events = await loop.run_in_executor(EXECUTOR, ear.process, frames)
+        except Exception:
+            log.exception("node %s: listening failed; starting it again", s.id)
+            s.ear = listening.Ear(rate=s.mic_rate, channels=s.mic_channels,
+                                  frontend=h.voice.frontend)
+            if s.conversation is not None:
+                s.conversation.cancel()
+            continue
+        for ev in events:
+            if isinstance(ev, listening.Heard):
+                h.heard(s, ev)
+            elif s.conversation is not None:
+                s.conversation.deliver(ev)
+        if s.conversation is not None and s.conversation.phase == "listening":
+            await s.conversation.point(ear.direction)
+
+
+def ring(direction: float, leds: int, colour: tuple[int, int, int]) -> list[list[int]]:
+    """A pixels frame pointing at `direction`: full at the nearest LED, soft on
+    its neighbours. LED 0 is taken to sit at 0 degrees (towards microphone 1)
+    and to count the same way as the microphones. Neither has been checked on
+    a board, so the pointer may be rotated or mirrored; see listening.py."""
+    pos = direction / 360.0 * leds
+    out = []
+    for i in range(leds):
+        d = abs(i - pos) % leds
+        d = min(d, leds - d)
+        w = max(0.0, 1.0 - d / 2.0) ** 2
+        out.append([round(c * w) for c in colour])
+    return out
+
+
+class Conversation:
+    """One wake word, or one push of a button, through to its reply.
+
+    Created by the listener (or by /inject) and run as its own task, so the
+    listener keeps draining audio while the router waits on STT, the
+    assistant and TTS. The command arrives through deliver() from the
+    listener; /inject delivers it before starting.
+
+    quiet: send nothing to any node. That is /inject without ?play=1, which is
+    how the pipeline is verified with nobody hearing or seeing anything.
+    """
+
+    def __init__(self, h: Hub, nid: str, name: str, heard: listening.Heard, *,
+                 session: Session | None = None, quiet: bool = False, injected: bool = False):
+        self.hub, self.nid, self.name, self.heard = h, nid, name, heard
+        self.s = session
+        self.quiet = quiet
+        self.injected = injected
+        self.command: asyncio.Future = asyncio.get_running_loop().create_future()
+        self.phase = "listening"
+        self.ducked: list[Session] = []
+        self.outcome: routing.Outcome | None = None
+        self.task: asyncio.Task | None = None
+        self._lit_key: int | None | str = "unset"
+        self._lit_at = 0.0
+
+    @property
+    def live(self) -> bool:
+        return not self.quiet and self.s is not None
+
+    def start(self) -> None:
+        self.task = self.hub.spawn(self.run(), name=f"conversation-{self.nid}")
+
+    def deliver(self, command: listening.Command) -> None:
+        if not self.command.done():
+            self.command.set_result(command)
+
+    def cancel(self) -> None:
+        if self.task is not None:
+            self.task.cancel()
+        elif not self.command.done():
+            self.command.cancel()
+
+    async def point(self, direction: float | None, *, force: bool = False) -> None:
+        """The ring, while listening: pointed at the talker, or a soft pulse
+        until there is a direction. Sent only when the pointed LED changes."""
+        s = self.s
+        leds = s.caps.get("lights") if s is not None else None
+        if not self.live or not isinstance(leds, int) or leds <= 0:
+            return
+        key = None if direction is None else round(direction / 360.0 * leds) % leds
+        now = time.monotonic()
+        # The listener calls this after every batch; until run() has lit the
+        # ring for the first time (after the wake earcon), it waits its turn.
+        if not force and (self._lit_key == "unset" or key == self._lit_key
+                          or now - self._lit_at < LIGHTS_MIN_S):
+            return
+        self._lit_key, self._lit_at = key, now
+        if direction is None:
+            msg = {"mode": "pulse", "color": list(LISTEN_COLOUR), "brightness": 48}
+        else:
+            msg = {"mode": "pixels", "brightness": 96,
+                   "pixels": ring(direction, leds, LISTEN_COLOUR)}
+        await self.hub.send_lights(s, msg)
+
+    def _reply_node(self) -> Session | None:
+        """The other node a matching rule would answer on, so it can be
+        ducked while the question is asked."""
+        rule = routing.current().rules.match(self.nid, self.name, self.heard.wake_word)
+        if rule is None or rule.reply_to in ("same", "none"):
+            return None
+        found = lookup_node(rule.reply_to)
+        if found is None or found[0] == self.nid:
+            return None
+        other = self.hub.sessions.get(found[0])
+        return other if other is not None and other.adopted else None
+
+    async def _duck(self, s: Session) -> None:
+        if s not in self.ducked:
+            self.ducked.append(s)
+            await self.hub.hold_duck(s)
+
+    async def _unduck(self, s: Session) -> None:
+        if s in self.ducked:
+            self.ducked.remove(s)
+            await self.hub.release_duck(s)
+
+    async def run(self) -> dict:
+        command: listening.Command | None = None
+        played, note = False, None
+        try:
+            self.hub.publish({"type": "wake", "node": self.nid, "wake_word": self.heard.wake_word,
+                              "score": self.heard.score, "direction": self.heard.direction}
+                             | ({"injected": True} if self.injected else {}))
+            if self.live:
+                await self.hub.earcon(self.s, "wake")
+                await self.point(self.heard.direction, force=True)
+                await self._duck(self.s)
+                other = self._reply_node()
+                if other is not None:
+                    await self._duck(other)
+            try:
+                command = await asyncio.wait_for(self.command, COMMAND_WAIT_S)
+            except TimeoutError:
+                self.outcome = routing.Outcome(
+                    error="no command: the microphone stopped sending audio")
+            self.phase = "routing"
+            if self.outcome is None:
+                if not command.had_speech:
+                    # Nothing to transcribe, and silence given to Whisper-style
+                    # models comes back as invented text.
+                    self.outcome = routing.Outcome(error="nothing was said after the wake word")
+                else:
+                    if self.live and self.s.lit:
+                        await self.hub.send_lights(self.s, {"mode": "spin", "brightness": 40,
+                                                            "color": list(LISTEN_COLOUR)})
+                    self.outcome = await routing.current().handle(
+                        self.nid, self.name, self.heard.wake_word, command.audio)
+            self.phase = "replying"
+            played, note = await self._reply(self.outcome)
+        except asyncio.CancelledError:
+            if self.outcome is None:
+                self.outcome = routing.Outcome(error="cancelled")
+            note = "cancelled"
+        finally:
+            for s in list(self.ducked):
+                await self._unduck(s)
+            if self.live and self.s.lit:
+                await self.hub.send_lights(self.s, {"mode": "off"})
+            if self.s is not None and self.s.conversation is self:
+                self.s.conversation = None
+            self.phase = "done"
+        o = self.outcome
+        event = {"type": "routed", "node": self.nid, "wake_word": self.heard.wake_word,
+                 "rule_id": o.rule_id, "reply_to": o.reply_to, "error": o.error,
+                 "transcript": o.transcript, "reply_text": o.reply_text,
+                 "timings_ms": o.timings_ms, "endpoint": command.reason if command else None,
+                 "command_s": round(command.seconds, 2) if command else None,
+                 "played": played, "note": note} | ({"injected": True} if self.injected else {})
+        self.hub.publish(event)
+        return event
+
+    async def _reply(self, o: routing.Outcome) -> tuple[bool, str | None]:
+        if self.quiet:
+            return False, "not played: ?play=1 was not given" if self.injected else None
+        origin = self.s
+        if o.error:
+            await self.hub.earcon(origin, "error")
+            return False, None
+        if not o.reply_pcm48k or not o.reply_to:
+            await self.hub.earcon(origin, "done")  # done, with nothing to say
+            return False, None
+        target = self.hub.sessions.get(o.reply_to)
+        if target is None or not target.adopted:
+            await self.hub.earcon(origin, "error")
+            return False, f"{o.reply_to} is not connected"
+        if not self.hub.config(target).get("speaker_enabled", True):
+            return False, f"{o.reply_to} has its speaker off"
+        # The answer is spoken over nothing: a reply still playing from an
+        # earlier conversation is dropped (this is where a barge-in lands),
+        # and the duck is lifted first, because it lowers hub audio and the
+        # reply is hub audio.
+        if target.flush_speaker():
+            await _quietly(target.send_json({"type": "flush"}))
+        await self._unduck(target)
+        pcm = o.reply_pcm48k
+        if target.spk_rate != routing.SPEAKER_RATE:
+            pcm = audio.resample(pcm, routing.SPEAKER_RATE, target.spk_rate)
+        target.speaker.put_nowait(pcm)
+        if origin is not None and target is not origin:
+            await self.hub.earcon(origin, "done")
+        return True, None
+
+
+def lookup_node(ref: str) -> tuple[str, str] | None:
+    """router.py's view of the nodes: one adopted node by id or name, or None."""
+    if ref == "all":
+        return None
+    found = [n for n in hub.find(ref) if n in hub.store.nodes]
+    if len(found) != 1:
+        return None
+    return found[0], hub.store.nodes[found[0]].name
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    global hub
+    global hub, FIRMWARE_KEY, EXECUTOR
+    # A bad NODES_FIRMWARE_PUBKEY stops the service here, not at the first
+    # upload an hour later.
+    FIRMWARE_KEY = signing.load_public_key()
+    EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ear")
     hub = Hub(Store(DATA_DIR))
+    hub.voice = Voice(WAKE_WORDS, MODEL_DIR, FRONTEND)
+    hub.http = httpx.AsyncClient(follow_redirects=False, timeout=10)
+    routing.configure(routing.Router(routing.Rules(DATA_DIR), lookup=lookup_node))
+    hub.bridge = MqttBridge.from_env()
+    await hub.bridge.start(hub, on_command=mqtt_command)
+    loader = asyncio.create_task(hub.voice.load(), name="wake-words")
     log.info("%d adopted nodes, %d firmware images in %s",
              len(hub.store.nodes), len(hub.store.firmware), DATA_DIR)
-    yield
+    try:
+        yield
+    finally:
+        loader.cancel()
+        for s in list(hub.sessions.values()):
+            hub.stop_listening(s)
+        for t in list(hub.tasks):
+            t.cancel()
+        await asyncio.gather(*hub.tasks, return_exceptions=True)
+        await hub.bridge.stop()
+        await routing.current().aclose()
+        await hub.http.aclose()
+        EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 app = FastAPI(title="voice-nodes", lifespan=lifespan)
@@ -234,8 +863,16 @@ health.install_health(app, details=lambda: {
     "nodes": {"online": len(hub.sessions), "adopted": len(hub.store.nodes),
               "pending": sum(1 for s in hub.sessions.values() if not s.adopted)},
     "tts": TTS_URL or None,
+    "voice": hub.voice.health(),
+    "routing": {"rules": len(routing.current().rules.rules),
+                "stt": routing.current().stt_url or None,
+                "load_error": routing.current().rules.load_error},
+    "mqtt": hub.bridge.health() if hub.bridge else None,
 })
 auth.install(app, "NODES_API_KEYS")
+# Before every /nodes/{nid} route below: FastAPI matches in registration order,
+# and GET /nodes/{nid} would otherwise take "routing" for a node id.
+app.include_router(routing.routes)
 
 
 # ---- the device socket -------------------------------------------------------
@@ -269,14 +906,18 @@ async def node_socket(ws: WebSocket) -> None:
             if msg.get("bytes") is not None:
                 data = msg["bytes"]
                 if s.adopted and data and data[0] == FRAME_MIC:
+                    pcm = data[HEADER:]
                     for q in list(s.taps):
-                        q.put_nowait(data[HEADER:])
+                        q.put_nowait(pcm)
+                    if s.listener is not None:
+                        s.offer_mic(pcm)
             elif msg.get("text") is not None:
                 await on_message(s, json.loads(msg["text"]))
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
         player.cancel()
+        hub.stop_listening(s)
         if s.ota and s.ota.get("state") in ("requested", "started", "progress"):
             s.ota.update(state="failed", error="disconnected mid-transfer")
             hub.publish({"type": "ota", "node": s.id, "state": "failed",
@@ -289,6 +930,9 @@ async def node_socket(ws: WebSocket) -> None:
         log.info("node %s disconnected", s.id)
 
 
+EARCON_MESSAGES = frozenset({"earcons", "earcon_next", "earcon_stored", "earcon_failed"})
+
+
 async def on_message(s: Session, msg: dict) -> None:
     kind = msg.get("type")
     if kind == "hello":  # sent again after adoption, with the new token
@@ -297,9 +941,16 @@ async def on_message(s: Session, msg: dict) -> None:
     elif kind == "status":
         s.status = {k: v for k, v in msg.items() if k != "type"}
         hub.publish({"type": "status", "node": s.id, "status": s.status})
+        # Muted mid-command: nothing more will arrive, so stop waiting for it.
+        if s.status.get("muted") and s.conversation and s.conversation.phase == "listening":
+            s.conversation.cancel()
     elif kind == "button" and s.adopted:
         hub.publish({"type": "button", "node": s.id, "button": msg.get("button"),
                      "action": msg.get("action"), "held_ms": msg.get("held_ms")})
+        if isinstance(msg.get("button"), str) and msg.get("action") in ("press", "release"):
+            await hub.on_button(s, msg["button"], msg["action"], msg.get("held_ms"))
+    elif kind in EARCON_MESSAGES and s.adopted and s.earcons is not None:
+        await hub.on_earcons(s, msg)
     elif kind == "ota_next" and s.ota:
         off = int(msg.get("offset", 0))
         image = s.ota["image"]
@@ -324,6 +975,14 @@ class AdoptBody(BaseModel):
     name: str = Field(default="", max_length=64)
 
 
+# A button as the node names it, and what the hub does when it is pressed or
+# released. A webhook URL may not carry a user and password: the mapping is
+# returned by GET /nodes, as a rule is by GET /nodes/routing.
+ButtonName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_-]{1,32}$")]
+ButtonAction = Annotated[str, StringConstraints(
+    pattern=r"^(ptt|stop|none|webhook:https?://[^\s/?#@]+(/\S*)?)$", max_length=500)]
+
+
 class ConfigBody(BaseModel):
     name: str | None = Field(default=None, max_length=64)
     volume: int | None = Field(default=None, ge=0, le=100)
@@ -332,6 +991,18 @@ class ConfigBody(BaseModel):
     speaker_enabled: bool | None = None
     local_volume_buttons: bool | None = None
     lights_enabled: bool | None = None
+    # Replaces the whole mapping. {} maps nothing; the default is in store.py.
+    buttons: dict[ButtonName, dict[Literal["press", "release"], ButtonAction]] | None = Field(
+        default=None, max_length=16)
+
+    @field_validator("buttons")
+    @classmethod
+    def _rec_is_the_mute(cls, v: dict | None) -> dict | None:
+        # The firmware mutes on REC by itself, before the hub hears of it, so
+        # anything mapped there would start with the microphone cut.
+        if v and any(a != "none" for a in (v.get("rec") or {}).values()):
+            raise ValueError("rec is the node's own privacy mute and cannot be mapped")
+        return v
 
 
 class LightsBody(BaseModel):
@@ -358,6 +1029,17 @@ class HubBody(BaseModel):
 class OtaBody(BaseModel):
     node: str
     sha256: str = Field(pattern="^[0-9a-f]{64}$")
+
+
+def _mqtt_node(nid: str) -> None:
+    if hub.bridge is not None:
+        hub.bridge.publish_node(hub.describe(nid))
+
+
+async def mqtt_command(nid: str, change: dict) -> None:
+    """A Home Assistant switch or slider: the same path as PATCH, so it is
+    validated, saved and sent to the node in exactly one place."""
+    await configure(nid, ConfigBody(**change))
 
 
 @app.get("/nodes")
@@ -396,7 +1078,8 @@ async def list_firmware() -> dict:
 
 @app.post("/nodes/firmware")
 async def upload_firmware(request: Request, model: str = Query(..., max_length=64),
-                          version: str = Query("unknown", max_length=64)) -> dict:
+                          version: str = Query("unknown", max_length=64),
+                          signature: str | None = Query(None, max_length=200)) -> dict:
     image = await request.body()
     if not image:
         raise ApiError(400, "empty body: send the .bin as the request body")
@@ -404,8 +1087,13 @@ async def upload_firmware(request: Request, model: str = Query(..., max_length=6
         raise ApiError(413, f"image is {len(image)} bytes; an OTA slot holds {MAX_FIRMWARE}")
     if image[0] != 0xE9:  # every ESP32 app image starts with this magic byte
         raise ApiError(400, "not an ESP32 application image (first byte is not 0xE9)")
-    fw = hub.store.add_firmware(image, model, version)
-    log.info("firmware %s stored: %s %s, %d bytes", fw.sha256[:12], model, version, fw.size)
+    try:
+        sig = signing.accept_upload(image, signature, FIRMWARE_KEY)
+    except signing.SignatureError as e:
+        raise ApiError(400, str(e), code="bad_signature") from None
+    fw = hub.store.add_firmware(image, model, version, sig)
+    log.info("firmware %s stored: %s %s, %d bytes, %s", fw.sha256[:12], model, version, fw.size,
+             "signed" if sig else "unsigned")
     return vars(fw)
 
 
@@ -434,10 +1122,14 @@ async def start_ota(body: OtaBody) -> dict:
             skipped[nid] = f"model {s.model}, image is for {fw.model}"
         elif s.ota and s.ota.get("state") in ("requested", "started", "progress"):
             skipped[nid] = "already updating"
+        elif reason := signing.skip_reason(s.caps, fw.signature, FIRMWARE_KEY):
+            # The node would refuse it at the end of a 15 s transfer; say why now.
+            skipped[nid] = reason
         else:
             s.ota = {"image": image, "sha256": fw.sha256, "version": fw.version, "state": "requested"}
             await s.send_json({"type": "ota", "size": fw.size, "sha256": fw.sha256,
-                               "version": fw.version})
+                               "version": fw.version}
+                              | ({"signature": fw.signature} if fw.signature else {}))
             started.append(nid)
     return {"started": started, "skipped": skipped}
 
@@ -451,10 +1143,11 @@ async def get_node(nid: str) -> dict:
 async def adopt(nid: str, body: AdoptBody) -> dict:
     s = hub.session(nid, adopted=False)
     name = body.name or f"node-{s.id[-4:]}"
-    token = hub.store.adopt(s.id, name, s.model)
+    token = hub.store.adopt(s.id, name, s.model, reported=s.status)
     hub.seen.pop(s.id, None)
     await s.send_json({"type": "adopt", "token": token, "name": name})
     log.info("node %s adopted as %r", s.id, name)
+    _mqtt_node(s.id)
     return hub.describe(s.id)
 
 
@@ -465,7 +1158,12 @@ async def forget(nid: str) -> Response:
     hub.store.forget(nid)
     if s is not None:
         s.adopted = False
+        hub.stop_listening(s)
+        s.earcons = None
         await s.send_json({"type": "forget"})
+    # After store.forget: this is the only way a node forgotten while offline
+    # is removed from Home Assistant.
+    _mqtt_node(nid)
     return Response(status_code=204)
 
 
@@ -479,11 +1177,21 @@ async def configure(nid: str, body: ConfigBody) -> dict:
     if "name" in change:
         rec.name = change["name"]
     cfg = {k: v for k, v in change.items() if k in DEFAULT_CONFIG}
+    was_dark = not rec.config.get("lights_enabled", True)
     rec.config.update(cfg)
     hub.store.save_nodes()
     s = hub.sessions.get(nid)
     if s is not None and s.adopted:
-        await s.send_json({"type": "config", **cfg, **({"name": rec.name} if "name" in change else {})})
+        to_node = node_config(cfg) | ({"name": rec.name} if "name" in change else {})
+        if to_node:
+            await s.send_json({"type": "config", **to_node})
+        # A ring lit by a conversation that went dark mid-way was never put
+        # out, because nothing may be sent to a dark node. Now it may.
+        if was_dark and cfg.get("lights_enabled") and s.lit and s.conversation is None:
+            await hub.send_lights(s, {"mode": "off"})
+        if cfg.get("mic_enabled") is False and s.conversation and s.conversation.phase == "listening":
+            s.conversation.cancel()
+    _mqtt_node(nid)
     return hub.describe(nid)
 
 
@@ -510,7 +1218,10 @@ async def set_hub(nid: str, body: HubBody) -> Response:
 
 @app.post("/nodes/{nid}/lights")
 async def lights(nid: str, body: LightsBody) -> Response:
-    await hub.session(nid).send_json({"type": "lights", **body.model_dump(exclude_none=True)})
+    s = hub.session(nid)
+    if not await hub.send_lights(s, body.model_dump(exclude_none=True)):
+        raise ApiError(409, f"node {s.id} has its lights turned off (lights_enabled is false)",
+                       code="lights_disabled")
     return Response(status_code=204)
 
 
@@ -539,10 +1250,9 @@ async def say(nid: str, body: SayBody) -> Response:
 
 @app.post("/nodes/{nid}/flush")
 async def flush(nid: str) -> Response:
-    s = hub.session(nid)
-    while not s.speaker.empty():
-        s.speaker.get_nowait()
-    await s.send_json({"type": "flush"})
+    """Drop the speaker audio queued and playing, and the conversation in
+    progress: what the "stop" button does."""
+    await hub.stop(hub.session(nid))
     return Response(status_code=204)
 
 
@@ -576,3 +1286,96 @@ async def listen(nid: str, seconds: float = Query(5, gt=0, le=60),
         ch = 1
     return Response(audio.wav(pcm, rate, ch), media_type="audio/wav",
                     headers={"Content-Disposition": f'attachment; filename="{s.id}.wav"'})
+
+
+# ---- verifying the pipeline without a voice ---------------------------------------
+
+
+def _read_clip(body: bytes) -> np.ndarray:
+    if not body:
+        raise ApiError(400, "empty body: send a 16 kHz mono 16-bit WAV as the request body")
+    try:
+        with wave.open(io.BytesIO(body)) as w:
+            shape = (w.getframerate(), w.getnchannels(), w.getsampwidth())
+            n = w.getnframes()
+            pcm = w.readframes(n)
+    except (wave.Error, EOFError):
+        raise ApiError(400, "the body is not a WAV file") from None
+    if shape != (listening.RATE, 1, 2):
+        rate, ch, width = shape
+        raise ApiError(400, f"the clip is {rate} Hz, {ch} channel(s), {8 * width}-bit; "
+                            "inject takes 16 kHz mono 16-bit")
+    if n > MAX_INJECT_S * listening.RATE:
+        raise ApiError(413, f"the clip is {n / listening.RATE:.0f} s; inject takes at most {MAX_INJECT_S} s")
+    return np.frombuffer(pcm[:len(pcm) & ~1], dtype="<i2").astype(np.int16)
+
+
+def _hear_clip(clip: np.ndarray, wake: wakeword.WakeWords | None,
+               wake_word: str | None) -> tuple[listening.Heard | None, listening.Command | None]:
+    """A clip through a fresh Ear, in the node's own 20 ms frames, then room
+    noise until the endpointer ends the command. Runs in the thread pool."""
+    ear = listening.Ear(channels=1, frontend=False, wake=wake)
+    if wake_word:
+        ear.push_to_talk(wake_word)
+    heard = command = None
+    frame = listening.RATE * 20 // 1000
+    # openWakeWord fires up to about a second after the word ends (0.8 s on the
+    # fixtures), so a clip that stops right after it still gets that long.
+    grace = int(WAKE_GRACE_S * listening.RATE)
+    x = np.concatenate((clip, listening.room_floor(COMMAND_WAIT_S)))
+    for off in range(0, len(x), frame):
+        for ev in ear.process(x[off:off + frame].reshape(-1, 1)):
+            if isinstance(ev, listening.Heard) and heard is None:
+                heard = ev
+            elif isinstance(ev, listening.Command) and command is None:
+                command = ev
+        if command is not None or (heard is None and off >= len(clip) + grace):
+            break
+    return heard, command
+
+
+@app.post("/nodes/{nid}/inject")
+async def inject(nid: str, request: Request, play: bool = Query(False),
+                 wake_word: str | None = Query(
+                     None, pattern=r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$")) -> dict:
+    """Run a recorded clip through the listening path as if the node had heard
+    it: wake word, endpoint, rule, STT, destination, TTS. The reply is played
+    only with ?play=1; without it nothing at all is sent to any node, which is
+    how the whole path is checked with nobody in earshot. ?wake_word= skips
+    detection and treats the whole clip as the command after that word, as
+    push-to-talk does. Events are published marked "injected" and are not
+    forwarded to MQTT."""
+    nid = hub.resolve(nid)
+    rec = hub.store.nodes.get(nid)
+    if rec is None:
+        raise ApiError(409, f"node {nid} is not adopted", code="node_not_adopted")
+    s = None
+    if play:
+        s = hub.session(nid)
+        if s.conversation is not None:
+            raise ApiError(409, f"node {nid} is in a conversation already", code="node_busy")
+    clip = _read_clip(await request.body())
+    if wake_word is None and hub.voice.base is None:
+        raise ApiError(503, f"no wake word model is loaded (state {hub.voice.state}"
+                            f"{': ' + hub.voice.error if hub.voice.error else ''}); pass "
+                            "?wake_word= to skip detection", code="wake_words_unavailable")
+    loop = asyncio.get_running_loop()
+    wake = None if wake_word else await loop.run_in_executor(EXECUTOR, hub.voice.stream)
+    heard, command = await loop.run_in_executor(EXECUTOR, _hear_clip, clip, wake, wake_word)
+    if heard is None:
+        return {"node": nid, "heard": None, "command": None, "outcome": None, "played": False}
+    if play and s.conversation is not None:
+        raise ApiError(409, f"node {nid} is in a conversation already", code="node_busy")
+    conv = Conversation(hub, nid, rec.name, heard, session=s, quiet=not play, injected=True)
+    if s is not None:
+        s.conversation = conv
+    conv.deliver(command)
+    # A task, as a live conversation is, so the node's stop button cancels
+    # this one too; run() ends with the routed event even when cancelled.
+    conv.start()
+    event = await conv.task
+    return {"node": nid,
+            "heard": {"wake_word": heard.wake_word, "score": heard.score, "at_s": heard.at_s},
+            "command": {"reason": command.reason, "seconds": round(command.seconds, 2),
+                        "had_speech": command.had_speech},
+            "outcome": conv.outcome.as_json(), "played": event["played"], "note": event["note"]}

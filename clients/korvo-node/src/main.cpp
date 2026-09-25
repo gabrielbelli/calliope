@@ -1,10 +1,11 @@
 // Calliope node firmware for the ESP32-Korvo v1.1.
 //
 // The device is a thin client: it streams its microphones to the hub and
-// plays, lights and reports whatever the hub decides. Only three things stay
+// plays, lights and reports whatever the hub decides. Only four things stay
 // local, because they must work whatever the hub does: the privacy mute, the
-// volume ceiling (codec.cpp), and recovery (Wi-Fi setup, factory reset,
-// firmware rollback).
+// volume ceiling (codec.cpp), recovery (Wi-Fi setup, factory reset, firmware
+// rollback), and, in a build with a public key, the firmware signature check
+// (ota_sig.cpp).
 //
 // Buttons, locally:
 //   REC            toggles the privacy mute (mic powered down, ring red)
@@ -21,6 +22,7 @@
 #include "board.h"
 #include "buttons.h"
 #include "codec.h"
+#include "earcons.h"
 #include "hub.h"
 #include "lights.h"
 #include "settings.h"
@@ -129,6 +131,7 @@ void setup() {
   codec_begin();
   mic_set_gain_db(settings.mic_gain_db);
   spk_set_volume(settings.volume);
+  earcons_begin();  // in the background, while Wi-Fi comes up
   // A release build that inherited a ws:// hub from a development one reopens
   // the portal rather than connecting in clear (see hub_begin).
 #ifndef DEV_HUB

@@ -186,3 +186,22 @@ def test_the_socket_refuses_anything_but_a_hello_first(client):
         ws.send_text(json.dumps({"type": "status"}))
         with pytest.raises(Exception):
             ws.receive_json()
+
+
+def test_adopting_a_dark_node_keeps_it_dark(client):
+    """A node moved from another hub reports lights_enabled false while it is
+    pending. The new hub's default is true, and adoption used to take the
+    default -- the welcome would have lit a ring in a room where someone was
+    asleep."""
+    with client.websocket_connect("/nodes/ws") as ws:
+        ws.send_json(hello())
+        assert ws.receive_json() == {"type": "pending"}
+        ws.send_json({"type": "status", "lights_enabled": False, "volume": 35, "rssi": -60})
+        client.get("/nodes")  # let the status land before adopting
+        assert client.post(f"/nodes/{NID}/adopt", json={"name": "bedroom"}).status_code == 200
+        token = ws.receive_json()["token"]
+        ws.send_json(hello(token))
+        welcome = ws.receive_json()
+        assert welcome["type"] == "welcome"
+        assert welcome["config"]["lights_enabled"] is False
+        assert welcome["config"]["volume"] == 35

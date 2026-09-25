@@ -1168,12 +1168,14 @@ for _method, _path in UI_PATHS:
 NODES = Backend(
     name="voice-nodes",
     url=os.getenv("GATEWAY_NODES_URL", "http://voice-nodes:8003").rstrip("/"),
-    # 120 s: the slowest route is /nodes/{id}/say, which waits for Kokoro, and
-    # /nodes/{id}/listen, which records for up to 60 s by design.
+    # 120 s: the slowest routes are /nodes/{id}/say, which waits for Kokoro,
+    # /nodes/{id}/listen, which records for up to 60 s by design, and the two
+    # that run a sentence through STT, an assistant and TTS (/nodes/routing/test
+    # and /nodes/{id}/inject), each stage under its own ceiling of 15-30 s.
     read_timeout=float(os.getenv("GATEWAY_NODES_TIMEOUT", "120")),
     timeout_help="A listen records for as long as it was asked to, up to 60 s; "
-                 "a say waits for the whole sentence to be synthesised. Ask "
-                 "for less.",
+                 "a say waits for the whole sentence to be synthesised, and a "
+                 "routing test for the assistant. Ask for less.",
 )
 
 NODES_PATHS = (
@@ -1183,12 +1185,21 @@ NODES_PATHS = (
     ("POST", "/nodes/firmware"),
     ("DELETE", "/nodes/firmware/{sha256}"),
     ("POST", "/nodes/ota"),
+    # Above /nodes/{nid}, as in voice-nodes itself: here both would reach the
+    # same backend path, but PUT and the POST below have no /nodes/{nid} twin
+    # and would answer 405 if they were left to it.
+    ("GET", "/nodes/routing"),
+    ("PUT", "/nodes/routing"),
+    ("POST", "/nodes/routing/test"),
     ("GET", "/nodes/{nid}"),
     ("PATCH", "/nodes/{nid}"),
     ("GET", "/nodes/{nid}/listen"),
+    # inject is routed for scripts that verify the listening path with a
+    # recorded clip, behind the same keys as everything else here; the page
+    # never calls it (see NOT_ON_PAGE in tests/test_gateway.py).
     *(("POST", f"/nodes/{{nid}}/{action}") for action in (
         "adopt", "forget", "identify", "reboot", "lights", "tone", "say",
-        "flush", "set-hub")),
+        "flush", "set-hub", "inject")),
 )
 
 

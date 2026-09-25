@@ -1,2 +1,7 @@
 .pio/
 .vscode/
+# Only the public half of the firmware signing key belongs in the repository.
+# The private key lives outside it (keys/README.md).
+keys/*
+!keys/README.md
+!keys/*.pub.pem

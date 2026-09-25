@@ -1293,6 +1293,17 @@ NOT_ROUTED: dict[tuple[str, str, str], str] = {
         "write a row into the history it is reading.",
 }
 
+# Routes the gateway serves, behind its keys, that the page deliberately never
+# reaches: voice-ui's PROXIED leaves them out on purpose. Same rule as above,
+# every entry carries its reason.
+NOT_ON_PAGE: dict[tuple[str, str, str], str] = {
+    ("nodes", "POST", "/nodes/{nid}/inject"):
+        "a test hook: a recorded clip through a node's wake word, endpoint and "
+        "routing path, for a script verifying the pipeline with nobody in "
+        "earshot. A button for it on the page would be one press from a real "
+        "rule acting on a clip, with Home Assistant on the other end.",
+}
+
 # What this service answers itself, with no backend behind it. Without these
 # the reverse test reads a correct allowlist entry as pointing at nothing.
 #
@@ -1345,12 +1356,22 @@ def _declared_routes(service: str) -> set[tuple[str, str]]:
     for module in sorted(app_dir.glob("*.py")):
         tree = ast.parse(module.read_text(encoding="utf-8"))
         # One router per module in this estate, so its prefix is the module's.
+        # ITS NAME IS WHATEVER IT IS ASSIGNED TO. This reader once knew only
+        # `router`, and services/nodes/app/router.py names its APIRouter
+        # `routes` (the module is already called router): its three routes
+        # were invisible here, so the fence could not have said they were
+        # missing from either table.
         prefix = ""
+        owners = {"app", "router"}
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "APIRouter":
                 for keyword in node.keywords:
                     if keyword.arg == "prefix" and isinstance(keyword.value, ast.Constant):
                         prefix = keyword.value.value
+            if (isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Call)
+                    and getattr(node.value.func, "id", "") == "APIRouter"):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                owners |= {t.id for t in targets if isinstance(t, ast.Name)}
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -1362,12 +1383,12 @@ def _declared_routes(service: str) -> set[tuple[str, str]]:
                     continue
                 method = attribute.attr.upper()
                 owner = getattr(attribute.value, "id", "")
-                if method not in HTTP_METHODS or owner not in ("app", "router"):
+                if method not in HTTP_METHODS or owner not in owners:
                     continue
                 if not decorator.args or not isinstance(decorator.args[0], ast.Constant):
                     continue
                 path = decorator.args[0].value
-                routes.add((method, prefix + path if owner == "router" else path))
+                routes.add((method, path if owner == "app" else prefix + path))
     assert routes, f"read no routes at all out of services/{service}/app"
     return routes
 
@@ -1694,6 +1715,11 @@ def test_every_backend_route_is_routed_or_named_as_unrouted():
                 unreachable.append(
                     f"{service} answers {method} {path} and this service does "
                     "not route it")
+            elif (service, method, path) in NOT_ON_PAGE:
+                if pair in proxied:
+                    unreachable.append(
+                        f"{service} answers {method} {path}, which NOT_ON_PAGE "
+                        "keeps off the page, and voice-ui's PROXIED lists it")
             elif pair not in proxied:
                 unreachable.append(
                     f"{service} answers {method} {path} and voice-ui's PROXIED "
@@ -1792,6 +1818,16 @@ def test_the_proxied_reader_handles_an_annotated_assignment(tmp_path):
     empty.write_text("SOMETHING_ELSE = ()\n", encoding="utf-8")
     with pytest.raises(AssertionError):
         _proxied_table(empty)
+
+
+def test_the_route_reader_follows_an_apirouter_whatever_it_is_called():
+    """services/nodes/app/router.py names its APIRouter `routes`, and a reader
+    that knew only `router` saw none of its three routes: the fence above
+    could not have reported them missing."""
+    nodes = _declared_routes("nodes")
+    for pair in (("GET", "/nodes/routing"), ("PUT", "/nodes/routing"),
+                 ("POST", "/nodes/routing/test")):
+        assert pair in nodes, f"the reader does not see {pair} in services/nodes"
 
 
 @pytest.mark.parametrize("method,path", [

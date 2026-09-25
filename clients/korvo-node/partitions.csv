@@ -1,5 +1,6 @@
-# 16 MB flash: two 4 MB app slots for OTA with rollback, the rest for data
-# (earcons and the like, later).
+# 16 MB flash: two 4 MB app slots for OTA with rollback, the rest for data.
+# "storage" keeps its spiffs subtype but holds LittleFS (the earcons); the table
+# cannot change over the air, so it stays as the first USB flash wrote it.
 # Name,   Type, SubType, Offset,   Size
 nvs,      data, nvs,     0x9000,   0x5000
 otadata,  data, ota,     0xe000,   0x2000

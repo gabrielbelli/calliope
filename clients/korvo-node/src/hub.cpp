@@ -13,8 +13,11 @@
 #include "board.h"
 #include "ca.h"
 #include "codec.h"
+#include "earcons.h"
 #include "lights.h"
+#include "ota_sig.h"
 #include "settings.h"
+#include "speaker.h"
 
 #ifndef FW_VERSION
 #define FW_VERSION "dev"
@@ -33,9 +36,8 @@ static uint32_t last_status = 0;
 static const size_t MIC_FRAMES = MIC_RATE / 50;  // 20 ms per packet
 static const size_t MIC_PACKET = FRAME_HEADER + MIC_FRAMES * MIC_CHANNELS * 2;
 static RingbufHandle_t mic_rb;  // packets from the capture task to loop()
-static RingbufHandle_t spk_rb;  // PCM from the hub to the playback task
-static volatile uint32_t mic_dropped = 0, spk_dropped = 0;
-static volatile uint32_t spk_last_audio = 0;
+static volatile uint32_t mic_dropped = 0;
+static uint32_t spk_dropped = 0;  // hub audio with no room in the speaker's buffer
 
 static bool mic_live() {
   return connected && adopted && settings.mic_enabled && !node_muted;
@@ -60,22 +62,6 @@ static void mic_task(void *) {
   }
 }
 
-static void spk_task(void *) {
-  bool amp = false;
-  for (;;) {
-    size_t len = 0;
-    int16_t *pcm = (int16_t *)xRingbufferReceiveUpTo(spk_rb, &len, pdMS_TO_TICKS(20), 960);
-    if (pcm) {
-      if (!amp && settings.speaker_enabled) spk_amp(amp = true);
-      spk_write(pcm, len / 2, 100);
-      vRingbufferReturnItem(spk_rb, pcm);
-      spk_last_audio = millis();
-    } else if (amp && millis() - spk_last_audio > 3000) {
-      spk_amp(amp = false);  // amplifier hiss is audible; only power it while playing
-    }
-  }
-}
-
 // ---- firmware update over the socket ------------------------------------
 
 static struct {
@@ -83,6 +69,8 @@ static struct {
   uint32_t size = 0, offset = 0, last_pct = 0, last_rx = 0;
   String sha256, version;
   mbedtls_sha256_context sha;
+  uint8_t sig[SIG_MAX_DER];
+  size_t sig_len = 0;
 } ota;
 
 static void send_json(JsonDocument &doc) {
@@ -128,6 +116,22 @@ static void ota_start(JsonDocument &msg) {
     ota_report("failed", "bad request");
     return;
   }
+  const char *sig = msg["signature"] | "";
+  ota.sig_len = *sig ? sig_decode(sig, ota.sig, sizeof(ota.sig)) : 0;
+  if (sig_required()) {
+    if (!*sig) {
+      ota_report("failed", "unsigned image");
+      return;
+    }
+    // The hub names the digest before it sends a byte, so a signature that
+    // cannot match is refused before the spare slot is touched. The check that
+    // decides is the one on the bytes received, in ota_chunk.
+    uint8_t claimed[32];
+    if (!sig_hex32(ota.sha256.c_str(), claimed) || !sig_verify(claimed, ota.sig, ota.sig_len)) {
+      ota_report("failed", "bad signature");
+      return;
+    }
+  }
   if (!Update.begin(ota.size, U_FLASH)) {
     ota_report("failed", Update.errorString());
     return;
@@ -164,6 +168,8 @@ static void ota_chunk(const uint8_t *data, size_t len) {
   char hex[65];
   for (int i = 0; i < 32; i++) sprintf(hex + 2 * i, "%02x", digest[i]);
   if (ota.sha256 != hex) return ota_abort("sha256 mismatch");
+  // Before Update.end(), which is what makes the new slot bootable.
+  if (sig_required() && !sig_verify(digest, ota.sig, ota.sig_len)) return ota_abort("bad signature");
   if (!Update.end(true)) return ota_abort(Update.errorString());
   ota_report("rebooting");
   ws.loop();
@@ -210,6 +216,14 @@ static void send_hello() {
   caps["lights"] = LED_COUNT;
   JsonArray b = caps["buttons"].to<JsonArray>();
   for (const char *n : {"vol_up", "vol_down", "set", "play", "mode", "rec"}) b.add(n);
+  // Absent on older firmware, which ignores these messages: the hub checks
+  // before it sends them.
+  if (sig_required()) caps["ota_key"] = sig_key_id();
+  JsonObject ear = caps["earcons"].to<JsonObject>();
+  ear["max"] = EARCON_MAX_COUNT;
+  ear["max_bytes"] = EARCON_MAX_BYTES;
+  ear["rate"] = SPK_RATE;
+  caps["duck"] = true;
   send_json(d);
 }
 
@@ -229,8 +243,11 @@ void hub_send_status() {
   d["lights_enabled"] = settings.lights_enabled;
   d["mic_dropped"] = mic_dropped;
   d["spk_dropped"] = spk_dropped;
-  UBaseType_t free_bytes = xRingbufferGetCurFreeSize(spk_rb);
-  d["spk_buffered_ms"] = (96 * 1024 - free_bytes) / (SPK_RATE * 2 / 1000);
+  d["spk_buffered_ms"] = speaker_buffered_ms();
+  int duck = speaker_duck_level();
+  if (duck >= 0) d["duck"] = duck;
+  else d["duck"] = nullptr;
+  d["earcons_ready"] = earcons_ready();
   send_json(d);
   last_status = millis();
 }
@@ -258,6 +275,58 @@ static void apply_config(JsonVariantConst c) {
   if (c["name"].is<const char *>()) settings.name = (const char *)c["name"];
   settings_save();
   hub_send_status();
+}
+
+// ---- earcons ------------------------------------------------------------
+
+static void earcon_next() {
+  JsonDocument d;
+  d["type"] = "earcon_next";
+  d["id"] = earcon_put_id();
+  d["offset"] = earcon_put_offset();
+  send_json(d);
+}
+
+static void earcon_stored() {
+  JsonDocument d;
+  d["type"] = "earcon_stored";
+  d["id"] = earcon_put_id();
+  d["size"] = earcon_put_size();
+  d["sha256"] = earcon_put_sha256();
+  send_json(d);
+}
+
+// `op` tells an upload that failed from a play that failed: the hub may be
+// playing one earcon while it uploads another with the same id.
+static void earcon_failed(const char *op, const char *id, const char *error) {
+  JsonDocument d;
+  d["type"] = "earcon_failed";
+  d["op"] = op;
+  d["id"] = id;
+  d["error"] = error;
+  send_json(d);
+}
+
+static void earcon_send_list() {
+  JsonDocument d;
+  d["type"] = "earcons";
+  d["ready"] = earcons_ready();
+  earcon_list(d["items"].to<JsonArray>());
+  d["last_load_us"] = earcon_last_load_us();
+  send_json(d);
+}
+
+static void earcon_chunk(const uint8_t *data, size_t len) {
+  if (len < 8) return;
+  uint32_t offset;
+  memcpy(&offset, data + 4, 4);
+  const char *error = nullptr;
+  switch (earcon_put_chunk(offset, data + 8, len - 8, &error)) {
+    case PutResult::Next: earcon_next(); break;
+    case PutResult::Stored: earcon_stored(); break;
+    case PutResult::Failed: earcon_failed("put", earcon_put_id(), error); break;
+    case PutResult::Ignored: break;
+  }
 }
 
 static Mode parse_mode(const char *m) {
@@ -320,9 +389,35 @@ static void on_text(const char *text, size_t len) {
   } else if (!strcmp(type, "ota")) {
     ota_start(msg);
   } else if (!strcmp(type, "flush")) {  // drop queued speaker audio (barge-in)
-    size_t len;
-    void *item;
-    while ((item = xRingbufferReceiveUpTo(spk_rb, &len, 0, 96 * 1024))) vRingbufferReturnItem(spk_rb, item);
+    speaker_flush();
+  } else if (!adopted) {
+    // Below here: audio and storage, which like the binary frames are only
+    // for a node the hub has adopted.
+  } else if (!strcmp(type, "earcon_put")) {
+    const char *id = msg["id"] | "";
+    const char *error = earcon_put_begin(id, msg["size"] | 0u, msg["sha256"] | "");
+    if (error) earcon_failed("put", id, error);
+    else earcon_next();
+  } else if (!strcmp(type, "earcon")) {
+    const char *id = msg["id"] | "";
+    const char *error = earcon_play(id);
+    if (error) earcon_failed("play", id, error);
+  } else if (!strcmp(type, "earcon_list")) {
+    earcon_send_list();
+  } else if (!strcmp(type, "earcon_delete")) {
+    const char *id = msg["id"] | "";
+    const char *error = earcon_delete(id);
+    if (error) earcon_failed("delete", id, error);
+    else earcon_send_list();
+  } else if (!strcmp(type, "duck")) {
+    // Read as floats: a hub that computes 1.5 * 1000 sends "1500.0", which an
+    // integer read takes as absent, and absent ms means "until unduck".
+    JsonVariantConst level = msg["level"];
+    float ms = msg["ms"] | 0.0f;
+    if (level.is<float>())
+      speaker_duck((int)lroundf(level.as<float>()), ms > 0 ? (uint32_t)fminf(ms, 86400000.0f) : 0);
+  } else if (!strcmp(type, "unduck")) {
+    speaker_unduck();
   }
 }
 
@@ -336,6 +431,10 @@ static void on_event(WStype_t type, uint8_t *payload, size_t len) {
     case WStype_DISCONNECTED:
       connected = adopted = false;
       if (ota.active) ota_abort("disconnected");
+      earcon_put_abort();
+      // A duck belongs to the conversation that asked for it. A hub that comes
+      // back may not remember it, and nothing else would ever lift it.
+      speaker_unduck();
       lights_status(was_adopted ? Status::HubLost : Status::Connecting);
       break;
     case WStype_TEXT:
@@ -344,9 +443,11 @@ static void on_event(WStype_t type, uint8_t *payload, size_t len) {
     case WStype_BIN:
       if (!len) break;
       if (payload[0] == FRAME_SPEAKER && len > FRAME_HEADER && adopted) {
-        if (xRingbufferSend(spk_rb, payload + FRAME_HEADER, len - FRAME_HEADER, 0) != pdTRUE) spk_dropped++;
+        if (!speaker_push(payload + FRAME_HEADER, len - FRAME_HEADER)) spk_dropped++;
       } else if (payload[0] == FRAME_FIRMWARE && adopted) {
         ota_chunk(payload, len);
+      } else if (payload[0] == FRAME_EARCON && adopted) {
+        earcon_chunk(payload, len);
       }
       break;
     default:
@@ -372,12 +473,8 @@ static bool parse_hub(const String &url, bool *tls, String *host, uint16_t *port
 
 void hub_begin() {
   mic_rb = xRingbufferCreate(16 * 1024, RINGBUF_TYPE_NOSPLIT);
-  static StaticRingbuffer_t spk_rb_struct;
-  uint8_t *spk_mem = (uint8_t *)heap_caps_malloc(96 * 1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  spk_rb = spk_mem ? xRingbufferCreateStatic(96 * 1024, RINGBUF_TYPE_BYTEBUF, spk_mem, &spk_rb_struct)
-                   : xRingbufferCreate(32 * 1024, RINGBUF_TYPE_BYTEBUF);
+  speaker_begin();
   xTaskCreatePinnedToCore(mic_task, "mic", 4096, nullptr, 5, nullptr, 1);
-  xTaskCreatePinnedToCore(spk_task, "spk", 4096, nullptr, 5, nullptr, 1);
 
   bool tls;
   String host;
@@ -410,6 +507,11 @@ void hub_loop() {
     vRingbufferReturnItem(mic_rb, pkt);
   }
   if (ota.active && millis() - ota.last_rx > 5000) ota_abort("timeout");
+  if (earcon_put_active() && earcon_put_idle_ms() > 5000) {
+    earcon_failed("put", earcon_put_id(), "timeout");
+    earcon_put_abort();
+  }
+  speaker_loop();
   if (connected && millis() - last_status > 10000) hub_send_status();
 }
 

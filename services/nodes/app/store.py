@@ -7,6 +7,7 @@ file cannot impersonate a node to the hub.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import hmac
 import json
@@ -23,7 +24,24 @@ DEFAULT_CONFIG = {
     "speaker_enabled": True,
     "local_volume_buttons": True,
     "lights_enabled": True,
+    # What the hub does when a button is pressed. The node only reports
+    # presses, so this never goes to it (HUB_ONLY). PLAY talks, SET stops.
+    "buttons": {"play": {"press": "ptt"}, "set": {"press": "stop"}},
 }
+# Config the hub acts on itself and never sends to the node: the firmware would
+# ignore it, and it would cost a JSON document on a board with 300 KB of heap.
+HUB_ONLY = frozenset({"buttons"})
+
+
+def default_config() -> dict:
+    """A deep copy: "buttons" is a dict of dicts, and a shallow copy would let
+    one node's mapping be edited through another's."""
+    return copy.deepcopy(DEFAULT_CONFIG)
+
+
+def node_config(config: dict) -> dict:
+    """What the node itself is told: the config without the hub's own keys."""
+    return {k: v for k, v in config.items() if k not in HUB_ONLY}
 
 
 def token_hash(token: str) -> str:
@@ -37,7 +55,7 @@ class Node:
     model: str
     token_sha256: str
     adopted_at: float
-    config: dict = field(default_factory=lambda: dict(DEFAULT_CONFIG))
+    config: dict = field(default_factory=default_config)
 
     def accepts(self, token: str | None) -> bool:
         return bool(token) and hmac.compare_digest(token_hash(token), self.token_sha256)
@@ -50,6 +68,11 @@ class Firmware:
     model: str
     version: str
     uploaded_at: float
+    # Standard base64 DER ECDSA over the image, from the upload's ?signature=,
+    # or None for an unsigned image. Carried in the "ota" message; the node
+    # does the checking (signing.py). Absent from an index.json written before
+    # signatures existed, hence the default.
+    signature: str | None = None
 
 
 def _write_atomic(path: Path, data: str) -> None:
@@ -73,7 +96,7 @@ class Store:
         f = self.root / "nodes.json"
         if f.exists():
             for n in json.loads(f.read_text()).get("nodes", []):
-                cfg = dict(DEFAULT_CONFIG) | n.get("config", {})
+                cfg = default_config() | n.get("config", {})
                 self.nodes[n["id"]] = Node(**(n | {"config": cfg}))
         idx = self.fw_dir / "index.json"
         if idx.exists():
@@ -85,12 +108,19 @@ class Store:
         body = {"nodes": [asdict(n) for n in self.nodes.values()]}
         _write_atomic(self.root / "nodes.json", json.dumps(body, indent=2))
 
-    def adopt(self, node_id: str, name: str, model: str) -> str:
+    def adopt(self, node_id: str, name: str, model: str, reported: dict | None = None) -> str:
+        """`reported` is what the node says it is set to right now, and it wins
+        over both the defaults and an old record: the node is the thing in the
+        room. The case this exists for is a bedroom node with its lights off,
+        moved to a new hub, whose default lights_enabled is true -- adopting it
+        must not light it."""
         token = secrets.token_urlsafe(32)
         prev = self.nodes.get(node_id)
+        config = dict(prev.config) if prev else default_config()
+        config.update({k: v for k, v in (reported or {}).items() if k in config})
         self.nodes[node_id] = Node(
             id=node_id, name=name, model=model, token_sha256=token_hash(token),
-            adopted_at=time.time(), config=prev.config if prev else dict(DEFAULT_CONFIG),
+            adopted_at=time.time(), config=config,
         )
         self.save_nodes()
         return token
@@ -102,10 +132,11 @@ class Store:
 
     # -- firmware -----------------------------------------------------------
 
-    def add_firmware(self, image: bytes, model: str, version: str) -> Firmware:
+    def add_firmware(self, image: bytes, model: str, version: str,
+                     signature: str | None = None) -> Firmware:
         sha = hashlib.sha256(image).hexdigest()
         (self.fw_dir / f"{sha}.bin").write_bytes(image)
-        fw = Firmware(sha, len(image), model, version, time.time())
+        fw = Firmware(sha, len(image), model, version, time.time(), signature)
         self.firmware[sha] = fw
         self._save_index()
         return fw

@@ -385,9 +385,16 @@ jobs:
         with:
           python-version: '3.13'
       # The device is played by Starlette's test socket; nothing starts a
-      # server and no board is needed.
+      # server and no board is needed. openwakeword is installed on its own
+      # and without dependencies, as in the Containerfile: its metadata still
+      # asks for tflite-runtime, which has no wheel for Python 3.13, and a
+      # plain install fails right here.
       - name: Install
-        run: pip install -r services/nodes/requirements-dev.txt
+        run: |
+          pip install -r services/nodes/requirements-dev.txt
+          pip install --no-deps -r services/nodes/requirements-nodeps.txt
+      # The wake word tests fetch openWakeWord's models (5.4 MB) from its
+      # GitHub release once per run, and skip with the reason if they cannot.
       - name: Test
         working-directory: services/nodes
         run: pytest -q
@@ -503,11 +510,19 @@ jobs:
           buildah run --user root "$(buildah from localhost/build:ui-${{ matrix.arch }})" -- \
             sh -c 'command -v yt-dlp && yt-dlp --version'
 
+      # onnxruntime, scipy, scikit-learn and webrtcvad all ship compiled
+      # per-architecture wheels, and openwakeword is installed --no-deps, so a
+      # module it imports that nobody pinned builds cleanly and fails on the
+      # first node; importing openwakeword.model is what would catch that.
+      # The last line loads the wake word the image carries, from its own
+      # directory, with no network: that is the promise the image makes.
       - name: Check the runtime imports on this architecture (nodes)
         if: matrix.service == 'nodes'
         run: |
           buildah run --user root "$(buildah from localhost/build:nodes-${{ matrix.arch }})" -- \
-            python -c 'import app.main, voice_common.audio, numpy, httpx, fastapi, uvicorn, websockets; print("ok", numpy.__version__)'
+            python -c 'import app.main, app.listening, app.frontend, app.router, app.mqtt, app.signing, app.earcons, voice_common.audio, numpy, httpx, fastapi, uvicorn, websockets, onnxruntime, webrtcvad, openwakeword.model, aiomqtt, cryptography; print("ok", numpy.__version__, onnxruntime.__version__)'
+          buildah run --user root "$(buildah from localhost/build:nodes-${{ matrix.arch }})" -- \
+            python -c 'from app.wakeword import WakeWords; WakeWords({"hey_jarvis": 0.5}, "/srv/models"); print("hey_jarvis loads from the image")'
 
       # The page is the product here, and it is COPYd rather than built, so the
       # one way it goes missing is a Containerfile that forgot app/static.
