@@ -381,6 +381,15 @@ void hub_begin() {
   String host;
   uint16_t port;
   if (!parse_hub(settings.hub, &tls, &host, &port)) return;
+#ifndef DEV_HUB
+  // Release builds speak TLS only: the adoption token and the microphones
+  // never cross the network in clear. A plain ws:// hub is for development
+  // builds (DEV_HUB), on a machine the developer controls.
+  if (!tls) {
+    lights_status(Status::Portal);
+    return;
+  }
+#endif
   if (tls) ws.beginSslWithCA(host.c_str(), port, "/nodes/ws", CA_BUNDLE, "");
   else ws.begin(host.c_str(), port, "/nodes/ws", "");
   ws.onEvent(on_event);

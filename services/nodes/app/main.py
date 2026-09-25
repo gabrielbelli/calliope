@@ -64,7 +64,10 @@ MAX_FIRMWARE = 4 * 1024 * 1024  # one OTA slot on the Korvo
 
 FRAME_MIC, FRAME_SPEAKER, FRAME_FIRMWARE = 1, 2, 3
 HEADER = 16
-OTA_CHUNK = 16 * 1024
+# Under the node's own ceiling: the Arduino WebSockets library drops the whole
+# connection on any frame over 15 KB (WEBSOCKETS_MAX_DATA_SIZE, not
+# overridable on ESP32). 16 KB chunks killed the first real update 17 ms in.
+OTA_CHUNK = 8 * 1024
 SPEAKER_CHUNK_MS = 20
 SPEAKER_LEAD_S = 0.3  # how far ahead of real time playback is kept
 
@@ -274,6 +277,11 @@ async def node_socket(ws: WebSocket) -> None:
         pass
     finally:
         player.cancel()
+        if s.ota and s.ota.get("state") in ("requested", "started", "progress"):
+            s.ota.update(state="failed", error="disconnected mid-transfer")
+            hub.publish({"type": "ota", "node": s.id, "state": "failed",
+                         "error": "disconnected mid-transfer"})
+            log.warning("node %s disconnected during an update", s.id)
         if hub.sessions.get(s.id) is s:
             del hub.sessions[s.id]
         hub.seen[s.id] = {"model": s.model, "fw": s.fw, "last_seen": time.time()}

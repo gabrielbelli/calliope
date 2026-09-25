@@ -128,7 +128,14 @@ void setup() {
   codec_begin();
   mic_set_gain_db(settings.mic_gain_db);
   spk_set_volume(settings.volume);
-  run_wifi(settings.hub.isEmpty());
+  // A release build that inherited a ws:// hub from a development one reopens
+  // the portal rather than connecting in clear (see hub_begin).
+#ifndef DEV_HUB
+  bool plain = settings.hub.startsWith("ws://");
+#else
+  bool plain = false;
+#endif
+  run_wifi(settings.hub.isEmpty() || plain);
   hub_begin();
 }
 
