@@ -92,6 +92,28 @@ def _mac_key(ref: str) -> str:
     return re.sub(r"[:-]", "", ref.strip().lower())
 
 
+
+def strip_wake_phrase(text: str, wake_word: str) -> str:
+    """"Jarvis, what time is it" -> "what time is it". The listener rewinds
+    by the detector's latency so the command is not lost, and the price is
+    that the tail of the wake word can lead the transcript -- and misheard:
+    Parakeet on orko returned "Harvis, what time is it?" for the en_us fixture.
+    So a LEADING run of words that each resemble the wake word's own words, in
+    order, is removed (difflib ratio >= 0.6: "harvis" is 0.83 of "jarvis").
+    A command that merely mentions the name further in is left alone."""
+    import difflib
+
+    words = [w for w in _wake_key(wake_word).split("_") if w]
+    if not words or wake_word == "ptt":
+        return text
+    tokens = list(re.finditer(r"[\w']+", text))
+    like = lambda a, b: difflib.SequenceMatcher(None, a.casefold(), b).ratio() >= 0.6
+    for start in range(len(words)):  # the whole phrase, then shorter tails of it
+        tail = words[start:]
+        if len(tokens) > len(tail) and all(like(t.group(), w) for t, w in zip(tokens, tail)):
+            return text[tokens[len(tail)].start():]
+    return text
+
 class Rule(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -302,6 +324,7 @@ class Router:
                 return out
             text = await self._stage(out, "stt", self.stt_timeout,
                                      self._transcribe(utterance_pcm16k, rule.language))
+            text = strip_wake_phrase(text, wake_word)
             out.transcript = text
             if not text.strip():
                 out.error = "stt: nothing was heard (the transcript is empty)"

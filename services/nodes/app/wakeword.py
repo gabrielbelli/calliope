@@ -218,6 +218,14 @@ class WakeWords:
     construct once the first import (about 1 s) has been paid.
     """
 
+    # HOW LATE A DETECTION ARRIVES, as seen by whoever wants the audio after the
+    # word. openWakeWord scores a sliding window and crosses its threshold
+    # about 0.8 s after "jarvis" ends on both fixtures; 0.9 s leaves a margin.
+    # listening.Ear rewinds by this much, or "hey jarvis, what time is it" said
+    # in one breath loses its command to the latency -- measured on orko, where
+    # the first live injection reached Parakeet as silence.
+    latency_s = 0.9
+
     def __init__(self, models: dict[str, float], model_dir: str | Path, *,
                  refractory_s: float = REFRACTORY_S):
         if not models:

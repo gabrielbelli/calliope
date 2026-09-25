@@ -111,3 +111,39 @@ def test_wake_word_settings_parse(spec, expected):
 def test_a_wake_word_setting_that_cannot_be_right_is_refused_by_name(spec):
     with pytest.raises(ValueError):
         parse_wake_words(spec)
+
+
+class LateMarker:
+    """Fires DELAY samples after the marker, as openWakeWord fires ~0.8 s after
+    the word, and says so through latency_s as the real one does."""
+    latency_s = 0.6
+    DELAY = int(0.5 * RATE)
+
+    def __init__(self):
+        self.position = 0
+        self.due = None
+
+    def feed(self, pcm):
+        start = self.position
+        self.position += len(pcm)
+        hits = np.flatnonzero(pcm >= MARK)
+        if len(hits) and self.due is None:
+            self.due = start + int(hits[-1]) + 1 + self.DELAY
+        if self.due is not None and start < self.due <= self.position:
+            fired, self.due = self.due, -1
+            return [Detection("hey_jarvis", 0.9, fired)]
+        return []
+
+
+def test_a_late_detector_does_not_cost_the_command_its_first_words():
+    """Measured on orko: "hey jarvis, what time is it" in one breath reached
+    Parakeet as silence, because openWakeWord fires ~0.8 s after the word and
+    the command used to start at the frame that fired."""
+    ear = Ear(channels=1, frontend=False, wake=LateMarker())
+    speech = voiced(1.2, level=5000)
+    audio = np.concatenate((room_floor(0.3), np.full(10, MARK, np.int16), speech,
+                            room_floor(1.2, seed=1)))
+    heard, command = run(ear, audio)
+    got = np.frombuffer(command.audio, "<i2")
+    # All of the speech, including the 0.5 s spoken before the detector fired.
+    assert command.had_speech and len(got) >= len(speech)

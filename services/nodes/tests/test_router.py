@@ -461,3 +461,14 @@ def test_the_test_route_skips_stt_and_returns_the_outcome_without_audio_bytes(ap
         ("default", "good morning", "good morning", NID)
     assert body["reply_audio_seconds"] == TTS_SAMPLES / 24000
     assert fake.hosts() == ["tts.test"]  # no STT: the text was typed
+
+
+def test_the_wake_word_is_taken_off_the_front_of_the_transcript_and_nowhere_else():
+    from app.router import strip_wake_phrase
+    assert strip_wake_phrase("Hey Jarvis, what time is it?", "hey_jarvis") == "what time is it?"
+    assert strip_wake_phrase("Jarvis what time is it", "hey_jarvis") == "what time is it"
+    # Measured on orko: Parakeet's rendering of the rewound tail of the word.
+    assert strip_wake_phrase("Harvis, what time is it?", "hey_jarvis") == "what time is it?"
+    assert strip_wake_phrase("What time is it?", "hey_jarvis") == "What time is it?"
+    assert strip_wake_phrase("ask jarvis about it", "hey_jarvis") == "ask jarvis about it"
+    assert strip_wake_phrase("turn the lights off", "ptt") == "turn the lights off"

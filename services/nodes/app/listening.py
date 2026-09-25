@@ -68,6 +68,9 @@ class Command:
         return len(self.audio) / 2 / RATE
 
 
+# Enough to rewind by any detector's latency (wakeword.WakeWords.latency_s).
+HISTORY_S = 2.0
+
 class Ear:
     def __init__(self, *, rate: int = RATE, channels: int = 4, frontend: bool = True,
                  wake: WakeWords | None = None):
@@ -86,6 +89,9 @@ class Ear:
         self.state = "idle"
         self.endpointer: Endpointer | None = None
         self.samples = 0          # mono samples produced since this Ear was made
+        # The last HISTORY_S of output, for rewinding to where a late
+        # detector's word actually ended (WakeWords.latency_s).
+        self._history = np.zeros(0, np.int16)
         self._ptt: str | None = None
 
     # ---- called from the event loop, between process() calls ------------------
@@ -149,12 +155,18 @@ class Ear:
         found = self._feed_wake(mono)
         if self.state == "idle" and found:
             d = found[0]
-            # Everything after the frame that fired belongs to the command.
+            # Everything after the frame that fired belongs to the command, and
+            # so does the detector's own latency before it: a real model fires
+            # well after the word ends, by which time the command has begun.
             after = max(0, min(len(mono), self.wake.position - d.sample))
+            rewind = int(getattr(self.wake, "latency_s", 0.0) * self.rate)
+            before = np.concatenate((self._history, mono[:len(mono) - after]))[-rewind:] \
+                if rewind else np.zeros(0, np.int16)
             events.append(self._listen(d.name, d.score, start + len(mono) - after))
-            self._endpoint(mono[len(mono) - after:], events)
+            self._endpoint(np.concatenate((before, mono[len(mono) - after:])), events)
         elif self.state == "listening":
             self._endpoint(mono, events)
+        self._history = np.concatenate((self._history, mono))[-int(HISTORY_S * self.rate):]
         return events
 
     def _feed_wake(self, mono: np.ndarray) -> list:
