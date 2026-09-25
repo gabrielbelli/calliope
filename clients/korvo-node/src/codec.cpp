@@ -1,7 +1,16 @@
 // Register sequences are ported from Espressif's esp_codec_dev drivers
-// (es7210.c, es8311.c) for the Korvo's configuration: both codecs are I2S
-// slaves, the ES7210 runs four mics in TDM, the ES8311 is DAC-only and takes
-// its clock from BCLK.
+// (components/esp_codec_dev/device/es7210/es7210.c and es8311/es8311.c in
+// espressif/esp-adf), specialised for the Korvo: both codecs are I2S slaves,
+// the ES7210 runs four mics in TDM, the ES8311 is DAC-only and takes its clock
+// from BCLK. Changed from the original: the codec-interface layer is removed,
+// the open/set_fs/enable sequences are inlined for one configuration, and the
+// volume is mapped from a 0-100 scale capped at 0 dB.
+//
+//   SPDX-FileCopyrightText: 2023 Espressif Systems (Shanghai) CO LTD
+//   SPDX-License-Identifier: Apache-2.0
+//   Licensed under the Apache License, Version 2.0 (the "License"); you may
+//   not use this file except in compliance with the License. You may obtain a
+//   copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #include "codec.h"
 
 #include <Arduino.h>

@@ -1255,6 +1255,28 @@ details>summary:active{opacity:.72}
   .masthead{padding-top:clamp(1.25rem,4vh,2rem)}
   .wrap{padding-top:var(--s4)}
 }
+
+/* ------------------------------------------------------------ nodes -- */
+.node{border:1px solid var(--line);border-radius:10px;padding:var(--s3);
+  display:flex;flex-direction:column;gap:var(--s2)}
+.node + .node{margin-top:var(--s3)}
+.node-top{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
+.node-dot{width:10px;height:10px;border-radius:50%;background:var(--line);flex:none}
+.node[data-online="1"] .node-dot{background:var(--good)}
+.node[data-muted="1"] .node-dot{background:var(--bad)}
+.node .spacer{flex:1}
+.node .row > div{min-width:9rem}
+.node .node-sayfield{flex:1 1 16rem}
+.node .node-sayfield input{width:100%}
+.node audio{height:2rem}
+.node input[type=color]{width:2.6rem;height:2.2rem;padding:0;border:0;background:none}
+.fw{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;padding:var(--s2) 0;
+  border-top:1px solid var(--line)}
+.fw code{font-size:var(--t-label)}
+.nodeevents{list-style:none;margin:0;padding:0;font-size:var(--t-label);
+  font-variant-numeric:tabular-nums;max-height:14rem;overflow:auto}
+.nodeevents li{padding:2px 0;color:var(--dim)}
+.nodeevents li b{color:var(--ink);font-weight:600}
 </style>
 </head>
 <body>
@@ -1334,6 +1356,17 @@ details>summary:active{opacity:.72}
         <path d="M12 6.8C10.3 5.3 8.2 4.7 4.8 4.7a.8.8 0 0 0-.8.8v11.9a.8.8 0 0 0 .8.8c3.4 0 5.5.6 7.2 2 1.7-1.4 3.8-2 7.2-2a.8.8 0 0 0 .8-.8V5.5a.8.8 0 0 0-.8-.8c-3.4 0-5.5.6-7.2 2.1Z"/>
         <path d="M12 6.8v13.4"/>
       </svg><span class="label">Vocabulary</span></button>
+
+    <!-- NODES: the microphones and speakers around the house (services/nodes).
+         The fifth step of the same ramp, the rose pushed toward plum. -->
+    <button role="tab" id="tab-btn-nodes" data-tab="nodes"
+            aria-controls="tab-nodes" aria-selected="false" tabindex="-1" type="button"
+            style="--acc:#D4507F">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="2.6"/>
+        <path d="M7.6 7.6a6.2 6.2 0 0 0 0 8.8"/><path d="M16.4 7.6a6.2 6.2 0 0 1 0 8.8"/>
+        <path d="M4.8 4.8a10.2 10.2 0 0 0 0 14.4"/><path d="M19.2 4.8a10.2 10.2 0 0 1 0 14.4"/>
+      </svg><span class="label">Nodes</span><span class="count" id="nodecount"></span></button>
   </div>
 </div>
 </div>
@@ -2140,6 +2173,46 @@ details>summary:active{opacity:.72}
     </div>
   </section>
 
+  <!-- ======================================================= NODES == -->
+  <!-- Thin audio devices: a mic array, a speaker and a ring of lights each,
+       adopted here and told what to do. Every call goes through /ui/api/nodes,
+       the same allowlist as the rest of the page. Nothing on this tab runs
+       while another tab is open. -->
+  <section id="tab-nodes" role="tabpanel" aria-labelledby="tab-btn-nodes" hidden>
+    <div class="card">
+      <h2 class="tight">Nodes</h2>
+      <div class="hint" id="nodesnone">Asking the node hub what is on the network…</div>
+      <div id="nodesman" hidden>
+        <div class="hint" id="nodesempty" hidden>None yet. A new node opens a Wi-Fi
+          network named <code>calliope-node-…</code>; join it to set it up.</div>
+        <div id="nodelist"></div>
+      </div>
+    </div>
+
+    <div class="card" id="fwcard" hidden>
+      <h2 class="tight">Firmware</h2>
+      <div class="row">
+        <div class="tight"><label for="fwfile">Image (.bin)</label>
+          <input type="file" id="fwfile" accept=".bin,application/octet-stream"></div>
+        <div class="tight"><label for="fwversion">Version</label>
+          <input type="text" id="fwversion" maxlength="64" placeholder="e.g. v0.2.0"></div>
+        <div class="tight"><label for="fwmodel">Model</label>
+          <input type="text" id="fwmodel" maxlength="64" value="esp32-korvo-v1.1"></div>
+        <button class="small" id="fwupload" type="button">Upload</button>
+      </div>
+      <div id="fwlist"></div>
+      <div class="hint">An update stays only if the node reaches the hub again;
+        otherwise it rolls back.</div>
+      <div id="fwnote" aria-live="polite"></div>
+    </div>
+
+    <div class="card" id="evcard" hidden>
+      <h2 class="tight">Events</h2>
+      <div class="hint">Button presses, updates and nodes coming and going, newest first.</div>
+      <ol class="nodeevents" id="nodeevents"></ol>
+    </div>
+  </section>
+
 </main>
 
 <!-- ============================================ CONFIRM BEFORE FETCH == -->
@@ -2349,7 +2422,7 @@ function reason(payload, fallback) {
 
    Both mounts are live on the UI service, so this also works unchanged when
    the page is opened on that service's own port directly. */
-const GATEWAY_ROUTES = /^\/(v1|transcribe|speak|voices|jobs|glossaries)(\/|$)/;
+const GATEWAY_ROUTES = /^\/(v1|transcribe|speak|voices|jobs|glossaries|nodes)(\/|$)/;
 
 async function api(path, options) {
   const target = GATEWAY_ROUTES.test(path) ? "/ui/api" + path : path;
@@ -2921,7 +2994,8 @@ const MASTHEAD = {
   transcribe: ["Transcribe", "Speech in, text out."],
   speak:      ["Speak", "Text in, a voice out."],
   jobs:       ["Jobs", "Everything this stack has run, where it ran, and how long it took."],
-  vocab:      ["Vocabulary", "The words this box keeps getting wrong, and what they should be."]
+  vocab:      ["Vocabulary", "The words this box keeps getting wrong, and what they should be."],
+  nodes:      ["Nodes", "The microphones and speakers around the house, and what they are told."]
 };
 function dockMasthead(button) {
   const said = MASTHEAD[button && button.dataset ? button.dataset.tab : ""];
@@ -3105,6 +3179,7 @@ TABS.forEach(button => {
        stops being a delay and starts being a wrong answer. visibilitychange
        already does exactly this line; the tab did not. */
     if (changed && button.dataset.tab === "jobs") schedule(0);
+    if (changed && button.dataset.tab === "nodes") nodesRefresh();
   });
   /* Arrow, Home and End over the strip. It calls next.click() rather than
      repeating what a tab does, so the listener above stays the only thing that
@@ -3508,6 +3583,285 @@ let GLOSSARIES = [];
 function chosenGlossaries() {
   return [...$("gloss").querySelectorAll('[aria-pressed="true"]')]
     .map(b => b.dataset.gloss);
+}
+
+/* ============================================================== nodes === */
+/* The node hub, services/nodes. Polled every 3 s while this tab is open and
+   not at all otherwise. Cards are built once per node and updated in place,
+   so a poll never takes a slider out from under a finger or empties a box
+   somebody is typing in. */
+const NODES = { cards: new Map(), timer: null, events: null };
+const JSON_BODY = { "Content-Type": "application/json" };
+
+function nodesOpen() { const p = $("tab-nodes"); return !!p && !p.hidden; }
+
+async function nodesRefresh() {
+  clearTimeout(NODES.timer);
+  try {
+    const [n, f] = await Promise.all([json("/nodes"), json("/nodes/firmware")]);
+    $("nodesnone").hidden = true;
+    $("nodesman").hidden = $("fwcard").hidden = $("evcard").hidden = false;
+    nodesRender(n.nodes);
+    firmwareRender(f.firmware);
+    nodesListen();
+  } catch (e) {
+    $("nodesnone").textContent = (e.status === 404 || e.status === 503)
+      ? "This deployment has no node hub: voice-nodes is not running."
+      : `The node hub did not answer: ${e.message}`;
+    $("nodesnone").hidden = false;
+    $("nodesman").hidden = $("fwcard").hidden = $("evcard").hidden = true;
+  }
+  if (nodesOpen()) NODES.timer = setTimeout(nodesRefresh, 3000);
+}
+
+function nodesRender(list) {
+  const box = $("nodelist");
+  $("nodesempty").hidden = list.length > 0;
+  const pending = list.filter(n => n.online && !n.adopted).length;
+  $("nodecount").textContent = pending ? String(pending) : "";
+  const seen = new Set();
+  for (const n of list) {
+    seen.add(n.id);
+    let card = NODES.cards.get(n.id);
+    if (!card) { card = nodeCard(n.id); NODES.cards.set(n.id, card); box.appendChild(card); }
+    nodeUpdate(card, n);
+  }
+  for (const [id, card] of NODES.cards) {
+    if (!seen.has(id)) { card.remove(); NODES.cards.delete(id); }
+  }
+}
+
+function nodeCard(id) {
+  const card = document.createElement("div");
+  card.className = "node";
+  card.dataset.id = id;
+  card.innerHTML = `
+    <div class="node-top">
+      <span class="node-dot" aria-hidden="true"></span>
+      <strong class="node-name"></strong>
+      <span class="pill node-state"></span>
+      <span class="spacer"></span>
+      <span class="hint node-meta"></span>
+    </div>
+    <div class="row node-pending">
+      <div class="tight"><label>Name</label>
+        <input type="text" class="node-newname" maxlength="64" placeholder="kitchen"></div>
+      <button class="primary small" data-act="adopt" type="button">Adopt</button>
+      <button class="small" data-act="identify" type="button">Blink</button>
+    </div>
+    <div class="node-adopted">
+      <div class="row">
+        <div><label>Volume <span class="node-vol"></span></label>
+          <input type="range" min="0" max="100" step="5" class="node-volume"></div>
+        <div><label>Mic gain <span class="node-gain"></span></label>
+          <input type="range" min="0" max="36" step="3" class="node-micgain"></div>
+        <label class="checkline"><input type="checkbox" class="node-mic"> Microphone</label>
+        <label class="checkline"><input type="checkbox" class="node-spk"> Speaker</label>
+        <label class="checkline"><input type="checkbox" class="node-lights"> Lights</label>
+      </div>
+      <div class="row">
+        <div class="node-sayfield"><label>Say</label>
+          <input type="text" class="node-say" maxlength="500" placeholder="Something for it to say"></div>
+        <button class="small" data-act="say" type="button">Say</button>
+        <button class="small" data-act="tone" type="button">Tone</button>
+        <button class="small" data-act="listen" type="button">Listen 5 s</button>
+      </div>
+      <audio class="node-audio" controls hidden></audio>
+      <div class="row">
+        <div class="tight"><label>Lights</label>
+          <input type="color" class="node-colour" value="#d4507f"></div>
+        <select class="node-mode" aria-label="Light pattern">
+          <option>off</option><option>solid</option><option selected>pulse</option><option>spin</option></select>
+        <button class="small" data-act="lights" type="button">Set</button>
+        <button class="small" data-act="identify" type="button">Blink</button>
+        <button class="small" data-act="rename" type="button">Rename</button>
+        <button class="small" data-act="reboot" type="button">Reboot</button>
+        <button class="small danger" data-act="forget" type="button">Forget</button>
+      </div>
+    </div>
+    <div class="hint node-note" aria-live="polite"></div>`;
+  card.addEventListener("click", ev => {
+    const b = ev.target.closest("button[data-act]");
+    if (b) nodeAct(card, b.dataset.act, b);
+  });
+  const q = sel => card.querySelector(sel);
+  q(".node-volume").addEventListener("input", ev => { q(".node-vol").textContent = ev.target.value + "%"; });
+  q(".node-volume").addEventListener("change", ev => nodePatch(card, { volume: +ev.target.value }));
+  q(".node-micgain").addEventListener("input", ev => { q(".node-gain").textContent = ev.target.value + " dB"; });
+  q(".node-micgain").addEventListener("change", ev => nodePatch(card, { mic_gain_db: +ev.target.value }));
+  q(".node-mic").addEventListener("change", ev => nodePatch(card, { mic_enabled: ev.target.checked }));
+  q(".node-spk").addEventListener("change", ev => nodePatch(card, { speaker_enabled: ev.target.checked }));
+  q(".node-lights").addEventListener("change", ev => nodePatch(card, { lights_enabled: ev.target.checked }));
+  return card;
+}
+
+function nodeUpdate(card, n) {
+  const q = sel => card.querySelector(sel);
+  const st = n.status || {};
+  card.dataset.online = n.online ? "1" : "0";
+  card.dataset.muted = st.muted ? "1" : "0";
+  q(".node-name").textContent = n.name || n.id;
+  q(".node-state").textContent = !n.adopted ? (n.online ? "waiting to be adopted" : "seen, not adopted")
+    : !n.online ? "offline" : st.muted ? "muted at the device" : "online";
+  const ota = n.ota && n.ota.state && n.ota.state !== "verified"
+    ? ` · update ${n.ota.state}${n.ota.pct != null ? " " + n.ota.pct + "%" : ""}${n.ota.error ? ": " + n.ota.error : ""}` : "";
+  q(".node-meta").textContent = [n.model, n.firmware, n.address,
+    st.rssi != null ? `${st.rssi} dBm` : null].filter(Boolean).join(" · ") + ota;
+  q(".node-pending").hidden = n.adopted || !n.online;
+  q(".node-adopted").hidden = !n.adopted;
+  card.querySelectorAll(".node-adopted button, .node-adopted input, .node-adopted select")
+    .forEach(el => { el.disabled = !n.online; });
+  const cfg = n.config || {};
+  const editing = card.contains(document.activeElement);
+  if (!editing) {
+    if (cfg.volume != null) { q(".node-volume").value = cfg.volume; q(".node-vol").textContent = cfg.volume + "%"; }
+    if (cfg.mic_gain_db != null) { q(".node-micgain").value = cfg.mic_gain_db; q(".node-gain").textContent = cfg.mic_gain_db + " dB"; }
+    q(".node-mic").checked = !!cfg.mic_enabled;
+    q(".node-spk").checked = !!cfg.speaker_enabled;
+    q(".node-lights").checked = cfg.lights_enabled !== false;
+  }
+}
+
+async function nodePatch(card, change) {
+  const note = card.querySelector(".node-note");
+  try {
+    await json(`/nodes/${card.dataset.id}`, { method: "PATCH", headers: JSON_BODY, body: JSON.stringify(change) });
+    note.textContent = "";
+  } catch (e) { note.textContent = e.message; }
+}
+
+function hexColour(hex) {
+  return [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+}
+
+async function nodeAct(card, act, button) {
+  const id = card.dataset.id;
+  const q = sel => card.querySelector(sel);
+  const note = q(".node-note");
+  note.textContent = "";
+  button.disabled = true;
+  try {
+    if (act === "adopt") {
+      await json(`/nodes/${id}/adopt`, { method: "POST", headers: JSON_BODY,
+        body: JSON.stringify({ name: q(".node-newname").value.trim() }) });
+    } else if (act === "identify") {
+      await json(`/nodes/${id}/identify`, { method: "POST" });
+      note.textContent = "Blinking white for five seconds.";
+    } else if (act === "say") {
+      const text = q(".node-say").value.trim();
+      if (!text) { note.textContent = "Type something for it to say first."; return; }
+      await json(`/nodes/${id}/say`, { method: "POST", headers: JSON_BODY, body: JSON.stringify({ text }) });
+    } else if (act === "tone") {
+      await json(`/nodes/${id}/tone`, { method: "POST", headers: JSON_BODY,
+        body: JSON.stringify({ frequency: 440, seconds: 1 }) });
+    } else if (act === "listen") {
+      note.textContent = "Recording five seconds…";
+      const r = await api(`/nodes/${id}/listen?seconds=5`);
+      if (!r.ok) { let p = null; try { p = await r.json(); } catch {}
+        throw new Error(reason(p, `${r.status} ${r.statusText}`)); }
+      const a = q(".node-audio");
+      if (a.src) URL.revokeObjectURL(a.src);
+      a.src = URL.createObjectURL(await r.blob());
+      a.hidden = false;
+      note.textContent = "Four channels: the speaker loopback, then the three microphones.";
+    } else if (act === "lights") {
+      await json(`/nodes/${id}/lights`, { method: "POST", headers: JSON_BODY, body: JSON.stringify({
+        mode: q(".node-mode").value, color: hexColour(q(".node-colour").value), brightness: 96 }) });
+    } else if (act === "rename") {
+      const name = prompt("New name", q(".node-name").textContent);
+      if (name && name.trim()) await nodePatch(card, { name: name.trim() });
+    } else if (act === "reboot") {
+      if (!confirm("Reboot this node? It is back in about ten seconds.")) return;
+      await json(`/nodes/${id}/reboot`, { method: "POST" });
+    } else if (act === "forget") {
+      if (!confirm("Forget this node? It stops streaming and waits to be adopted again.")) return;
+      await json(`/nodes/${id}/forget`, { method: "POST" });
+    }
+    nodesRefresh();
+  } catch (e) {
+    note.textContent = e.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function firmwareRender(list) {
+  const box = $("fwlist");
+  box.textContent = "";
+  for (const fw of list) {
+    const row = document.createElement("div");
+    row.className = "fw";
+    const when = new Date(fw.uploaded_at * 1000).toLocaleString();
+    row.innerHTML = `<strong></strong><code></code><span class="hint"></span><span class="spacer" style="flex:1"></span>
+      <button class="small" data-fw="all" type="button">Update every node</button>
+      <button class="small danger" data-fw="delete" type="button">Delete</button>`;
+    row.querySelector("strong").textContent = fw.version;
+    row.querySelector("code").textContent = fw.sha256.slice(0, 12);
+    row.querySelector(".hint").textContent = `${fw.model} · ${(fw.size / 1048576).toFixed(2)} MB · ${when}`;
+    row.addEventListener("click", ev => {
+      const b = ev.target.closest("button[data-fw]");
+      if (b) firmwareAct(fw, b.dataset.fw, b);
+    });
+    box.appendChild(row);
+  }
+}
+
+async function firmwareAct(fw, act, button) {
+  const note = $("fwnote");
+  button.disabled = true;
+  try {
+    if (act === "all") {
+      const r = await json("/nodes/ota", { method: "POST", headers: JSON_BODY,
+        body: JSON.stringify({ node: "all", sha256: fw.sha256 }) });
+      const skipped = Object.entries(r.skipped || {}).map(([n, why]) => `${n}: ${why}`);
+      note.textContent = `Updating ${r.started.length} node(s).` + (skipped.length ? ` Skipped ${skipped.join("; ")}.` : "");
+    } else if (act === "delete") {
+      if (!confirm(`Delete firmware ${fw.version}?`)) return;
+      await json(`/nodes/firmware/${fw.sha256}`, { method: "DELETE" });
+      nodesRefresh();
+    }
+  } catch (e) { note.textContent = e.message; }
+  finally { button.disabled = false; }
+}
+
+$("fwupload").addEventListener("click", async () => {
+  const file = $("fwfile").files[0], note = $("fwnote");
+  if (!file) { note.textContent = "Choose a .bin first."; return; }
+  const version = $("fwversion").value.trim() || file.name.replace(/\.bin$/, "");
+  const model = $("fwmodel").value.trim();
+  try {
+    await json(`/nodes/firmware?model=${encodeURIComponent(model)}&version=${encodeURIComponent(version)}`,
+      { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
+    note.textContent = `Uploaded ${version}.`;
+    $("fwfile").value = "";
+    nodesRefresh();
+  } catch (e) { note.textContent = e.message; }
+});
+
+/* THE EVENT LOG IS A STREAM, NOT A POLL: a button press is gone by the next
+   three-second tick. EventSource reconnects on its own; it is opened the first
+   time the tab is and left open, one connection, for the page's life. */
+function nodesListen() {
+  if (NODES.events || !window.EventSource) return;
+  NODES.events = new EventSource("/ui/api/nodes/events");
+  NODES.events.onmessage = m => {
+    let ev; try { ev = JSON.parse(m.data); } catch { return; }
+    if (ev.type === "status") return;  // every ten seconds per node: noise here
+    const card = NODES.cards.get(ev.node);
+    const who = card ? card.querySelector(".node-name").textContent : ev.node;
+    const what = ev.type === "button" ? `${ev.button} ${ev.action}${ev.held_ms ? ` after ${ev.held_ms} ms` : ""}`
+      : ev.type === "ota" ? `update ${ev.state}${ev.pct != null ? " " + ev.pct + "%" : ""}${ev.error ? ": " + ev.error : ""}`
+      : ev.type;
+    const li = document.createElement("li");
+    li.innerHTML = "<span></span> <b></b> ";
+    li.querySelector("span").textContent = new Date(ev.at * 1000).toLocaleTimeString();
+    li.querySelector("b").textContent = who;
+    li.append(what);
+    const list = $("nodeevents");
+    list.prepend(li);
+    while (list.children.length > 50) list.lastChild.remove();
+    if (ev.type !== "button" && nodesOpen()) nodesRefresh();
+  };
 }
 
 async function loadGlossaries() {

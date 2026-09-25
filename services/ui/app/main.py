@@ -189,6 +189,28 @@ PROXIED: tuple[tuple[str, str], ...] = (
     ("GET", "/glossaries/{name}"),
     ("PUT", "/glossaries/{name}"),
     ("DELETE", "/glossaries/{name}"),
+    # THE NODES TAB (services/nodes). Every route the hub answers that a person
+    # has a control for, and nothing else: the device socket /nodes/ws is not
+    # here because a browser never opens it. PATCH is the first of its method
+    # in this table, and the gateway's /ui/api passthrough carries it too.
+    ("GET", "/nodes"),
+    ("GET", "/nodes/events"),
+    ("GET", "/nodes/firmware"),
+    ("POST", "/nodes/firmware"),
+    ("DELETE", "/nodes/firmware/{sha256}"),
+    ("POST", "/nodes/ota"),
+    ("GET", "/nodes/{nid}"),
+    ("PATCH", "/nodes/{nid}"),
+    ("GET", "/nodes/{nid}/listen"),
+    ("POST", "/nodes/{nid}/adopt"),
+    ("POST", "/nodes/{nid}/forget"),
+    ("POST", "/nodes/{nid}/identify"),
+    ("POST", "/nodes/{nid}/reboot"),
+    ("POST", "/nodes/{nid}/lights"),
+    ("POST", "/nodes/{nid}/tone"),
+    ("POST", "/nodes/{nid}/say"),
+    ("POST", "/nodes/{nid}/flush"),
+    ("POST", "/nodes/{nid}/set-hub"),
 )
 
 # Routes whose request body is an upload and must therefore never be buffered

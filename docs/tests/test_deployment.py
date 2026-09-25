@@ -266,7 +266,7 @@ def test_no_commented_out_knob_in_compose_is_read_by_nothing(compose_text, sourc
     """
     suggested = set()
     for line in compose_text.splitlines():
-        m = re.match(r'^\s*#\s*((?:TTS|GATEWAY|STT|UI|AIV|RUNLOG)_[A-Z0-9_]+):\s*"',
+        m = re.match(r'^\s*#\s*((?:TTS|GATEWAY|STT|UI|NODES|AIV|RUNLOG)_[A-Z0-9_]+):\s*"',
                      line)
         if m:
             suggested.add(m.group(1))

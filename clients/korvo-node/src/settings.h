@@ -12,6 +12,7 @@ struct Settings {
   bool mic_enabled = true;
   bool speaker_enabled = true;
   bool local_volume_buttons = true;  // VOL+/- act locally as well as reporting
+  bool lights_enabled = true;        // false: the ring stays dark, whatever happens
 };
 
 extern Settings settings;

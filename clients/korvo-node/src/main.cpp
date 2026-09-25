@@ -124,6 +124,7 @@ static void handle_buttons() {
 void setup() {
   arm_rollback_timer();
   settings_load();
+  lights_dark(!settings.lights_enabled);  // before the first frame is drawn
   lights_begin();
   codec_begin();
   mic_set_gain_db(settings.mic_gain_db);

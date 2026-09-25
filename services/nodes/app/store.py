@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
     "mic_enabled": True,
     "speaker_enabled": True,
     "local_volume_buttons": True,
+    "lights_enabled": True,
 }
 
 

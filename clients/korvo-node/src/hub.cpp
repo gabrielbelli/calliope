@@ -226,6 +226,7 @@ void hub_send_status() {
   d["mic_enabled"] = settings.mic_enabled;
   d["mic_gain_db"] = settings.mic_gain_db;
   d["speaker_enabled"] = settings.speaker_enabled;
+  d["lights_enabled"] = settings.lights_enabled;
   d["mic_dropped"] = mic_dropped;
   d["spk_dropped"] = spk_dropped;
   UBaseType_t free_bytes = xRingbufferGetCurFreeSize(spk_rb);
@@ -253,6 +254,7 @@ static void apply_config(JsonVariantConst c) {
     if (!settings.speaker_enabled) spk_amp(false);
   }
   if (c["local_volume_buttons"].is<bool>()) settings.local_volume_buttons = c["local_volume_buttons"];
+  if (c["lights_enabled"].is<bool>()) lights_dark(!(settings.lights_enabled = c["lights_enabled"]));
   if (c["name"].is<const char *>()) settings.name = (const char *)c["name"];
   settings_save();
   hub_send_status();

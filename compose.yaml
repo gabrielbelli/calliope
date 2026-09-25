@@ -100,6 +100,10 @@ services:
       GATEWAY_TTS_URL: http://tts-stack:8001
       GATEWAY_TTS_LONG_URL: http://tts-long:8002
       GATEWAY_UI_URL: http://voice-ui:8090
+      # The node hub (services/nodes), optional. It is also where the devices'
+      # own socket, /nodes/ws, is relayed -- through this one published port,
+      # over the same certificate. Set to "" to run the stack without it.
+      GATEWAY_NODES_URL: http://voice-nodes:8003
 
       # WHICH `model` STRINGS GO TO tts-long. Default: "chatterbox,tts-long".
       # Everything else -- including a name nobody recognises -- goes to
@@ -845,6 +849,37 @@ services:
     # at the health pills and find out what is still loading.
 
 
+  # THE NODE HUB. Thin audio devices -- a mic array, a speaker and a ring of
+  # lights on Wi-Fi (clients/korvo-node) -- connect to wss://<this host>:30080
+  # /nodes/ws through the gateway, are adopted here, and are told what to do.
+  # No model and no GPU: fastapi, httpx and numpy for the test tone and the
+  # 24 -> 48 kHz resample of Kokoro's output. Optional; deleting this block and
+  # setting GATEWAY_NODES_URL to "" leaves the rest of the stack unchanged.
+  voice-nodes:
+    container_name: voice-nodes
+    image: ghcr.io/gabrielbelli/calliope-nodes:v0.2.0
+    pull_policy: always
+    restart: unless-stopped
+    expose:
+      - "8003"
+    environment:
+      # Where "say" gets its voice: tts-stack's OpenAI route, asked for pcm.
+      NODES_TTS_URL: http://tts-stack:8001
+      NODES_TTS_VOICE: bm_george
+    cpus: 1
+    mem_limit: 256m
+    volumes:
+      # Adopted nodes (tokens only as hashes) and uploaded firmware images.
+      # Named, because losing it un-adopts every node in the house.
+      - nodes-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8003/health')"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 30s
+
+
 # Unchanged, and named here so the deploy does not create new empty ones and
 # silently orphan the models already on disk.
 #
@@ -866,3 +901,5 @@ volumes:
   tts-long-models:
   tts-long-out:
   voices:
+  # The node hub's adoptions and firmware store.
+  nodes-data:

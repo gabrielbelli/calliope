@@ -1685,7 +1685,7 @@ def test_every_backend_route_is_routed_or_named_as_unrouted():
     proxied = {(method, _pattern(path)) for method, path in _proxied_table()}
 
     unreachable: list[str] = []
-    for service in ("stt", "tts", "tts-long"):
+    for service in ("stt", "tts", "tts-long", "nodes"):
         for method, path in sorted(_declared_routes(service)):
             if (service, method, path) in NOT_ROUTED:
                 continue
@@ -1716,7 +1716,7 @@ def test_no_allowlist_entry_points_at_nothing():
     from app import main as gateway_main
 
     backends = {(method, _pattern(path))
-                for service in ("stt", "tts", "tts-long")
+                for service in ("stt", "tts", "tts-long", "nodes")
                 for method, path in _declared_routes(service)}
     voice_ui = {(method, _pattern(path))
                 for method, path in _declared_routes("ui")}

@@ -14,7 +14,11 @@ name: build
 # so the thing it protected against stopped being reachable. See ADR 0004.
 on:
   push:
-    branches: [main]
+    # feat/** publishes too, under its own tags and never :latest -- see the
+    # manifest step. A feature can then be deployed and tried on the real box
+    # without a release and without touching main (ADR 0012's topic branch,
+    # given a way to run).
+    branches: [main, 'feat/**']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -86,6 +90,8 @@ jobs:
               # ffmpeg and no audio library at all, because the decoding this
               # feature needs happens in the browser.
               "ui":       {"image": "calliope-ui",       "base": "python:3.13-slim-trixie"},
+              # The node hub: fastapi, httpx and numpy, no model.
+              "nodes":    {"image": "calliope-nodes",    "base": "python:3.13-slim-trixie"},
           }
           # Native runners per architecture rather than qemu. Every one of
           # these images has RUN instructions (apt, pip), and emulated arm64
@@ -369,9 +375,26 @@ jobs:
         working-directory: services/ui
         run: pytest -q
 
+  nodes:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.services), 'nodes')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      # The device is played by Starlette's test socket; nothing starts a
+      # server and no board is needed.
+      - name: Install
+        run: pip install -r services/nodes/requirements-dev.txt
+      - name: Test
+        working-directory: services/nodes
+        run: pytest -q
+
   # --------------------------------------------------------- the images --
   build:
-    needs: [changes, common, stt, tts, tts-long, gateway, ui]
+    needs: [changes, common, stt, tts, tts-long, gateway, ui, nodes]
     # A `needs` job that is SKIPPED skips its dependents too, and skipping is
     # the normal case here — that is the whole point of the filter. So the
     # condition is written out: run unless something actually failed, and only
@@ -480,6 +503,12 @@ jobs:
           buildah run --user root "$(buildah from localhost/build:ui-${{ matrix.arch }})" -- \
             sh -c 'command -v yt-dlp && yt-dlp --version'
 
+      - name: Check the runtime imports on this architecture (nodes)
+        if: matrix.service == 'nodes'
+        run: |
+          buildah run --user root "$(buildah from localhost/build:nodes-${{ matrix.arch }})" -- \
+            python -c 'import app.main, voice_common.audio, numpy, httpx, fastapi, uvicorn, websockets; print("ok", numpy.__version__)'
+
       # The page is the product here, and it is COPYd rather than built, so the
       # one way it goes missing is a Containerfile that forgot app/static.
       - name: Check the page is in the image (ui)
@@ -561,5 +590,13 @@ jobs:
             refs/tags/*)
               buildah manifest push --all m "docker://${dest}:${GITHUB_REF#refs/tags/}"
               buildah manifest push --all m "docker://${dest}:latest"
+              ;;
+            refs/heads/feat/*)
+              # feat/nodes -> :feat-nodes (moving) and :feat-nodes-<sha>
+              # (immutable, the one to deploy). Never :latest: a feature build
+              # must not become what an unpinned pull gets.
+              slug="$(printf '%s' "${GITHUB_REF#refs/heads/}" | tr '/' '-' | tr -c 'A-Za-z0-9_.-' '-')"
+              buildah manifest push --all m "docker://${dest}:${slug}"
+              buildah manifest push --all m "docker://${dest}:${slug}-${GITHUB_SHA}"
               ;;
           esac

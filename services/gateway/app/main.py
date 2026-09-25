@@ -1134,6 +1134,8 @@ UI_PATHS = (
     ("GET", "/ui/api/{rest:path}"),
     ("PUT", "/ui/api/{rest:path}"),
     ("DELETE", "/ui/api/{rest:path}"),
+    # PATCH arrived with the Nodes tab (PATCH /nodes/{id}, a node's settings).
+    ("PATCH", "/ui/api/{rest:path}"),
 )
 
 

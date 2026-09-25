@@ -25,6 +25,7 @@ void settings_load() {
   settings.mic_enabled = prefs.getBool("mic_on", true);
   settings.speaker_enabled = prefs.getBool("spk_on", true);
   settings.local_volume_buttons = prefs.getBool("local_vol", true);
+  settings.lights_enabled = prefs.getBool("lights_on", true);
   prefs.end();
 }
 
@@ -38,6 +39,7 @@ void settings_save() {
   prefs.putBool("mic_on", settings.mic_enabled);
   prefs.putBool("spk_on", settings.speaker_enabled);
   prefs.putBool("local_vol", settings.local_volume_buttons);
+  prefs.putBool("lights_on", settings.lights_enabled);
   prefs.end();
 }
 

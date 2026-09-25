@@ -331,6 +331,7 @@ class ConfigBody(BaseModel):
     mic_enabled: bool | None = None
     speaker_enabled: bool | None = None
     local_volume_buttons: bool | None = None
+    lights_enabled: bool | None = None
 
 
 class LightsBody(BaseModel):

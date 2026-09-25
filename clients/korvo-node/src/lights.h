@@ -15,6 +15,9 @@ enum class Status : uint8_t {
 enum class Mode : uint8_t { Off, Solid, Pulse, Spin, Pixels };
 
 void lights_begin();
+// Dark overrides every layer, status included: a bedroom node stays unlit
+// through reboots, reconnects and updates.
+void lights_dark(bool dark);
 void lights_status(Status s);
 void lights_muted(bool muted);
 void lights_identify(uint32_t ms);

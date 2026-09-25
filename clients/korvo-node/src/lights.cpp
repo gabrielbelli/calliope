@@ -12,6 +12,7 @@ static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 
 static volatile Status status = Status::Booting;
 static volatile bool muted = false;
+static volatile bool dark = false;
 static volatile uint32_t identify_until = 0;
 static volatile int ota_pct = -1;
 
@@ -41,6 +42,10 @@ static void spin(uint32_t t, uint8_t r, uint8_t g, uint8_t b, uint32_t period) {
 }
 
 static void render(uint32_t t) {
+  if (dark) {
+    fill(0, 0, 0);
+    return;
+  }
   if (muted) {
     fill(80, 0, 0);
     return;
@@ -112,6 +117,7 @@ void lights_begin() {
   xTaskCreatePinnedToCore(task, "lights", 3072, nullptr, 1, nullptr, 0);
 }
 
+void lights_dark(bool d) { dark = d; }
 void lights_status(Status s) { status = s; }
 void lights_muted(bool m) { muted = m; }
 void lights_identify(uint32_t ms) { identify_until = millis() + ms; }

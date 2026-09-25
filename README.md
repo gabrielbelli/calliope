@@ -7,7 +7,7 @@
 **Speech in, text out. Text in, a voice out.**
 
 A self-hosted speech stack: transcription, speech, long documents as jobs, and
-voice cloning from a reference clip. Five containers behind one
+voice cloning from a reference clip. Six containers behind one
 OpenAI-compatible port, with a web page at the same address and a macOS app
 that reads any selection aloud. Every image runs on CPU — no CUDA, nothing
 to install on the host.
@@ -21,7 +21,7 @@ $EDITOR compose.yaml      # five things belong to another machine — see Run it
 docker compose up -d
 ```
 
-All five images are published to `ghcr.io`, so nothing has to be built.
+All six images are published to `ghcr.io`, so nothing has to be built.
 `compose.yaml` is a live deployment rather than a template, so it will not come
 up unedited; [Run it](#run-it) names every line.
 
@@ -69,6 +69,21 @@ Accessibility permission to read another application's selection. A Calliope
 server is opt-in, from the menu bar: **Settings…** → *Use a Calliope server*.
 [`clients/macos-player`](clients/macos-player/README.md) has the rest,
 including the optional OpenClip action.
+
+## Around the house
+
+**Nodes** are thin audio devices: a microphone array, a speaker and a ring of
+lights on Wi-Fi, making no decisions of their own. A new one opens a Wi-Fi
+network to be set up from a phone, connects to `wss://<host>:30080/nodes/ws`
+through the same port as everything else, and waits on the **Nodes** tab to be
+adopted. From there the stack sets its volume and lights, plays speech or a
+tone on it, records from its microphones, and updates its firmware over the
+air. An update the node cannot bring back to the hub rolls itself back.
+
+The first board is Espressif's ESP32-Korvo v1.1 (three microphones, a speaker
+loopback for echo cancellation, twelve LEDs, six buttons).
+[`services/nodes`](services/nodes/README.md) is the hub and the protocol;
+[`clients/korvo-node`](clients/korvo-node/README.md) is the firmware.
 
 ## The API
 
@@ -244,7 +259,7 @@ publish 30080 to the internet.
 ## Build and test
 
 Only needed to change an image. The build context is the **repository root**
-for all five, because `packages/common` is a path dependency and must be inside
+for all six, because `packages/common` is a path dependency and must be inside
 the context.
 
 ```bash
@@ -275,8 +290,10 @@ configuration table.
 | [`services/tts-long`](services/tts-long/README.md) | The queue, both engines, cloning, the optional GPU runner |
 | [`services/gateway`](services/gateway/README.md) | Routing, authentication, `/health` |
 | [`services/ui`](services/ui/README.md) | The page and the routes behind it |
+| [`services/nodes`](services/nodes/README.md) | The node hub, adoption, the device protocol, OTA |
 | [`packages/common`](packages/common/README.md) | Auth, the error envelope, `/health`, the entrypoint |
 | [`clients/macos-player`](clients/macos-player/README.md) | The capsule, the reader, the OpenClip action |
+| [`clients/korvo-node`](clients/korvo-node/README.md) | Node firmware: first flash, Wi-Fi setup, buttons, updates |
 | [`docs/architecture.md`](docs/architecture.md) | The measurements behind the shape of all this |
 | [`docs/adr/`](docs/adr/) | Decisions, dated, with what each one cost |
 

@@ -1391,7 +1391,7 @@ skips the extension if OpenClip is absent.
 ## 10. Decision records
 
 `docs/adr/` holds the decisions, dated, each with what it cost. The sequence
-runs 0001–0010 and 0012; there is no 0011.
+runs 0001–0010, 0012 and 0013; there is no 0011.
 
 | | Status |
 |---|---|
@@ -1406,6 +1406,7 @@ runs 0001–0010 and 0012; there is no 0011.
 | [0009 — A third engine, and the first one this container cannot run](adr/0009-a-third-engine-that-cannot-run-here.md) | superseded by 0010 |
 | [0010 — The third engine was measured on the card it was for, and retired](adr/0010-the-third-engine-was-measured-and-retired.md) | accepted |
 | [0012 — One branch: `main` is the branch, a `v*` tag is a release](adr/0012-one-branch.md) | accepted |
+| [0013 — Nodes come in through the one door, and their socket is not behind a key](adr/0013-nodes-one-door.md) | accepted |
 
 0009 is kept rather than deleted because every engineering fact in it is still
 true; what it got wrong is its own first sentence, that this deployment offers a

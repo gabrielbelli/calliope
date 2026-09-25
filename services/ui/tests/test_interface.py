@@ -1349,8 +1349,9 @@ def test_the_surface_is_decorative_and_the_state_is_not_in_it():
     # The icons too: each button already has a label beside it, so an icon that
     # announced itself would say the name of the tab twice.
     icons = HTML[HTML.index('<div class="tabs"'):HTML.index("<!-- ==================================================== /the dock ====")]
-    assert icons.count("<svg viewBox") == 4
-    assert icons.count('aria-hidden="true" focusable="false"') == 4
+    # Five since the Nodes tab.
+    assert icons.count("<svg viewBox") == 5
+    assert icons.count('aria-hidden="true" focusable="false"') == 5
 
 
 def test_the_trough_is_one_path_rather_than_assembled_shapes():
@@ -1754,8 +1755,9 @@ def test_the_page_tells_you_which_tab_you_are_on_from_across_the_room():
     You do not read which tab you are on; the room changes colour."""
     dock = HTML[HTML.index('<div class="rail">'):HTML.index("<!-- ==================================================== /the dock ====")]
     accents = re.findall(r'--acc:(#[0-9A-Fa-f]{6})', dock)
-    assert len(accents) == 4, f"not every tab carries an accent: {accents}"
-    assert len(set(accents)) == 4, f"two tabs share an accent: {accents}"
+    # Five since the Nodes tab.
+    assert len(accents) == 5, f"not every tab carries an accent: {accents}"
+    assert len(set(accents)) == 5, f"two tabs share an accent: {accents}"
     # READ FROM THE STYLESHEET, NOT WRITTEN TWICE. A palette with a second copy
     # in the script is a palette that drifts the first time one of them moves.
     body = js_between("const DOCKACC", "1 geometry --")

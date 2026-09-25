@@ -28,6 +28,7 @@ import pytest
 STT_URL = "http://stt.test"
 TTS_URL = "http://tts.test"
 LONG_URL = "http://long.test"
+NODES_URL = "http://nodes.test"
 
 
 class MockBackend:
@@ -132,6 +133,7 @@ def reload_gateway(monkeypatch, *, api_keys: str | None = None,
     monkeypatch.setenv("GATEWAY_STT_URL", STT_URL)
     monkeypatch.setenv("GATEWAY_TTS_URL", TTS_URL)
     monkeypatch.setenv("GATEWAY_TTS_LONG_URL", LONG_URL)
+    monkeypatch.setenv("GATEWAY_NODES_URL", NODES_URL)
     if api_keys is None:
         monkeypatch.delenv("GATEWAY_API_KEYS", raising=False)
     else:
@@ -144,7 +146,7 @@ def reload_gateway(monkeypatch, *, api_keys: str | None = None,
 
 
 @asynccontextmanager
-async def gateway(monkeypatch, *, stt=None, tts=None, long=None,
+async def gateway(monkeypatch, *, stt=None, tts=None, long=None, nodes=None,
                   api_keys: str | None = None,
                   long_models: str | None = None):
     """A client speaking to the real app, which speaks to the mock backends."""
@@ -152,7 +154,8 @@ async def gateway(monkeypatch, *, stt=None, tts=None, long=None,
                           long_models=long_models)
     router = Router({"stt.test": stt or MockBackend("stt-stack"),
                      "tts.test": tts or MockBackend("tts-stack"),
-                     "long.test": long or MockBackend("tts-long")})
+                     "long.test": long or MockBackend("tts-long"),
+                     "nodes.test": nodes or MockBackend("voice-nodes")})
     monkeypatch.setattr(main, "new_client",
                         lambda: httpx.AsyncClient(transport=router,
                                                   follow_redirects=False))

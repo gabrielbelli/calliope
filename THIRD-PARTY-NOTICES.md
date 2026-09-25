@@ -41,6 +41,8 @@ holding.** Re-read this section first.
 | fastapi | 0.121.2 | MIT |
 | uvicorn[standard] | 0.38.0 | BSD-3-Clause |
 | httpx | 0.28.1 | BSD-3-Clause |
+| websockets | 17.1 | BSD-3-Clause |
+| numpy | 2.3.4 | BSD-3-Clause |
 | python-multipart | 0.0.20 | Apache-2.0 |
 
 yt-dlp is used **as a metadata probe only** — `extract_info(download=False)`,
@@ -48,6 +50,24 @@ to resolve a pasted link to a title, duration and size so the user can confirm
 before anything is fetched. The fetching itself is MeTube's job.
 
 ---
+
+### Node firmware (`clients/korvo-node`)
+
+Fetched by PlatformIO at build time and linked into the firmware image; none of
+it is in this tree. The two LGPL libraries are linked unmodified, and the whole
+firmware is published here as source, so anyone can rebuild it against their
+own copy of either.
+
+| Library | Version | Licence |
+|---|---|---|
+| Arduino core for the ESP32 (`framework-arduinoespressif32`) | 2.0.17 | LGPL-2.1 |
+| `tzapu/WiFiManager` | 2.0.17 | MIT |
+| `links2004/WebSockets` | 2.6.1 | LGPL-2.1 |
+| `bblanchon/ArduinoJson` | 7.4.2 | MIT |
+| `adafruit/Adafruit NeoPixel` | 1.15.1 | LGPL-3.0 |
+
+`src/ca.h` holds the ISRG Root X1 and X2 certificates, exported from the macOS
+system roots; they are public trust anchors and carry no licence terms.
 
 ## Copied
 
@@ -105,6 +125,17 @@ SOFTWARE.
 ```
 
 ---
+
+### `espressif/esp-adf` `esp_codec_dev` — Apache-2.0 — Copyright 2023 Espressif Systems (Shanghai) CO LTD
+
+The ES7210 and ES8311 register sequences in
+`clients/korvo-node/src/codec.cpp` are ported from
+`components/esp_codec_dev/device/es7210/es7210.c` and `es8311/es8311.c`,
+specialised to the Korvo's one configuration. Apache-2.0 is compatible with
+BSD-2-Clause for this use; the notice and a statement of what changed are at
+the top of that file. The Korvo's pin assignments were read from Espressif's
+published schematics and from esp-skainet's board header, which are facts
+rather than code.
 
 ## Learned from
 
