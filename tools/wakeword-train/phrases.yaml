@@ -1,0 +1,105 @@
+# The wake words to train. Each key under `models` is the model name and its
+# file name (<name>.onnx), the name the hub is given.
+#
+#   phrases         What the LibriTTS-R generator says (openWakeWord's
+#                   target_phrase). Spell it the way espeak-ng should read it:
+#                   "g p t" gives three stressed letters, "gpt" one acronym
+#                   with the stress on the T. Every word must be in CMUdict
+#                   or in `pronunciations` below, because openWakeWord builds
+#                   its adversarial phrases from those pronunciations.
+#   negatives       Hand-picked confusable phrases, added to the ones
+#                   openWakeWord generates (its custom_negative_phrases).
+#                   Never a homophone of the wake word: a clip that sounds the
+#                   same, labelled negative, teaches the model to reject it.
+#                   Each is rendered about once among n_samples negatives, so
+#                   one line carries little weight; repeat a phrase in the
+#                   list to give it more.
+#   eval            How a person writes it. Spoken by held-out voices (macOS
+#                   `say`, unused LibriTTS-R speaker blends) for evaluate.py.
+#   eval_negatives  Confusable phrases kept OUT of training, for measuring how
+#                   often the model accepts a near miss it has never seen.
+#   train           Optional overrides of the training profile for this model.
+
+# ARPAbet for words CMUdict lacks (see oww_train.py for why this matters).
+pronunciations:
+  grok: G R AA1 K
+  gpt: JH IY2 P IY2 T IY1         # espeak reads "gpt" as one acronym, stress on the T
+  lumos: L UW1 M OW0 S            # espeak: LOO-mohz
+  lumoss: L UW1 M AA2 S           # espeak: LOO-moss, as in the films
+  jemminee: JH EH1 M IH0 N IY2    # the JEM-in-ee reading of "gemini"
+
+# Single words are short, so more ordinary speech happens to contain something
+# close to them. These models get a wider layer and twice the adversarial
+# negatives per batch; the false accepts they still make are reported as-is.
+single_word: &single_word
+  layer_size: 64
+  batch_n_per_class: {ACAV100M_sample: 1024, adversarial_negative: 100, positive: 50}
+
+models:
+  hey_claude:
+    phrases: [hey claude]
+    negatives: [hey cloud, hey clod, hey clause, hey claws, hey claudia, hey claudio, hey clyde,
+                hey clown, hey code, hey lord, hey cloudy, hey called, hey clog, hey glad, a cloud]
+    eval: [Hey Claude]
+    eval_negatives: [hey crowd, hey clock, hey maude, hey applaud, okay cloud]
+
+  hey_gemini:
+    phrases: [hey gemini, hey jemminee]
+    negatives: [hey germany, hey jimmy, hey gemma, hey jeremy, hey jemima, hey jenny,
+                hey lemony, hey harmony, hey jasmine, hey chimney, hey mini, hey genie, hey gem]
+    eval: [Hey Gemini]
+    eval_negatives: [hey feminine, hey eminem, hey many, hey jamie, hey jenna]
+
+  hey_grok:
+    phrases: [hey grok]
+    negatives: [hey rock, hey grow, hey crock, hey grog, hey croc, hey frock, hey grab, hey block,
+                hey broke, hey rocket, hey clock, hey groan, hey crook, hey truck, hey grope]
+    eval: [Hey Grok]
+    eval_negatives: [hey gross, hey rook, hey dock, hey brock, hey crop]
+
+  hey_chat_gpt:
+    phrases: [hey chat g p t, hey chat gpt]
+    negatives: [hey chat g p s, hey chat c p u, hey chat b b c, hey chat t v, hey chatty, hey chad,
+                hey jack, hey chat, hey cat, hey g p s, hey chat e p, hey chat d v d]
+    eval: [Hey ChatGPT, Hey chat G P T]
+    eval_negatives: [hey chat g p u, hey chatbot, hey cheap tea, hey chat is key, hey patty]
+
+  claude:
+    phrases: [claude]
+    negatives: [cloud, clod, clause, claws, claudia, claudio, clyde, clown, code, cord, called,
+                glad, lord, load, crowd, fraud, maude, loud, clog, clot]
+    eval: [Claude]
+    eval_negatives: [applaud, clock, cloudy, closed, gloat]
+    train: *single_word
+
+  gemini:
+    phrases: [gemini, jemminee]
+    negatives: [germany, jimmy, gemma, jeremy, jemima, jenny, lemony, harmony, jasmine,
+                chimney, mini, genie, gem, many, jamie]
+    eval: [Gemini]
+    eval_negatives: [feminine, eminem, jenna, lemming, seminar]
+    train: *single_word
+
+  grok:
+    phrases: [grok]
+    negatives: [rock, grow, crock, grog, croc, frock, grab, block, broke, groan, crook, truck,
+                grope, rook, gross, clock, group, grove]
+    eval: [Grok]
+    eval_negatives: [dock, brock, grog shop, crop, grass]
+    train: *single_word
+
+  gpt:
+    phrases: [g p t, gpt]
+    negatives: [g p s, g p u, g p a, j p g, c p u, b b c, t v, e t a, d v d, g b, g t, p t, jeep,
+                g, p, t, gee, key, cheap tea]
+    eval: [GPT, G P T]
+    eval_negatives: [g t p, d p t, b p t, chatbot, empty]
+    train: *single_word
+
+  lumos:
+    phrases: [lumos, lumoss]
+    negatives: [lumen, lumens, loomis, moose, lemons, numbers, humus, hummus, you must, luminous,
+                loom, lumber, remus, famous, rumours, looms]
+    eval: [Lumos]
+    eval_negatives: [lummox, lupus, nimbus, cosmos, lima]
+    train: *single_word
