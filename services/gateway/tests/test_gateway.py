@@ -1302,6 +1302,11 @@ NOT_ON_PAGE: dict[tuple[str, str, str], str] = {
         "and routing path, for a script verifying the pipeline with nobody in "
         "earshot. A button for it on the page would be one press from a real "
         "rule acting on a clip, with Home Assistant on the other end.",
+    ("satellites", "POST", "/satellites/{nid}/ptt"):
+        "for Home Assistant's integration (clients/home-assistant): push-to-talk "
+        "from an automation or a dashboard. On the page the satellite's own "
+        "PLAY button is the push-to-talk, and a remote one would open a "
+        "microphone in a room the person pressing it is not in.",
 }
 
 # What this service answers itself, with no backend behind it. Without these

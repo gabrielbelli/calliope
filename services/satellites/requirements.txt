@@ -15,6 +15,13 @@ tqdm==4.70.1
 requests==2.34.2
 # The endpointer's voice activity detector.
 webrtcvad-wheels==2.0.14
+# The language of a transcript (app/language.py): stt-stack's Parakeet
+# recognises 25 languages and reports none of them. BSD-3-Clause, 4.4 MB with
+# its model; measured against lingua-language-detector in language.py.
+py3langid==0.4.0
+# Home Assistant's websocket API, for the ha_assist action (destinations.py).
+# uvicorn[standard] installs it too; pinned here because the hub imports it.
+websockets==17.1
 # Home Assistant over MQTT (app/mqtt.py); imported only when SATELLITES_MQTT_URL
 # is set.
 aiomqtt==2.5.1

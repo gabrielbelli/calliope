@@ -68,6 +68,8 @@ asks for tflite-runtime, which has no wheel for Python 3.13).
 | aiomqtt | 2.5.1 | BSD-3-Clause | Home Assistant over MQTT |
 | paho-mqtt | 2.1.0 | EPL-2.0 OR BSD-3-Clause, taken as BSD-3-Clause | under aiomqtt |
 | cryptography | 50.0.1 | Apache-2.0 OR BSD-3-Clause | firmware signatures |
+| py3langid | 0.4.0 | BSD-3-Clause, its model included | the language of a transcript |
+| websockets | 17.1 | BSD-3-Clause | Home Assistant's Assist pipelines (`ha_assist`) |
 
 MPL-2.0 (tqdm) is file-level copyleft: it binds changes to tqdm's own files,
 and nothing here changes them.

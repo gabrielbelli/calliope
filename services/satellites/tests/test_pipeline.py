@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from app import listening, signing, wakeword
+from app import listening, signing, wakeword, wakewords_config
 from app import router as routing
 from app.wakeword import Detection
 
@@ -260,9 +260,11 @@ def app(env, fake_models):
 
 
 def route_to_fakes(app, services, tmp_path) -> None:
+    """The hub's own routing (each wake word's entry), with STT, TTS and
+    every destination on the fakes."""
     routing.configure(routing.Router(
-        routing.Rules(tmp_path), stt_url="http://stt.test", tts_url="http://tts.test",
-        client=httpx.AsyncClient(transport=httpx.MockTransport(services)),
+        wakewords_config.WordActions(app.hub.voice.assignment), stt_url="http://stt.test",
+        tts_url="http://tts.test", client=httpx.AsyncClient(transport=httpx.MockTransport(services)),
         lookup=app.lookup_satellite))
 
 
@@ -481,7 +483,8 @@ def test_a_wake_word_is_published_with_its_score_and_the_command_is_routed(clien
     [wake] = of(events, "wake")
     assert (wake["satellite"], wake["wake_word"], wake["score"]) == (NID, "hey_jarvis", 0.9)
     assert "direction" in wake
-    assert (done["rule_id"], done["reply_to"], done["endpoint"]) == ("default", NID, "silence")
+    # rule_id names what answered: the wake word's own entry.
+    assert (done["rule_id"], done["reply_to"], done["endpoint"]) == ("hey_jarvis", NID, "silence")
     # The command sent to STT is the speech after the marker plus the
     # endpointer's padding, not the marker and not the whole second of room.
     assert 1.0 <= done["command_s"] <= 1.7
@@ -526,11 +529,12 @@ def test_without_stt_configured_a_wake_word_is_still_published_and_routing_says_
 
 
 def test_a_reply_for_another_satellite_is_played_there_and_both_are_ducked(client, events, tmp_path, plug):
-    client.put("/satellites/routing", json={"rules": [
-        {"id": "ask-here-answer-there", "destination": {"type": "echo"}, "reply_to": "bedroom"}]})
     with client.websocket_connect("/satellites/ws") as ws1, client.websocket_connect("/satellites/ws") as ws2:
         adopt(client, ws1, name="kitchen")
         adopt(client, ws2, name="bedroom", mac=MAC2)
+        assert client.put("/satellites/wake-words", json={"words": [
+            {"name": "hey_jarvis", "action": {"destination": {"type": "echo"},
+                                              "reply_to": "bedroom"}}]}).status_code == 200
         kitchen, bedroom = plug(ws1), plug(ws2, NID2)
         kitchen.send(utterance())
         [done] = routed(events)
@@ -915,7 +919,7 @@ def test_inject_needs_an_adopted_satellite_and_play_needs_it_online(client):
 
 def test_the_routing_routes_are_not_taken_for_a_satellite_called_routing(client):
     r = client.get("/satellites/routing")
-    assert r.status_code == 200 and r.json()["rules"][0]["id"] == "default"
+    assert r.status_code == 200 and r.json()["rules"][0]["wake_word"] == "hey_jarvis"
 
 
 def test_a_home_assistant_switch_goes_through_the_same_path_as_patch(client, app):

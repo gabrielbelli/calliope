@@ -700,6 +700,7 @@ class FrontEnd:
         self._speech_hang = 0
         self._last_speech = -(10 ** 9)
         self._cpu = 0.0
+        self.blocks: list[tuple[bool, bool, float]] = []
 
     # ---- public surface -----------------------------------------------------
 
@@ -762,6 +763,11 @@ class FrontEnd:
         buf = np.concatenate((self._pending, frames[:, : self.channels].astype(np.float64)))
         blocks = len(buf) // self.hop
         out = np.empty(blocks * self.hop)
+        # One entry per block of the output this call returns, in order:
+        # (voiced, far_end, snr). listening.BargeIn reads them, because the
+        # `speech` property says only what the LAST block was, and a batch
+        # holds dozens.
+        self.blocks = []
         start = time.thread_time()
         for b in range(blocks):
             blk = buf[b * self.hop:(b + 1) * self.hop]
@@ -818,8 +824,9 @@ class FrontEnd:
 
         power = S.real ** 2 + S.imag ** 2
         learning = self._far_hang > 0 and self.aec.active_blocks < self.warm_blocks
-        voiced = (not learning and power[band].mean() > self.silence
-                  and float(gamma[band].mean()) > self.SPEECH_SNR)
+        snr = float(gamma[band].mean())
+        voiced = (not learning and power[band].mean() > self.silence and snr > self.SPEECH_SNR)
+        self.blocks.append((voiced, self._far_hang > 0, snr))
         self._speech_hang = self.hang_blocks if voiced else max(0, self._speech_hang - 1)
         if is_speech and self._far_hang == 0:
             self._last_speech = self._blocks
@@ -830,7 +837,10 @@ class FrontEnd:
         self._ola = synth[n:].copy()
         if not np.isfinite(out).all():
             # A live stream must never go permanently silent on one bad
-            # block: start the whole pipeline again.
+            # block: start the whole pipeline again. The decisions already
+            # made in this call are kept, so there is still one per block.
+            done = self.blocks[:-1] + [(False, self._far_hang > 0, 0.0)]
             self.reset()
+            self.blocks = done
             return np.zeros(n)
         return out

@@ -1203,11 +1203,12 @@ SATELLITES_PATHS = (
     ("PATCH", "/satellites/{nid}"),
     ("GET", "/satellites/{nid}/listen"),
     # inject is routed for scripts that verify the listening path with a
-    # recorded clip, behind the same keys as everything else here; the page
-    # never calls it (see NOT_ON_PAGE in tests/test_gateway.py).
+    # recorded clip, and ptt for Home Assistant's integration, behind the same
+    # keys as everything else here; the page calls neither (see NOT_ON_PAGE in
+    # tests/test_gateway.py).
     *(("POST", f"/satellites/{{nid}}/{action}") for action in (
         "adopt", "forget", "identify", "reboot", "lights", "tone", "say",
-        "flush", "set-hub", "inject")),
+        "flush", "set-hub", "inject", "ptt")),
 )
 
 

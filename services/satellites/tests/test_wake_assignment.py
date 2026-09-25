@@ -407,9 +407,11 @@ def test_the_assignment_survives_a_restart_of_the_hub(app, services, tmp_path):
         words = c.get("/satellites/wake-words").json()["words"]
     assert [(w["name"], w["threshold"], w["satellites"], w["state"]) for w in words] == [
         ("hey_jarvis", 0.7, [NID], "ready"), ("alexa", 0.5, ["*"], "ready")]
-    assert json.loads((tmp_path / "wake_words.json").read_text()) == {"words": [
-        {"name": "hey_jarvis", "threshold": 0.7, "satellites": [NID]},
-        {"name": "alexa", "threshold": 0.5, "satellites": ["*"]}]}
+    saved = json.loads((tmp_path / "wake_words.json").read_text())
+    assert saved["version"] == 2
+    assert [(w["name"], w["threshold"], w["satellites"], w["mode"], w["action"]["destination"])
+            for w in saved["words"]] == [("hey_jarvis", 0.7, [NID], "command", {"type": "echo"}),
+                                        ("alexa", 0.5, ["*"], "command", {"type": "echo"})]
 
 
 def test_the_first_start_seeds_every_word_for_every_satellite_and_a_later_start_does_not(

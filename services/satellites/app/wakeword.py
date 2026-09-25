@@ -404,7 +404,7 @@ class Endpointer:
     PAD_MS = 300
 
     def __init__(self, rate: int = RATE, max_seconds: float = 10.0, silence_ms: int = 800,
-                 start_timeout_s: float = 4.0, *, vad_mode: int = 2):
+                 start_timeout_s: float = 4.0, *, vad_mode: int = 2, reopen: bool = True):
         if rate not in (8000, 16000, 32000, 48000):
             raise ValueError(f"webrtcvad takes 8, 16, 32 or 48 kHz, not {rate} Hz")
         # Mode 2, not 3: 3 rejects more loud noise, but with the fixtures at
@@ -432,6 +432,16 @@ class Endpointer:
         self._pre_last = -1                 # last voiced frame of the preroll
         self._held = b""                    # the wake word's own speech, held
         self._reopened_at: int | None = None
+        # False for a turn with no wake word before it (a follow-up, a
+        # barge-in): short speech at its start is the turn itself, not a wake
+        # word to wait past.
+        self._reopen = reopen
+
+    def set_silence(self, silence_ms: int) -> None:
+        """How long a pause ends the command, changed after the start: the
+        hub knows which wake word was heard, and so its setting, only once
+        the detector has fired and this endpointer exists."""
+        self._silence_frames = max(1, math.ceil(silence_ms / self.FRAME_MS))
 
     @property
     def had_speech(self) -> bool:
@@ -517,7 +527,7 @@ class Endpointer:
                     # pause: begin here, never inside the rewound wake word.
                     self._start = self._pre_start if running else max(onset, self._live)
                 self._last_speech = self._voiced
-            if (self._start is not None and i - self._last_speech >= self._silence_frames
+            if (self._reopen and self._start is not None and i - self._last_speech >= self._silence_frames
                     and self._reopened_at is None and self._start < self._live + self.ONSET_WINDOW
                     and self._last_speech - self._live < self.WAKE_TAIL):
                 # THE WAKE WORD, THEN A PAUSE. The speech that crossed the

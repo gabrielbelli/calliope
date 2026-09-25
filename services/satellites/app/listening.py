@@ -17,11 +17,32 @@ satellite anything.
 
 THREE STATES. "idle" listens for a wake word; "listening" feeds the endpointer
 after one; "busy" is the conversation after the endpoint, while the router
-works. The wake word model is fed in every state, so its stream never has a
-hole in it (openWakeWord scores a sliding window, and a window straddling a gap
-scores audio that never happened); a detection outside "idle" is dropped.
-main.py moves "busy" back to "idle" when the conversation ends, between two
-process() calls, never during one.
+works and the reply plays. The wake word model is fed in every state, so its
+stream never has a hole in it (openWakeWord scores a sliding window, and a
+window straddling a gap scores audio that never happened); a detection outside
+"idle" is dropped unless main.py has made the Ear `interruptible`. main.py
+moves "busy" back to "idle" when the conversation ends, between two process()
+calls, never during one.
+
+A CONVERSATION ASKS FOR MORE, all by flags that process() reads at its start,
+because main.py sets them from the event loop while process() may be running
+in its thread:
+
+  * follow_up(): listen again with no wake word, once the satellite's own
+    voice has left its loopback channel for FOLLOW_UP_GUARD_S; a turn that
+    does not start within the timeout comes back as Command "no_speech";
+  * watch(voice=True): barge-in. While the reply plays, sustained speech on
+    the echo-cancelled output (BargeInDetector) is reported as BargeIn and,
+    with `capture`, the Ear starts collecting what is being said from BARGE_
+    PREROLL_S before the detection, so its first syllables are kept;
+  * interruptible: a wake word heard in any state is reported, and starts a
+    new command after it;
+  * triggers: words that are the whole command. Heard is reported and the
+    Ear listens for nothing after them.
+
+Barge-in by voice needs the front-end: without echo cancellation there is no
+telling the satellite's own voice from the talker's, so with
+SATELLITES_FRONTEND=0, or one channel, only a wake word interrupts.
 
 WITHOUT THE FRONT-END (SATELLITES_FRONTEND=0) the mono stream is the first
 microphone, raw: the channel after the loopback reference.
@@ -37,6 +58,7 @@ takes that much noise for speech.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -72,8 +94,70 @@ class Command:
         return len(self.audio) / 2 / RATE
 
 
+@dataclass(frozen=True)
+class BargeIn:
+    """Someone spoke over the reply. `at_s` is the stream position where it
+    was detected; `capturing` says the Ear is collecting the utterance."""
+
+    at_s: float
+    capturing: bool
+
+
 # Enough to rewind by any detector's latency (wakeword.WakeWords.latency_s).
 HISTORY_S = 2.0
+
+# BARGE-IN, on the front-end's own decision for each 16 ms block (FrontEnd.
+# blocks): voiced, whether the satellite's speaker is playing, and the
+# block's a posteriori SNR against the tracked noise PLUS the canceller's
+# model of the echo it left behind.
+#
+# Measured on synthetic scenes (tests/test_listening.py, and the notes in the
+# README): the canceller removes a linear echo (27-38 dB ERLE) and the
+# satellite's own voice never raised a voiced block once it had converged.
+# A loudspeaker that distorts is another matter: with its peaks clipped (tanh
+# at -14 to -24 dBFS) the linear model leaves 4-12 dB of ERLE, and the
+# front-end's usual bar (SNR 2, 3 dB) was cleared by 32-42 % of the playback's
+# blocks. The same blocks never reached 9 dB, while a talker at -36 dBFS over
+# the same playback had a median of 13.7-19 dB. So while the satellite plays,
+# a block counts only at BARGE_SNR_FAR; with nothing playing, at the front-end's
+# own bar.
+BARGE_SNR_FAR = 10.0     # 10 dB, linear, as FrontEnd reports it
+# Sustained speech, not a cough or a clatter: BARGE_VOICED of the last
+# BARGE_WINDOW blocks, 288 ms voiced within 480 ms. Measured: a talker at -30
+# to -42 dBFS over the reply was caught 0.30-0.37 s after they began; the
+# clipped self-echo reached at most 4 of the 18 needed.
+BARGE_WINDOW = 30
+BARGE_VOICED = 18
+# Kept from before the detection: the window it took to decide, and a margin.
+BARGE_PREROLL_S = 0.6
+# How long the loopback must have been quiet before a follow-up is listened
+# to, so the reply's last syllable and the room's echo of it are not taken for
+# the talker's next turn: without the front-end nothing else removes them.
+FOLLOW_UP_GUARD_S = 0.25
+# The loopback is the satellite playing when it is louder than this (the
+# Korvo's idle loopback measured -89 dBFS; frontend.FAR_END_DBFS).
+LOOPBACK_DBFS = -60.0
+
+
+class BargeInDetector:
+    """BARGE_VOICED voiced blocks in the last BARGE_WINDOW, counting a block
+    of playback only at BARGE_SNR_FAR. feed() returns the index, in the
+    blocks given, of the block that completed the count, or None."""
+
+    def __init__(self) -> None:
+        self.recent: deque[bool] = deque(maxlen=BARGE_WINDOW)
+
+    def reset(self) -> None:
+        self.recent.clear()
+
+    def feed(self, blocks: list[tuple[bool, bool, float]]) -> int | None:
+        for k, (voiced, far, snr) in enumerate(blocks):
+            self.recent.append(voiced and (snr >= BARGE_SNR_FAR if far else True))
+            if sum(self.recent) >= BARGE_VOICED:
+                self.recent.clear()
+                return k
+        return None
+
 
 class Ear:
     def __init__(self, *, rate: int = RATE, channels: int = 4, frontend: bool = True,
@@ -109,6 +193,16 @@ class Ear:
         self.debug_s = debug_s
         self._dbg_proc = np.zeros(0, np.int16)
         self._dbg_raw = np.zeros(0, np.int16)
+        # Set by main.py for a conversation (see the module docstring).
+        self.interruptible = False
+        self.triggers: frozenset[str] = frozenset()
+        self._voice = False
+        self._capture: tuple[int, float] | None = None
+        self._follow: tuple[int, float] | None = None
+        self._guard = 0           # samples of quiet loopback a follow-up still waits for
+        self._turn_settings: tuple[int, float] | None = None
+        self._barge = BargeInDetector()
+        self._loop_floor = rate * 0.02 * (32768.0 * 10 ** (LOOPBACK_DBFS / 20)) ** 2
 
     # ---- called from the event loop, between process() calls ------------------
 
@@ -125,6 +219,32 @@ class Ear:
         """The conversation is over (or was cancelled): back to wake words."""
         self.state = "idle"
         self.endpointer = None
+        self.unwatch()
+        self._follow = None
+        self._guard = 0
+
+    def follow_up(self, silence_ms: int, timeout_s: float) -> None:
+        """Listen for the next turn, with no wake word before it, at the next
+        process(): a pause of silence_ms ends it, and timeout_s without it
+        starting is Command "no_speech"."""
+        self._follow = (silence_ms, timeout_s)
+
+    def watch(self, *, voice: bool, capture: tuple[int, float] | None = None) -> None:
+        """Barge-in by voice while a reply plays. `capture` (silence_ms,
+        timeout_s) collects what the talker says as the next command; None
+        only reports it."""
+        if voice and not self._voice:
+            self._barge.reset()
+        self._voice, self._capture = voice, capture
+
+    def unwatch(self) -> None:
+        self._voice, self._capture = False, None
+        self.interruptible = False
+
+    def set_silence(self, silence_ms: int) -> None:
+        ep = self.endpointer
+        if ep is not None:
+            ep.set_silence(silence_ms)
 
     @property
     def direction(self) -> float | None:
@@ -148,7 +268,7 @@ class Ear:
 
     # ---- in the thread pool --------------------------------------------------
 
-    def process(self, frames: np.ndarray) -> list[Heard | Command]:
+    def process(self, frames: np.ndarray) -> list[Heard | Command | BargeIn]:
         """int16 (n, channels) in; what happened in them out, in order."""
         if self.frontend:
             mono = self.frontend.process(frames)
@@ -156,7 +276,8 @@ class Ear:
             mono = np.ascontiguousarray(frames[:, self.first_mic], dtype=np.int16)
         start = self.samples
         self.samples += len(mono)
-        events: list[Heard | Command] = []
+        mono_all = mono
+        events: list[Heard | Command | BargeIn] = []
         if self.debug_s:
             keep = int(self.debug_s * self.rate)
             self._dbg_proc = np.concatenate((self._dbg_proc, mono))[-keep:]
@@ -173,30 +294,92 @@ class Ear:
                 self._feed_wake(mono)
                 return events
 
+        follow, self._follow = self._follow, None
+        if follow is not None and self.state in ("busy", "idle"):
+            self.state = "listening"
+            self.endpointer = self._turn(follow)
+            self._guard = int(FOLLOW_UP_GUARD_S * self.rate) if self.channels > 1 else 0
+        interruptible = self.interruptible
+        voice, capture = self._voice and self.frontend is not None, self._capture
+
         found = self._feed_wake(mono)
-        if self.state == "idle" and found:
+        if found and (self.state == "idle" or interruptible):
             d = found[0]
-            # Everything after the frame that fired belongs to the command, and
-            # so does the detector's own latency before it: a real model fires
-            # well after the word ends, by which time the command has begun.
-            after = max(0, min(len(mono), self.wake.position - d.sample))
-            rewind = int(getattr(self.wake, "latency_s", 0.0) * self.rate)
-            before = np.concatenate((self._history, mono[:len(mono) - after]))[-rewind:] \
-                if rewind else np.zeros(0, np.int16)
-            events.append(self._listen(d.name, d.score, start + len(mono) - after))
-            if len(before) and self.endpointer is not None:
-                self.endpointer.preroll(before)
-            self._endpoint(mono[len(mono) - after:], events)
+            if d.name in self.triggers:
+                # The word is the whole command. A follow-up that was
+                # listening starts again, so the word is not its next turn.
+                events.append(Heard(d.name, round(d.score, 3), self._direction(),
+                                    round((start + len(mono)) / self.rate, 3)))
+                if self.state == "listening" and self._turn_settings is not None:
+                    self.endpointer = self._turn(self._turn_settings)
+            else:
+                # Everything after the frame that fired belongs to the
+                # command, and so does the detector's own latency before it:
+                # a real model fires well after the word ends, by which time
+                # the command has begun.
+                self._voice = False
+                after = max(0, min(len(mono), self.wake.position - d.sample))
+                rewind = int(getattr(self.wake, "latency_s", 0.0) * self.rate)
+                before = np.concatenate((self._history, mono[:len(mono) - after]))[-rewind:] \
+                    if rewind else np.zeros(0, np.int16)
+                events.append(self._listen(d.name, d.score, start + len(mono) - after))
+                if len(before) and self.endpointer is not None:
+                    self.endpointer.preroll(before)
+                self._endpoint(mono[len(mono) - after:], events)
+        elif voice and self.state == "busy":
+            k = self._barge.feed(self.frontend.blocks)
+            if k is not None:
+                cut = min(len(mono), (k + 1) * self.frontend.hop)
+                self._voice = False  # once per reply
+                events.append(BargeIn(round((start + cut) / self.rate, 3), capture is not None))
+                if capture is not None:
+                    self.state = "listening"
+                    self.endpointer = self._turn(capture)
+                    keep = int(BARGE_PREROLL_S * self.rate)
+                    self._endpoint(np.concatenate((self._history, mono[:cut]))[-keep:], events)
+                    self._endpoint(mono[cut:], events)
         elif self.state == "listening":
-            self._endpoint(mono, events)
-        self._history = np.concatenate((self._history, mono))[-int(HISTORY_S * self.rate):]
+            if self._guard > 0:
+                mono = self._after_guard(frames, mono)
+            if len(mono):
+                self._endpoint(mono, events)
+        self._history = np.concatenate((self._history, mono_all))[-int(HISTORY_S * self.rate):]
         return events
+
+    def _after_guard(self, frames: np.ndarray, mono: np.ndarray) -> np.ndarray:
+        """What of this chunk comes after the loopback has been quiet for the
+        guard: nothing until then. With one channel there is no loopback, and
+        no guard (follow_up sets none)."""
+        ref = frames[:, 0].astype(np.float64)
+        n = self.rate // 50  # the satellite's own 20 ms
+        loud = [i for i in range(0, len(ref) - n + 1, n)
+                if float(ref[i:i + n] @ ref[i:i + n]) > self._loop_floor]
+        quiet_tail = len(ref) - (loud[-1] + n) if loud else None
+        if quiet_tail is None:
+            self._guard -= len(ref)
+        else:
+            self._guard = int(FOLLOW_UP_GUARD_S * self.rate) - quiet_tail
+        if self._guard > 0:
+            return mono[:0]
+        take = min(len(mono), -self._guard)
+        self._guard = 0
+        return mono[len(mono) - take:] if take else mono[:0]
+
+    def _direction(self) -> float | None:
+        return None if self.direction is None else round(self.direction, 1)
+
+    def _turn(self, settings: tuple[int, float]) -> Endpointer:
+        """An endpointer for a turn with no wake word before it."""
+        self._turn_settings = settings
+        return Endpointer(rate=self.rate, silence_ms=settings[0], start_timeout_s=settings[1],
+                          reopen=False)
 
     def _feed_wake(self, mono: np.ndarray) -> list:
         return self.wake.feed(mono) if self.wake is not None else []
 
     def _listen(self, word: str, score: float | None, at: int) -> Heard:
         self.state = "listening"
+        self._turn_settings = None
         self.endpointer = Endpointer(rate=self.rate)
         return Heard(word, None if score is None else round(score, 3),
                      None if self.direction is None else round(self.direction, 1),

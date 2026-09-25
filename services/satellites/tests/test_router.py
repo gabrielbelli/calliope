@@ -225,10 +225,13 @@ async def test_ha_is_sent_the_bearer_from_its_env_var_and_its_plain_speech_is_sp
     assert str(sent.url) == "http://ha.test:8123/api/conversation/process"
     assert sent.headers["authorization"] == f"Bearer {SECRET}"
     assert json.loads(sent.content) == {"text": "what time is it", "language": "pt-BR"}
-    # Whisper takes ISO 639-1; "pt-BR" there is an error, and the wrong
-    # language translates rather than transcribes.
-    assert multipart(fake.sent("stt.test"))["language"] == b"pt"
-    assert json.loads(fake.sent("tts.test").content)["input"] == "It is half past seven."
+    # The hint is Home Assistant's and the voice's. STT is not sent it: this
+    # fake names no engine, and stt-stack's default (Parakeet) refuses the
+    # field with a 400 (test_a_language_hint_reaches_stt_only_when_it_runs_whisper).
+    [transcription] = [r for r in fake.seen if r.url.path == "/v1/audio/transcriptions"]
+    assert "language" not in multipart(transcription)
+    tts = json.loads(fake.sent("tts.test").content)
+    assert tts["input"] == "It is half past seven." and tts["voice"] == "pf_dora"
 
 
 async def test_the_llm_gets_the_system_prompt_and_key_and_its_think_block_is_not_spoken(make, fake, monkeypatch):
@@ -241,8 +244,13 @@ async def test_the_llm_gets_the_system_prompt_and_key_and_its_think_block_is_not
     sent = fake.sent("llm.test")
     assert str(sent.url) == "http://llm.test/v1/chat/completions"
     assert sent.headers["authorization"] == f"Bearer {LLM_KEY}"
-    assert json.loads(sent.content) == {"model": "tiny", "max_tokens": 400, "messages": [
-        {"role": "system", "content": "Be brief."}, {"role": "user", "content": "what time is it"}]}
+    # Streamed by default; this fake answers with one JSON body, which is the
+    # fallback for a server that does not stream. The language to answer in
+    # follows the system prompt.
+    assert json.loads(sent.content) == {"model": "tiny", "max_tokens": 400, "stream": True,
+                                        "messages": [
+        {"role": "system", "content": "Be brief.\n\nAnswer in English, the language the user is speaking."},
+        {"role": "user", "content": "what time is it"}]}
 
 
 async def test_a_local_llm_with_no_key_set_is_called_without_an_authorization_header(make, fake):
@@ -257,8 +265,8 @@ async def test_the_webhook_gets_the_documented_fields_and_a_json_reply_is_spoken
 
     assert out.error is None and out.reply_text == "Done." and out.reply_pcm48k
     assert json.loads(fake.sent("hook.test").content) == {
-        "satellite": "kitchen", "satellite_id": NID, "wake_word": "hey_jarvis",
-        "text": "what time is it", "audio_seconds": 1.0}
+        "satellite": "kitchen", "satellite_id": NID, "wake_word": "hey_jarvis", "mode": "command",
+        "text": "what time is it", "language": "en", "audio_seconds": 1.0, "history": []}
 
 
 async def test_a_webhook_that_answers_without_a_reply_is_success_with_nothing_to_say(make, fake):
@@ -438,7 +446,8 @@ def test_get_routing_says_which_secrets_are_missing_without_values(api, monkeypa
         {"id": "hook", "destination": HOOK | {"token_env": "HOOK_TOKEN"}}]})
     body = client.get("/satellites/routing").json()
     assert body["env"] == {"HOOK_TOKEN": False, "SATELLITES_HA_TOKEN": False, "SATELLITES_LLM_API_KEY": True}
-    assert body["services"] == {"stt": "http://stt.test", "tts": "http://tts.test", "voice": "bm_george"}
+    assert body["services"] == {"stt": "http://stt.test", "tts": "http://tts.test", "voice": "bm_george",
+                                "stt_engine": None}
     assert LLM_KEY not in json.dumps(body)
 
 

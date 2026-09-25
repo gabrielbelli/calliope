@@ -24,7 +24,7 @@ an assistant, and is the one place audio and firmware reach them from.
     GET   /satellites/{id}
     PATCH /satellites/{id}             name, config and the button mapping
     POST  /satellites/{id}/adopt | forget | identify | reboot | lights | tone | say
-                        | flush | set-hub
+                        | flush | set-hub | ptt
     GET   /satellites/{id}/listen?seconds=5   a WAV of the raw microphone channels
     POST  /satellites/{id}/inject?play=0      a 16 kHz mono WAV through the wake
                                        word, endpoint and routing path, as if heard
@@ -47,13 +47,17 @@ token proves the rest.
 THE LISTENING PATH, per adopted satellite. The socket loop hands microphone
 frames to a bounded queue (the oldest frame goes when it is full, and is
 counted); one task per satellite drains it and runs listening.Ear (front-end,
-wake words, endpointer) in a thread pool, so the event loop never does signal
-work. Each satellite listens only for the wake words assigned to it
-(wake_words.json, see Voice and wakewords_config.py). A wake word starts a
-Conversation: the "wake" earcon if the satellite holds it, the ring pointed at
-the talker, the satellite ducked, then the command, the router, and the reply
-on whichever satellite the rule names. One conversation per satellite at a
-time.
+wake words, endpointer, barge-in) in a thread pool, so the event loop never
+does signal work. Each satellite listens only for the wake words assigned to
+it, and each word says what it does (wake_words.json: see Voice and
+wakewords_config.py). A trigger word publishes "triggered" and that is all
+(Hub.trigger). Any other word starts a Conversation: the "wake" earcon if the
+satellite holds it, the ring pointed at the talker, the satellite ducked,
+then the command, streamed through dialogue.run_turn, and the reply on
+whichever satellite the word's action names, sentence by sentence (Player).
+A command is one turn; a conversation listens for the next one without the
+wake word. While a reply plays, speech over it or the wake word interrupts
+it. One conversation per satellite at a time.
 
 A SATELLITE WITH LIGHTS OFF IS NEVER SENT "lights". Every lights message this
 hub sends goes through Hub.send_lights, which reads the satellite's
@@ -74,9 +78,11 @@ import io
 import json
 import os
 import re
+import statistics
 import struct
 import time
 import wave
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -92,7 +98,8 @@ from voice_common import auth, errors, health
 from voice_common import logging as voice_logging
 from voice_common.errors import ApiError
 
-from . import audio, earcons, listening, signing, wakeword, wakewords_config
+from . import audio, dialogue, earcons, listening, signing, wakeword, wakewords_config
+from . import language as lang
 from . import router as routing
 from .mqtt import MqttBridge
 from .store import DEFAULT_CONFIG, Store, reported_config, satellite_config
@@ -153,6 +160,22 @@ LIGHTS_MIN_S = 0.15    # at most one direction update this often
 MAX_INJECT_S = 60
 WAKE_GRACE_S = 1.5
 DEFAULT_EARCONS = earcons.defaults()
+# A follow-up that has heard nothing for its follow_up_s ends on the Ear's own
+# "no_speech". This much longer without any Command means the audio itself
+# stopped arriving (a privacy mute, a satellite gone), and the conversation
+# ends on that instead of waiting for ever.
+FOLLOW_UP_SLACK_S = 3.0
+# A reply's playback is waited for at most its own length and this, in case
+# the speaker loop that would say it has finished is gone with its socket.
+PLAYBACK_SLACK_S = 5.0
+# How long an utterance that interrupted a reply may take to start: it already
+# has, so this only ends one the endpointer lost. Then up to the endpointer's
+# own 10 s of speech.
+CAPTURE_START_S = 4.0
+CAPTURE_WAIT_S = CAPTURE_START_S + 10.0 + FOLLOW_UP_SLACK_S
+# Turns kept for the latency summary in GET /satellites/{id}.
+LATENCY_TURNS = 20
+TRIGGER_FLASH_S = 0.3
 
 FIRMWARE_KEY: Any | None = None
 EXECUTOR: ThreadPoolExecutor | None = None
@@ -163,6 +186,24 @@ def satellite_id(mac: str) -> str:
 
 
 # ---- live connections -------------------------------------------------------
+
+
+class Clip:
+    """One sentence of a reply on its way to a speaker. The speaker loop marks
+    it `started` when its first frame goes out, and resolves `done` when it
+    ends: True when all of it went out, False when a flush or a setting
+    dropped it. A conversation learns from these what was heard of a reply it
+    interrupted, and when the reply is over."""
+
+    __slots__ = ("pcm", "text", "started", "done")
+
+    def __init__(self, pcm: bytes, text: str = ""):
+        self.pcm, self.text, self.started = pcm, text, False
+        self.done: asyncio.Future = asyncio.get_running_loop().create_future()
+
+    def finish(self, played: bool) -> None:
+        if not self.done.done():
+            self.done.set_result(played)
 
 
 class Session:
@@ -181,9 +222,12 @@ class Session:
         self.adopted = False
         self.status: dict = {}
         self.taps: set[asyncio.Queue] = set()
-        self.speaker: asyncio.Queue[bytes] = asyncio.Queue()
+        self.speaker: asyncio.Queue[bytes | Clip] = asyncio.Queue()
         self.speaker_gen = 0      # bumped by a flush; the loop drops the item in hand
         self.playing = False
+        # time.monotonic() at which what has been sent will have played out
+        # on the satellite, as far as the pacing knows.
+        self.play_until = 0.0
         self.ota: dict | None = None
         self.mic: asyncio.Queue[bytes] = asyncio.Queue(maxsize=MIC_QUEUE)
         self.mic_dropped = 0
@@ -263,8 +307,11 @@ class Session:
         message too."""
         had = self.playing or not self.speaker.empty()
         while not self.speaker.empty():
-            self.speaker.get_nowait()
+            item = self.speaker.get_nowait()
+            if isinstance(item, Clip):
+                item.finish(False)
         self.speaker_gen += 1
+        self.play_until = 0.0
         return had
 
     async def speaker_loop(self, allowed: Callable[[], bool]) -> None:
@@ -277,10 +324,16 @@ class Session:
         seq = 0
         chunk = self.spk_rate * 2 * SPEAKER_CHUNK_MS // 1000
         while True:
-            pcm = await self.speaker.get()
+            item = await self.speaker.get()
+            clip = item if isinstance(item, Clip) else None
+            pcm = clip.pcm if clip is not None else item
             gen = self.speaker_gen
             self.playing = True
-            start, sent = time.monotonic(), 0.0
+            # A reply arrives a sentence at a time. Each one carries on from
+            # the audio still buffered on the satellite rather than starting
+            # the clock again, or every sentence would add another
+            # SPEAKER_LEAD_S to what the satellite holds (300 ms of buffer).
+            base, sent, played = max(time.monotonic(), self.play_until), 0.0, True
             for off in range(0, len(pcm), chunk):
                 # Checked per chunk: a reply is one item, and a flush that only
                 # emptied the queue would let a two-minute answer play on.
@@ -288,13 +341,19 @@ class Session:
                 frame = struct.pack("<BBBBIQ", FRAME_SPEAKER, 0, 1, 0, seq, 0) + piece
                 if not await self.send_if(lambda: self.speaker_gen == gen and allowed(),
                                           data=frame):
+                    played = False
                     break
+                if clip is not None:
+                    clip.started = True
                 seq = (seq + 1) & 0xFFFFFFFF
                 sent += len(piece) / 2 / self.spk_rate
-                ahead = sent - (time.monotonic() - start)
+                self.play_until = base + sent
+                ahead = self.play_until - time.monotonic()
                 if ahead > SPEAKER_LEAD_S:
                     await asyncio.sleep(ahead - SPEAKER_LEAD_S)
             self.playing = False
+            if clip is not None:
+                clip.finish(played)
 
 
 async def _quietly(coro) -> bool:
@@ -388,13 +447,17 @@ class Voice:
         out = []
         for w in self.assignment.words:
             state, error = self.word_state(w.name)
-            out.append({"name": w.name, "threshold": w.threshold,
-                        "satellites": list(w.satellites), "state": state, "error": error})
+            out.append(w.as_json() | {"state": state, "error": error})
         return out
 
     def describe(self) -> dict:
+        actions = wakewords_config.WordActions(self.assignment)
         return {"available": wakewords_config.available(self.model_dir), "words": self.views(),
+                "ptt": self.assignment.ptt.model_dump(mode="json"),
                 "custom": wakewords_config.custom(self.model_dir),
+                # Which secret variables the actions name are set: names and
+                # booleans only, never a value.
+                "env": actions.env_vars(), "warnings": actions.warnings(lookup_satellite_safe),
                 "load_error": self.assignment.load_error}
 
     def health(self) -> dict:
@@ -420,10 +483,11 @@ class Voice:
 
     # -- changes --------------------------------------------------------------
 
-    def replace(self, words: list[wakewords_config.Word]) -> None:
+    def replace(self, words: list[wakewords_config.Word],
+                ptt: routing.Behaviour | None = None) -> None:
         """Save a new assignment and make what can be live, live: thresholds
-        now, plan() now. Words not loaded yet need reconcile()."""
-        self.assignment.replace(words)
+        and actions now, plan() now. Words not loaded yet need reconcile()."""
+        self.assignment.replace(words, ptt)
         # A save is also the retry for a word that failed to fetch: the network
         # may be back, or the model file may have been dropped into the volume.
         self.failed.clear()
@@ -551,6 +615,12 @@ class Hub:
         self.bridge: MqttBridge | None = None
         self.http: httpx.AsyncClient | None = None  # button webhooks
         self.tasks: set[asyncio.Task] = set()
+        # The last LATENCY_TURNS turns' timelines per satellite, for GET
+        # /satellites/{id}. Memory only: a restart starts the count again.
+        self.latency: dict[str, deque] = {}
+        # (satellite, trigger word) -> time.monotonic() before which it does
+        # not fire again.
+        self.cooldown: dict[tuple[str, str], float] = {}
 
     def publish(self, event: dict) -> None:
         event = {"at": time.time()} | event
@@ -598,7 +668,31 @@ class Hub:
             # Assigned, whether or not the model has loaded yet: GET
             # /satellites/wake-words has each word's state.
             "wake_words": self.voice.assignment.effective(nid),
+            "latency": self.latency_summary(nid),
         }
+
+    def record_latency(self, nid: str, timeline: dict) -> None:
+        if timeline.get("first_audio") is not None:
+            self.latency.setdefault(nid, deque(maxlen=LATENCY_TURNS)).append(dict(timeline))
+
+    def latency_summary(self, nid: str) -> dict | None:
+        """Medians (and the 90th percentile of the first audio) over the last
+        LATENCY_TURNS spoken replies, in ms from the end of speech."""
+        rows = list(self.latency.get(nid, ()))
+        if not rows:
+            return None
+
+        def pick(key: str, q: float = 0.5) -> float | None:
+            values = sorted(r[key] for r in rows if r.get(key) is not None)
+            if not values:
+                return None
+            if q == 0.5:
+                return round(statistics.median(values))
+            return round(values[min(len(values) - 1, int(q * len(values)))])
+        return {"turns": len(rows), "p50_first_audio_ms": pick("first_audio"),
+                "p90_first_audio_ms": pick("first_audio", 0.9),
+                "p50_stt_done_ms": pick("stt_done"), "p50_first_token_ms": pick("first_token"),
+                "p50_answer_done_ms": pick("answer_done"), "p50_reply_done_ms": pick("reply_done")}
 
     @staticmethod
     def _listening(s: Session | None) -> dict | None:
@@ -609,7 +703,8 @@ class Hub:
             return {"state": "off", "error": err} if err else None
         conv = getattr(s, "conversation", None)
         return ear.stats() | {"mic_dropped": s.mic_dropped,
-                              "conversation": conv.phase if conv else None}
+                              "conversation": conv.phase if conv else None,
+                              "session": conv.session_view() if conv else None}
 
     @staticmethod
     def _earcons(s: Session | None) -> dict | None:
@@ -678,7 +773,7 @@ class Hub:
         had_audio = s.flush_speaker()
         ducked = s.duck_holds > 0 and s.caps.get("duck")
         s.duck_holds = 0
-        self.stop_listening(s)
+        self.stop_listening(s, "unadopted")
         s.earcons = None
         if was and had_audio:
             await _quietly(s.send_json({"type": "flush"}))
@@ -727,34 +822,108 @@ class Hub:
         s.listen_error = None
         s.listener = asyncio.create_task(listen_loop(self, s), name=f"listen-{s.id}")
 
-    def stop_listening(self, s: Session) -> None:
+    def stop_listening(self, s: Session, reason: str = "stopped listening") -> None:
         if s.listener is not None:
             s.listener.cancel()
             s.listener = None
         if s.conversation is not None:
-            s.conversation.cancel()
+            s.conversation.cancel(reason)
         s.ear = None
         while not s.mic.empty():
             s.mic.get_nowait()
 
     def heard(self, s: Session, heard: listening.Heard) -> None:
-        if s.conversation is not None:
-            return  # one conversation per satellite; the Ear already drops these
+        """A wake word (or push-to-talk). A trigger word fires and that is
+        all. Otherwise it starts a conversation, one per satellite at a time:
+        heard while one is listening for its command or routing it, it is
+        dropped (the Ear already drops those unless told otherwise); heard
+        while a reply plays, or a conversation waits for its next turn, it
+        interrupts. The same wake word carries the conversation on; another
+        one ends it and starts its own."""
+        if not s.adopted:
+            return
+        behaviour = self.voice.assignment.behaviour(heard.wake_word)
+        if behaviour is not None and behaviour.mode == "trigger":
+            self.trigger(s, heard, behaviour)
+            return
+        conv = s.conversation
+        if conv is not None:
+            if conv.takes(heard):
+                return
+            if not conv.interruptible:
+                return
+            conv.supersede()
         rec = self.store.satellites.get(s.id)
         conv = Conversation(self, s.id, rec.name if rec else "", heard, session=s)
         s.conversation = conv
+        # The pause that ends this word's command, set before the next batch.
+        if s.ear is not None and conv.route is not None:
+            s.ear.set_silence(conv.route.behaviour.silence_ms)
         conv.start()
 
-    async def push_to_talk(self, s: Session, word: str = listening.PTT) -> None:
-        if s.conversation is not None or s.ear is None:
+    def trigger(self, s: Session, heard: listening.Heard, behaviour: routing.Behaviour) -> None:
+        """A trigger word: the word is the command, and Home Assistant's
+        automation decides what it does. The hub publishes "triggered" once
+        per cooldown and, if asked, shows it heard: the "done" earcon and a
+        flash of the ring, each only where the satellite may play or light."""
+        key, now = (s.id, heard.wake_word), time.monotonic()
+        if now < self.cooldown.get(key, 0.0):
+            log.debug("satellite %s: trigger %s again within its cooldown; ignored",
+                      s.id, heard.wake_word)
             return
-        if not self.may_listen(s):
-            # Nothing would arrive to be heard. Say so, rather than open a
-            # conversation that can only time out.
-            log.info("satellite %s: push-to-talk while its microphone is off or muted", s.id)
-            await self.earcon(s, "error")
-            return
+        self.cooldown[key] = now + behaviour.trigger.cooldown_s
+        rec = self.store.satellites.get(s.id)
+        self.publish({"type": "triggered", "satellite": s.id,
+                      "satellite_name": rec.name if rec else "", "wake_word": heard.wake_word,
+                      "score": heard.score, "direction": heard.direction})
+        log.info("satellite %s: trigger %s (score %s)", s.id, heard.wake_word, heard.score)
+        conv = s.conversation
+        if behaviour.trigger.ends_conversation and conv is not None:
+            conv.cancel("trigger")
+            conv = None
+        if behaviour.trigger.feedback == "earcon":
+            self.spawn(self._trigger_feedback(s, flash=conv is None), name=f"trigger-{s.id}")
+
+    async def _trigger_feedback(self, s: Session, flash: bool) -> None:
+        await self.earcon(s, "done")
+        # A conversation owns the ring while it runs; a flash would put out
+        # its "listening".
+        leds = s.caps.get("lights")
+        if flash and isinstance(leds, int) and leds > 0 and not s.lit:
+            if await self.send_lights(s, {"mode": "solid", "color": list(LISTEN_COLOUR),
+                                          "brightness": 96}):
+                await asyncio.sleep(TRIGGER_FLASH_S)
+                if s.conversation is None:
+                    await self.send_lights(s, {"mode": "off"})
+
+    def ptt_refusal(self, s: Session) -> tuple[str, str] | None:
+        """Why push-to-talk cannot start on this satellite now, as (code,
+        sentence), or None when it can."""
+        if s.conversation is not None:
+            return "satellite_busy", f"satellite {s.id} is in a conversation already"
+        if s.status.get("muted"):
+            return ("satellite_muted", f"satellite {s.id} is muted at the device; only its REC "
+                                       "button unmutes it")
+        if not self.config(s).get("mic_enabled", True):
+            return "mic_disabled", f"satellite {s.id} has its microphone turned off"
+        if s.ear is None:
+            return ("not_listening", f"satellite {s.id} is not being listened to"
+                    + (f": {s.listen_error}" if s.listen_error else ""))
+        return None
+
+    async def push_to_talk(self, s: Session, word: str = listening.PTT) -> bool:
+        """Listen as if `word` had been heard. False, and nothing starts, when
+        ptt_refusal says why not; a satellite that would hear nothing (muted,
+        microphone off) plays its error earcon, rather than open a
+        conversation that can only time out."""
+        why = self.ptt_refusal(s)
+        if why is not None:
+            if why[0] in ("satellite_muted", "mic_disabled"):
+                log.info("satellite %s: push-to-talk while its microphone is off or muted", s.id)
+                await self.earcon(s, "error")
+            return False
         s.ear.push_to_talk(word)
+        return True
 
     async def stop(self, s: Session) -> None:
         """What the "stop" button and POST /satellites/{id}/flush do:
@@ -762,7 +931,7 @@ class Hub:
         s.flush_speaker()
         await s.send_json({"type": "flush"})
         if s.conversation is not None:
-            s.conversation.cancel()
+            s.conversation.cancel("stop")
 
     # -- what a satellite can see and hear -------------------------------------
 
@@ -910,6 +1079,7 @@ async def listen_loop(h: Hub, s: Session) -> None:
                 log.exception("satellite %s: its wake words could not be set up", s.id)
                 ear.wake = None
             ear.wake_key = key
+        ear.triggers = h.voice.assignment.triggers()
         if ear.state != "idle" and s.conversation is None:
             ear.release()
         data = b"".join(c for c in chunks if len(c) % step == 0)
@@ -923,7 +1093,7 @@ async def listen_loop(h: Hub, s: Session) -> None:
             s.ear = listening.Ear(debug_s=DEBUG_AUDIO_S, rate=s.mic_rate, channels=s.mic_channels,
                                   frontend=h.voice.frontend)
             if s.conversation is not None:
-                s.conversation.cancel()
+                s.conversation.cancel("listening failed")
             continue
         dropped = False
         for ev in events:
@@ -934,11 +1104,15 @@ async def listen_loop(h: Hub, s: Session) -> None:
                 # PUT /satellites/wake-words answers, not one batch later.
                 # Push-to-talk has no score and is never assigned.
                 if ev.score is not None and not h.voice.listens(s.id, ev.wake_word):
-                    ear.release()
-                    dropped = True
+                    if ev.wake_word not in ear.triggers:
+                        ear.release()
+                        dropped = True
                     continue
                 dropped = False
                 h.heard(s, ev)
+            elif isinstance(ev, listening.BargeIn):
+                if s.conversation is not None:
+                    s.conversation.barge_in(ev)
             elif dropped:
                 continue  # the command after a dropped wake word
             elif s.conversation is not None:
@@ -947,7 +1121,6 @@ async def listen_loop(h: Hub, s: Session) -> None:
                 s.conversation.deliver(ev)
         if s.conversation is not None and s.conversation.phase == "listening":
             await s.conversation.point(ear.direction)
-
 
 
 def _save_debug(sid: str, command: "listening.Command") -> None:
@@ -978,13 +1151,107 @@ def ring(direction: float, leds: int, colour: tuple[int, int, int]) -> list[list
     return out
 
 
+class Player:
+    """dialogue.Sink for a live conversation: each sentence of the reply
+    queued on the satellite it is for, as soon as it is synthesised.
+
+    The reply is spoken over nothing: before its first sentence, audio still
+    playing there from an earlier reply is dropped, and the duck is lifted,
+    because the firmware ducks the hub's audio and the reply is the hub's
+    audio. A satellite that may not play (speaker off, forgotten, gone) is
+    handed nothing, and the conversation carries on in events alone."""
+
+    def __init__(self, conv: Conversation, out: routing.Outcome):
+        self.conv, self.hub, self.out = conv, conv.hub, out
+        self.clips: list[Clip] = []
+        self.began = False
+
+    def session(self) -> Session | None:
+        target = self.out.reply_to
+        s = self.hub.sessions.get(target) if target else None
+        return s if s is not None and s.adopted else None
+
+    async def play(self, pcm48k: bytes, text: str) -> bool:
+        target = self.session()
+        if target is None:
+            self.conv.note = f"{self.out.reply_to} is not connected"
+            if not self.began:
+                self.began = True
+                await self.hub.earcon(self.conv.s, "error")
+            return False
+        if not self.hub.speaker_allowed(target):
+            self.conv.note = f"{self.out.reply_to} has its speaker off"
+            return False
+        if not self.began:
+            self.began = True
+            await self.conv.before_first_audio(target)
+            # Asked again: the sends above wait on the socket, and a PATCH in
+            # between flushed a queue that did not hold this reply yet.
+            if not self.hub.speaker_allowed(target):
+                self.conv.note = f"{self.out.reply_to} has its speaker off"
+                return False
+        if target.spk_rate != routing.SPEAKER_RATE:
+            pcm48k = audio.resample(pcm48k, routing.SPEAKER_RATE, target.spk_rate)
+        clip = Clip(pcm48k, text)
+        self.clips.append(clip)
+        target.speaker.put_nowait(clip)
+        return True
+
+    async def finish(self) -> None:
+        """Until the last sentence has been sent and the satellite has played
+        what it buffered."""
+        if not self.clips:
+            return
+        seconds = sum(len(c.pcm) for c in self.clips) / 2 / routing.SPEAKER_RATE
+        try:
+            await asyncio.wait_for(asyncio.shield(self.clips[-1].done), seconds + PLAYBACK_SLACK_S)
+        except TimeoutError:
+            return
+        target = self.session()
+        left = target.play_until - time.monotonic() if target is not None else 0.0
+        if left > 0:
+            await asyncio.sleep(left)
+
+    def spoken(self) -> str:
+        return " ".join(c.text for c in self.clips if c.started)
+
+    def drop(self) -> bool:
+        """Stop this reply, whatever of it is queued or playing. True when the
+        satellite had anything to flush."""
+        target = self.session()
+        if target is None or not self.clips:
+            return False
+        for c in self.clips:
+            c.finish(False)
+        return target.flush_speaker()
+
+
 class Conversation:
-    """One wake word, or one push of a button, through to its reply.
+    """One wake word, or one push of a button, through to its last reply.
+
+    A COMMAND is one turn: the words after the wake word, routed, answered,
+    and over when the answer has finished playing. A CONVERSATION (the wake
+    word's mode, or a command that handed over to its `fallback`) goes on:
+    after each reply the satellite listens again without the wake word for
+    the conversation's follow_up_s, and the next thing said is the next turn,
+    with the turns so far passed to the destination (dialogue.Memory). It
+    ends on silence, on an ending phrase, on an error, on the stop button, or
+    when the satellite stops sending audio.
+
+    WHILE A REPLY PLAYS, the satellite can be interrupted. Speech over it
+    (listening.BargeIn, which needs the front-end) stops the reply at once:
+    the speaker is flushed, the destination and TTS still working on the
+    rest are cancelled, and in a conversation what was said becomes the next
+    turn, from its first syllable. In a command it only stops the reply. The
+    wake word interrupts too: the same one carries the conversation on,
+    another ends it and starts its own. Barge-in by voice is armed only when
+    the reply plays on the satellite that heard, whose own loopback is what
+    the echo canceller subtracts: a reply played in another room is not.
 
     Created by the listener (or by /inject) and run as its own task, so the
-    listener keeps draining audio while the router waits on STT, the
-    assistant and TTS. The command arrives through deliver() from the
-    listener; /inject delivers it before starting.
+    listener keeps draining audio while the router works. Commands arrive
+    through deliver() from the listener; /inject delivers one before
+    starting, and an injected conversation is always one turn.
 
     quiet: send nothing to any satellite. That is /inject without ?play=1,
     which is how the pipeline is verified with nobody hearing or seeing
@@ -997,13 +1264,28 @@ class Conversation:
         self.s = session
         self.quiet = quiet
         self.injected = injected
-        self.command: asyncio.Future = asyncio.get_running_loop().create_future()
+        self.commands: asyncio.Queue[listening.Command] = asyncio.Queue()
         self.phase = "listening"
         self.ducked: list[Session] = []
         self.outcome: routing.Outcome | None = None
         self.task: asyncio.Task | None = None
         self._lit_key: int | None | str = "unset"
         self._lit_at = 0.0
+        self.route = routing.current().find(nid, name, heard.wake_word)
+        self.memory: dialogue.Memory | None = None
+        self.turns = 0
+        self.started_at = time.monotonic()
+        self.reason: str | None = None       # why it ended, for conversation_ended
+        self.note: str | None = None
+        self.interruptible = False
+        self.superseded = False
+        self.player: Player | None = None
+        self._interrupt: asyncio.Future | None = None
+        self._delivered_at = time.monotonic()
+        self._silence_ms = self.route.behaviour.silence_ms if self.route else 800
+        self._command: listening.Command | None = None
+        self._published = False
+        self._cancelled = False
 
     @property
     def live(self) -> bool:
@@ -1013,14 +1295,57 @@ class Conversation:
         self.task = self.hub.spawn(self.run(), name=f"conversation-{self.nid}")
 
     def deliver(self, command: listening.Command) -> None:
-        if not self.command.done():
-            self.command.set_result(command)
+        self._delivered_at = time.monotonic()
+        self.commands.put_nowait(command)
 
-    def cancel(self) -> None:
+    def cancel(self, reason: str = "cancelled") -> None:
+        self.reason = self.reason or reason
         if self.task is not None:
             self.task.cancel()
-        elif not self.command.done():
-            self.command.cancel()
+
+    def session_view(self) -> dict | None:
+        if self.memory is None:
+            return None
+        return {"rule_id": self.route.id if self.route else None, "turns": self.turns,
+                "seconds": round(time.monotonic() - self.started_at, 1),
+                "language": self.memory.language}
+
+    # -- interruptions, from the listener ---------------------------------------
+
+    def takes(self, heard: listening.Heard) -> bool:
+        """A wake word heard during this conversation that carries it on: the
+        one it is a conversation of, while it may be interrupted. What follows
+        the word is the next turn."""
+        if self.memory is None or not self.interruptible or self.route is None:
+            return False
+        found = routing.current().find(self.nid, self.name, heard.wake_word)
+        if found is None or found.id != self.route.id:
+            return False
+        if self.s is not None and self.s.ear is not None:
+            self.s.ear.set_silence(self.route.behaviour.silence_ms)
+        self._silence_ms = self.route.behaviour.silence_ms
+        self._interrupted("wake_word")
+        return True
+
+    def barge_in(self, ev: listening.BargeIn) -> None:
+        if self.interruptible:
+            self._interrupted("voice" if ev.capturing else "voice_stop")
+
+    def _interrupted(self, kind: str) -> None:
+        if self._interrupt is not None and not self._interrupt.done():
+            self._interrupt.set_result(kind)
+
+    def supersede(self) -> None:
+        """Another wake word: this conversation ends now, its reply with it,
+        and the new one owns the ring."""
+        self.superseded = True
+        if self.player is not None and self.player.drop():
+            target = self.player.session()
+            if target is not None:
+                self.hub.spawn(_quietly(target.send_json({"type": "flush"})), name="flush")
+        self.cancel("wake_word")
+
+    # -- the satellite's lights, duck and Ear -----------------------------------
 
     async def point(self, direction: float | None, *, force: bool = False) -> None:
         """The ring, while listening: pointed at the talker, or a soft pulse
@@ -1045,12 +1370,14 @@ class Conversation:
         await self.hub.send_lights(s, msg)
 
     def _reply_satellite(self) -> Session | None:
-        """The other satellite a matching rule would answer on, so it can be
-        ducked while the question is asked."""
-        rule = routing.current().rules.match(self.nid, self.name, self.heard.wake_word)
-        if rule is None or rule.reply_to in ("same", "none"):
+        """The other satellite this word answers on, so it can be ducked
+        while the question is asked."""
+        if self.route is None or self.route.behaviour.action is None:
             return None
-        found = lookup_satellite(rule.reply_to)
+        reply_to = self.route.behaviour.action.reply_to
+        if reply_to in ("same", "none"):
+            return None
+        found = lookup_satellite(reply_to)
         if found is None or found[0] == self.nid:
             return None
         other = self.hub.sessions.get(found[0])
@@ -1066,9 +1393,60 @@ class Conversation:
             self.ducked.remove(s)
             await self.hub.release_duck(s)
 
+    async def before_first_audio(self, target: Session) -> None:
+        """The moment a reply starts: whatever was playing there goes, the
+        duck is lifted, the ring (spinning while it thought) goes out, and
+        the satellite may be interrupted until the reply is over."""
+        if target.flush_speaker():
+            await _quietly(target.send_json({"type": "flush"}))
+        await self._unduck(target)
+        if self.live and self.s.lit:
+            await self.hub.send_lights(self.s, {"mode": "off"})
+        self.phase = "replying"
+        ear = self.s.ear if self.live else None
+        if ear is None:
+            return
+        self.interruptible = ear.interruptible = True
+        if target is self.s:
+            capture = None
+            if self.memory is not None:
+                capture = (self.route.behaviour.conversation.silence_ms, CAPTURE_START_S)
+            ear.watch(voice=True, capture=capture)
+
+    def _hold_still(self) -> None:
+        """Nothing interrupts while a command is routed: the Ear reports no
+        wake word and listens for no barge-in."""
+        self.interruptible = False
+        ear = self.s.ear if self.live else None
+        if ear is not None:
+            ear.unwatch()
+
+    # -- the conversation ---------------------------------------------------------
+
+    def _begin(self, route: routing.Route, reason: str,
+               from_rule: str | None = None) -> dialogue.Memory | None:
+        """This becomes a conversation, with a memory of its own."""
+        if self.quiet or self.injected or self.s is None or not self.s.adopted:
+            return None
+        self.route = route
+        self.memory = dialogue.Memory()
+        self.hub.publish({"type": "conversation_started", "satellite": self.nid,
+                          "wake_word": self.heard.wake_word, "rule_id": route.id,
+                          "reason": reason, "from_rule": from_rule,
+                          "follow_up_s": route.behaviour.conversation.follow_up_s})
+        return self.memory
+
+    def _handover(self, target: routing.Route) -> dialogue.Memory | None:
+        return self._begin(target, "fallback", from_rule=self.route.id if self.route else None)
+
+    async def _next(self, timeout: float) -> listening.Command | None:
+        try:
+            return await asyncio.wait_for(self.commands.get(), timeout)
+        except TimeoutError:
+            return None
+
     async def run(self) -> dict:
-        command: listening.Command | None = None
-        played, note = False, None
+        event: dict = {}
         try:
             self.hub.publish({"type": "wake", "satellite": self.nid,
                               "wake_word": self.heard.wake_word,
@@ -1081,83 +1459,190 @@ class Conversation:
                 other = self._reply_satellite()
                 if other is not None:
                     await self._duck(other)
-            try:
-                command = await asyncio.wait_for(self.command, COMMAND_WAIT_S)
-            except TimeoutError:
-                self.outcome = routing.Outcome(
-                    error="no command: the microphone stopped sending audio")
-            self.phase = "routing"
-            if self.outcome is None:
-                if not command.had_speech:
-                    # Nothing to transcribe, and silence given to Whisper-style
-                    # models comes back as invented text.
-                    self.outcome = routing.Outcome(error="nothing was said after the wake word")
-                else:
-                    if self.live and self.s.lit:
-                        await self.hub.send_lights(self.s, {"mode": "spin", "brightness": 40,
-                                                            "color": list(LISTEN_COLOUR)})
-                    self.outcome = await routing.current().handle(
-                        self.nid, self.name, self.heard.wake_word, command.audio)
-            self.phase = "replying"
-            played, note = await self._reply(self.outcome)
+            if self.route is not None and self.route.behaviour.mode == "conversation":
+                self._begin(self.route, "wake_word")
+            command = await self._next(COMMAND_WAIT_S)
+            first = True
+            while True:
+                out, following = await self._turn(command, first)
+                await self._feedback(out)
+                event = self._publish(out, command)
+                if self.memory is None or self.injected:
+                    break
+                if out.ended:
+                    self.reason = "phrase"
+                    if self.live:
+                        await self.hub.earcon(self.s, "done")
+                    break
+                if command is None:
+                    self.reason = "no_audio"
+                    break
+                nothing = out.error is not None and (out.error.startswith("nothing was said")
+                                                     or out.error.startswith("stt: nothing"))
+                if out.error and (first or not nothing):
+                    self.reason = "silence" if nothing else "error"
+                    break
+                first = False
+                if following is None or not following.had_speech:
+                    following = await self._follow_up()
+                    if following is None:
+                        self.reason = "no_audio"
+                        break
+                    if not following.had_speech:
+                        self.reason = "silence"
+                        break
+                command = following
         except asyncio.CancelledError:
+            self._cancelled = True
             if self.outcome is None:
-                self.outcome = routing.Outcome(error="cancelled")
-            note = "cancelled"
+                self.outcome = routing.Outcome(rule_id=self.route.id if self.route else None)
+            if not self._published:
+                if self.outcome.error is None:
+                    self.outcome.error = "cancelled"
+                event = self._publish(self.outcome, self._command, note="cancelled")
         finally:
-            for s in list(self.ducked):
-                await self._unduck(s)
-            if self.live and self.s.lit:
-                await self.hub.send_lights(self.s, {"mode": "off"})
-            if self.s is not None and self.s.conversation is self:
-                self.s.conversation = None
-            self.phase = "done"
-        o = self.outcome
-        event = {"type": "routed", "satellite": self.nid, "wake_word": self.heard.wake_word,
-                 "rule_id": o.rule_id, "reply_to": o.reply_to, "error": o.error,
-                 "transcript": o.transcript, "reply_text": o.reply_text,
-                 "timings_ms": o.timings_ms, "endpoint": command.reason if command else None,
-                 "command_s": round(command.seconds, 2) if command else None,
-                 "played": played, "note": note} | ({"injected": True} if self.injected else {})
+            await self._close()
+        return event
+
+    async def _follow_up(self) -> listening.Command | None:
+        """Listen for the next turn without the wake word. None when no
+        Command came at all (the audio stopped arriving)."""
+        b = self.route.behaviour.conversation
+        self.phase = "listening"
+        ear = self.s.ear if self.live else None
+        if ear is None or not self.hub.may_listen(self.s):
+            return None
+        self._silence_ms = b.silence_ms
+        ear.follow_up(b.silence_ms, b.follow_up_s)
+        self.interruptible = ear.interruptible = True
+        await self.point(None, force=True)
+        return await self._next(b.follow_up_s + FOLLOW_UP_SLACK_S)
+
+    async def _turn(self, command: listening.Command | None,
+                    first: bool) -> tuple[routing.Outcome, listening.Command | None]:
+        """One utterance through to its reply, and the next command if a
+        barge-in or the wake word already brought one."""
+        out = routing.Outcome(rule_id=self.route.id if self.route else None,
+                              mode=self.route.behaviour.mode if self.route else "command")
+        self.outcome, self._command, self._published = out, command, False
+        self.phase = "routing"
+        self._hold_still()
+        if command is None:
+            out.error = "no command: the microphone stopped sending audio"
+            return out, None
+        if not command.had_speech:
+            # Nothing to transcribe, and silence given to Whisper-style models
+            # comes back as invented text.
+            out.error = "nothing was said after the wake word" if first else "nothing was said"
+            return out, None
+        if self.live and self.s.lit:
+            await self.hub.send_lights(self.s, {"mode": "spin", "brightness": 40,
+                                                "color": list(LISTEN_COLOUR)})
+        speech_end = self._delivered_at - self._silence_ms / 1000
+        sink = Player(self, out) if self.live else dialogue.Collect()
+        self.player = sink if isinstance(sink, Player) else None
+        self._interrupt = asyncio.get_running_loop().create_future()
+        work = asyncio.create_task(dialogue.run_turn(
+            routing.current(), self.route, satellite_id=self.nid, satellite_name=self.name,
+            wake_word=self.heard.wake_word, audio=command.audio, sink=sink, memory=self.memory,
+            out=out, speech_end=speech_end,
+            on_handover=None if (self.quiet or self.injected) else self._handover))
+        following = None
+        try:
+            await asyncio.wait({work, self._interrupt}, return_when=asyncio.FIRST_COMPLETED)
+            if not work.done():
+                kind = self._interrupt.result()
+                work.cancel()
+                await asyncio.gather(work, return_exceptions=True)
+                if self.player is not None and self.player.drop():
+                    target = self.player.session()
+                    if target is not None:
+                        await _quietly(target.send_json({"type": "flush"}))
+                out.interrupted = True
+                out.spoken_text = sink.spoken() or None
+                self.note = "interrupted by " + ("the wake word" if kind == "wake_word" else "voice")
+                log.info("satellite %s: reply interrupted by %s", self.nid, kind)
+                if kind in ("voice", "wake_word") and self.memory is not None:
+                    # The Ear is already collecting what is being said.
+                    if kind == "voice":
+                        self._silence_ms = self.route.behaviour.conversation.silence_ms
+                    self.phase = "listening"
+                    following = await self._next(CAPTURE_WAIT_S)
+        finally:
+            if not work.done():
+                work.cancel()
+                await asyncio.gather(work, return_exceptions=True)
+            self._hold_still()
+            self._interrupt = None
+        if self.memory is not None and out.transcript and not out.error and not out.ended:
+            self.turns += 1
+            self.memory.add(out.transcript, out.spoken_text or out.reply_text or "")
+        if self.live:
+            self.hub.record_latency(self.nid, out.timeline_ms)
+        return out, following
+
+    async def _feedback(self, out: routing.Outcome) -> None:
+        """The earcon a turn ends with: `error` when it failed, `done` when it
+        succeeded with nothing to say, or answered on another satellite. A
+        reply heard here says it is done by itself."""
+        if not self.live or out.interrupted or out.ended:
+            return
+        if out.error:
+            await self.hub.earcon(self.s, "error")
+            return
+        target = self.player.session() if self.player is not None else None
+        if not out.audio_bytes:
+            if self.note is None:  # not a speaker that is off, or a satellite gone
+                await self.hub.earcon(self.s, "done")
+        elif target is not None and target is not self.s:
+            await self.hub.earcon(self.s, "done")
+
+    def _publish(self, o: routing.Outcome, command: listening.Command | None,
+                 note: str | None = None) -> dict:
+        played = bool(self.player is not None and self.player.clips)
+        if self.quiet:
+            note = note or ("not played: ?play=1 was not given" if self.injected else None)
+        common = {"satellite": self.nid, "wake_word": self.heard.wake_word,
+                  "rule_id": o.rule_id, "mode": o.mode, "reply_to": o.reply_to,
+                  "error": o.error, "transcript": o.transcript, "language": o.language,
+                  "language_source": o.language_source, "reply_language": o.reply_language,
+                  "voice": o.voice, "reply_text": o.reply_text, "spoken_text": o.spoken_text,
+                  "interrupted": o.interrupted, "timings_ms": o.timings_ms,
+                  "timeline_ms": o.timeline_ms,
+                  "endpoint": command.reason if command else None,
+                  "command_s": round(command.seconds, 2) if command else None,
+                  "played": played, "note": note or self.note}
+        if self.memory is not None and not self.injected:
+            event = {"type": "turn", "turn": self.turns, "ended": o.ended,
+                     "handed_over_to": o.handed_over_to} | common
+        else:
+            event = {"type": "routed"} | common | ({"injected": True} if self.injected else {})
+        self.note = None
+        self._published = True
         self.hub.publish(event)
         return event
 
-    async def _reply(self, o: routing.Outcome) -> tuple[bool, str | None]:
-        if self.quiet:
-            return False, "not played: ?play=1 was not given" if self.injected else None
-        origin = self.s
-        if o.error:
-            await self.hub.earcon(origin, "error")
-            return False, None
-        if not o.reply_pcm48k or not o.reply_to:
-            await self.hub.earcon(origin, "done")  # done, with nothing to say
-            return False, None
-        target = self.hub.sessions.get(o.reply_to)
-        if target is None or not target.adopted:
-            await self.hub.earcon(origin, "error")
-            return False, f"{o.reply_to} is not connected"
-        if not self.hub.config(target).get("speaker_enabled", True):
-            return False, f"{o.reply_to} has its speaker off"
-        # The answer is spoken over nothing: a reply still playing from an
-        # earlier conversation is dropped (this is where a barge-in lands),
-        # and the duck is lifted first, because it lowers hub audio and the
-        # reply is hub audio.
-        if target.flush_speaker():
-            await _quietly(target.send_json({"type": "flush"}))
-        await self._unduck(target)
-        # Asked again: the two sends above wait on the socket, and a PATCH in
-        # between flushed a queue that did not hold this reply yet. The
-        # speaker loop would drop it anyway; this keeps the routed event from
-        # saying it played.
-        if not self.hub.speaker_allowed(target):
-            return False, f"{o.reply_to} has its speaker off"
-        pcm = o.reply_pcm48k
-        if target.spk_rate != routing.SPEAKER_RATE:
-            pcm = audio.resample(pcm, routing.SPEAKER_RATE, target.spk_rate)
-        target.speaker.put_nowait(pcm)
-        if origin is not None and target is not origin:
-            await self.hub.earcon(origin, "done")
-        return True, None
+    async def _close(self) -> None:
+        """Whatever the way out: a reply cut short stops, the duck is
+        lifted, the ring goes out, the Ear goes back to wake words (the
+        listener sees no conversation), and a conversation says it ended."""
+        self.interruptible = False
+        if self._cancelled and self.player is not None and self.player.drop():
+            target = self.player.session()
+            if target is not None:
+                await _quietly(target.send_json({"type": "flush"}))
+        for s in list(self.ducked):
+            await self._unduck(s)
+        if self.live and self.s.lit and not self.superseded:
+            await self.hub.send_lights(self.s, {"mode": "off"})
+        if self.s is not None and self.s.conversation is self:
+            self.s.conversation = None
+        if self.memory is not None:
+            self.hub.publish({"type": "conversation_ended", "satellite": self.nid,
+                              "rule_id": self.route.id if self.route else None,
+                              "turns": self.turns, "reason": self.reason or "cancelled",
+                              "seconds": round(time.monotonic() - self.started_at, 1)})
+        self.phase = "done"
 
 
 # ---- the rename from "nodes" ------------------------------------------------------
@@ -1165,7 +1650,7 @@ class Conversation:
 LEGACY_PREFIX, PREFIX = "NODES_", "SATELLITES_"
 
 
-def legacy_settings(environ: dict[str, str], rules: list[routing.Rule]) -> list[str]:
+def legacy_settings(environ: dict[str, str], rules: list) -> list[str]:
     """A sentence for each setting that the rename (2026-09-25) left behind.
 
     Every NODES_* variable became SATELLITES_*, and the hub reads only the new
@@ -1173,12 +1658,14 @@ def legacy_settings(environ: dict[str, str], rules: list[routing.Rule]) -> list[
     without a word otherwise: MQTT simply switches off. So each one still set
     is named at start, with the name read now.
 
-    Except the ones a routing rule names. rules.json stores every field, so a
-    rule saved before the rename says "token_env": "NODES_HA_TOKEN" and reads
+    Except the ones an action names (`rules`: anything with an id and a
+    destination: a wake word's action, or a rule). rules.json stored every
+    field, and a wake word migrated from it carries them on, so an action
+    saved before the rename says "token_env": "NODES_HA_TOKEN" and reads
     exactly that; calling it unread would send the operator off to rename the
     one variable that works. What is worth saying about those is the opposite
-    case: a rule naming a NODES_* variable that is not set, which is what
-    renaming the secret and not the rule looks like."""
+    case: an action naming a NODES_* variable that is not set, which is what
+    renaming the secret and not the action looks like."""
     named: dict[str, list[str]] = {}
     for rule in rules:
         for var in rule.destination.env_vars():
@@ -1193,9 +1680,26 @@ def legacy_settings(environ: dict[str, str], rules: list[routing.Rule]) -> list[
     for var, ids in sorted(named.items()):
         if var.startswith(LEGACY_PREFIX) and not environ.get(var):
             new = PREFIX + var.removeprefix(LEGACY_PREFIX)
-            out.append(f"routing rule {', '.join(repr(i) for i in ids)} reads {var}, which is not "
-                       f"set: a secret renamed to {new} has to be renamed in the rule as well")
+            out.append(f"the action of {', '.join(repr(i) for i in ids)} reads {var}, which is not "
+                       f"set: a secret renamed to {new} has to be renamed in the action as well")
     return out
+
+
+def _named_actions() -> list:
+    """Each wake word's action (and push-to-talk's), as legacy_settings reads them."""
+    from types import SimpleNamespace
+    a = hub.voice.assignment
+    return [SimpleNamespace(id=name, destination=b.action.destination)
+            for name, b in [(w.name, w.behaviour) for w in a.words] + [("ptt", a.ptt)]
+            if b is not None and b.action is not None]
+
+
+def lookup_satellite_safe(ref: str) -> tuple[str, str] | None:
+    """lookup_satellite for a Voice that may exist before the hub does."""
+    try:
+        return lookup_satellite(ref)
+    except NameError:
+        return None
 
 
 def lookup_satellite(ref: str) -> tuple[str, str] | None:
@@ -1223,9 +1727,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                       on_change=lambda: hub.publish({"type": "wake_words",
                                                      "words": hub.voice.views()}))
     hub.http = httpx.AsyncClient(follow_redirects=False, timeout=10)
-    routing.configure(routing.Router(routing.Rules(DATA_DIR), lookup=lookup_satellite))
-    for problem in legacy_settings(dict(os.environ), routing.current().rules.rules):
+    # Routing is by each wake word's own entry (wakewords_config.WordActions);
+    # rules.json was read once, above, by Assignment.open's migration.
+    routing.configure(routing.Router(wakewords_config.WordActions(hub.voice.assignment),
+                                     lookup=lookup_satellite))
+    for problem in legacy_settings(dict(os.environ), _named_actions()):
         log.warning("%s", problem)
+    # py3langid takes 0.4 s to load; paid now, off the event loop, rather than
+    # by the first utterance.
+    hub.spawn(asyncio.to_thread(lang.detector.load), name="language")
     hub.bridge = MqttBridge.from_env()
     await hub.bridge.start(hub, on_command=mqtt_command)
     hub.spawn(hub.voice.reconcile(), name="wake-words")
@@ -1252,8 +1762,9 @@ health.install_health(app, details=lambda: {
               "pending": sum(1 for s in hub.sessions.values() if not s.adopted)},
     "tts": TTS_URL or None,
     "voice": hub.voice.health(),
-    "routing": {"rules": len(routing.current().rules.rules),
+    "routing": {"rules": sum(1 for w in hub.voice.assignment.words if w.behaviour),
                 "stt": routing.current().stt_url or None,
+                "stt_engine": routing.current().stt_engine,
                 "load_error": routing.current().rules.load_error},
     "mqtt": hub.bridge.health() if hub.bridge else None,
 })
@@ -1357,9 +1868,11 @@ async def on_message(s: Session, msg: dict) -> None:
             # the record gets them.
             hub.take_report(s, s.status)
         hub.publish({"type": "status", "satellite": s.id, "status": s.status})
-        # Muted mid-command: nothing more will arrive, so stop waiting for it.
-        if s.status.get("muted") and s.conversation and s.conversation.phase == "listening":
-            s.conversation.cancel()
+        # The privacy mute stops everything: nothing more will arrive to be
+        # heard, and a conversation that is waiting for it, or answering it,
+        # ends now rather than when its follow-up times out.
+        if s.status.get("muted") and s.conversation is not None:
+            s.conversation.cancel("muted")
     elif kind == "button" and s.adopted:
         hub.publish({"type": "button", "satellite": s.id, "button": msg.get("button"),
                      "action": msg.get("action"), "held_ms": msg.get("held_ms")})
@@ -1449,18 +1962,28 @@ class OtaBody(BaseModel):
 
 
 class WakeWordBody(BaseModel):
-    # Only the shape here; what the names, thresholds and satellites may be is
-    # wakewords_config.check's, which a loaded file goes through as well.
+    # Only the shape here; what an entry may say is wakewords_config.check's
+    # (and router.Behaviour's), which a loaded file goes through as well.
     # Fields GET adds ("state", "error") are ignored rather than refused, so
-    # the page can send back what it was given.
+    # the page can send back what it was given. A field left out keeps what
+    # was saved for that name (wakewords_config: a save merges), which is why
+    # none has a default here: the route reads only the fields that were sent.
     name: str = Field(max_length=64)
-    threshold: float = wakewords_config.DEFAULT_THRESHOLD
-    satellites: list[Annotated[str, StringConstraints(max_length=64)]] = Field(
-        default_factory=lambda: [wakewords_config.EVERY], max_length=256)
+    threshold: float | None = None
+    satellites: list[Annotated[str, StringConstraints(max_length=64)]] | None = Field(
+        default=None, max_length=256)
+    mode: str | None = None
+    language: str | None = None
+    action: dict | None = None
+    silence_ms: int | None = None
+    conversation: dict | None = None
+    trigger: dict | None = None
 
 
 class WakeWordsBody(BaseModel):
     words: list[WakeWordBody] = Field(max_length=wakewords_config.MAX_WORDS)
+    # Push-to-talk's behaviour. Left out, it stays as saved.
+    ptt: dict | None = None
 
 
 def _mqtt_satellite(nid: str) -> None:
@@ -1511,25 +2034,28 @@ async def get_wake_words() -> dict:
 
 @app.put("/satellites/wake-words")
 async def put_wake_words(body: WakeWordsBody) -> dict:
-    """Replace every wake word and its satellites. Live at once: a threshold
-    reaches every detector, a word taken off a satellite is no longer heard
-    there, and a word named for the first time is fetched in the background
-    and listened for when it is ready."""
+    """Replace every wake word: its model, threshold, satellites and what it
+    does. Live at once: a threshold reaches every detector, a word taken off
+    a satellite is no longer heard there, a word's action applies to the
+    next time it is heard, and a word named for the first time is fetched in
+    the background and listened for when it is ready."""
     known = (set(hub.store.satellites) | set(hub.sessions) | set(hub.seen)
              | hub.voice.assignment.satellite_ids())
     try:
-        words = wakewords_config.check([w.model_dump() for w in body.words],
-                                       available=wakewords_config.available(hub.voice.model_dir),
-                                       known=known)
+        words, ptt = wakewords_config.check(
+            [w.model_dump(exclude_unset=True) for w in body.words],
+            available=wakewords_config.available(hub.voice.model_dir), known=known,
+            saved=hub.voice.assignment, ptt=body.ptt)
     except ValueError as e:
         raise ApiError(422, str(e), code="invalid_wake_words") from None
     try:
-        hub.voice.replace(words)
+        hub.voice.replace(words, ptt)
     except OSError as e:
         raise ApiError(500, f"could not write {wakewords_config.FILE}: {e}",
                        type_="server_error") from None
     log.info("wake words saved: %s", ", ".join(
-        f"{w.name} at {w.threshold:g} on {'every satellite' if w.satellites == ['*'] else w.satellites}"
+        f"{w.name} ({w.mode or 'no action'}) at {w.threshold:g} on "
+        f"{'every satellite' if w.satellites == ['*'] else w.satellites}"
         for w in words) or "none")
     hub.spawn(hub.voice.reconcile(), name="wake-words")
     return hub.voice.describe()
@@ -1704,8 +2230,12 @@ async def configure(nid: str, body: ConfigBody) -> dict:
         # told to be silent.
         if cfg.get("speaker_enabled") is False and s.flush_speaker():
             await s.send_json({"type": "flush"})
-        if cfg.get("mic_enabled") is False and s.conversation and s.conversation.phase == "listening":
-            s.conversation.cancel()
+        # Nothing more will be heard: a conversation waiting for its next turn
+        # ends, and a command already said still gets its answer.
+        conv = s.conversation
+        if cfg.get("mic_enabled") is False and conv is not None and (
+                conv.phase == "listening" or conv.memory is not None):
+            conv.cancel("mic_off")
     _mqtt_satellite(nid)
     return hub.describe(nid)
 
@@ -1774,6 +2304,33 @@ async def say(nid: str, body: SayBody) -> Response:
     _speaker_on(s)
     # Kokoro's pcm is 24 kHz mono s16le (voice_common.audio.SAMPLE_RATE).
     s.speaker.put_nowait(audio.resample(r.content, 24000, s.spk_rate))
+    return Response(status_code=204)
+
+
+class PttBody(BaseModel):
+    wake_word: str | None = Field(default=None, max_length=64)
+
+
+@app.post("/satellites/{nid}/ptt")
+async def ptt(nid: str, body: PttBody | None = None) -> Response:
+    """Listen on a satellite as if its push-to-talk button had been pressed:
+    Home Assistant's way to start a command from an automation or a dashboard
+    (clients/home-assistant). What follows is handled by `wake_word`'s entry
+    when one is named, else by push-to-talk's. 409 when the satellite cannot
+    listen now, and why."""
+    s = hub.session(nid)
+    word = (body.wake_word if body else None) or listening.PTT
+    if word != listening.PTT:
+        behaviour = hub.voice.assignment.behaviour(word)
+        if behaviour is None:
+            raise ApiError(404, f"no wake word {word!r} with an action", code="wake_word_not_found")
+        if behaviour.mode == "trigger":
+            raise ApiError(409, f"{word!r} is a trigger word: it is the whole command, so there "
+                                "is nothing to listen for after it", code="trigger_word")
+    why = hub.ptt_refusal(s)
+    if why is not None:
+        raise ApiError(409, why[1], code=why[0])
+    await hub.push_to_talk(s, word)
     return Response(status_code=204)
 
 
@@ -1908,6 +2465,16 @@ async def inject(nid: str, request: Request, play: bool = Query(False),
     heard, command = await loop.run_in_executor(EXECUTOR, _hear_clip, clip, wake, wake_word)
     if heard is None:
         return {"satellite": nid, "heard": None, "command": None, "outcome": None, "played": False}
+    behaviour = hub.voice.assignment.behaviour(heard.wake_word)
+    if behaviour is not None and behaviour.mode == "trigger":
+        # A trigger's whole effect is its event; marked injected, it reaches
+        # neither MQTT nor, by the integration's own filter, Home Assistant.
+        hub.publish({"type": "triggered", "satellite": nid, "satellite_name": rec.name,
+                     "wake_word": heard.wake_word, "score": heard.score,
+                     "direction": heard.direction, "injected": True})
+        return {"satellite": nid,
+                "heard": {"wake_word": heard.wake_word, "score": heard.score, "at_s": heard.at_s},
+                "command": None, "outcome": None, "triggered": True, "played": False}
     if play and s.conversation is not None:
         raise ApiError(409, f"satellite {nid} is in a conversation already", code="satellite_busy")
     conv = Conversation(hub, nid, rec.name, heard, session=s, quiet=not play, injected=True)
