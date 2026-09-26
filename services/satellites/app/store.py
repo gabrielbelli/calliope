@@ -233,6 +233,21 @@ class Store:
         self.save_satellites()
         return True
 
+    def take_own(self, satellite_id: str, settings: dict) -> bool:
+        """Settings an adopted satellite changed itself, with its own buttons:
+        what it has now, so the record takes them whatever it held. True when
+        the record changed."""
+        rec = self.satellites.get(satellite_id)
+        if rec is None:
+            return False
+        given = {k: v for k, v in reported_config(settings).items() if rec.config.get(k) != v}
+        if not given:
+            return False
+        rec.config.update(given)
+        rec.unreported = [k for k in rec.unreported if k not in given]
+        self.save_satellites()
+        return True
+
     def forget(self, satellite_id: str) -> bool:
         gone = self.satellites.pop(satellite_id, None) is not None
         self.save_satellites()

@@ -99,6 +99,7 @@ from voice_common import logging as voice_logging
 from voice_common.errors import ApiError
 
 from . import audio, dialogue, earcons, listening, signing, wakeword, wakewords_config
+from . import output as outputs
 from . import language as lang
 from . import router as routing
 from .mqtt import MqttBridge
@@ -137,6 +138,9 @@ HEADER = 16
 OTA_CHUNK = 8 * 1024
 SPEAKER_CHUNK_MS = 20
 SPEAKER_LEAD_S = 0.3  # how far ahead of real time playback is kept
+# A press of a satellite's own volume button is answered by its status in
+# milliseconds; a status later than this is a heartbeat, not the answer.
+VOLUME_PRESS_S = 2.0
 
 # One second of 20 ms frames. The listener drains the queue in batches, so it
 # only fills when the thread pool falls a second behind; then the oldest audio
@@ -239,7 +243,13 @@ class Session:
         self.earcon_asks = 0
         self.lit = False          # the hub's own layer is showing something
         self.duck_holds = 0       # conversations that want this satellite ducked
+        # time.monotonic() until which a status is the answer to a press of
+        # this satellite's own volume buttons (Hub.on_button).
+        self.volume_press_until = 0.0
         self.update(hello)
+        # Speaker or headphones, from the loopback (output.py). Channel 0 is
+        # the loopback on a satellite with more than one channel.
+        self.sense = outputs.OutputSense(self.mic_channels) if self.mic_channels > 1 else None
 
     def update(self, hello: dict) -> None:
         self.hello = hello
@@ -289,6 +299,15 @@ class Session:
     def mic_channels(self) -> int:
         return self.caps.get("mic", {}).get("channels", 4)
 
+    def sound(self, start: float, end: float, pcm: bytes) -> outputs.Sound:
+        """A sound played on this satellite, for OutputSense: its level, and
+        the volume it played at, which a duck lowers."""
+        volume = self.status.get("volume")
+        if isinstance(volume, int) and self.duck_holds > 0:
+            volume = min(volume, DUCK_LEVEL)
+        return outputs.Sound(start, end, outputs.level_dbfs(np.frombuffer(pcm[:len(pcm) // 2 * 2], "<i2")),
+                             volume if isinstance(volume, int) else None)
+
     def offer_mic(self, pcm: bytes) -> None:
         """Queue one microphone frame for the listener, dropping the oldest
         when the queue is full. Never waits: this runs in the socket loop,
@@ -334,6 +353,7 @@ class Session:
             # the clock again, or every sentence would add another
             # SPEAKER_LEAD_S to what the satellite holds (300 ms of buffer).
             base, sent, played = max(time.monotonic(), self.play_until), 0.0, True
+            first = time.monotonic()
             for off in range(0, len(pcm), chunk):
                 # Checked per chunk: a reply is one item, and a flush that only
                 # emptied the queue would let a two-minute answer play on.
@@ -352,6 +372,8 @@ class Session:
                 if ahead > SPEAKER_LEAD_S:
                     await asyncio.sleep(ahead - SPEAKER_LEAD_S)
             self.playing = False
+            if played and sent and self.sense is not None:
+                self.sense.played(self.sound(first, self.play_until, pcm))
             if clip is not None:
                 clip.finish(played)
 
@@ -662,6 +684,10 @@ class Hub:
             "config": rec.config if rec else None,
             "status": s.status if s else {},
             "caps": s.caps if s else {},
+            # "speaker", "headphones", or None: not known until something has
+            # played since it connected (output.py).
+            "output": s.sense.output if s and s.sense else None,
+            "output_at": s.sense.at if s and s.sense else None,
             "boot": ({"reset_reason": s.hello.get("reset_reason"), **(s.hello.get("boot") or {})}
                      if s and s.hello.get("boot") is not None else None),
             "ota": _ota_view(s),
@@ -749,6 +775,18 @@ class Hub:
     def proves_adoption(self, s: Session) -> bool:
         rec = self.store.satellites.get(s.id)
         return bool(rec and rec.accepts(s.hello.get("token") or None))
+
+    def take_own_volume(self, s: Session) -> None:
+        """The volume in the status that answers a press of the satellite's
+        own volume buttons is the one it now has, so it is the hub's too:
+        the page and Home Assistant show it, and the next welcome does not
+        put the old one back. Any other status is not believed on this: one
+        already on its way when the page changed the volume carries the old
+        value."""
+        volume = reported_config(s.status).get("volume")
+        if volume is not None and self.store.take_own(s.id, {"volume": volume}):
+            log.info("satellite %s set its own volume to %d", s.id, volume)
+            self.publish({"type": "volume", "satellite": s.id, "volume": volume})
 
     def take_report(self, s: Session, msg: dict) -> None:
         """Settings the hub had not had from this satellite, from its hello or
@@ -956,7 +994,19 @@ class Hub:
     async def earcon(self, s: Session | None, eid: str) -> bool:
         if s is None or s.earcons is None or not s.earcons.has(eid):
             return False
-        return await _sent(s.send_if(lambda: self.speaker_allowed(s), earcons.play_message(eid)))
+        sent = await _sent(s.send_if(lambda: self.speaker_allowed(s), earcons.play_message(eid)))
+        if sent and s.sense is not None:
+            # Played from the satellite's own storage, at once.
+            pcm = s.earcons.want[eid]
+            now = time.monotonic()
+            s.sense.played(s.sound(now, now + len(pcm) / 2 / earcons.RATE, pcm))
+        return sent
+
+    def on_output(self, s: Session) -> None:
+        """The loopback settled a sound and said something new: speaker or
+        headphones. Home Assistant hears it through publish()."""
+        log.info("satellite %s plays through its %s", s.id, s.sense.output)
+        self.publish({"type": "output", "satellite": s.id, "output": s.sense.output})
 
     # A pending satellite is sent neither. unadopt() lifts a duck the hub held
     # itself, ahead of the "forget" or "pending", and the firmware lifts one on
@@ -1017,6 +1067,12 @@ class Hub:
     # -- buttons --------------------------------------------------------------
 
     async def on_button(self, s: Session, button: str, action: str, held_ms: int | None) -> None:
+        # A volume button the satellite acts on itself: it changes its volume
+        # and at once sends a status with the new one (clients/korvo-satellite
+        # src/main.cpp, handle_buttons), after this press on the same socket.
+        if (button in ("vol_up", "vol_down") and action == "press"
+                and self.config(s).get("local_volume_buttons", True)):
+            s.volume_press_until = time.monotonic() + VOLUME_PRESS_S
         mapping = self.config(s).get("buttons") or {}
         act = (mapping.get(button) or {}).get(action)
         if not act or act == "none":
@@ -1843,6 +1899,8 @@ async def satellite_socket(ws: WebSocket) -> None:
                         q.put_nowait(pcm)
                     if s.listener is not None:
                         s.offer_mic(pcm)
+                    if s.sense is not None and s.sense.feed(pcm, time.monotonic(), s.playing):
+                        hub.on_output(s)
             elif msg.get("text") is not None:
                 await on_message(s, json.loads(msg["text"]))
     except (WebSocketDisconnect, RuntimeError):
@@ -1877,6 +1935,9 @@ async def on_message(s: Session, msg: dict) -> None:
             # the firmware applies the rest and reports at once: this is where
             # the record gets them.
             hub.take_report(s, s.status)
+            if time.monotonic() <= s.volume_press_until:
+                s.volume_press_until = 0.0
+                hub.take_own_volume(s)
         hub.publish({"type": "status", "satellite": s.id, "status": s.status})
         # The privacy mute stops everything: nothing more will arrive to be
         # heard, and a conversation that is waiting for it, or answering it,

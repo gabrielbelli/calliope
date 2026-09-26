@@ -481,3 +481,79 @@ def test_a_satellites_account_of_its_start_up_is_kept_and_shown(client):
         boot = client.get(f"/satellites/{NID}").json()["boot"]
         assert boot["stalled_in"] == "codec" and boot["stages_ms"]["codec"] == 95012
         assert boot["reset_reason"] == 3
+
+
+# ---- the satellite's own volume buttons -----------------------------------------
+
+
+def press(ws, button: str) -> None:
+    ws.send_json({"type": "button", "button": button, "action": "press", "held_ms": 0})
+
+
+def heard(client, rssi: int):
+    """A status that carries a marker, so a test knows the hub has handled it
+    and every message before it."""
+    until(lambda: client.get(f"/satellites/{NID}").json()["status"].get("rssi") == rssi,
+          f"the status with rssi {rssi}")
+
+
+def test_the_volume_a_satellite_set_with_its_own_buttons_becomes_the_hubs(client, app):
+    """VOL+ changes the volume on the satellite, which reports it at once. The
+    hub took a reported volume only before it had one of its own, so the page
+    kept showing the old value, and the next welcome put it back on the
+    satellite."""
+    published = []
+    publish = app.hub.publish
+    app.hub.publish = lambda e: (published.append(e), publish(e))
+    with client.websocket_connect("/satellites/ws") as ws:
+        token = adopt(client, ws)
+        press(ws, "vol_up")
+        ws.send_json(status(**SETTINGS | {"volume": 70}))
+        until(lambda: config_of(client)["volume"] == 70, "the volume from the buttons")
+    assert [(e["satellite"], e["volume"]) for e in published if e["type"] == "volume"] == [(NID, 70)]
+    with client.websocket_connect("/satellites/ws") as ws:
+        ws.send_json(hello(token) | SETTINGS | {"volume": 70})
+        assert ws.receive_json()["config"]["volume"] == 70
+
+
+def test_only_the_status_that_answers_the_press_is_taken(client):
+    """The one sent with the new volume. A heartbeat after it, or one that
+    follows another button, is not believed on the volume: it may have left
+    before the page changed it."""
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        ws.send_json(status(**SETTINGS | {"volume": 35}))
+        press(ws, "play")
+        ws.send_json(status(**SETTINGS | {"volume": 35, "rssi": -50}))
+        heard(client, -50)
+        assert config_of(client)["volume"] == 60
+        press(ws, "vol_down")
+        ws.send_json(status(**SETTINGS | {"volume": 50}))
+        ws.send_json(status(**SETTINGS | {"volume": 35, "rssi": -51}))
+        heard(client, -51)
+        assert config_of(client)["volume"] == 50
+
+
+def test_a_status_long_after_the_press_is_a_heartbeat_not_the_answer(client, app, monkeypatch):
+    monkeypatch.setattr(app, "VOLUME_PRESS_S", 0.05)
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        press(ws, "vol_up")
+        import time
+        time.sleep(0.2)
+        ws.send_json(status(**SETTINGS | {"volume": 70, "rssi": -50}))
+        heard(client, -50)
+        assert config_of(client)["volume"] == 60
+
+
+def test_with_its_volume_buttons_off_a_press_changes_nothing_on_the_hub(client):
+    """Off, the satellite leaves its volume alone and reports the press only;
+    its status is the volume the hub gave it, however it reads."""
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        assert client.patch(f"/satellites/{NID}", json={"local_volume_buttons": False}).status_code == 200
+        assert ws.receive_json() == {"type": "config", "local_volume_buttons": False}
+        press(ws, "vol_down")
+        ws.send_json(status(**SETTINGS | {"volume": 50, "rssi": -50}))
+        heard(client, -50)
+        assert config_of(client)["volume"] == 60

@@ -600,6 +600,41 @@ def test_a_tone_or_say_for_a_satellite_with_its_speaker_off_is_refused_not_strea
     assert satellite.speaker() == []
 
 
+@pytest.mark.parametrize("jack, loud", [("speaker", 3000), ("headphones", 0)])
+def test_the_loopback_says_whether_a_satellite_plays_through_its_speaker_or_headphones(
+        client, events, plug, jack, loud):
+    """The Korvo's jack cuts the codec's output off from the amplifier and the
+    loopback when a plug is in (app/output.py). A satellite that hears its own
+    tone on channel 0 has no plug; one that plays it and hears nothing does.
+    Frames go in real time, because the hub times the tone by its own clock."""
+    def frame(seq: int, loopback: int) -> bytes:
+        pcm = np.zeros((FRAME, 4), "<i2")
+        pcm[:, 0] = loopback
+        return struct.pack("<BBBBIQ", 1, 0, 4, 0, seq, 0) + pcm.tobytes()
+
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        plug(ws)
+        assert client.get(f"/satellites/{NID}").json()["output"] is None
+        seq = 0
+        for _ in range(30):
+            ws.send_bytes(frame(seq, 0))
+            seq += 1
+            time.sleep(0.02)
+        assert client.post(f"/satellites/{NID}/tone",
+                           json={"frequency": 440, "seconds": 0.6}).status_code == 204
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1.8:
+            elapsed = time.monotonic() - t0
+            ws.send_bytes(frame(seq, loud if 0.1 <= elapsed <= 0.7 else 0))
+            seq += 1
+            time.sleep(0.02)
+        wait(lambda: of(events, "output"), what="the output")
+        described = client.get(f"/satellites/{NID}").json()
+    assert [e["output"] for e in of(events, "output")] == [jack]
+    assert described["output"] == jack and described["output_at"] is not None
+
+
 def test_turning_a_speaker_off_stops_what_it_is_playing(client, plug):
     """The reply or tone in hand used to stream on to its end after the
     speaker was turned off, because only new audio was checked."""

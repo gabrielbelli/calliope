@@ -388,7 +388,7 @@ SAMPLES = {"name": "Kitchen", "old": "Kitchen", "new": "Bedroom", "id": "a1b2c3d
            "list": "Speaker, Microphone and Lights", "message": "503 Service Unavailable",
            "n": "3 satellites", "k": "2 warnings", "score": "0.82", "b": "Vol −",
            "how": "strong", "word": "hey mycroft", "var": "SATELLITES_HA_TOKEN_KITCHEN",
-           "s": "1.3"}
+           "s": "1.3", "output": "Headphones"}
 
 
 def sat_copy() -> dict[str, str]:

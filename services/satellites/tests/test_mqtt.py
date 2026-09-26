@@ -119,7 +119,7 @@ def connect(hub: Hub, *, rssi: int = -61, caps: dict | None = None) -> SimpleNam
         id=NID, model=MODEL, fw="v0.3.0", address="192.0.2.10", connected_at=0.0,
         status={"rssi": rssi, "volume": 60}, ota=None, hello={},
         caps={"buttons": BUTTONS} if caps is None else caps,
-        adopted=NID in hub.store.satellites, sent=[])
+        adopted=NID in hub.store.satellites, sense=None, sent=[])
 
     async def send(obj) -> None:
         s.sent.append(obj)
@@ -234,7 +234,8 @@ async def test_an_adopted_satellite_is_one_device_with_every_entity_retained(hub
                    for t in configs)
     assert kinds == sorted(
         ["sensor/rssi", "binary_sensor/online", "switch/microphone", "switch/speaker",
-         "switch/lights", "number/volume", "sensor/last_wake_word", "event/wake_word"]
+         "switch/lights", "number/volume", "sensor/output", "sensor/last_wake_word",
+         "event/wake_word"]
         + [f"event/button_{b}" for b in BUTTONS])
     for topic, cfg in configs.items():
         assert cfg["device"] == {"identifiers": [NID], "name": "kitchen", "model": MODEL,
@@ -276,11 +277,15 @@ async def test_discovery_payloads_have_the_shapes_home_assistant_reads(hub, brok
     assert c["button_vol_up"]["name"] == "Volume up button"
     assert c["wake_word"]["event_types"] == ["detected"]
     assert c["last_wake_word"]["state_topic"] == f"{ROOT}/wake_word"
+    # Unknown until something has played: null renders "None", which Home
+    # Assistant's MQTT sensor takes as no value rather than as an option.
+    assert (c["output"]["device_class"], c["output"]["options"]) == ("enum", ["speaker", "headphones"])
+    assert satellite_avail in c["output"]["availability"]
 
     assert broker.retained[f"{ROOT}/availability"] == b"online"
     assert json.loads(broker.retained[f"{ROOT}/state"]) == {
         "rssi": -61, "volume": 60, "mic_enabled": True, "speaker_enabled": True,
-        "lights_enabled": True}
+        "lights_enabled": True, "output": None}
 
 
 async def test_an_unadopted_satellite_publishes_nothing(hub, broker, bridge):
@@ -368,7 +373,7 @@ async def test_switch_and_volume_commands_reach_on_command_as_patch_changes(hub,
     # The entities are not optimistic: the result has to come back as state.
     await until(lambda: json.loads(broker.retained[f"{ROOT}/state"]) == {
         "rssi": -61, "volume": 73, "mic_enabled": False, "speaker_enabled": False,
-        "lights_enabled": False})
+        "lights_enabled": False, "output": None})
 
 
 async def test_the_lights_switch_changes_only_lights_enabled_and_sends_the_satellite_nothing(

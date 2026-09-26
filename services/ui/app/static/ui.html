@@ -3901,6 +3901,9 @@ const SAT_COPY = {
   pendOffline: "It has to be online to be adopted.",
   whyOffline: "It is offline, so settings you change here are sent when it reconnects.",
   whyMuted: "It is muted on the device, and only its Rec button turns the microphones back on.",
+  outHeadphones: "Headphones are plugged in, so its own speaker stays silent.",
+  outSeen: "{output}, heard at {clock}",
+  outUnknown: "Not known until it plays something",
   tryOffline: "Offline, so nothing here reaches it.",
   trySpeaker: "Turn Speaker on to use Say and Play a tone.",
   tryMic: "Turn Microphone on to use Listen 5 s.",
@@ -4354,6 +4357,7 @@ function satAdoptedMarkup(u) {
           <div class="slider"><input type="range" id="${u}-gain" min="0" max="36" step="3" data-cfg="mic_gain_db">
             <output for="${u}-gain"></output></div></div>
       </div>
+      <div class="hint sat-output"></div>
       <div class="row sat-switches">
         <label class="checkline tight"><input type="checkbox" data-cfg="speaker_enabled"> Speaker</label>
         <label class="checkline tight"><input type="checkbox" data-cfg="mic_enabled"> Microphone</label>
@@ -4546,6 +4550,7 @@ function satelliteUpdate(li, n) {
   }
   const cfg = n.config || {}, st = n.status || {};
   satSet(q(".sat-why"), !n.online ? SAT_COPY.whyOffline : st.muted ? SAT_COPY.whyMuted : "");
+  satSet(q(".sat-output"), n.online && n.output === "headphones" ? SAT_COPY.outHeadphones : "");
   satLevel(q('[data-cfg="volume"]'), cfg.volume);
   satLevel(q('[data-cfg="mic_gain_db"]'), cfg.mic_gain_db);
   const idle = el => el !== document.activeElement;
@@ -4774,6 +4779,7 @@ function satDevice(li, n, s) {
   const facts = [["Model", n.model], ["Firmware", fw], ["Address", n.address],
     ["Wi-Fi signal", n.online ? rssiWords(st.rssi) : ""],
     ["Reply time", satLatency(n)],
+    ["Output", n.online ? satOutput(n) : ""],
     n.online ? ["Connected", n.connected_at ? satText("connected", { clock: satClock(n.connected_at) }) : ""]
              : ["Last seen", last ? satClock(last) : ""],
     ["ID", n.id]].filter(f => f[1]);
@@ -4805,6 +4811,16 @@ function satDevice(li, n, s) {
   if (field !== document.activeElement && !field.dataset.edited) field.value = n.name || "";
   satSet(li.querySelector(".sat-devhint"), !n.online ? SAT_COPY.devOffline
     : s.dataState === "updating" ? SAT_COPY.devUpdating : "");
+}
+
+/* SPEAKER OR HEADPHONES, AS THE HUB LAST HEARD IT. The board has no jack
+   detect the firmware can read, so the hub tells from the loopback while
+   something plays (services/satellites app/output.py), and until then it
+   does not know. */
+function satOutput(n) {
+  if (n.output !== "speaker" && n.output !== "headphones") return SAT_COPY.outUnknown;
+  return satText("outSeen", { output: n.output === "headphones" ? "Headphones" : "Speaker",
+                              clock: satClock(n.output_at) });
 }
 
 /* The one disclosure built by hand, so it carries aria-expanded itself; the
@@ -6075,6 +6091,8 @@ function satEventWhat(ev) {
     : ev.type === "conversation_started" ? satTalkStarted(ev)
     : ev.type === "conversation_ended" ? satTalkEnded(ev)
     : ev.type === "triggered" ? satTriggered(ev)
+    : ev.type === "volume" ? `volume set to ${ev.volume}% on the device`
+    : ev.type === "output" ? (ev.output === "headphones" ? "headphones plugged in" : "playing through its speaker")
     : ev.type;
 }
 const SAT_WOKE_ENDS = ["routed", "turn", "conversation_ended", "triggered"];

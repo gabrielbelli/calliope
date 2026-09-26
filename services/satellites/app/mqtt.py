@@ -170,6 +170,7 @@ def satellite_state(satellite: dict) -> dict:
         "mic_enabled": cfg.get("mic_enabled"),
         "speaker_enabled": cfg.get("speaker_enabled"),
         "lights_enabled": cfg.get("lights_enabled"),
+        "output": satellite.get("output"),
     }
 
 
@@ -226,6 +227,12 @@ def discovery_configs(satellite: dict, *, prefix: str, base: str,
             "command_topic": f"{root}/set/volume",
             "min": 0, "max": 100, "step": 1, "mode": "slider",
             "unit_of_measurement": "%", **hub_only}),
+        ("sensor", "output", {
+            # "speaker" or "headphones", known once something has played
+            # (output.py); unknown before that.
+            "name": "Audio output", "icon": "mdi:headphones", "state_topic": state,
+            "value_template": "{{ value_json.output }}",
+            "device_class": "enum", "options": ["speaker", "headphones"], **live}),
         ("sensor", "last_wake_word", {
             "name": "Last wake word", "icon": "mdi:account-voice",
             "state_topic": f"{root}/wake_word", **hub_only}),
@@ -359,7 +366,8 @@ class MqttBridge:
 
     def publish_event(self, event: dict) -> None:
         """Take any Hub.publish() event. Buttons and wake words become Home
-        Assistant events; status, online, offline and pending refresh the
+        Assistant events; status, online, offline, pending, volume (set on
+        the satellite itself) and output (speaker or headphones) refresh the
         satellite; the rest are ignored. So the hub may forward every event."""
         if not self.enabled:
             return
@@ -367,7 +375,7 @@ class MqttBridge:
         if not isinstance(nid, str) or not NID.fullmatch(nid):
             return
         root = f"{self.base}/{nid}"
-        if kind in ("status", "online", "offline", "pending"):
+        if kind in ("status", "online", "offline", "pending", "volume", "output"):
             self._refresh(nid)
         elif kind == "button":
             button, action = event.get("button"), event.get("action")

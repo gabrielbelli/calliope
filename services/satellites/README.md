@@ -88,12 +88,12 @@ name.
 | `WS /satellites/ws` | The device connection. Protocol below. |
 | `WS /nodes/ws` | The same handler, under the feature's name until 2026-09-25. A board in the field runs firmware that connects here, and its next firmware arrives over this socket, so the old path stays until no board reports firmware from before the rename ([ADR 0013](../../docs/adr/0013-satellites-one-door.md#renamed)). The gateway relays both. |
 | `GET /satellites` | Every satellite seen since the hub started, adopted or not, with its listening state, earcons and `wake_words` (the names assigned to it) |
-| `GET /satellites/events` | Server-sent events: buttons, wake words, routing, conversations and their turns, triggers, status, updates, satellites coming and going, a wake word's model becoming ready |
+| `GET /satellites/events` | Server-sent events: buttons, wake words, routing, conversations and their turns, triggers, status, updates, satellites coming and going, a wake word's model becoming ready, a volume set with the satellite's own buttons (`volume`), speaker or headphones (`output`) |
 | `GET /satellites/wake-words` | `{"available", "words", "ptt", "custom", "env", "warnings", "load_error"}`: the names the hub can load, each word's whole entry with its `state` and `error`, push-to-talk's entry, and which secret variables the actions name are set. [Wake words](#wake-words). |
 | `PUT /satellites/wake-words` | `{"words": [...], "ptt": {...}}`: replace them all, live. A field an entry leaves out keeps its saved value. A bad set is a 422 and the old one stays. |
 | `POST /satellites/wake-words/models?name=` | A custom wake word: the `.onnx` as the raw body, checked to be an openWakeWord classifier (input `[batch, 16, 96]`, under 5 MB) before it is written. Then offered in `available` and assigned like a built-in. |
 | `DELETE /satellites/wake-words/models/{name}` | Only a custom model, and only once no wake word uses it (409 otherwise). |
-| `GET /satellites/{id}` | One satellite, with `latency`: how quickly its last 20 replies began and ended |
+| `GET /satellites/{id}` | One satellite, with `latency`: how quickly its last 20 replies began and ended, and `output`: `speaker`, `headphones` or `null` ([Speaker or headphones](#speaker-or-headphones)) |
 | `PATCH /satellites/{id}` | `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `local_volume_buttons`, `lights_enabled`, `buttons` |
 | `POST /satellites/{id}/adopt` | `{"name": "..."}` |
 | `POST /satellites/{id}/forget` | |
@@ -423,6 +423,36 @@ mapping. `rec` cannot be mapped: the firmware mutes on it before the hub hears
 of the press. Every press is still published as an event, whatever it maps to.
 The mapping stays on the hub and is never sent to the satellite.
 
+**The volume buttons.** With `local_volume_buttons` on (the default), VOL+ and
+VOL− change the volume on the satellite itself, which sends a status with the
+new one straight after the press. That status, and only that one (within 2 s
+of the press), is taken as the hub's volume too: the page and Home Assistant
+show it, a `{"type": "volume", "satellite", "volume"}` event says so, and the
+next welcome does not put the old value back. Any other status is not believed
+on the volume, because one already on its way when the page changed it carries
+the old value.
+
+### Speaker or headphones
+
+The Korvo's headphone jack switches in hardware, and no GPIO reads its detect
+pin. With no plug, the codec's output runs through the jack's
+normally-closed contacts to the speaker amplifier and to the loopback (ES7210
+channel 0). A plug opens those contacts, so the loopback hears nothing
+([schematic](https://dl.espressif.com/dl/schematics/ESP32-KORVO_V1.1_schematics.pdf),
+sheet 4). After each sound the hub plays (a reply, a tone, an earcon), it
+compares the loopback over that sound with its idle level (`app/output.py`):
+
+| Loopback over the sound | Output |
+|---|---|
+| 10 dB or more above idle | `speaker` |
+| 3 dB or less above idle, for a sound louder than −45 dBFS at volume 10 or more | `headphones` |
+| Between, or a quiet sound, or too little loopback to judge | unchanged |
+
+So it is known only once something has played since the satellite connected,
+and a plug put in or pulled out in silence is seen at the next sound. A change
+publishes `{"type": "output", "satellite", "output"}`. Nothing needs a
+firmware change.
+
 ## Command, conversation and trigger
 
 Each wake word has a mode (`app/router.py`, `app/dialogue.py`, and
@@ -612,14 +642,17 @@ s, TTS 30 s, the destination its own `timeout`.
 
 With `SATELLITES_MQTT_URL` set, every adopted satellite is one Home Assistant
 device, by discovery: Wi-Fi signal, online, microphone, speaker and lights
-switches, volume, last wake word, a wake word event and one event per button. A
+switches, volume, audio output (speaker or headphones, unknown until something
+has played), last wake word, a wake word event and one event per button. A
 switch goes through the same code as `PATCH /satellites/{id}`, and nothing but
 those four settings can be changed from the broker. Button presses and wake
 words are dropped while the broker is away rather than delivered late; state,
 discovery and availability are retained and sent again on every reconnect.
 Forgetting a satellite removes its device. Injected test clips are not
 published. Checked against Home Assistant 2026.8.1's own MQTT integration: 14
-entities under one device.
+entities under one device. The audio output sensor came after, and is checked
+against that version's sensor code only: an unknown output renders `None`,
+which it takes as no value rather than as an invalid option.
 
 ## Signed firmware
 
