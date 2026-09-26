@@ -11,6 +11,7 @@
 #include <mbedtls/sha256.h>
 
 #include "board.h"
+#include "boot.h"
 #include "ca.h"
 #include "codec.h"
 #include "earcons.h"
@@ -203,6 +204,14 @@ static void send_hello() {
   d["token"] = settings.token;
   d["name"] = settings.name;
   d["reset_reason"] = (int)esp_reset_reason();
+  JsonObject boot = d["boot"].to<JsonObject>();
+  JsonObject stages = boot["stages_ms"].to<JsonObject>();
+  for (uint8_t i = 0; i < BOOT_STAGES; i++)
+    if (boot_ms(i) || i == BOOT_START) stages[boot_stage_name(i)] = boot_ms(i);
+  if (boot_stuck_stage() != 255) {
+    boot["stalled_in"] = boot_stage_name(boot_stuck_stage());
+    boot["stall_restarts"] = boot_stuck_restarts();
+  }
   d["ota_pending"] = ota_pending_verify();
   // The settings, as "status" reports them. A hub that adopts this board before
   // its first status (up to 10 s after connecting) would otherwise not know

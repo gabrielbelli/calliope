@@ -468,3 +468,16 @@ def test_a_nodes_secret_a_routing_rule_still_names_is_not_called_unread(app):
     assert app.legacy_settings({"NODES_HA_TOKEN": "t"}, [rule]) == []
     [unset] = app.legacy_settings({"SATELLITES_HA_TOKEN": "t"}, [rule])
     assert "'ha'" in unset and "NODES_HA_TOKEN" in unset and "SATELLITES_HA_TOKEN" in unset
+
+
+def test_a_satellites_account_of_its_start_up_is_kept_and_shown(client):
+    """A board sat between lighting its ring and starting Wi-Fi for hours on
+    one power source; the hub is where its own report of that now lands."""
+    with client.websocket_connect("/satellites/ws") as ws:
+        report = {"stages_ms": {"start": 0, "codec": 95012, "wifi": 95040},
+                  "stalled_in": "codec", "stall_restarts": 1}
+        ws.send_json(hello() | {"reset_reason": 3, "boot": report})
+        assert ws.receive_json()["type"] == "pending"
+        boot = client.get(f"/satellites/{NID}").json()["boot"]
+        assert boot["stalled_in"] == "codec" and boot["stages_ms"]["codec"] == 95012
+        assert boot["reset_reason"] == 3

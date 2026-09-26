@@ -662,6 +662,8 @@ class Hub:
             "config": rec.config if rec else None,
             "status": s.status if s else {},
             "caps": s.caps if s else {},
+            "boot": ({"reset_reason": s.hello.get("reset_reason"), **(s.hello.get("boot") or {})}
+                     if s and s.hello.get("boot") is not None else None),
             "ota": _ota_view(s),
             "listening": self._listening(s),
             "earcons": self._earcons(s),
@@ -1819,6 +1821,14 @@ async def satellite_socket(ws: WebSocket) -> None:
     hub.sessions[s.id] = s
     player = asyncio.create_task(s.speaker_loop(lambda: hub.speaker_allowed(s)))
     log.info("satellite %s connected from %s (%s, firmware %s)", s.id, s.address, s.model, s.fw)
+    boot = s.hello.get("boot") or {}
+    if boot:
+        # The satellite's own account of its start-up: how long each step took,
+        # and whether a previous start-up stalled (see clients/korvo-satellite
+        # src/boot.h for why this exists).
+        log.info("satellite %s boot: reset reason %s, stages %s%s", s.id, s.hello.get("reset_reason"),
+                 boot.get("stages_ms"), f", STALLED in {boot['stalled_in']} "
+                 f"({boot.get('stall_restarts')} restarts)" if boot.get("stalled_in") else "")
     try:
         await hub.greet(s)
         while True:

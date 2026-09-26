@@ -20,6 +20,7 @@
 #include <esp_timer.h>
 
 #include "board.h"
+#include "boot.h"
 #include "buttons.h"
 #include "codec.h"
 #include "earcons.h"
@@ -124,14 +125,22 @@ static void handle_buttons() {
 }
 
 void setup() {
+  Serial.begin(115200);
+  boot_mark(BOOT_START);
   arm_rollback_timer();
   settings_load();
+  boot_mark(BOOT_SETTINGS);
   lights_dark(!settings.lights_enabled);  // before the first frame is drawn
   lights_begin();
+  boot_mark(BOOT_LIGHTS);
   codec_begin();
+  boot_mark(BOOT_CODEC);
   mic_set_gain_db(settings.mic_gain_db);
+  boot_mark(BOOT_GAIN);
   spk_set_volume(settings.volume);
+  boot_mark(BOOT_VOLUME);
   earcons_begin();  // in the background, while Wi-Fi comes up
+  boot_mark(BOOT_EARCONS);
   // A release build that inherited a ws:// hub from a development one reopens
   // the portal rather than connecting in clear (see hub_begin).
 #ifndef DEV_HUB
@@ -139,7 +148,9 @@ void setup() {
 #else
   bool plain = false;
 #endif
+  boot_mark(BOOT_WIFI);
   run_wifi(settings.hub.isEmpty() || plain);
+  boot_mark(BOOT_HUB);
   hub_begin();
 }
 
