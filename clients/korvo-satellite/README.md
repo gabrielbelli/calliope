@@ -188,6 +188,44 @@ whatever the hub does:
 - **The firmware signature**, in a build with a public key. The hub cannot
   waive it.
 
+## Power: the board does not start by itself after a power cut
+
+**Measured on 26 Sep 2026.** A cold power-on through the **POWER** port puts
+the chip in the ROM's download mode, and it waits there indefinitely. It
+answers a flashing tool without being reset, and the ring stays as it was.
+Any reset afterwards boots it normally: the RST button, a reset pulse on the
+UART, or the BOOT and RST buttons together. After that it reaches the hub in
+about 2.5 s.
+
+The cause is a race on GPIO0 (the BOOT strap), from the schematic:
+
+- GPIO0 has no external pull-up (R40, 47 kΩ, is not fitted). It relies on the
+  chip's weak internal one.
+- The BOOT button line carries C14 (0.1 µF), and the microphone codec's
+  clock input hangs off the same net.
+- At power-on, the strap is read before GPIO0 has charged high, so the chip
+  starts in download mode. By the time of any later reset it has charged, so
+  a reset boots normally.
+
+The firmware cannot fix this: the decision is made in ROM before any code
+runs. The boot watchdog below never gets to run in this case.
+
+**The UART port does not power the board.** D17, the diode from its VBUS, is
+not fitted. The USB-serial chip is powered from the board's own 3.3 V, so the
+UART cable alone leaves the board off.
+
+| Fix | |
+|---|---|
+| Fit a **10 kΩ resistor on the empty R40 pad** (GPIO0 pull-up) | permanent; recommended |
+| Or a **1-10 µF capacitor from EN to GND** | permanent; holds reset until GPIO0 is high |
+| Keep the UART connected to a computer and reset through it | works, but needs the computer |
+| Press **RST** once after power is applied | works, by hand, after every power cut |
+
+The boot journal (`src/boot.cpp`) is for the other kind of stall, one inside
+the firmware. It stamps each start-up step, sends the stamps to the hub
+(`GET /satellites/{id}` → `boot`), and restarts a start-up that has not
+reached Wi-Fi after 20 s.
+
 ## Licence
 
 BSD 2-Clause, like the rest of the repository. Code ported from Espressif's
