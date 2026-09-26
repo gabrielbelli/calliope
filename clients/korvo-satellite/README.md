@@ -197,18 +197,29 @@ Any reset afterwards boots it normally: the RST button, a reset pulse on the
 UART, or the BOOT and RST buttons together. After that it reaches the hub in
 about 2.5 s.
 
-The cause is a race on GPIO0 (the BOOT strap), from the schematic:
+The cause is C14, read from the v1.1 schematic (sheets 2 and 5):
 
-- GPIO0 has no external pull-up (R40, 47 kΩ, is not fitted). It relies on the
-  chip's weak internal one.
-- The BOOT button line carries C14 (0.1 µF), and the microphone codec's
-  clock input hangs off the same net.
-- At power-on, the strap is read before GPIO0 has charged high, so the chip
-  starts in download mode. By the time of any later reset it has charged, so
-  a reset boots normally.
+- C14 (0.1 µF) sits across the BOOT button, SW9. The button reaches GPIO0 and
+  GPIO2 through D28, a BAT54C, so C14 hangs off GPIO0 through a diode.
+- Nothing charges C14 except GPIO0's weak internal pull-up. At a cold
+  power-on C14 is empty, so it holds GPIO0 low through D28 when the strap is
+  read, and the chip starts in download mode.
+- C14 then stays charged, because the diode stops it draining back into
+  GPIO0. That is why every later reset boots normally.
+- The reset line is not at fault. EN already has Espressif's recommended
+  delay, R185 (10 kΩ) and C127 (1 µF).
+- R40 (47 kΩ, not fitted) would not help. It sits on the cathode side of D30,
+  the auto-program diode, so it cannot lift GPIO0.
+
+Espressif's hardware guidelines warn against exactly this: "Do not add
+high-value capacitors at GPIO0, or the chip may enter download mode." The
+ESP32-DevKitC V4 had the same fault from its C15, and Espressif's advice there
+is to remove the part.
 
 The firmware cannot fix this: the decision is made in ROM before any code
-runs. The boot watchdog below never gets to run in this case.
+runs. The boot watchdog below never gets to run in this case. Burning the
+eFuse that disables download mode does not help either. The ROM then prints
+an error instead of booting, and the eFuse is permanent.
 
 **The UART port does not power the board.** D17, the diode from its VBUS, is
 not fitted. The USB-serial chip is powered from the board's own 3.3 V, so the
@@ -216,8 +227,8 @@ UART cable alone leaves the board off.
 
 | Fix | |
 |---|---|
-| Fit a **10 kΩ resistor on the empty R40 pad** (GPIO0 pull-up) | permanent; recommended |
-| Or a **1-10 µF capacitor from EN to GND** | permanent; holds reset until GPIO0 is high |
+| **Remove C14** (desolder only, nothing is added) | permanent; recommended. The BOOT button loses its debounce, which only matters for USB flashing. Not yet tried on this board |
+| Or a 10 kΩ from GPIO0 to 3.3 V | permanent; charges C14 before EN rises, but there is no footprint, so it needs a bodge wire |
 | Keep the UART connected to a computer and reset through it | works, but needs the computer |
 | Press **RST** once after power is applied | works, by hand, after every power cut |
 
