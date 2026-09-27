@@ -79,8 +79,9 @@ leaves Home Assistant.
 | Last wake word | The last wake word or trigger word heard, with its score |
 
 The switches and the slider show the **hub's** record of the satellite, as the
-Satellites tab does. A volume changed with the satellite's own VOL buttons is
-not written back to that record, so it does not show here either.
+Satellites tab does. A setting changed with the satellite's own buttons
+(volume, night mode, brightness) is written back to that record, so it shows
+here too.
 
 While a satellite is offline, the switches and the slider still take changes:
 the hub keeps them and sends them at the next connect. Wi-Fi signal and
