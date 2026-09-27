@@ -601,3 +601,14 @@ def test_a_mapping_saved_before_button_actions_keeps_what_the_buttons_did(app, t
         buttons = c.get(f"/satellites/{NID}").json()["config"]["buttons"]
     assert buttons["rec"] == {"press": "mute"} and buttons["play"] == {"press": "ptt"}
     assert ("vol_up" in buttons and "vol_down" in buttons) is pair
+
+
+def test_the_bottom_of_the_ring_is_one_of_its_twelve_leds(client):
+    """Where a level on the ring rises from, as the satellite is mounted."""
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        assert config_of(client)["ring_bottom"] == 0
+        assert client.patch(f"/satellites/{NID}", json={"ring_bottom": 6}).status_code == 200
+        assert ws.receive_json() == {"type": "config", "ring_bottom": 6}
+        assert [client.patch(f"/satellites/{NID}", json={"ring_bottom": b}).status_code
+                for b in (-1, 12, 3.5)] == [422, 422, 422]

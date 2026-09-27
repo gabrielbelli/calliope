@@ -94,7 +94,7 @@ name.
 | `POST /satellites/wake-words/models?name=` | A custom wake word: the `.onnx` as the raw body, checked to be an openWakeWord classifier (input `[batch, 16, 96]`, under 5 MB) before it is written. Then offered in `available` and assigned like a built-in. |
 | `DELETE /satellites/wake-words/models/{name}` | Only a custom model, and only once no wake word uses it (409 otherwise). |
 | `GET /satellites/{id}` | One satellite, with `latency`: how quickly its last 20 replies began and ended, and `output`: `speaker`, `jack` or `null` ([Speaker or jack](#speaker-or-jack)) |
-| `PATCH /satellites/{id}` | `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness` (1-100), `buttons` ([Buttons](#buttons)); `local_volume_buttons` for firmware from before 2026-09-27 |
+| `PATCH /satellites/{id}` | `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness` (1-100), `ring_bottom` (0-11: the LED at the bottom as mounted, from which a level on the ring rises), `buttons` ([Buttons](#buttons)); `local_volume_buttons` for firmware from before 2026-09-27 |
 | `POST /satellites/{id}/adopt` | `{"name": "..."}` |
 | `POST /satellites/{id}/forget` | |
 | `POST /satellites/{id}/identify` | Blink for five seconds. Works before adoption, which is the point. |

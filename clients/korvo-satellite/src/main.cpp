@@ -163,6 +163,7 @@ void setup() {
   boot_mark(BOOT_SETTINGS);
   lights_dark(!settings.lights_enabled);  // before the first frame is drawn
   lights_brightness(settings.brightness);
+  lights_bottom(settings.ring_bottom);
   lights_begin();
   boot_mark(BOOT_LIGHTS);
   codec_begin();

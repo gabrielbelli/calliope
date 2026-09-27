@@ -17,6 +17,7 @@ static volatile int brightness_pct = 100;
 static volatile uint32_t identify_until = 0;
 static volatile int ota_pct = -1;
 static volatile int level_lit = 0;
+static volatile int bottom_led = 0;
 static volatile uint32_t level_until = 0;
 
 struct HubLayer {
@@ -50,8 +51,14 @@ static void render(uint32_t t) {
     return;
   }
   if ((int32_t)(level_until - t) > 0) {
-    for (int i = 0; i < LED_COUNT; i++)
-      strip.setPixelColor(i, i < level_lit ? 90 : 3, i < level_lit ? 90 : 3, i < level_lit ? 90 : 3);
+    // The k-th LED to light is the bottom, then one to each side of it in
+    // turn: bottom, +1, -1, +2, -2, ... around the ring.
+    fill(3, 3, 3);
+    for (int k = 0; k < level_lit; k++) {
+      int step = (k + 1) / 2, side = (k % 2) ? 1 : -1;
+      int i = ((bottom_led + side * step) % LED_COUNT + LED_COUNT) % LED_COUNT;
+      strip.setPixelColor(i, 90, 90, 90);
+    }
     return;
   }
   if (muted) {
@@ -139,6 +146,8 @@ void lights_begin() {
 }
 
 void lights_dark(bool d) { dark = d; }
+void lights_bottom(int led) { bottom_led = ((led % LED_COUNT) + LED_COUNT) % LED_COUNT; }
+
 void lights_level(int lit, uint32_t ms) {
   level_lit = lit < 0 ? 0 : lit > LED_COUNT ? LED_COUNT : lit;
   level_until = millis() + ms;

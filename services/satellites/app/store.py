@@ -29,6 +29,9 @@ DEFAULT_CONFIG = {
     "local_volume_buttons": True,
     "lights_enabled": True,
     "brightness": 100,
+    # The LED at the bottom of the ring as the satellite is mounted (0-11): a
+    # level shown on the ring rises from it.
+    "ring_bottom": 0,
     # What each button does, on press and on release. The actions the
     # satellite runs itself (DEVICE_ACTIONS) go to it as "button_actions"; the
     # rest the hub runs when it hears of the press. Rec mutes, the volume pair
@@ -70,6 +73,7 @@ REPORTED = {
     "speaker_enabled": _flag,
     "lights_enabled": _flag,
     "brightness": _between(1, 100, whole=True),
+    "ring_bottom": _between(0, 11, whole=True),
 }
 # What the hub's record says for a switch the satellite has not reported yet:
 # off. Nothing is sent to a satellite, or heard from it, on a setting the hub

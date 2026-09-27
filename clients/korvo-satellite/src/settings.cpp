@@ -33,6 +33,7 @@ void settings_load() {
   settings.speaker_enabled = prefs.getBool("spk_on", true);
   settings.lights_enabled = prefs.getBool("lights_on", true);
   settings.brightness = prefs.getInt("bright", 100);
+  settings.ring_bottom = prefs.getInt("ring_bottom", 0);
   if (prefs.getBytesLength("actions") == sizeof(settings.actions))
     prefs.getBytes("actions", settings.actions, sizeof(settings.actions));
   else if (!prefs.getBool("local_vol", true))
@@ -53,6 +54,7 @@ void settings_save() {
   prefs.putBool("spk_on", settings.speaker_enabled);
   prefs.putBool("lights_on", settings.lights_enabled);
   prefs.putInt("bright", settings.brightness);
+  prefs.putInt("ring_bottom", settings.ring_bottom);
   prefs.putBytes("actions", settings.actions, sizeof(settings.actions));
   prefs.end();
 }
