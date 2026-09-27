@@ -250,7 +250,7 @@ class Session:
         # this satellite's own volume buttons (Hub.on_button).
         self.volume_press_until = 0.0
         self.update(hello)
-        # Speaker or headphones, from the loopback (output.py). Channel 0 is
+        # Speaker or jack, from the loopback (output.py). Channel 0 is
         # the loopback on a satellite with more than one channel.
         self.sense = outputs.OutputSense(self.mic_channels) if self.mic_channels > 1 else None
         # AirPlay, mixed under the voice by the speaker loop (airplay.py).
@@ -787,7 +787,7 @@ class Hub:
             "config": rec.config if rec else None,
             "status": s.status if s else {},
             "caps": s.caps if s else {},
-            # "speaker", "headphones", or None: not known until something has
+            # "speaker", "jack", or None: not known until something has
             # played since it connected (output.py).
             "output": s.sense.output if s and s.sense else None,
             "output_at": s.sense.at if s and s.sense else None,
@@ -1129,7 +1129,7 @@ class Hub:
 
     def on_output(self, s: Session) -> None:
         """The loopback settled a sound and said something new: speaker or
-        headphones. Home Assistant hears it through publish()."""
+        jack. Home Assistant hears it through publish()."""
         log.info("satellite %s plays through its %s", s.id, s.sense.output)
         self.publish({"type": "output", "satellite": s.id, "output": s.sense.output})
 

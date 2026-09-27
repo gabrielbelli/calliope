@@ -1,10 +1,11 @@
-"""Which output a satellite plays through: its speaker, or headphones.
+"""Which output a satellite plays through: its speaker, or its jack.
 
-THE KORVO HAS NO JACK-DETECT INPUT. Its headphone jack (J1, a PJ-393-A,
+THE KORVO HAS NO JACK-DETECT INPUT. Its 3.5 mm jack (J1, a PJ-393-A,
 schematic sheet 4, "EarPhone" and "AEC") switches in hardware. With no plug,
 the codec's output runs through the jack's normally-closed contacts on to the
 speaker amplifier and to the loopback, ES7210 channel 0. A plug opens those
-contacts: the codec then drives the headphones alone, and the loopback hears
+contacts: the codec then drives the jack alone (headphones, or an aux cable to
+another amplifier), and the loopback hears
 nothing. The jack's detect pin only gates the amplifier (Q16, U19); no GPIO
 reads it.
 
@@ -31,7 +32,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-SPEAKER, HEADPHONES = "speaker", "headphones"
+SPEAKER, JACK = "speaker", "jack"
 
 RISE_DB = 10.0      # the Korvo's loopback idles at -89 dBFS and carries a reply
                     # at -40 or so at volume 60; the volume's 0.5 dB steps leave
@@ -119,5 +120,5 @@ class OutputSense:
             return SPEAKER
         if (rise <= FLAT_DB and sound.level_dbfs >= AUDIBLE_DBFS
                 and (sound.volume is None or sound.volume >= MIN_VOLUME)):
-            return HEADPHONES
+            return JACK
         return None

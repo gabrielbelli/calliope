@@ -8,8 +8,16 @@ after a satellite, by its id or its name, is that satellite's music:
 
     /airplay/korvo  ->  the satellite called korvo
 
-Shairport Sync paces the pipe in real time against the phone's clock, on the
-same kernel clock the hub paces by, so music arrives as fast as it is sent on.
+Shairport Sync paces the pipe against the phone's clock, on the same kernel
+clock the hub paces by, so music arrives as fast as it is sent on, with two
+exceptions its player.c makes for an output that cannot report its delay, as a
+pipe cannot. At each start it writes the whole lead-in, up to the moment the
+first sample is due, as silence and at once: a second or two of zeros in a
+millisecond. That silence is the timing (the first real sample comes after it),
+so it is kept and played like the rest, and MAX_BUFFER_S has room for it. And
+it releases the audio audio_backend_buffer_desired_length_in_seconds early,
+which compose.yaml sets to 0.5 s, so the hub always has the 0.3 s it keeps the
+satellite ahead.
 
 MUSIC AND VOICE SHARE ONE STREAM. A satellite plays a single stream from the
 hub, so the speaker loop mixes: music, with the voice of a reply, a tone or
@@ -20,11 +28,15 @@ only once the loopback has gone quiet (listening.FOLLOW_UP_GUARD_S), and music
 still in the loopback would keep it from ever starting. The song goes on at
 the phone; what the satellite missed is not played late.
 
-ONLY ITS OWN FORMAT IS PLAYED. Raw PCM says nothing about itself, and a pipe
-set up for stereo or 32-bit samples would play as full-scale noise. So the
-rate music arrives at, over the PREFILL_S it waits for anyway, has to be that
-of 48 kHz 16-bit mono (2 bytes x 48000 a second, within RATE_TOLERANCE); a
-start that is not is refused, and logged, until the music stops.
+ONLY ITS OWN FORMAT IS PLAYED. Raw PCM says nothing about itself. 32-bit
+samples read as 16-bit put the low halves between the high ones: audio with
+unrelated values between every two samples, which plays as a loud buzz. So
+the first block that is not silence is checked for that: its even and odd
+samples, each taken alone, must be the same kind of signal (interleaved()). Stereo read as mono
+is the song at half speed, not noise, and shows only in the rate: more than
+1.6 times 16-bit mono's, three seconds after the audio began. Either is
+refused, and logged, until the music stops. Silence is never checked: zeros
+are safe in any format, and the lead-in burst would read as a fast rate.
 
 THE SATELLITE'S CLOCK. Its DAC runs on its own crystal, a few tens of ppm off
 the hub's, which over an hour of music is enough to empty or overflow its
@@ -53,10 +65,12 @@ log = logging.getLogger("voice-satellites.airplay")
 
 PREFILL_S = 0.3        # gathered before music starts, so the satellite holds as
                        # much as the voice path keeps it ahead (SPEAKER_LEAD_S)
-MAX_BUFFER_S = 1.0     # more than this means the loop stalled: the oldest goes
+MAX_BUFFER_S = 4.0     # the lead-in silence is written at once; beyond it the loop stalled
 IDLE_S = 1.0           # no music for this long and it has stopped: paused, or over
 FADE_S = 0.3           # music in, or out, over this long
-RATE_TOLERANCE = 0.5   # 0.5x to 1.5x of the expected byte rate: stereo, or 32-bit, is 2x
+SILENT = 32            # a block no sample of which is louder than this is silence (dither)
+RATE_WINDOW_S = 3.0    # audio this long before its rate is judged
+RATE_MAX = 1.6         # stereo is 2x; the early release adds 0.5 s over the window
 BUFFER_LOW_MS = 120
 BUFFER_HIGH_MS = 600
 READ_BYTES = 4096
@@ -78,8 +92,9 @@ class Music:
         self.adjust = 0            # the clock servo: -1 drop a chunk, +1 repeat one
         self.previous = b""
         self.playing = False       # as last published
-        self.first = 0.0           # the first block of this start, when it came
-        self.after_first = 0       # bytes since it, for the rate check
+        self.audio_at: float | None = None  # the first block of this start that was not silence
+        self.audio_bytes = 0       # since then, for the rate
+        self.rate_checked = False
         self.refused = False       # this start is not 48 kHz 16-bit mono
         self.arrived = asyncio.Event()
 
@@ -88,13 +103,18 @@ class Music:
             return
         now = time.monotonic() if now is None else now
         if now - self.last > IDLE_S:
-            # A new start: check its rate, gather PREFILL_S, and fade in.
+            # A new start: check its format again, gather PREFILL_S, fade in.
             self.primed, self.refused, self.gain = False, False, 0.0
-            self.first, self.after_first = now, 0
-        else:
-            self.after_first += len(data)
+            self.audio_at, self.audio_bytes, self.rate_checked = None, 0, False
         self.last = now
         if self.refused:
+            return
+        problem = self._check(data, now)
+        if problem:
+            self.refused = True
+            self.clear()
+            log.warning("AirPlay: refused: %s. The receiver's pipe must be output_rate = %d, "
+                        'output_format = "S16_LE", output_channels = 1.', problem, self.rate)
             return
         self.chunks.append(data)
         self.size += len(data)
@@ -110,22 +130,29 @@ class Music:
         now = time.monotonic() if now is None else now
         return now - self.last <= IDLE_S and not self.refused
 
-    def ready(self, nbytes: int, now: float | None = None) -> bool:
-        """Music alone may send a chunk: a whole one is here, and since it
-        started PREFILL_S has been gathered at the rate of its format."""
+    def _check(self, data: bytes, now: float) -> str | None:
+        """What is wrong with this start's format, once audio shows it."""
+        if self.audio_at is None:
+            x = np.frombuffer(data[:len(data) // 2 * 2], "<i2")
+            if x.size == 0 or int(np.abs(x.astype(np.int32)).max()) <= SILENT:
+                return None
+            self.audio_at = now
+            if interleaved(x):
+                return "every other sample is unrelated to its neighbours (32-bit samples?)"
+            return None
+        self.audio_bytes += len(data)
+        span = now - self.audio_at
+        if not self.rate_checked and span >= RATE_WINDOW_S:
+            self.rate_checked = True
+            rate = self.audio_bytes / span
+            if rate > RATE_MAX * self.rate * 2:
+                return f"it arrives at {rate:.0f} bytes a second, {rate / (self.rate * 2):.1f} times mono's (stereo?)"
+        return None
+
+    def ready(self, nbytes: int) -> bool:
+        """Music alone may send a chunk: a whole one is here, and PREFILL_S
+        has been gathered since it started."""
         if not self.primed and self.size >= int(PREFILL_S * self.rate) * 2:
-            now = time.monotonic() if now is None else now
-            # Counted from after the first block, so a first write larger than
-            # the rest does not read as a fast rate.
-            rate = self.after_first / max(now - self.first, 1e-3)
-            expected = self.rate * 2
-            if abs(rate / expected - 1) > RATE_TOLERANCE:
-                self.refused = True
-                self.clear()
-                log.warning("AirPlay: refused: music arrives at %d bytes a second, and 48 kHz "
-                            "16-bit mono is %d. Is the receiver's pipe set to output_rate = %d, "
-                            'output_format = "S16_LE", output_channels = 1?', rate, expected, self.rate)
-                return False
             self.primed = True
         return self.primed and self.size >= nbytes
 
@@ -171,6 +198,24 @@ class Music:
         self.chunks.clear()
         self.size = 0
         self.primed = False
+
+
+def interleaved(x: np.ndarray) -> bool:
+    """Two unrelated streams taking turns, as 32-bit samples read as 16-bit
+    are: the high halves are the audio, and the low halves between them are a
+    decoder's noise, or zeros. So the even samples and the odd ones, each taken
+    alone, are two different signals: one smooth, one not. In real audio both
+    are the same signal at half the rate, and alike whatever it is; noise has
+    both unsmooth, a tone at any frequency has both equally smooth."""
+    if x.size < 256:
+        return False
+
+    def smooth(y: np.ndarray) -> float:
+        y = y.astype(np.float64) - y.mean()
+        a, b = y[:-1], y[1:]
+        d = float(np.sqrt((a @ a) * (b @ b)))
+        return float(a @ b) / d if d else 0.0
+    return abs(smooth(x[0::2]) - smooth(x[1::2])) > 0.5
 
 
 def mix(voice: bytes | None, music: bytes | None, gain_from: float, gain_to: float,

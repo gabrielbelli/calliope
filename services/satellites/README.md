@@ -88,12 +88,12 @@ name.
 | `WS /satellites/ws` | The device connection. Protocol below. |
 | `WS /nodes/ws` | The same handler, under the feature's name until 2026-09-25. A board in the field runs firmware that connects here, and its next firmware arrives over this socket, so the old path stays until no board reports firmware from before the rename ([ADR 0013](../../docs/adr/0013-satellites-one-door.md#renamed)). The gateway relays both. |
 | `GET /satellites` | Every satellite seen since the hub started, adopted or not, with its listening state, earcons and `wake_words` (the names assigned to it) |
-| `GET /satellites/events` | Server-sent events: buttons, wake words, routing, conversations and their turns, triggers, status, updates, satellites coming and going, a wake word's model becoming ready, a volume set with the satellite's own buttons (`volume`), speaker or headphones (`output`) |
+| `GET /satellites/events` | Server-sent events: buttons, wake words, routing, conversations and their turns, triggers, status, updates, satellites coming and going, a wake word's model becoming ready, a volume set with the satellite's own buttons (`volume`), speaker or jack (`output`) |
 | `GET /satellites/wake-words` | `{"available", "words", "ptt", "custom", "env", "warnings", "load_error"}`: the names the hub can load, each word's whole entry with its `state` and `error`, push-to-talk's entry, and which secret variables the actions name are set. [Wake words](#wake-words). |
 | `PUT /satellites/wake-words` | `{"words": [...], "ptt": {...}}`: replace them all, live. A field an entry leaves out keeps its saved value. A bad set is a 422 and the old one stays. |
 | `POST /satellites/wake-words/models?name=` | A custom wake word: the `.onnx` as the raw body, checked to be an openWakeWord classifier (input `[batch, 16, 96]`, under 5 MB) before it is written. Then offered in `available` and assigned like a built-in. |
 | `DELETE /satellites/wake-words/models/{name}` | Only a custom model, and only once no wake word uses it (409 otherwise). |
-| `GET /satellites/{id}` | One satellite, with `latency`: how quickly its last 20 replies began and ended, and `output`: `speaker`, `headphones` or `null` ([Speaker or headphones](#speaker-or-headphones)) |
+| `GET /satellites/{id}` | One satellite, with `latency`: how quickly its last 20 replies began and ended, and `output`: `speaker`, `jack` or `null` ([Speaker or jack](#speaker-or-jack)) |
 | `PATCH /satellites/{id}` | `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `local_volume_buttons`, `lights_enabled`, `buttons` |
 | `POST /satellites/{id}/adopt` | `{"name": "..."}` |
 | `POST /satellites/{id}/forget` | |
@@ -448,11 +448,16 @@ by name or id). `app/airplay.py` reads the pipes and mixes.
   it is over. Out rather than down, because a conversation listens for its
   follow-up only once the loopback is quiet. The song carries on at the
   phone; what the satellite missed is not played late.
+- **The lead-in is kept.** A pipe cannot report how full it is, so Shairport
+  Sync writes everything up to the first sample's moment as silence, at once
+  (a second or two of zeros in a millisecond), then releases the audio by the
+  clock, 0.5 s early. The silence is the timing and is played like the rest.
 - **Its format only.** The pipe carries raw 48 kHz 16-bit mono, the
-  satellite's own, so nothing is resampled. Raw PCM cannot say what it is,
-  and stereo or 32-bit samples read as mono 16-bit are full-scale noise, so
-  each start is timed over its first 0.3 s and refused, and logged, unless it
-  arrives at that format's rate (±50 %).
+  satellite's own, so nothing is resampled. Raw PCM cannot say what it is. 32-bit
+  samples read as 16-bit are a loud buzz, so the first block that is not
+  silence must have even and odd samples of the same kind; stereo read as mono
+  is the song at half speed, and is refused once three seconds of audio have
+  come at more than 1.6 times mono's rate. Refused starts are logged.
 - **The satellite's clock.** Its DAC drifts from the hub's by tens of ppm,
   enough in an hour to empty or overflow its one-second buffer. While music
   plays, its status (`spk_buffered_ms`, every 10 s) outside 120-600 ms drops
@@ -462,7 +467,7 @@ by name or id). `app/airplay.py` reads the pipes and mixes.
 - `GET /satellites/{id}` says `"airplay": true` while music plays, and an
   `{"type": "airplay", "satellite", "state": "playing"|"stopped"}` event
   marks each start and stop. Music is also what the hub tells
-  [speaker or headphones](#speaker-or-headphones) by, two seconds at a time.
+  [speaker or jack](#speaker-or-jack) by, two seconds at a time.
 
 The receiver has an address of its own on the LAN, by macvlan, rather than
 the host's network: AirPlay 2 needs mDNS, RTSP on 7000 and PTP on 319/320,
@@ -470,9 +475,9 @@ and on the host that is three more open ports and a second mDNS responder
 beside the host's own. A hub restarted mid-song leaves the receiver writing
 to a pipe nobody reads until the next play; pause and play again.
 
-### Speaker or headphones
+### Speaker or jack
 
-The Korvo's headphone jack switches in hardware, and no GPIO reads its detect
+The Korvo's 3.5 mm jack (headphones, or an aux cable to another amplifier) switches in hardware, and no GPIO reads its detect
 pin. With no plug, the codec's output runs through the jack's
 normally-closed contacts to the speaker amplifier and to the loopback (ES7210
 channel 0). A plug opens those contacts, so the loopback hears nothing
@@ -483,7 +488,7 @@ compares the loopback over that sound with its idle level (`app/output.py`):
 | Loopback over the sound | Output |
 |---|---|
 | 10 dB or more above idle | `speaker` |
-| 3 dB or less above idle, for a sound louder than −45 dBFS at volume 10 or more | `headphones` |
+| 3 dB or less above idle, for a sound louder than −45 dBFS at volume 10 or more | `jack` |
 | Between, or a quiet sound, or too little loopback to judge | unchanged |
 
 So it is known only once something has played since the satellite connected,
@@ -680,7 +685,7 @@ s, TTS 30 s, the destination its own `timeout`.
 
 With `SATELLITES_MQTT_URL` set, every adopted satellite is one Home Assistant
 device, by discovery: Wi-Fi signal, online, microphone, speaker and lights
-switches, volume, audio output (speaker or headphones, unknown until something
+switches, volume, audio output (speaker or jack, unknown until something
 has played), last wake word, a wake word event and one event per button. A
 switch goes through the same code as `PATCH /satellites/{id}`, and nothing but
 those four settings can be changed from the broker. Button presses and wake

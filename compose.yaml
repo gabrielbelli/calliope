@@ -1041,9 +1041,12 @@ networks:
 
 # The receiver's whole configuration: only what differs from Shairport Sync's
 # defaults. Its name; the pipe it writes and the one format the hub plays, the
-# satellite's own (48 kHz 16-bit mono; the hub refuses any other rate); and the
-# 0.3 s the hub and the satellite hold after the pipe, taken off, so a video's
-# picture on the phone waits for its sound.
+# satellite's own (48 kHz 16-bit mono; the hub refuses what does not look like
+# it); the 0.3 s the hub and the satellite hold after the pipe, taken off, so a
+# video's picture on the phone waits for its sound; and the audio released
+# 0.5 s before it is due rather than 0.2, so the hub always has the 0.3 s it
+# keeps the satellite ahead (a pipe cannot say how full it is, so Shairport
+# Sync releases by the clock alone).
 configs:
   airplay-korvo:
     content: |
@@ -1051,6 +1054,7 @@ configs:
         name = "Korvo";
         output_backend = "pipe";
         audio_backend_latency_offset_in_seconds = -0.3;
+        audio_backend_buffer_desired_length_in_seconds = 0.5;
       };
       pipe = {
         name = "/airplay/korvo";

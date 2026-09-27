@@ -228,11 +228,11 @@ def discovery_configs(satellite: dict, *, prefix: str, base: str,
             "min": 0, "max": 100, "step": 1, "mode": "slider",
             "unit_of_measurement": "%", **hub_only}),
         ("sensor", "output", {
-            # "speaker" or "headphones", known once something has played
+            # "speaker" or "jack" (headphones or aux), known once something has played
             # (output.py); unknown before that.
-            "name": "Audio output", "icon": "mdi:headphones", "state_topic": state,
+            "name": "Audio output", "icon": "mdi:audio-input-stereo-minijack", "state_topic": state,
             "value_template": "{{ value_json.output }}",
-            "device_class": "enum", "options": ["speaker", "headphones"], **live}),
+            "device_class": "enum", "options": ["speaker", "jack"], **live}),
         ("sensor", "last_wake_word", {
             "name": "Last wake word", "icon": "mdi:account-voice",
             "state_topic": f"{root}/wake_word", **hub_only}),
@@ -367,7 +367,7 @@ class MqttBridge:
     def publish_event(self, event: dict) -> None:
         """Take any Hub.publish() event. Buttons and wake words become Home
         Assistant events; status, online, offline, pending, volume (set on
-        the satellite itself) and output (speaker or headphones) refresh the
+        the satellite itself) and output (speaker or jack) refresh the
         satellite; the rest are ignored. So the hub may forward every event."""
         if not self.enabled:
             return

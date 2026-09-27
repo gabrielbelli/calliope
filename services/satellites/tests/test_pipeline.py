@@ -600,8 +600,8 @@ def test_a_tone_or_say_for_a_satellite_with_its_speaker_off_is_refused_not_strea
     assert satellite.speaker() == []
 
 
-@pytest.mark.parametrize("jack, loud", [("speaker", 3000), ("headphones", 0)])
-def test_the_loopback_says_whether_a_satellite_plays_through_its_speaker_or_headphones(
+@pytest.mark.parametrize("jack, loud", [("speaker", 3000), ("jack", 0)])
+def test_the_loopback_says_whether_a_satellite_plays_through_its_speaker_or_its_jack(
         client, events, plug, jack, loud):
     """The Korvo's jack cuts the codec's output off from the amplifier and the
     loopback when a plug is in (app/output.py). A satellite that hears its own

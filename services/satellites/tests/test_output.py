@@ -1,4 +1,4 @@
-"""Speaker or headphones, from the loopback (app/output.py).
+"""Speaker or jack, from the loopback (app/output.py).
 
 Timestamps are passed in, so nothing here sleeps: each test lays out 20 ms
 frames on a timeline, idle, then a sound, then quiet after it.
@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.output import HEADPHONES, SPEAKER, OutputSense, Sound, level_dbfs
+from app.output import JACK, SPEAKER, OutputSense, Sound, level_dbfs
 
 FRAME_S = 0.02
 QUIET = 1       # -90 dBFS, about the Korvo's idle loopback (-89)
@@ -54,14 +54,14 @@ def test_a_sound_the_loopback_heard_means_the_speaker():
     assert sense.output == SPEAKER and sense.at is not None
 
 
-def test_a_sound_the_loopback_did_not_hear_means_headphones():
+def test_a_sound_the_loopback_did_not_hear_means_the_jack():
     """A plug opens the jack's contacts that carry the codec's output to the
     amplifier and the loopback: the sound plays, and the loopback stays
     where it idles."""
     sense = OutputSense(4)
     run(sense, 0.0, 1.0, lambda t: QUIET)
     played(sense)
-    assert [s for _, s in run(sense, 1.0, 3.0, lambda t: QUIET)] == [HEADPHONES]
+    assert [s for _, s in run(sense, 1.0, 3.0, lambda t: QUIET)] == [JACK]
 
 
 def test_only_the_loopback_counts_not_the_microphones():
@@ -70,7 +70,7 @@ def test_only_the_loopback_counts_not_the_microphones():
     sense = OutputSense(4)
     run(sense, 0.0, 1.0, lambda t: QUIET, mics=3000)
     played(sense)
-    assert [s for _, s in run(sense, 1.0, 3.0, lambda t: QUIET, mics=3000)] == [HEADPHONES]
+    assert [s for _, s in run(sense, 1.0, 3.0, lambda t: QUIET, mics=3000)] == [JACK]
 
 
 @pytest.mark.parametrize("level, volume", [(-60.0, 60), (-20.0, 5), (-20.0, 0)])
@@ -86,7 +86,7 @@ def test_a_volume_the_satellite_has_not_reported_does_not_stop_a_verdict():
     sense = OutputSense(4)
     run(sense, 0.0, 1.0, lambda t: QUIET)
     played(sense, volume=None)
-    assert [s for _, s in run(sense, 1.0, 3.0, lambda t: QUIET)] == [HEADPHONES]
+    assert [s for _, s in run(sense, 1.0, 3.0, lambda t: QUIET)] == [JACK]
 
 
 def test_a_rise_between_the_thresholds_leaves_the_last_answer_standing():
@@ -109,7 +109,7 @@ def test_an_answer_is_reported_when_it_changes_not_at_every_sound():
         played(sense, start=start, end=start + 1.0)
         said += run(sense, start, start + 2.0,
                     lambda t, s=start: LOUD if (start < 5.0 and s + 0.3 <= t <= s + 1.0) else QUIET)
-    assert [s for _, s in said] == [SPEAKER, HEADPHONES]
+    assert [s for _, s in said] == [SPEAKER, JACK]
 
 
 def test_the_idle_level_is_only_what_arrived_with_nothing_playing():

@@ -8,7 +8,7 @@
 #define PIN_I2C_SDA 19
 #define PIN_I2C_SCL 32
 #define ES7210_ADDR 0x40  // 4-channel ADC: three mics and the speaker loopback
-#define ES8311_ADDR 0x18  // DAC for the speaker and the headphone jack
+#define ES8311_ADDR 0x18  // DAC for the speaker and the 3.5 mm jack
 
 // I2S1, microphones. The ES7210 is the clock slave and packs four 16-bit slots
 // into each 64-bit stereo frame (TDM).
@@ -22,7 +22,7 @@
 #define PIN_SPK_WS 22
 #define PIN_SPK_DOUT 13
 
-// Speaker amplifier enable. Plugging in headphones gates it off in hardware
+// Speaker amplifier enable. A plug in the jack gates it off in hardware
 // (Q16 + U19), and the jack detect is not wired to any GPIO.
 #define PIN_PA_CTRL 12
 

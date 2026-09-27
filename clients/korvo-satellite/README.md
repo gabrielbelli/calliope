@@ -7,7 +7,7 @@ microphones and a speaker on Wi-Fi, told what to do by
 The board is Espressif's original ESP32-Korvo (ESP32-WROVER-E, 16 MB flash,
 PSRAM). It has an ES7210 four-channel ADC carrying three analogue mics 65 mm
 apart plus a loopback of the speaker output for echo cancellation, an ES8311
-codec for the speaker and headphone jack, twelve WS2812 LEDs and six buttons.
+codec for the speaker and the 3.5 mm jack (headphones or aux), twelve WS2812 LEDs and six buttons.
 Pins come from Espressif's schematics; see `src/board.h`.
 
 ## First flash (once, over USB)

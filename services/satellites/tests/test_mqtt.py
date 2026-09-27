@@ -280,7 +280,7 @@ async def test_discovery_payloads_have_the_shapes_home_assistant_reads(hub, brok
     assert c["last_wake_word"]["state_topic"] == f"{ROOT}/wake_word"
     # Unknown until something has played: null renders "None", which Home
     # Assistant's MQTT sensor takes as no value rather than as an option.
-    assert (c["output"]["device_class"], c["output"]["options"]) == ("enum", ["speaker", "headphones"])
+    assert (c["output"]["device_class"], c["output"]["options"]) == ("enum", ["speaker", "jack"])
     assert satellite_avail in c["output"]["availability"]
 
     assert broker.retained[f"{ROOT}/availability"] == b"online"
