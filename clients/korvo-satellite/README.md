@@ -178,6 +178,20 @@ whatever the hub does:
 | SET, held 5 s | reopens the Wi-Fi setup network |
 | MODE, held 10 s | factory reset: forgets Wi-Fi, hub and adoption |
 
+The six are one resistor ladder on GPIO39 (the mic board's sheet 3: 0.38 V for
+VOL+ up to 2.41 V for REC, 3.1 V idle). Each status carries `buttons_mv`, the
+ladder's latest, lowest and highest millivolts since the last status and how
+many polls ran, so a button that sends nothing can be told from one that
+never moved the line.
+
+**KEY1, the third button on the main board's edge (SW3), is not connected.**
+Its only path to the ESP32 is R37, a 0 Ω link to GPIO39 that is not fitted
+(main board sheet 2). Measured on 27 Sep 2026: pressing it moves the ladder
+not at all. Fitting R37 alone would also put KEY1's own 10 kΩ pull-up (R50) in
+parallel with the ladder's, which moves VOL+ to about 0.68 V, where it reads
+as VOL−. So KEY1 as a seventh button needs R37 fitted, R50 removed, and a
+threshold here for its 0 V.
+
 ## Kept on the device, whatever the hub says
 
 - **The privacy mute.** It powers down the ES7210 mic front-end, and only the
