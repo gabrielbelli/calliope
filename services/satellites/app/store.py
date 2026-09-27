@@ -29,9 +29,11 @@ DEFAULT_CONFIG = {
     "local_volume_buttons": True,
     "lights_enabled": True,
     "brightness": 100,
-    # The LED at the bottom of the ring as the satellite is mounted (0-11): a
-    # level shown on the ring rises from it.
-    "ring_bottom": 0,
+    # How the ring is mounted: the LED at 12 o'clock (0-11), where a bar on
+    # the ring starts, and whether the LEDs run anticlockwise as seen (upside
+    # down), so that the bar still fills clockwise.
+    "ring_top": 0,
+    "ring_upside_down": False,
     # What each button does, on press and on release. The actions the
     # satellite runs itself (DEVICE_ACTIONS) go to it as "button_actions"; the
     # rest the hub runs when it hears of the press. Rec mutes, the volume pair
@@ -73,7 +75,8 @@ REPORTED = {
     "speaker_enabled": _flag,
     "lights_enabled": _flag,
     "brightness": _between(1, 100, whole=True),
-    "ring_bottom": _between(0, 11, whole=True),
+    "ring_top": _between(0, 11, whole=True),
+    "ring_upside_down": _flag,
 }
 # What the hub's record says for a switch the satellite has not reported yet:
 # off. Nothing is sent to a satellite, or heard from it, on a setting the hub
@@ -211,6 +214,12 @@ class Store:
         for n in records or ():
             cfg = default_config() | n.get("config", {})
             cfg["buttons"] = with_button_defaults(cfg)
+            # ring_bottom was the setting for an hour on 27 Sep 2026, and
+            # named the LED opposite the top.
+            if "ring_bottom" in cfg:
+                bottom = cfg.pop("ring_bottom")
+                if "ring_top" not in n.get("config", {}) and isinstance(bottom, int):
+                    cfg["ring_top"] = (bottom + 6) % 12
             self.satellites[n["id"]] = Satellite(**(n | {"config": cfg}))
         if records is not None and not f.exists():
             self.save_satellites()

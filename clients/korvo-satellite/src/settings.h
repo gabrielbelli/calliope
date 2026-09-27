@@ -16,7 +16,8 @@ struct Settings {
   bool speaker_enabled = true;
   bool lights_enabled = true;  // false: the ring stays dark, whatever happens
   int brightness = 100;        // percent, of whatever the ring shows
-  int ring_bottom = 0;         // the LED at the bottom of the ring as mounted: levels rise from it
+  int ring_top = 0;             // the LED at 12 o'clock as mounted: a bar on the ring starts there
+  bool ring_upside_down = false;  // the bar runs the other way round (LED order seen reversed)
   // What each button does here, on press and on release (Action, indexed by
   // Button - 1). The hub sends its own; this is the board's until it does,
   // and what it was before there was a choice: Rec mutes, VOL+/- set volume.

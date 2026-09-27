@@ -18,12 +18,13 @@ void lights_begin();
 // Dark overrides every layer, status included: a bedroom satellite stays unlit
 // through reboots, reconnects and updates.
 void lights_dark(bool dark);
-// For ms, the ring shows a level: `lit` LEDs on, the rest faint, rising from
-// the bottom LED evenly on both sides, like water in the ring. Over everything
-// but the dark, which a bedroom satellite keeps.
+// For ms, the ring shows a level as a clock bar: `lit` LEDs on from the top,
+// clockwise as the board is mounted, the rest faint. Over everything but the
+// dark, which a bedroom satellite keeps.
 void lights_level(int lit, uint32_t ms);
-// Which LED is at the bottom of the ring as the board is mounted.
-void lights_bottom(int led);
+// Which LED is at 12 o'clock as the board is mounted, and whether the LEDs'
+// order runs anticlockwise as seen (upside down).
+void lights_ring(int top, bool upside_down);
 // Percent of whatever is shown, the privacy mute's red kept at a quarter or
 // more so that it is never too dim to see.
 void lights_brightness(int percent);

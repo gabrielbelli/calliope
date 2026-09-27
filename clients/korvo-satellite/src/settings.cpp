@@ -2,6 +2,8 @@
 
 #include <Preferences.h>
 
+#include "board.h"
+
 Settings settings;
 static Preferences prefs;
 
@@ -33,7 +35,10 @@ void settings_load() {
   settings.speaker_enabled = prefs.getBool("spk_on", true);
   settings.lights_enabled = prefs.getBool("lights_on", true);
   settings.brightness = prefs.getInt("bright", 100);
-  settings.ring_bottom = prefs.getInt("ring_bottom", 0);
+  // ring_bottom, the setting for an hour on 27 Sep 2026, named the opposite LED.
+  settings.ring_top = prefs.isKey("ring_top") ? prefs.getInt("ring_top", 0)
+                                              : (prefs.getInt("ring_bottom", 6) + 6) % LED_COUNT;
+  settings.ring_upside_down = prefs.getBool("ring_flip", false);
   if (prefs.getBytesLength("actions") == sizeof(settings.actions))
     prefs.getBytes("actions", settings.actions, sizeof(settings.actions));
   else if (!prefs.getBool("local_vol", true))
@@ -54,7 +59,8 @@ void settings_save() {
   prefs.putBool("spk_on", settings.speaker_enabled);
   prefs.putBool("lights_on", settings.lights_enabled);
   prefs.putInt("bright", settings.brightness);
-  prefs.putInt("ring_bottom", settings.ring_bottom);
+  prefs.putInt("ring_top", settings.ring_top);
+  prefs.putBool("ring_flip", settings.ring_upside_down);
   prefs.putBytes("actions", settings.actions, sizeof(settings.actions));
   prefs.end();
 }

@@ -2011,7 +2011,8 @@ class ConfigBody(BaseModel):
     local_volume_buttons: bool | None = None
     lights_enabled: bool | None = None
     brightness: int | None = Field(default=None, ge=1, le=100)
-    ring_bottom: int | None = Field(default=None, ge=0, le=11)
+    ring_top: int | None = Field(default=None, ge=0, le=11)
+    ring_upside_down: bool | None = None
     # Replaces the whole mapping; the default is in store.py.
     buttons: dict[ButtonName, dict[Literal["press", "release"], ButtonAction]] | None = Field(
         default=None, max_length=16)

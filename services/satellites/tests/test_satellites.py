@@ -603,12 +603,23 @@ def test_a_mapping_saved_before_button_actions_keeps_what_the_buttons_did(app, t
     assert ("vol_up" in buttons and "vol_down" in buttons) is pair
 
 
-def test_the_bottom_of_the_ring_is_one_of_its_twelve_leds(client):
-    """Where a level on the ring rises from, as the satellite is mounted."""
+def test_how_the_ring_is_mounted_is_its_top_led_and_which_way_it_runs(client):
+    """Where a bar on the ring starts (12 o'clock) and whether it runs the
+    other way round, as the satellite is mounted."""
     with client.websocket_connect("/satellites/ws") as ws:
         adopt(client, ws)
-        assert config_of(client)["ring_bottom"] == 0
-        assert client.patch(f"/satellites/{NID}", json={"ring_bottom": 6}).status_code == 200
-        assert ws.receive_json() == {"type": "config", "ring_bottom": 6}
-        assert [client.patch(f"/satellites/{NID}", json={"ring_bottom": b}).status_code
+        config = config_of(client)
+        assert (config["ring_top"], config["ring_upside_down"]) == (0, False)
+        assert client.patch(f"/satellites/{NID}", json={"ring_top": 6, "ring_upside_down": True}).status_code == 200
+        assert ws.receive_json() == {"type": "config", "ring_top": 6, "ring_upside_down": True}
+        assert [client.patch(f"/satellites/{NID}", json={"ring_top": b}).status_code
                 for b in (-1, 12, 3.5)] == [422, 422, 422]
+
+
+def test_a_ring_bottom_from_its_hour_as_a_setting_becomes_the_top_opposite(app, tmp_path):
+    (tmp_path / "satellites.json").write_text(json.dumps({"satellites": [{
+        "id": NID, "name": "bedroom", "model": MODEL, "token_sha256": "0" * 64,
+        "adopted_at": 1.0, "config": {"ring_bottom": 2}}]}))
+    with TestClient(app.app) as c:
+        config = c.get(f"/satellites/{NID}").json()["config"]
+    assert config["ring_top"] == 8 and "ring_bottom" not in config

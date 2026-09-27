@@ -225,7 +225,8 @@ static void send_hello() {
   d["speaker_enabled"] = settings.speaker_enabled;
   d["lights_enabled"] = settings.lights_enabled;
   d["brightness"] = settings.brightness;
-  d["ring_bottom"] = settings.ring_bottom;
+  d["ring_top"] = settings.ring_top;
+  d["ring_upside_down"] = settings.ring_upside_down;
   JsonObject caps = d["caps"].to<JsonObject>();
   JsonObject mic = caps["mic"].to<JsonObject>();
   mic["rate"] = MIC_RATE;
@@ -269,7 +270,8 @@ void hub_send_status(const char *cause) {
   d["speaker_enabled"] = settings.speaker_enabled;
   d["lights_enabled"] = settings.lights_enabled;
   d["brightness"] = settings.brightness;
-  d["ring_bottom"] = settings.ring_bottom;
+  d["ring_top"] = settings.ring_top;
+  d["ring_upside_down"] = settings.ring_upside_down;
   d["mic_dropped"] = mic_dropped;
   d["spk_dropped"] = spk_dropped;
   d["spk_buffered_ms"] = speaker_buffered_ms();
@@ -331,11 +333,21 @@ static void apply_config(JsonVariantConst c) {
     if (!settings.speaker_enabled) spk_amp(false);
   }
   if (c["brightness"].is<int>()) lights_brightness(settings.brightness = constrain(c["brightness"].as<int>(), 1, 100));
-  // A new bottom is shown, alone, so whoever is choosing it can see which LED
-  // it is; the same one again (every welcome carries it) is not.
-  if (c["ring_bottom"].is<int>() && c["ring_bottom"].as<int>() != settings.ring_bottom) {
-    lights_bottom(settings.ring_bottom = constrain(c["ring_bottom"].as<int>(), 0, LED_COUNT - 1));
-    lights_level(1, 2000);
+  // A new top or direction shows the bar's first three LEDs, so whoever is
+  // choosing can see where it starts and which way it runs; the same values
+  // again (every welcome carries them) do not.
+  bool ring = false;
+  if (c["ring_top"].is<int>() && c["ring_top"].as<int>() != settings.ring_top) {
+    settings.ring_top = constrain(c["ring_top"].as<int>(), 0, LED_COUNT - 1);
+    ring = true;
+  }
+  if (c["ring_upside_down"].is<bool>() && c["ring_upside_down"].as<bool>() != settings.ring_upside_down) {
+    settings.ring_upside_down = c["ring_upside_down"];
+    ring = true;
+  }
+  if (ring) {
+    lights_ring(settings.ring_top, settings.ring_upside_down);
+    lights_level(3, 2000);
   }
   if (c["button_actions"].is<JsonObjectConst>()) apply_button_actions(c["button_actions"]);
   if (c["lights_enabled"].is<bool>()) lights_dark(!(settings.lights_enabled = c["lights_enabled"]));

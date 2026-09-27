@@ -3913,6 +3913,10 @@ const SAT_COPY = {
   devOffline: "Offline, so Reboot, Move and Update wait for it to reconnect.",
   devUpdating: "Reboot, Move and Update wait until this update finishes.",
   btnNoMute: "Keep Mute mic on one button at least, or a muted satellite could never be unmuted.",
+  ringTop: "Move the lit LED with ◀ ▶ until it is at 12 o'clock, then press That's the top.",
+  ringWay: "The bar runs from the brightest LED. Which way does it go, as you look at it?",
+  ringSaved: "Saved: the volume bar starts at 12 o'clock and fills clockwise.",
+  ringMuted: "It is muted, so the ring shows red: unmute it with its button first.",
   /* The scheme without its colon and slashes: test_ui.py keeps every plain
      http address out of this file, so a fetch to one cannot hide in copy. */
   btnBadUrl: "Write the webhook as a full web address, starting with https or http.",
@@ -4430,13 +4434,30 @@ function satAdoptedMarkup(u) {
             <button class="small tight" type="submit">Rename</button>
           </form>
           <div class="row sat-orient">
-            <div><label for="${u}-bottom">Bottom of the ring</label>
-              <select id="${u}-bottom" data-cfg="ring_bottom">
+            <div><label for="${u}-top">Top of the ring</label>
+              <select id="${u}-top" data-cfg="ring_top">
                 <option value="0">LED 1</option><option value="1">LED 2</option><option value="2">LED 3</option><option value="3">LED 4</option>
                 <option value="4">LED 5</option><option value="5">LED 6</option><option value="6">LED 7</option><option value="7">LED 8</option>
                 <option value="8">LED 9</option><option value="9">LED 10</option><option value="10">LED 11</option><option value="11">LED 12</option></select></div>
+            <label class="checkline tight"><input type="checkbox" data-cfg="ring_upside_down"> Upside down</label>
           </div>
-          <div class="hint">Pick the LED at the bottom as it is mounted; it lights up as you pick it.</div>
+          <div class="actions">
+            <button class="small" type="button" data-act="ring" data-needs="online lights">Set up the ring…</button>
+          </div>
+          <div class="sat-ringset" hidden>
+            <p class="hint sat-ringsay" aria-live="polite"></p>
+            <div class="actions sat-ringtop">
+              <button class="small" type="button" data-act="ring-prev" aria-label="Move the lit LED back">◀</button>
+              <button class="small" type="button" data-act="ring-next" aria-label="Move the lit LED on">▶</button>
+              <button class="small" type="button" data-act="ring-top">That's the top</button>
+            </div>
+            <div class="actions sat-ringway" hidden>
+              <button class="small" type="button" data-act="ring-cw">Clockwise</button>
+              <button class="small" type="button" data-act="ring-ccw">Anticlockwise</button>
+            </div>
+            <div class="actions"><button class="small" type="button" data-act="ring-cancel">Cancel</button></div>
+          </div>
+          <div class="hint">Set up the ring shows you where the volume bar starts and which way it runs.</div>
           <div class="actions">
             <button class="small" type="button" data-act="reboot" data-needs="online idle">Reboot</button>
             <button class="small" type="button" data-act="move" data-needs="online idle"
@@ -4837,9 +4858,11 @@ function satDevice(li, n, s) {
   const going = satGoingTo(n);
   satSet(li.querySelector(".sat-device .sum-note"), img ? satText("sumUpdate", { fw })
     : going && fw ? satText("sumUpdating", { fw, v: going }) : fw || "");
-  /* Set once, where it is mounted; the ring lights the one picked. */
-  const bottom = li.querySelector('[data-cfg="ring_bottom"]'), cfg = n.config || {};
-  if (bottom !== document.activeElement && Number.isInteger(cfg.ring_bottom)) bottom.value = String(cfg.ring_bottom);
+  /* Set once, where it is mounted; the ring shows the start of the bar. */
+  const top = li.querySelector('[data-cfg="ring_top"]'), flip = li.querySelector('[data-cfg="ring_upside_down"]');
+  const cfg = n.config || {};
+  if (top !== document.activeElement && Number.isInteger(cfg.ring_top)) top.value = String(cfg.ring_top);
+  if (flip !== document.activeElement) flip.checked = cfg.ring_upside_down === true;
   const field = li.querySelector(".sat-rename input");
   if (field !== document.activeElement && !field.dataset.edited) field.value = n.name || "";
   satSet(li.querySelector(".sat-devhint"), !n.online ? SAT_COPY.devOffline
@@ -4903,6 +4926,7 @@ async function satelliteAct(li, act, button) {
   const q = sel => li.querySelector(sel);
   const host = satNoteFor(li, button);
   if (act === "wakewords") { satGoWakeWords(); return; }
+  if (act === "ring" || act.startsWith("ring-")) { satRingSetup(li, act, button); return; }
   if (act === "move") { satMoveOpen(li, button.getAttribute("aria-expanded") !== "true"); return; }
   /* The questions are asked before anything is greyed, so a No leaves the
      row exactly as it was. A satellite that was only ever seen has nothing
@@ -4998,6 +5022,68 @@ async function satelliteAct(li, act, button) {
     note(host, "bad", e.message);
   } finally {
     done();
+  }
+}
+
+/* SETTING UP THE RING WITHOUT ITS NUMBERS. The hub's own lights draw on the
+   LEDs by their number, so the page lights one, moves it with ◀ ▶ until it is
+   at 12 o'clock, then shows a bar running on from it, bright to dim, and asks
+   which way that is. The answers are ring_top and ring_upside_down; the ring
+   goes back off when it is done, cancelled, or left alone for two minutes. */
+const RING_LEDS = 12, RING_IDLE_MS = 120000;
+
+function satRingDraw(li) {
+  const r = li._ring, px = Array.from({ length: RING_LEDS }, () => [6, 6, 6]);
+  if (r.step === "top") px[r.led] = [255, 255, 255];
+  else [255, 110, 35].forEach((v, k) => { px[(r.led + k) % RING_LEDS] = [v, v, v]; });
+  return json(`/satellites/${li.dataset.id}/lights`, { method: "POST", headers: JSON_BODY,
+    body: JSON.stringify({ mode: "pixels", pixels: px, brightness: 200 }) });
+}
+
+function satRingShow(li, step) {
+  const box = li.querySelector(".sat-ringset");
+  box.hidden = step === null;
+  if (step === null) return;
+  box.querySelector(".sat-ringtop").hidden = step !== "top";
+  box.querySelector(".sat-ringway").hidden = step !== "way";
+  satSet(box.querySelector(".sat-ringsay"), step === "top" ? SAT_COPY.ringTop : SAT_COPY.ringWay);
+}
+
+async function satRingSetup(li, act, button) {
+  const host = satNoteFor(li, button), n = li._n || {}, cfg = n.config || {};
+  clearTimeout(li._ringIdle);
+  try {
+    if (act === "ring") {
+      if ((n.status || {}).muted) { note(host, "bad", SAT_COPY.ringMuted); return; }
+      li._ring = { step: "top", led: Number.isInteger(cfg.ring_top) ? cfg.ring_top : 0 };
+    } else if (!li._ring) {
+      return;
+    } else if (act === "ring-prev" || act === "ring-next") {
+      li._ring.led = (li._ring.led + (act === "ring-next" ? 1 : RING_LEDS - 1)) % RING_LEDS;
+    } else if (act === "ring-top") {
+      li._ring.step = "way";
+    } else if (act === "ring-cw" || act === "ring-ccw") {
+      const done = { ring_top: li._ring.led, ring_upside_down: act === "ring-ccw" };
+      li._ring = null;
+      satRingShow(li, null);
+      await json(`/satellites/${li.dataset.id}/lights`, { method: "POST", headers: JSON_BODY,
+        body: JSON.stringify({ mode: "off" }) });
+      if (await satellitePatch(li, done, host)) satSaid(host, SAT_COPY.ringSaved);
+      return;
+    } else if (act === "ring-cancel") {
+      li._ring = null;
+      satRingShow(li, null);
+      await json(`/satellites/${li.dataset.id}/lights`, { method: "POST", headers: JSON_BODY,
+        body: JSON.stringify({ mode: "off" }) });
+      return;
+    }
+    satRingShow(li, li._ring.step);
+    await satRingDraw(li);
+    li._ringIdle = setTimeout(() => satRingSetup(li, "ring-cancel", button), RING_IDLE_MS);
+  } catch (e) {
+    li._ring = null;
+    satRingShow(li, null);
+    note(host, "bad", e.message);
   }
 }
 
