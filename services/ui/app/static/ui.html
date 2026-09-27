@@ -4274,6 +4274,8 @@ function satState(n, mem) {
   if (ota.state === "verified") return say("updated", "Updated", "done", satText("lineUpdated", { v }), "online");
   if (st.muted) return say("muted", "Muted", "neutral", listens, "online");
   if (cfg.mic_enabled === false) return say("micoff", "Mic off", "neutral", listens, "online");
+  /* Music from its AirPlay receiver: a choice, like Muted, so no colour. */
+  if (n.airplay === true) return say("airplay", "Playing AirPlay", "neutral", listens, "online");
   return say("online", "Online", "", listens, "online");
 }
 
@@ -6093,6 +6095,7 @@ function satEventWhat(ev) {
     : ev.type === "triggered" ? satTriggered(ev)
     : ev.type === "volume" ? `volume set to ${ev.volume}% on the device`
     : ev.type === "output" ? (ev.output === "headphones" ? "headphones plugged in" : "playing through its speaker")
+    : ev.type === "airplay" ? (ev.state === "playing" ? "AirPlay started" : "AirPlay stopped")
     : ev.type;
 }
 const SAT_WOKE_ENDS = ["routed", "turn", "conversation_ended", "triggered"];

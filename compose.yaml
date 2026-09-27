@@ -942,6 +942,10 @@ services:
       # with it. The hub's own migration (nodes.json to satellites.json) can
       # only run on the volume that holds nodes.json.
       - nodes-data:/data
+      # AirPlay: the receiver's pipes, one per satellite, read-only in effect
+      # (the hub only reads them). SATELLITES_AIRPLAY_DIR is /airplay by
+      # default, and a hub without the directory has no AirPlay.
+      - airplay:/airplay
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8003/health')"]
       interval: 60s
@@ -949,6 +953,48 @@ services:
       retries: 3
       start_period: 30s
 
+
+  # AirPlay 2 into a satellite (services/satellites/README.md, "AirPlay"):
+  # Shairport Sync, the receiver a phone sees as "Korvo". It writes what it
+  # plays into a named pipe in the airplay volume, and the hub mixes that under
+  # its own voice on the satellite the pipe is named for.
+  #
+  # AN ADDRESS OF ITS OWN ON THE LAN, NOT THE HOST'S. AirPlay 2 needs mDNS,
+  # RTSP on 7000 and PTP on 319/320. On the host network that is three more
+  # open ports on the NAS and a second mDNS responder beside TrueNAS's own
+  # avahi, or else the host's D-Bus mounted into a root container, which is
+  # root on the host. A macvlan gives it 192.168.1.113 (outside pfSense's DHCP
+  # pool, .10-.100) with an avahi of its own, and this host's one published
+  # port stays the gateway's. The host cannot reach a macvlan address and does
+  # not need to: the audio crosses in the volume.
+  #
+  # Pinned by digest: the image the receiver was tested with on 27 Sep 2026.
+  # One receiver per satellite; a second satellite is another service like
+  # this one, with its own name, pipe, address and MAC.
+  voice-airplay:
+    container_name: voice-airplay
+    image: mikebrady/shairport-sync:5.5.2@sha256:bed60f067bd328034ee772a597f2d2ff9f1d4d2fe95c84b8e10ff86208fa9046
+    restart: unless-stopped
+    hostname: korvo-airplay
+    networks:
+      airplay-lan:
+        ipv4_address: 192.168.1.113
+        # Fixed, so the router and the UniFi client list keep one entry for
+        # it across recreations. Locally administered, the address in hex.
+        mac_address: "02:42:c0:a8:01:71"
+    cap_add:
+      - SYS_NICE  # Shairport Sync's real-time audio thread
+    configs:
+      - source: airplay-korvo
+        target: /etc/shairport-sync.conf
+    volumes:
+      - airplay:/airplay
+    cpus: 0.5
+    mem_limit: 256m
+    logging:
+      options:
+        max-size: "200k"
+        max-file: "10"
 
 # Unchanged, and named here so the deploy does not create new empty ones and
 # silently orphan the models already on disk.
@@ -976,3 +1022,39 @@ volumes:
   # called: renaming the key here would hand the hub an empty one (see the
   # voice-satellites block).
   nodes-data:
+  # AirPlay's pipes, between voice-airplay and the hub. Nothing kept: a pipe
+  # holds no data, and the receiver makes it again on every start.
+  airplay:
+
+# voice-airplay's own address on the LAN (see that service). ens4f0 is the
+# host's LAN interface, 192.168.1.0/24.
+networks:
+  airplay-lan:
+    driver: macvlan
+    driver_opts:
+      parent: ens4f0
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
+          gateway: 192.168.1.1
+          ip_range: 192.168.1.113/32
+
+# The receiver's whole configuration: only what differs from Shairport Sync's
+# defaults. Its name; the pipe it writes and the one format the hub plays, the
+# satellite's own (48 kHz 16-bit mono; the hub refuses any other rate); and the
+# 0.3 s the hub and the satellite hold after the pipe, taken off, so a video's
+# picture on the phone waits for its sound.
+configs:
+  airplay-korvo:
+    content: |
+      general = {
+        name = "Korvo";
+        output_backend = "pipe";
+        audio_backend_latency_offset_in_seconds = -0.3;
+      };
+      pipe = {
+        name = "/airplay/korvo";
+        output_rate = 48000;
+        output_format = "S16_LE";
+        output_channels = 1;
+      };

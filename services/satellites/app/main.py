@@ -98,7 +98,7 @@ from voice_common import auth, errors, health
 from voice_common import logging as voice_logging
 from voice_common.errors import ApiError
 
-from . import audio, dialogue, earcons, listening, signing, wakeword, wakewords_config
+from . import airplay, audio, dialogue, earcons, listening, signing, wakeword, wakewords_config
 from . import output as outputs
 from . import language as lang
 from . import router as routing
@@ -108,6 +108,9 @@ from .store import DEFAULT_CONFIG, Store, reported_config, satellite_config
 log = voice_logging.setup("voice-satellites", "SATELLITES")
 
 DATA_DIR = Path(os.environ.get("SATELLITES_DATA_DIR", "/data"))
+# Where the AirPlay receiver's pipes are, one per satellite (airplay.py). A
+# directory that is not there is no AirPlay, and nothing else changes.
+AIRPLAY_DIR = Path(os.environ.get("SATELLITES_AIRPLAY_DIR", "/airplay"))
 TTS_URL = os.environ.get("SATELLITES_TTS_URL", "").rstrip("/")
 TTS_VOICE = os.environ.get("SATELLITES_TTS_VOICE", "bm_george")
 # Only the seed of wake_words.json, read on the first start with a volume that
@@ -250,6 +253,9 @@ class Session:
         # Speaker or headphones, from the loopback (output.py). Channel 0 is
         # the loopback on a satellite with more than one channel.
         self.sense = outputs.OutputSense(self.mic_channels) if self.mic_channels > 1 else None
+        # AirPlay, mixed under the voice by the speaker loop (airplay.py).
+        self.music = airplay.Music(self.spk_rate)
+        self.music_sound: tuple[float, list[bytes]] | None = None  # for OutputSense
 
     def update(self, hello: dict) -> None:
         self.hello = hello
@@ -299,6 +305,17 @@ class Session:
     def mic_channels(self) -> int:
         return self.caps.get("mic", {}).get("channels", 4)
 
+    def engaged(self) -> bool:
+        """Music fades out: a conversation is open here, or voice is queued
+        or playing (airplay.py)."""
+        return self.conversation is not None or self.playing or not self.speaker.empty()
+
+    @property
+    def sounding(self) -> bool:
+        """Anything the hub is playing here, voice or music: OutputSense's
+        idle level is only what arrives with neither."""
+        return self.playing or self.music.playing
+
     def sound(self, start: float, end: float, pcm: bytes) -> outputs.Sound:
         """A sound played on this satellite, for OutputSense: its level, and
         the volume it played at, which a duck lowers."""
@@ -333,49 +350,135 @@ class Session:
         self.play_until = 0.0
         return had
 
-    async def speaker_loop(self, allowed: Callable[[], bool]) -> None:
-        """Play the queue at real time. `allowed` is Hub.speaker_allowed for
-        this satellite, and it is the last word: whatever queued audio -- a
-        reply handed over just as the speaker was turned off, a tone playing
-        when the satellite was forgotten -- goes nowhere once it says no. The
+    async def speaker_loop(self, allowed: Callable[[], bool],
+                           publish: Callable[[dict], None] = lambda e: None) -> None:
+        """Play at real time: the queue's voice, over this satellite's AirPlay
+        music (airplay.py). `allowed` is Hub.speaker_allowed for this
+        satellite, and it is the last word: whatever queued audio -- a reply
+        handed over just as the speaker was turned off, a tone playing when
+        the satellite was forgotten -- goes nowhere once it says no. The
         callers check too, but each check before a queue is a moment before
-        the audio plays."""
+        the audio plays. Music is still taken at its pace while it says no,
+        so that turning the speaker on again joins the song where it is."""
         seq = 0
-        chunk = self.spk_rate * 2 * SPEAKER_CHUNK_MS // 1000
+        samples = self.spk_rate * SPEAKER_CHUNK_MS // 1000
+        chunk, chunk_s = samples * 2, SPEAKER_CHUNK_MS / 1000
+        item: Clip | bytes | None = None
+        pcm, off, gen, first, sent = b"", 0, 0, 0.0, 0.0
         while True:
-            item = await self.speaker.get()
+            music_on = self.music.on()
+            if music_on != self.music.playing:
+                self.music.playing = music_on
+                if not music_on:
+                    self.music.clear()
+                publish({"type": "airplay", "satellite": self.id,
+                         "state": "playing" if music_on else "stopped"})
+            if item is None:
+                if not self.speaker.empty():
+                    item = self.speaker.get_nowait()
+                elif not music_on:
+                    item = await self._voice_or_music()
+                    if item is None:
+                        continue
+                if item is not None:
+                    pcm = item.pcm if isinstance(item, Clip) else item
+                    off, gen, first, sent = 0, self.speaker_gen, time.monotonic(), 0.0
+                    self.playing = True
             clip = item if isinstance(item, Clip) else None
-            pcm = clip.pcm if clip is not None else item
-            gen = self.speaker_gen
-            self.playing = True
-            # A reply arrives a sentence at a time. Each one carries on from
-            # the audio still buffered on the satellite rather than starting
-            # the clock again, or every sentence would add another
-            # SPEAKER_LEAD_S to what the satellite holds (300 ms of buffer).
-            base, sent, played = max(time.monotonic(), self.play_until), 0.0, True
-            first = time.monotonic()
-            for off in range(0, len(pcm), chunk):
-                # Checked per chunk: a reply is one item, and a flush that only
-                # emptied the queue would let a two-minute answer play on.
-                piece = pcm[off:off + chunk]
-                frame = struct.pack("<BBBBIQ", FRAME_SPEAKER, 0, 1, 0, seq, 0) + piece
-                if not await self.send_if(lambda: self.speaker_gen == gen and allowed(),
-                                          data=frame):
-                    played = False
-                    break
+            # The voice for this chunk, if any. A flush drops the item in hand:
+            # a reply is one item, and a flush that only emptied the queue
+            # would let a two-minute answer play on.
+            voice = None
+            if item is not None:
+                if gen != self.speaker_gen:
+                    item = self._voice_done(item, False, first, pcm, sent)
+                    continue
+                voice, off = pcm[off:off + chunk], off + chunk
+                if not voice and not music_on:
+                    item = self._voice_done(item, True, first, pcm, sent)  # an empty clip
+                    continue
+            # The music for it. Alone, it waits for a whole chunk, and at a
+            # start for airplay.PREFILL_S; under a voice it is padded.
+            music = None
+            if music_on:
+                if voice is None and not self.music.ready(chunk):
+                    self.music.arrived.clear()
+                    try:
+                        await asyncio.wait_for(self.music.arrived.wait(), airplay.IDLE_S)
+                    except TimeoutError:
+                        pass
+                    continue
+                music = self.music.take(chunk)
+            target = 0.0 if self.engaged() else 1.0
+            gain_from = self.music.gain
+            self.music.gain = airplay.fade_step(gain_from, target, chunk_s)
+            out = airplay.mix(voice, music, gain_from, self.music.gain,
+                              samples if music is not None else len(voice) // 2)
+            frame = struct.pack("<BBBBIQ", FRAME_SPEAKER, 0, 1, 0, seq, 0) + out
+            ok = await self.send_if(lambda: allowed() and (item is None or self.speaker_gen == gen),
+                                    data=frame)
+            if not ok and item is not None:
+                item = self._voice_done(item, False, first, pcm, sent)
+                continue
+            if ok:
                 if clip is not None:
                     clip.started = True
                 seq = (seq + 1) & 0xFFFFFFFF
-                sent += len(piece) / 2 / self.spk_rate
-                self.play_until = base + sent
-                ahead = self.play_until - time.monotonic()
-                if ahead > SPEAKER_LEAD_S:
-                    await asyncio.sleep(ahead - SPEAKER_LEAD_S)
-            self.playing = False
-            if played and sent and self.sense is not None:
-                self.sense.played(self.sound(first, self.play_until, pcm))
-            if clip is not None:
-                clip.finish(played)
+                dur = len(out) / 2 / self.spk_rate
+                # A reply arrives a sentence at a time. Each one carries on
+                # from the audio still buffered on the satellite rather than
+                # starting the clock again, or every sentence would add
+                # another SPEAKER_LEAD_S to what the satellite holds (300 ms).
+                self.play_until = max(time.monotonic(), self.play_until) + dur
+                if voice is not None:
+                    sent += dur
+                if music is not None:
+                    self._music_heard(out)
+            if item is not None and off >= len(pcm):
+                item = self._voice_done(item, True, first, pcm, sent)
+            ahead = self.play_until - time.monotonic()
+            if ahead > SPEAKER_LEAD_S:
+                await asyncio.sleep(ahead - SPEAKER_LEAD_S)
+            elif not ok:
+                await asyncio.sleep(chunk_s)  # not sending: take the music at its pace
+
+    async def _voice_or_music(self) -> Clip | bytes | None:
+        """Wait for either: a queued voice (returned), or music (None)."""
+        self.music.arrived.clear()
+        getter = asyncio.ensure_future(self.speaker.get())
+        waiter = asyncio.ensure_future(self.music.arrived.wait())
+        try:
+            await asyncio.wait({getter, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+            if not getter.done():
+                getter.cancel()
+        return getter.result() if getter.done() and not getter.cancelled() else None
+
+    def _voice_done(self, item: Clip | bytes, played: bool, first: float, pcm: bytes,
+                    sent: float) -> None:
+        """The voice in hand is over: played to its end, or cut off."""
+        self.playing = False
+        if played and sent and self.sense is not None:
+            self.sense.played(self.sound(first, self.play_until, pcm))
+        if isinstance(item, Clip):
+            item.finish(played)
+        return None
+
+    def _music_heard(self, out: bytes) -> None:
+        """Music at full level is a sound OutputSense can tell the output by,
+        two seconds at a time."""
+        if self.sense is None or self.music.gain < 0.99 or self.playing:
+            self.music_sound = None
+            return
+        now = time.monotonic()
+        if self.music_sound is None:
+            self.music_sound = (now, [])
+        start, parts = self.music_sound
+        parts.append(out)
+        if now - start >= 2.0:
+            self.sense.played(self.sound(start, self.play_until, b"".join(parts)))
+            self.music_sound = None
 
 
 async def _quietly(coro) -> bool:
@@ -688,6 +791,8 @@ class Hub:
             # played since it connected (output.py).
             "output": s.sense.output if s and s.sense else None,
             "output_at": s.sense.at if s and s.sense else None,
+            # Music from its AirPlay receiver is playing (airplay.py).
+            "airplay": s.music.playing if s else False,
             "boot": ({"reset_reason": s.hello.get("reset_reason"), **(s.hello.get("boot") or {})}
                      if s and s.hello.get("boot") is not None else None),
             "ota": _ota_view(s),
@@ -1001,6 +1106,26 @@ class Hub:
             now = time.monotonic()
             s.sense.played(s.sound(now, now + len(pcm) / 2 / earcons.RATE, pcm))
         return sent
+
+    def on_music(self, name: str, data: bytes) -> None:
+        """A block from an AirPlay pipe, named for a satellite by id or name.
+        Nobody connected and adopted by that name: dropped."""
+        found = lookup_satellite(name)
+        s = self.sessions.get(found[0]) if found else None
+        if s is not None and s.adopted:
+            s.music.feed(data)
+
+    async def watch_airplay(self, directory: Path) -> None:
+        """Read every pipe that appears in the AirPlay directory."""
+        loop = asyncio.get_running_loop()
+        pipes = airplay.Pipes(directory, lambda name, data: loop.call_soon_threadsafe(
+            self.on_music, name, data))
+        try:
+            while True:
+                pipes.scan()
+                await asyncio.sleep(airplay.SCAN_S)
+        finally:
+            pipes.stop()
 
     def on_output(self, s: Session) -> None:
         """The loopback settled a sound and said something new: speaker or
@@ -1797,6 +1922,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     hub.bridge = MqttBridge.from_env()
     await hub.bridge.start(hub, on_command=mqtt_command)
     hub.spawn(hub.voice.reconcile(), name="wake-words")
+    if AIRPLAY_DIR.is_dir():
+        hub.spawn(hub.watch_airplay(AIRPLAY_DIR), name="airplay")
     log.info("%d adopted satellites, %d firmware images in %s",
              len(hub.store.satellites), len(hub.store.firmware), DATA_DIR)
     try:
@@ -1875,7 +2002,7 @@ async def satellite_socket(ws: WebSocket) -> None:
     if old is not None:  # the device reconnected before the old socket timed out
         await old.ws.close(code=1012)
     hub.sessions[s.id] = s
-    player = asyncio.create_task(s.speaker_loop(lambda: hub.speaker_allowed(s)))
+    player = asyncio.create_task(s.speaker_loop(lambda: hub.speaker_allowed(s), hub.publish))
     log.info("satellite %s connected from %s (%s, firmware %s)", s.id, s.address, s.model, s.fw)
     boot = s.hello.get("boot") or {}
     if boot:
@@ -1899,7 +2026,7 @@ async def satellite_socket(ws: WebSocket) -> None:
                         q.put_nowait(pcm)
                     if s.listener is not None:
                         s.offer_mic(pcm)
-                    if s.sense is not None and s.sense.feed(pcm, time.monotonic(), s.playing):
+                    if s.sense is not None and s.sense.feed(pcm, time.monotonic(), s.sounding):
                         hub.on_output(s)
             elif msg.get("text") is not None:
                 await on_message(s, json.loads(msg["text"]))
@@ -1938,6 +2065,8 @@ async def on_message(s: Session, msg: dict) -> None:
             if time.monotonic() <= s.volume_press_until:
                 s.volume_press_until = 0.0
                 hub.take_own_volume(s)
+            if s.music.playing:
+                s.music.buffered(msg.get("spk_buffered_ms"))
         hub.publish({"type": "status", "satellite": s.id, "status": s.status})
         # The privacy mute stops everything: nothing more will arrive to be
         # heard, and a conversation that is waiting for it, or answering it,
