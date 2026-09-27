@@ -6,7 +6,7 @@ from typing import Final
 
 DOMAIN: Final = "calliope"
 
-DEFAULT_URL: Final = "https://orko.gabrielbelli.com:30080"
+DEFAULT_URL: Final = "https://calliope.gabrielbelli.com"
 
 # The one bus event every satellite event is fired as, for YAML automations.
 # Its data is the hub's own event plus "device_id", "satellite_name" and

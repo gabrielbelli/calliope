@@ -26,7 +26,8 @@ pio run -e usb -t upload
 1. On first boot the satellite opens a Wi-Fi network called
    `calliope-sat-XXXX`, and the ring breathes orange.
 2. Join it from a phone. Choose your 2.4 GHz network and enter the password.
-   The hub address is pre-filled with `wss://orko.gabrielbelli.com:30080`.
+   The hub address is pre-filled with `wss://calliope.gabrielbelli.com`, the lab's
+   HAProxy on pfSense in front of the gateway (`orko:30080`).
 3. The satellite connects, and the ring breathes white while it waits.
 4. Adopt it on the **Satellites** tab.
 
@@ -45,7 +46,7 @@ CALLIOPE_SATELLITE=kitchen pio run -e ota -t upload     # or CALLIOPE_SATELLITE=
 ```
 
 This builds the image, signs it, uploads it to the hub (`CALLIOPE_URL`, default
-`https://orko.gabrielbelli.com:30080`), and asks the hub to update the
+`https://calliope.gabrielbelli.com`), and asks the hub to update the
 satellite. The satellite pulls the image over its own connection. It keeps the
 new image only if it reaches the hub again afterwards; otherwise the bootloader
 rolls back. An image can also be uploaded from the Satellites tab, but only
@@ -198,6 +199,12 @@ not at all. Fitting R37 alone would also put KEY1's own 10 kΩ pull-up (R50) in
 parallel with the ladder's, which moves VOL+ to about 0.68 V, where it reads
 as VOL−. So KEY1 as a seventh button needs R37 fitted and R50 removed; the
 firmware already reads it (below 250 mV, as `key1`), and the hub lists it.
+
+**Behind a proxy that routes by host name.** The WebSocket library always
+sends the port in its `Host` header (`calliope.gabrielbelli.com:443`), so a
+proxy that matches the host exactly must accept it with the port too, or it
+answers 404 and the board keeps retrying. The lab's HAProxy rule lists both
+(27 Sep 2026).
 
 ## Sound out
 

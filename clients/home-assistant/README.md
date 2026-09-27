@@ -49,7 +49,7 @@ and choose **Calliope**.
 
 | Field | |
 |---|---|
-| URL | The gateway, `https://orko.gabrielbelli.com:30080` by default |
+| URL | The gateway, `https://calliope.gabrielbelli.com` by default: the lab's HAProxy on pfSense, in front of `orko:30080` |
 | API key | Only if the gateway sets `GATEWAY_API_KEYS`. Leave it empty for a keyless gateway |
 | Verify the TLS certificate | On. Turn it off only for a self-signed certificate |
 
