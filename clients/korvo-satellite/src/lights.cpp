@@ -16,6 +16,8 @@ static volatile bool dark = false;
 static volatile int brightness_pct = 100;
 static volatile uint32_t identify_until = 0;
 static volatile int ota_pct = -1;
+static volatile int level_lit = 0;
+static volatile uint32_t level_until = 0;
 
 struct HubLayer {
   Mode mode = Mode::Off;
@@ -45,6 +47,11 @@ static void spin(uint32_t t, uint8_t r, uint8_t g, uint8_t b, uint32_t period) {
 static void render(uint32_t t) {
   if (dark) {
     fill(0, 0, 0);
+    return;
+  }
+  if ((int32_t)(level_until - t) > 0) {
+    for (int i = 0; i < LED_COUNT; i++)
+      strip.setPixelColor(i, i < level_lit ? 90 : 3, i < level_lit ? 90 : 3, i < level_lit ? 90 : 3);
     return;
   }
   if (muted) {
@@ -132,6 +139,10 @@ void lights_begin() {
 }
 
 void lights_dark(bool d) { dark = d; }
+void lights_level(int lit, uint32_t ms) {
+  level_lit = lit < 0 ? 0 : lit > LED_COUNT ? LED_COUNT : lit;
+  level_until = millis() + ms;
+}
 void lights_brightness(int percent) { brightness_pct = percent < 1 ? 1 : percent > 100 ? 100 : percent; }
 void lights_status(Status s) { status = s; }
 void lights_muted(bool m) { muted = m; }

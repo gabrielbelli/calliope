@@ -4357,7 +4357,7 @@ function satAdoptedMarkup(u) {
       <div class="hint sat-why"></div>
       <div class="grid2">
         <div><label for="${u}-vol">Volume</label>
-          <div class="slider"><input type="range" id="${u}-vol" min="0" max="100" step="5" data-cfg="volume">
+          <div class="slider"><input type="range" id="${u}-vol" min="0" max="12" step="1" data-cfg="volume" data-steps="12">
             <output for="${u}-vol"></output></div></div>
         <div><label for="${u}-gain">Mic gain</label>
           <div class="slider"><input type="range" id="${u}-gain" min="0" max="36" step="3" data-cfg="mic_gain_db">
@@ -4486,8 +4486,9 @@ function satelliteRow(n) {
   li.addEventListener("change", ev => {
     const t = ev.target;
     if (t.dataset.cfg) {
-      satellitePatch(li, { [t.dataset.cfg]: t.type === "checkbox" ? t.checked : Number(t.value) },
-        satNoteFor(li, t));
+      const value = t.type === "checkbox" ? t.checked
+        : t.dataset.steps ? Math.round(Number(t.value) * 100 / Number(t.dataset.steps)) : Number(t.value);
+      satellitePatch(li, { [t.dataset.cfg]: value }, satNoteFor(li, t));
     } else if (t.dataset.btn) satButtonPicked(li, t);
     else if (t.dataset.hook) satButtonsSave(li);
   });
@@ -4608,16 +4609,20 @@ function satTryHint(n) {
 
 /* paintRange() after every value set in code: a value set without an input
    event leaves the track painted at its old fill. */
+/* THE VOLUME IS IN THE SATELLITE'S STEPS, twelve, one to an LED of its ring
+   (data-steps): the slider moves a step at a time, and the hub is told the
+   percent that step is. */
 function satLevel(input, value) {
   if (value === undefined || value === null || input === document.activeElement) return;
+  if (input.dataset.steps) value = Math.round(Number(value) * Number(input.dataset.steps) / 100);
   if (String(input.value) !== String(value)) input.value = value;
   satLevelSay(input);
   paintRange(input);
 }
 function satLevelSay(input) {
-  const v = Number(input.value), db = input.dataset.cfg === "mic_gain_db";
-  satSet(input.parentElement.querySelector("output"), db ? `${v} dB` : `${v}%`);
-  input.setAttribute("aria-valuetext", db ? `${v} dB` : `${v} percent`);
+  const v = Number(input.value), db = input.dataset.cfg === "mic_gain_db", steps = input.dataset.steps;
+  satSet(input.parentElement.querySelector("output"), steps ? `${v} of ${steps}` : db ? `${v} dB` : `${v}%`);
+  input.setAttribute("aria-valuetext", steps ? `step ${v} of ${steps}` : db ? `${v} dB` : `${v} percent`);
 }
 
 /* ---- Buttons ---------------------------------------------------------- */

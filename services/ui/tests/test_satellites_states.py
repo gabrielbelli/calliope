@@ -13,7 +13,7 @@ What they prevent:
     wrong no easier to find than the rows that are fine;
   * a row that claims a wake word nobody has saved, or hides that a word it
     is assigned is still downloading;
-  * a button mapping sent that the hub refuses, or one that maps Rec.
+  * a button mapping sent that the hub refuses, or one with no mute left in it.
 """
 
 from test_satellites_writes import pytestmark, run  # noqa: F401

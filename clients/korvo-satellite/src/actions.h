@@ -13,3 +13,11 @@ const char *action_name(Action a);
 
 // Brightness steps for Dimmer and Brighter, in percent.
 int brightness_step(int percent, bool up);
+
+// The volume has VOLUME_STEPS steps, one to an LED of the ring: step k is
+// k * 100 / VOLUME_STEPS percent, about 4 dB apart (the codec's volume is 0.5
+// dB a percent). A volume between steps, set on the hub, moves to the next one.
+static const int VOLUME_STEPS = 12;
+int volume_step(int percent, bool up);
+int volume_level(int percent);  // 0..VOLUME_STEPS, the LEDs that show it
+static const uint32_t VOLUME_SHOW_MS = 1500;  // a change of volume shows on the ring this long

@@ -168,7 +168,9 @@ it has reported them.
 ## Buttons
 
 Every press and release is reported to the hub, and each may also do one
-thing here, chosen on the hub (`src/actions.h`): the privacy mute, volume ±10 %,
+thing here, chosen on the hub (`src/actions.h`): the privacy mute, volume up or
+down a step (twelve, one to an LED; the ring shows the level for 1.5 s, and
+does for a volume the hub sets too, unless it is dark),
 night mode (the ring off or on), or the ring's brightness down or up a step.
 They run here so they work with the hub down and only a button can undo the
 mute. The hub sends the table as `button_actions`; until it does, Rec mutes

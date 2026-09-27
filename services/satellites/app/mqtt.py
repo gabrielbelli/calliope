@@ -139,6 +139,9 @@ def parse_url(url: str) -> dict:
     }
 
 
+VOLUME_STEP = round(100 / 12, 4)
+
+
 def parse_command(field: str, payload: str) -> dict | None:
     """A Home Assistant command as a PATCH /satellites/{id} change, or None.
 
@@ -225,7 +228,8 @@ def discovery_configs(satellite: dict, *, prefix: str, base: str,
             "name": "Volume", "icon": "mdi:volume-high", "state_topic": state,
             "value_template": "{{ value_json.volume }}",
             "command_topic": f"{root}/set/volume",
-            "min": 0, "max": 100, "step": 1, "mode": "slider",
+            # The satellite's twelve steps, one to an LED of its ring.
+            "min": 0, "max": 100, "step": VOLUME_STEP, "mode": "slider",
             "unit_of_measurement": "%", **hub_only}),
         ("sensor", "output", {
             # "speaker" or "jack" (headphones or aux), known once something has played

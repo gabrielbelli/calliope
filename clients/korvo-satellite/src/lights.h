@@ -18,6 +18,9 @@ void lights_begin();
 // Dark overrides every layer, status included: a bedroom satellite stays unlit
 // through reboots, reconnects and updates.
 void lights_dark(bool dark);
+// For ms, the ring shows a level: the first `lit` LEDs on, the rest faint.
+// Over everything but the dark, which a bedroom satellite keeps.
+void lights_level(int lit, uint32_t ms);
 // Percent of whatever is shown, the privacy mute's red kept at a quarter or
 // more so that it is never too dim to see.
 void lights_brightness(int percent);

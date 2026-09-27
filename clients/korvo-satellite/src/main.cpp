@@ -96,8 +96,9 @@ static void run_action(Action a) {
       return;
     case Action::VolumeUp:
     case Action::VolumeDown:
-      settings.volume = constrain(settings.volume + (a == Action::VolumeUp ? 10 : -10), 0, 100);
+      settings.volume = volume_step(settings.volume, a == Action::VolumeUp);
       spk_set_volume(settings.volume);
+      lights_level(volume_level(settings.volume), VOLUME_SHOW_MS);
       break;
     case Action::Lights:
       settings.lights_enabled = !settings.lights_enabled;

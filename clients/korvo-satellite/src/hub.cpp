@@ -316,7 +316,12 @@ static void apply_button_actions(JsonObjectConst m) {
 }
 
 static void apply_config(JsonVariantConst c) {
-  if (c["volume"].is<int>()) spk_set_volume(settings.volume = c["volume"]);
+  // A new volume from the hub shows on the ring, as a button's does; the same
+  // one again (every welcome carries it) does not.
+  if (c["volume"].is<int>() && c["volume"].as<int>() != settings.volume) {
+    spk_set_volume(settings.volume = c["volume"]);
+    lights_level(volume_level(settings.volume), VOLUME_SHOW_MS);
+  }
   if (c["mic_gain_db"].is<float>()) mic_set_gain_db(settings.mic_gain_db = c["mic_gain_db"]);
   if (c["mic_enabled"].is<bool>()) settings.mic_enabled = c["mic_enabled"];
   if (c["speaker_enabled"].is<bool>()) {

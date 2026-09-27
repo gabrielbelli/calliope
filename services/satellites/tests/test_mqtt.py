@@ -270,7 +270,7 @@ async def test_discovery_payloads_have_the_shapes_home_assistant_reads(hub, brok
 
     vol = c["volume"]
     assert (vol["min"], vol["max"], vol["step"], vol["command_topic"]) == (
-        0, 100, 1, f"{ROOT}/set/volume")
+        0, 100, 8.3333, f"{ROOT}/set/volume")
 
     assert c["button_play"]["event_types"] == ["press", "release"]
     assert c["button_play"]["state_topic"] == f"{ROOT}/button/play"

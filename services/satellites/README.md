@@ -418,7 +418,7 @@ choice:
 | Action | Runs on | What happens |
 |---|---|---|
 | `mute` | the satellite | Toggles the privacy mute |
-| `volume_up`, `volume_down` | the satellite | Volume ±10 % |
+| `volume_up`, `volume_down` | the satellite | Volume up or down one of 12 steps (step k is k × 100 / 12 %, about 4 dB apart), and the ring shows the level for 1.5 s |
 | `lights` | the satellite | Night mode: the ring off, or back on |
 | `dimmer`, `brighter` | the satellite | Brightness down or up a step (10, 20, 35, 60, 100 %) |
 | `ptt` | the hub | Push-to-talk: listen as if a wake word had been heard, and do what the `ptt` entry in `wake_words.json` says |
