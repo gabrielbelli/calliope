@@ -167,16 +167,19 @@ it has reported them.
 
 ## Buttons
 
-Every press and release is reported to the hub, which decides what they do.
-Four things are handled on the satellite as well, because they must work
-whatever the hub does:
+Every press and release is reported to the hub, and each may also do one
+thing here, chosen on the hub (`src/actions.h`): the privacy mute, volume ±10 %,
+night mode (the ring off or on), or the ring's brightness down or up a step.
+They run here so they work with the hub down and only a button can undo the
+mute. The hub sends the table as `button_actions`; until it does, Rec mutes
+and VOL+/- set the volume. A table without a mute keeps Rec as the mute. A
+setting a button changes is saved and reported at once, in a status marked
+`"cause": "button"`. Two holds are recovery, whatever the buttons are set to:
 
-| Button | On the satellite |
+| Hold | |
 |---|---|
-| REC | toggles the privacy mute |
-| VOL+ / VOL- | volume ±10 %, while `local_volume_buttons` is on |
-| SET, held 5 s | reopens the Wi-Fi setup network |
-| MODE, held 10 s | factory reset: forgets Wi-Fi, hub and adoption |
+| SET, 5 s | reopens the Wi-Fi setup network |
+| MODE, 10 s | factory reset: forgets Wi-Fi, hub and adoption |
 
 The six are one resistor ladder on GPIO39 (the mic board's sheet 3: 0.38 V for
 VOL+ up to 2.41 V for REC, 3.1 V idle). Each status carries `buttons_mv`, the
@@ -189,8 +192,8 @@ Its only path to the ESP32 is R37, a 0 Ω link to GPIO39 that is not fitted
 (main board sheet 2). Measured on 27 Sep 2026: pressing it moves the ladder
 not at all. Fitting R37 alone would also put KEY1's own 10 kΩ pull-up (R50) in
 parallel with the ladder's, which moves VOL+ to about 0.68 V, where it reads
-as VOL−. So KEY1 as a seventh button needs R37 fitted, R50 removed, and a
-threshold here for its 0 V.
+as VOL−. So KEY1 as a seventh button needs R37 fitted and R50 removed; the
+firmware already reads it (below 250 mV, as `key1`), and the hub lists it.
 
 ## Sound out
 

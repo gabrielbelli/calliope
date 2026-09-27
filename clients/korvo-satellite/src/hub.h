@@ -15,4 +15,6 @@ void hub_loop();   // from loop()
 bool hub_adopted();
 bool hub_connected();
 void hub_send_button(const char *name, const char *action, uint32_t held_ms);
-void hub_send_status();
+// cause "button": sent because one of this board's buttons changed a setting
+// here, so the hub takes the settings in it as its own (services/satellites).
+void hub_send_status(const char *cause = nullptr);

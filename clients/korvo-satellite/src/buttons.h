@@ -1,8 +1,11 @@
-// Six buttons on one ADC resistor ladder. Only one reads at a time.
+// Six buttons on one ADC resistor ladder, and KEY1 on the main board's edge,
+// which reaches the same pin only once R37 is fitted and R50 removed (the
+// README's Buttons). Only one reads at a time.
 #pragma once
 #include <stdint.h>
 
-enum class Button : uint8_t { None, VolUp, VolDown, Set, Play, Mode, Rec };
+enum class Button : uint8_t { None, VolUp, VolDown, Set, Play, Mode, Rec, Key1 };
+static const int BUTTON_COUNT = 7;  // the real ones: Button - 1 indexes a table of them
 
 const char *button_name(Button b);
 

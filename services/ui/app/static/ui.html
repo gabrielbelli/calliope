@@ -3912,7 +3912,7 @@ const SAT_COPY = {
   tryMuted: "Muted on the device, so Listen 5 s hears nothing.",
   devOffline: "Offline, so Reboot, Move and Update wait for it to reconnect.",
   devUpdating: "Reboot, Move and Update wait until this update finishes.",
-  btnLocalVol: "Turn this off to map Vol + and Vol − to something else.",
+  btnNoMute: "Keep Mute mic on one button at least, or a muted satellite could never be unmuted.",
   /* The scheme without its colon and slashes: test_ui.py keeps every plain
      http address out of this file, so a fetch to one cannot hide in copy. */
   btnBadUrl: "Write the webhook as a full web address, starting with https or http.",
@@ -3984,6 +3984,12 @@ const SAT_COPY = {
   talks: "{b} talks",
   stops: "{b} stops",
   hooks: "{b} calls a webhook",
+  mutes: "{b} mutes",
+  louder: "{b} turns it up",
+  quieter: "{b} turns it down",
+  switches: "{b} switches the lights",
+  dims: "{b} dims",
+  brightens: "{b} brightens",
   rssi: "{n} dBm, {how}",
   connected: "since {clock}",
   healthOffline: "{n} offline",
@@ -4356,6 +4362,9 @@ function satAdoptedMarkup(u) {
         <div><label for="${u}-gain">Mic gain</label>
           <div class="slider"><input type="range" id="${u}-gain" min="0" max="36" step="3" data-cfg="mic_gain_db">
             <output for="${u}-gain"></output></div></div>
+        <div><label for="${u}-bright">Light brightness</label>
+          <div class="slider"><input type="range" id="${u}-bright" min="10" max="100" step="5" data-cfg="brightness">
+            <output for="${u}-bright"></output></div></div>
       </div>
       <div class="hint sat-output"></div>
       <div class="row sat-switches">
@@ -4397,13 +4406,13 @@ function satAdoptedMarkup(u) {
       <details class="sub sat-buttons">
         <summary>Buttons<span class="sum-note"></span></summary>
         <div class="body">
-          <label class="checkline"><input type="checkbox" data-cfg="local_volume_buttons"> Volume buttons change the volume</label>
-          <div class="hint sat-localvol"></div>
           <div class="sat-btns" role="group" aria-label="Button actions">
             <span></span><span class="hd" aria-hidden="true">When pressed</span><span class="hd" aria-hidden="true">When released</span>
           </div>
           <div class="hint">Talk listens as if it heard a wake word, and Stop cuts off what it is saying.</div>
-          <div class="hint">Rec is the privacy mute and cannot be remapped.</div>
+          <div class="hint">Mute, volume and lights happen on the device itself, so they work with the hub down.</div>
+          <div class="hint">Holding Set 5 s opens Wi-Fi setup and Mode 10 s resets it, whatever they are set to.</div>
+          <div class="hint">Side works once R37 is fitted and R50 removed on the board (firmware README).</div>
           <div class="sat-note" aria-live="polite"></div>
         </div>
       </details>
@@ -4553,8 +4562,9 @@ function satelliteUpdate(li, n) {
   satSet(q(".sat-output"), n.online && n.output === "jack" ? SAT_COPY.outJack : "");
   satLevel(q('[data-cfg="volume"]'), cfg.volume);
   satLevel(q('[data-cfg="mic_gain_db"]'), cfg.mic_gain_db);
+  satLevel(q('[data-cfg="brightness"]'), cfg.brightness);
   const idle = el => el !== document.activeElement;
-  for (const key of ["speaker_enabled", "mic_enabled", "lights_enabled", "local_volume_buttons"]) {
+  for (const key of ["speaker_enabled", "mic_enabled", "lights_enabled"]) {
     const box = q(`[data-cfg="${key}"]`);
     if (idle(box)) box.checked = cfg[key] !== false;
   }
@@ -4615,9 +4625,16 @@ function satLevelSay(input) {
    "play=ptt set.release=stop", which nobody can guess. The hub replaces the
    whole mapping on PATCH, so every change sends all of it, built from every
    select; "none" is left out, and a webhook carries its address. */
-const SAT_ACTIONS = [["ptt", "Talk"], ["stop", "Stop"], ["none", "Nothing"], ["webhook", "Webhook"]];
-const SAT_BUTTONS = { play: "Play", set: "Set", mode: "Mode", vol_up: "Vol +",
-                      vol_down: "Vol −", rec: "Rec" };
+const SAT_ACTIONS = [["none", "Nothing"], ["ptt", "Talk"], ["stop", "Stop"], ["mute", "Mute mic"],
+                     ["volume_up", "Volume up"], ["volume_down", "Volume down"],
+                     ["lights", "Night mode (lights on/off)"], ["dimmer", "Dimmer"],
+                     ["brighter", "Brighter"], ["webhook", "Webhook"]];
+/* In the order they sit on the board, left to right (the mic board's sheet
+   3), then the one on the main board's edge. */
+const SAT_BUTTONS = { rec: "Rec", mode: "Mode", play: "Play", set: "Set", vol_down: "Vol −",
+                      vol_up: "Vol +", key1: "Side" };
+const SAT_VERBS = { ptt: "talks", stop: "stops", mute: "mutes", volume_up: "louder",
+                    volume_down: "quieter", lights: "switches", dimmer: "dims", brighter: "brightens" };
 /* The hub's ButtonAction pattern, so nothing is sent that it would refuse. */
 const SAT_WEBHOOK = /^https?:\/\/[^\s/?#@]+(\/\S*)?$/;
 
@@ -4625,28 +4642,25 @@ function satButtonName(key) {
   const k = String(key);
   return SAT_BUTTONS[k] || (k.charAt(0).toUpperCase() + k.slice(1)).replace(/_/g, " ");
 }
-/* The buttons the firmware reports, less Rec (its own privacy mute, which
-   the hub refuses to map) and less the volume pair while the satellite uses
-   them itself; plus any button already mapped, so nothing stored is hidden.
-   A satellite not seen since the hub started has no report, so the three
-   buttons every board has stand in. */
+/* EVERY BUTTON, NONE SPECIAL. The buttons the firmware reports, Rec and the
+   volume pair included: what each does is a choice now, the mute one of the
+   choices. Plus any button already mapped, so nothing stored is hidden. A
+   satellite not seen since the hub started has no report, so the six on the
+   top of every board stand in. */
 function satButtonKeys(n) {
-  const cfg = n.config || {}, mapping = cfg.buttons || {};
+  const mapping = (n.config || {}).buttons || {};
   const caps = n.caps && Array.isArray(n.caps.buttons)
     ? n.caps.buttons.filter(b => typeof b === "string") : [];
-  const local = cfg.local_volume_buttons !== false;
-  const keys = (caps.length ? caps : ["play", "set", "mode"])
-    .filter(k => k !== "rec" && !(local && (k === "vol_up" || k === "vol_down")));
-  for (const k of Object.keys(mapping)) if (k !== "rec" && !keys.includes(k)) keys.push(k);
-  /* Play, Set and Mode first, the order the note reads them in ("Play talks,
-     Set stops"), rather than the order the firmware happens to list them. */
+  const keys = caps.length ? [...caps] : Object.keys(SAT_BUTTONS).filter(k => k !== "key1");
+  for (const k of Object.keys(mapping)) if (!keys.includes(k)) keys.push(k);
+  /* The order they sit in, rather than the order the firmware lists them. */
   const rank = k => { const at = Object.keys(SAT_BUTTONS).indexOf(k); return at < 0 ? 99 : at; };
   return keys.sort((a, b) => rank(a) - rank(b));
 }
 function satMapping(entries) {
   const mapping = {};
   for (const e of entries) {
-    if (e.action === "none" || e.button === "rec") continue;
+    if (e.action === "none") continue;
     let act = e.action;
     if (act === "webhook") {
       if (!SAT_WEBHOOK.test(e.url) || e.url.length > 480) return { error: SAT_COPY.btnBadUrl };
@@ -4654,12 +4668,16 @@ function satMapping(entries) {
     }
     (mapping[e.button] = mapping[e.button] || {})[e.edge] = act;
   }
+  /* The hub refuses a mapping without a mute: only a button undoes it. */
+  if (!Object.values(mapping).some(edges => Object.values(edges).includes("mute"))) {
+    return { error: SAT_COPY.btnNoMute };
+  }
   return { mapping };
 }
 function satButtonsNote(mapping, keys) {
   const said = edge => keys.map(key => {
     const act = (mapping[key] || {})[edge] || "", b = satButtonName(key);
-    return act === "ptt" ? satText("talks", { b }) : act === "stop" ? satText("stops", { b })
+    return SAT_VERBS[act] ? satText(SAT_VERBS[act], { b })
       : act.startsWith("webhook:") ? satText("hooks", { b }) : null;
   }).filter(Boolean);
   const press = said("press"), release = press.length ? [] : said("release");
@@ -4723,7 +4741,6 @@ function satButtons(li, n) {
     }
     field.parentElement.hidden = pick.value !== "webhook";
   }
-  satSet(li.querySelector(".sat-localvol"), cfg.local_volume_buttons !== false ? SAT_COPY.btnLocalVol : "");
   satSet(li.querySelector(".sat-buttons .sum-note"), satButtonsNote(mapping, keys));
 }
 
@@ -6083,6 +6100,15 @@ function satellitesListen() {
   };
 }
 
+/* What a button changed on the device, in words. */
+function satSettingsSaid(s) {
+  const said = [];
+  if (typeof s.volume === "number") said.push(`volume ${s.volume}%`);
+  if (typeof s.lights_enabled === "boolean") said.push(`lights ${s.lights_enabled ? "on" : "off"}`);
+  if (typeof s.brightness === "number") said.push(`brightness ${s.brightness}%`);
+  return said.join(", ") || "nothing";
+}
+
 function satEventWhat(ev) {
   return ev.type === "button" ? `${satButtonName(ev.button)} ${ev.action}${ev.held_ms ? ` after ${ev.held_ms} ms` : ""}`
     : ev.type === "ota" ? `update ${ev.state}${ev.pct != null ? " " + ev.pct + "%" : ""}${ev.error ? ": " + ev.error : ""}`
@@ -6091,7 +6117,7 @@ function satEventWhat(ev) {
     : ev.type === "conversation_started" ? satTalkStarted(ev)
     : ev.type === "conversation_ended" ? satTalkEnded(ev)
     : ev.type === "triggered" ? satTriggered(ev)
-    : ev.type === "volume" ? `volume set to ${ev.volume}% on the device`
+    : ev.type === "settings" ? `set on the device: ${satSettingsSaid(ev.settings || {})}`
     : ev.type === "output" ? (ev.output === "jack" ? "playing through its jack (aux)" : "playing through its speaker")
     : ev.type;
 }

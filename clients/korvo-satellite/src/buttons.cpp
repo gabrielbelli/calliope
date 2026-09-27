@@ -6,8 +6,10 @@
 
 // Ladder voltages from the mic board sheet: VOL+ 0.38, VOL- 0.82, SET 1.11,
 // PLAY 1.65, MODE 1.98, REC 2.41 V; idle is the 3.3 V pull-up. Thresholds are
-// the midpoints.
+// the midpoints. KEY1, once wired, shorts the pin to ground: the ADC's floor,
+// below VOL+'s 0.38 V (measured 0.41).
 static Button classify(uint32_t mv) {
+  if (mv < 250) return Button::Key1;
   if (mv < 600) return Button::VolUp;
   if (mv < 965) return Button::VolDown;
   if (mv < 1380) return Button::Set;
@@ -25,6 +27,7 @@ const char *button_name(Button b) {
     case Button::Play: return "play";
     case Button::Mode: return "mode";
     case Button::Rec: return "rec";
+    case Button::Key1: return "key1";
     default: return "none";
   }
 }

@@ -3,6 +3,9 @@
 #pragma once
 #include <Arduino.h>
 
+#include "actions.h"
+#include "buttons.h"
+
 struct Settings {
   String hub;    // ws://host:port or wss://host:port, set in the setup portal
   String token;  // issued by the hub on adoption; empty = not adopted
@@ -11,8 +14,14 @@ struct Settings {
   float mic_gain_db = 30;
   bool mic_enabled = true;
   bool speaker_enabled = true;
-  bool local_volume_buttons = true;  // VOL+/- act locally as well as reporting
-  bool lights_enabled = true;        // false: the ring stays dark, whatever happens
+  bool lights_enabled = true;  // false: the ring stays dark, whatever happens
+  int brightness = 100;        // percent, of whatever the ring shows
+  // What each button does here, on press and on release (Action, indexed by
+  // Button - 1). The hub sends its own; this is the board's until it does,
+  // and what it was before there was a choice: Rec mutes, VOL+/- set volume.
+  uint8_t actions[BUTTON_COUNT][2] = {
+      {(uint8_t)Action::VolumeUp, 0}, {(uint8_t)Action::VolumeDown, 0}, {0, 0}, {0, 0},
+      {0, 0}, {(uint8_t)Action::Mute, 0}, {0, 0}};
 };
 
 extern Settings settings;

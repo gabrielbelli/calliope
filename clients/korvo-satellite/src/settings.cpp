@@ -31,8 +31,14 @@ void settings_load() {
   settings.mic_gain_db = prefs.getFloat("mic_gain", 30);
   settings.mic_enabled = prefs.getBool("mic_on", true);
   settings.speaker_enabled = prefs.getBool("spk_on", true);
-  settings.local_volume_buttons = prefs.getBool("local_vol", true);
   settings.lights_enabled = prefs.getBool("lights_on", true);
+  settings.brightness = prefs.getInt("bright", 100);
+  if (prefs.getBytesLength("actions") == sizeof(settings.actions))
+    prefs.getBytes("actions", settings.actions, sizeof(settings.actions));
+  else if (!prefs.getBool("local_vol", true))
+    // Saved by firmware from before the choice, with the volume buttons
+    // handed to the hub: they do nothing here.
+    settings.actions[0][0] = settings.actions[1][0] = (uint8_t)Action::None;
   prefs.end();
 }
 
@@ -45,8 +51,9 @@ void settings_save() {
   prefs.putFloat("mic_gain", settings.mic_gain_db);
   prefs.putBool("mic_on", settings.mic_enabled);
   prefs.putBool("spk_on", settings.speaker_enabled);
-  prefs.putBool("local_vol", settings.local_volume_buttons);
   prefs.putBool("lights_on", settings.lights_enabled);
+  prefs.putInt("bright", settings.brightness);
+  prefs.putBytes("actions", settings.actions, sizeof(settings.actions));
   prefs.end();
 }
 

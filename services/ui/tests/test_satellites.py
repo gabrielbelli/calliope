@@ -159,14 +159,17 @@ def test_a_satellites_own_settings_are_folded_under_it_and_start_closed():
     Buttons; and the device's facts and every consequential action in
     Device, two levels down."""
     assert '<details class="sat-row">' in ADOPTED, "the row starts open, or is not a disclosure"
-    for control in ('data-cfg="volume"', 'data-cfg="mic_gain_db"', 'data-cfg="speaker_enabled"',
-                    'data-cfg="mic_enabled"', 'data-cfg="lights_enabled"', 'data-act="wakewords"'):
+    for control in ('data-cfg="volume"', 'data-cfg="mic_gain_db"', 'data-cfg="brightness"',
+                    'data-cfg="speaker_enabled"', 'data-cfg="mic_enabled"', 'data-cfg="lights_enabled"',
+                    'data-act="wakewords"'):
         assert control in OPEN_ROW, f"{control} is not on the open row"
     for control in ('class="row sat-sayform"', 'data-act="identify"', 'data-act="tone"',
                     'data-act="listen"', 'data-act="stop"', 'data-act="lights"', "<audio"):
         assert control in TRY, f"{control} is not in Try it"
-    for control in ('data-cfg="local_volume_buttons"', 'class="sat-btns"'):
-        assert control in BUTTONS, f"{control} is not in Buttons"
+    assert 'class="sat-btns"' in BUTTONS, "the mapping is not in Buttons"
+    # No button is set apart from the rest: the volume pair has no switch of
+    # its own any more, it is two rows of the grid like the others.
+    assert "local_volume_buttons" not in ADOPTED
     for control in ('<dl class="facts">', 'data-act="update"', 'class="row sat-rename"',
                     'data-act="reboot"', 'data-act="move"', 'data-act="forget"',
                     'class="row sat-moveform"'):

@@ -11,6 +11,7 @@
 #include <mbedtls/sha256.h>
 
 #include "board.h"
+#include "actions.h"
 #include "boot.h"
 #include "buttons.h"
 #include "ca.h"
@@ -223,6 +224,7 @@ static void send_hello() {
   d["mic_gain_db"] = settings.mic_gain_db;
   d["speaker_enabled"] = settings.speaker_enabled;
   d["lights_enabled"] = settings.lights_enabled;
+  d["brightness"] = settings.brightness;
   JsonObject caps = d["caps"].to<JsonObject>();
   JsonObject mic = caps["mic"].to<JsonObject>();
   mic["rate"] = MIC_RATE;
@@ -234,7 +236,11 @@ static void send_hello() {
   spk["format"] = "s16le";
   caps["lights"] = LED_COUNT;
   JsonArray b = caps["buttons"].to<JsonArray>();
-  for (const char *n : {"vol_up", "vol_down", "set", "play", "mode", "rec"}) b.add(n);
+  for (uint8_t i = 1; i <= BUTTON_COUNT; i++) b.add(button_name((Button)i));
+  // What button_actions may name: the hub sends only these, and only to a
+  // board that says it has them.
+  JsonArray acts = caps["actions"].to<JsonArray>();
+  for (uint8_t i = 1; i <= (uint8_t)Action::Brighter; i++) acts.add(action_name((Action)i));
   // Absent on older firmware, which ignores these messages: the hub checks
   // before it sends them.
   if (sig_required()) caps["ota_key"] = sig_key_id();
@@ -246,10 +252,11 @@ static void send_hello() {
   send_json(d);
 }
 
-void hub_send_status() {
+void hub_send_status(const char *cause) {
   if (!connected) return;
   JsonDocument d;
   d["type"] = "status";
+  if (cause) d["cause"] = cause;
   d["uptime_s"] = millis() / 1000;
   d["rssi"] = WiFi.RSSI();
   d["heap"] = ESP.getFreeHeap();
@@ -260,6 +267,7 @@ void hub_send_status() {
   d["mic_gain_db"] = settings.mic_gain_db;
   d["speaker_enabled"] = settings.speaker_enabled;
   d["lights_enabled"] = settings.lights_enabled;
+  d["brightness"] = settings.brightness;
   d["mic_dropped"] = mic_dropped;
   d["spk_dropped"] = spk_dropped;
   d["spk_buffered_ms"] = speaker_buffered_ms();
@@ -288,6 +296,25 @@ void hub_send_button(const char *name, const char *action, uint32_t held_ms) {
   send_json(d);
 }
 
+// {"rec": {"press": "mute"}, "vol_up": {"press": "volume_up"}, ...}: the whole
+// table, so a button left out does nothing here. A table with no mute in it
+// would leave a muted board with no way back, so Rec keeps it; the hub
+// refuses such a table before it gets here.
+static void apply_button_actions(JsonObjectConst m) {
+  memset(settings.actions, 0, sizeof(settings.actions));
+  bool mute = false;
+  for (uint8_t i = 1; i <= BUTTON_COUNT; i++) {
+    JsonObjectConst edges = m[button_name((Button)i)];
+    if (edges.isNull()) continue;
+    for (uint8_t e = 0; e < 2; e++) {
+      Action a = action_parse(edges[e ? "release" : "press"] | "");
+      settings.actions[i - 1][e] = (uint8_t)a;
+      mute |= a == Action::Mute;
+    }
+  }
+  if (!mute) settings.actions[(int)Button::Rec - 1][0] = (uint8_t)Action::Mute;
+}
+
 static void apply_config(JsonVariantConst c) {
   if (c["volume"].is<int>()) spk_set_volume(settings.volume = c["volume"]);
   if (c["mic_gain_db"].is<float>()) mic_set_gain_db(settings.mic_gain_db = c["mic_gain_db"]);
@@ -296,7 +323,8 @@ static void apply_config(JsonVariantConst c) {
     settings.speaker_enabled = c["speaker_enabled"];
     if (!settings.speaker_enabled) spk_amp(false);
   }
-  if (c["local_volume_buttons"].is<bool>()) settings.local_volume_buttons = c["local_volume_buttons"];
+  if (c["brightness"].is<int>()) lights_brightness(settings.brightness = constrain(c["brightness"].as<int>(), 1, 100));
+  if (c["button_actions"].is<JsonObjectConst>()) apply_button_actions(c["button_actions"]);
   if (c["lights_enabled"].is<bool>()) lights_dark(!(settings.lights_enabled = c["lights_enabled"]));
   if (c["name"].is<const char *>()) settings.name = (const char *)c["name"];
   settings_save();

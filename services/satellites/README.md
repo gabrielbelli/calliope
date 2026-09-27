@@ -94,7 +94,7 @@ name.
 | `POST /satellites/wake-words/models?name=` | A custom wake word: the `.onnx` as the raw body, checked to be an openWakeWord classifier (input `[batch, 16, 96]`, under 5 MB) before it is written. Then offered in `available` and assigned like a built-in. |
 | `DELETE /satellites/wake-words/models/{name}` | Only a custom model, and only once no wake word uses it (409 otherwise). |
 | `GET /satellites/{id}` | One satellite, with `latency`: how quickly its last 20 replies began and ended, and `output`: `speaker`, `jack` or `null` ([Speaker or jack](#speaker-or-jack)) |
-| `PATCH /satellites/{id}` | `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `local_volume_buttons`, `lights_enabled`, `buttons` |
+| `PATCH /satellites/{id}` | `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness` (1-100), `buttons` ([Buttons](#buttons)); `local_volume_buttons` for firmware from before 2026-09-27 |
 | `POST /satellites/{id}/adopt` | `{"name": "..."}` |
 | `POST /satellites/{id}/forget` | |
 | `POST /satellites/{id}/identify` | Blink for five seconds. Works before adoption, which is the point. |
@@ -405,32 +405,48 @@ while it waited.
 
 ### Buttons
 
-`buttons` in a satellite's config maps a button and an edge to an action:
+`buttons` in a satellite's config maps each button (`rec`, `mode`, `play`,
+`set`, `vol_down`, `vol_up`, and `key1`, the side button) and edge to an
+action. No button is special; the default is what they did before there was a
+choice:
 
 ```json
-{"play": {"press": "ptt"}, "set": {"press": "stop"}, "mode": {"release": "webhook:http://nodered:1880/korvo"}}
+{"rec": {"press": "mute"}, "vol_up": {"press": "volume_up"}, "vol_down": {"press": "volume_down"},
+ "play": {"press": "ptt"}, "set": {"press": "stop"}}
 ```
 
-| Action | What happens |
-|---|---|
-| `ptt` | Push-to-talk: listen as if a wake word had been heard, and do what the `ptt` entry in `wake_words.json` says |
-| `stop` | What `POST /satellites/{id}/flush` does |
-| `webhook:<url>` | POST `{"satellite", "satellite_id", "button", "action", "held_ms"}` to the URL, 10 s at most, no redirects followed |
-| `none` | Nothing |
+| Action | Runs on | What happens |
+|---|---|---|
+| `mute` | the satellite | Toggles the privacy mute |
+| `volume_up`, `volume_down` | the satellite | Volume ±10 % |
+| `lights` | the satellite | Night mode: the ring off, or back on |
+| `dimmer`, `brighter` | the satellite | Brightness down or up a step (10, 20, 35, 60, 100 %) |
+| `ptt` | the hub | Push-to-talk: listen as if a wake word had been heard, and do what the `ptt` entry in `wake_words.json` says |
+| `stop` | the hub | What `POST /satellites/{id}/flush` does |
+| `webhook:<url>` | the hub | POST `{"satellite", "satellite_id", "button", "action", "held_ms"}` to the URL, 10 s at most, no redirects followed |
+| `none` | | Nothing |
 
-The default is the one above without the webhook. A PATCH replaces the whole
-mapping. `rec` cannot be mapped: the firmware mutes on it before the hub hears
-of the press. Every press is still published as an event, whatever it maps to.
-The mapping stays on the hub and is never sent to the satellite.
+**The satellite's own actions run on it**, sent as `button_actions` in the
+welcome and in each `config` that changes the mapping, to firmware that lists
+them in its hello (`caps.actions`). They work with the hub down, and only a
+button, never the hub, can undo the mute. So a mapping must keep `mute` on at
+least one button: the hub refuses one without, and the firmware keeps Rec as
+the mute if it is ever sent one anyway. Holding Set 5 s (Wi-Fi setup) and Mode
+10 s (factory reset) are recovery, whatever those buttons are mapped to.
 
-**The volume buttons.** With `local_volume_buttons` on (the default), VOL+ and
-VOL− change the volume on the satellite itself, which sends a status with the
-new one straight after the press. That status, and only that one (within 2 s
-of the press), is taken as the hub's volume too: the page and Home Assistant
-show it, a `{"type": "volume", "satellite", "volume"}` event says so, and the
-next welcome does not put the old value back. Any other status is not believed
-on the volume, because one already on its way when the page changed it carries
-the old value.
+A PATCH replaces the whole mapping. Every press and release is published as
+an event, whatever it maps to.
+
+**What a button changed is the hub's too.** After an action that changes a
+setting (volume, `lights_enabled`, `brightness`), the satellite sends a status
+marked `"cause": "button"`, and those settings in it are taken as the hub's:
+the page and Home Assistant show them, a `{"type": "settings", "satellite",
+"settings"}` event says what changed, and the next welcome does not put the
+old values back. Any other status is not believed on them, because one
+already on its way when the page changed a setting carries the old value.
+Firmware from before 2026-09-27 does not mark it; for that, the status within
+2 s of such a press counts. `local_volume_buttons` is read only by that
+firmware, and is turned into the volume pair's mapping once.
 
 ### Speaker or jack
 

@@ -366,16 +366,17 @@ class MqttBridge:
 
     def publish_event(self, event: dict) -> None:
         """Take any Hub.publish() event. Buttons and wake words become Home
-        Assistant events; status, online, offline, pending, volume (set on
-        the satellite itself) and output (speaker or jack) refresh the
-        satellite; the rest are ignored. So the hub may forward every event."""
+        Assistant events; status, online, offline, pending, settings (changed
+        by a button on the satellite) and output (speaker or jack) refresh
+        the satellite; the rest are ignored. So the hub may forward every
+        event."""
         if not self.enabled:
             return
         kind, nid = event.get("type"), event.get("satellite")
         if not isinstance(nid, str) or not NID.fullmatch(nid):
             return
         root = f"{self.base}/{nid}"
-        if kind in ("status", "online", "offline", "pending", "volume", "output"):
+        if kind in ("status", "online", "offline", "pending", "settings", "output"):
             self._refresh(nid)
         elif kind == "button":
             button, action = event.get("button"), event.get("action")

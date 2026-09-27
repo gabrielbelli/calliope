@@ -23,12 +23,23 @@ DEFAULT_CONFIG = {
     "mic_gain_db": 30.0,
     "mic_enabled": True,
     "speaker_enabled": True,
+    # Read by firmware from before button actions (2026-09-27), which keeps
+    # VOL+/- to itself while this is on; current firmware takes
+    # "button_actions" instead (DEVICE_ACTIONS).
     "local_volume_buttons": True,
     "lights_enabled": True,
-    # What the hub does when a button is pressed. The satellite only reports
-    # presses, so this never goes to it (HUB_ONLY). PLAY talks, SET stops.
-    "buttons": {"play": {"press": "ptt"}, "set": {"press": "stop"}},
+    "brightness": 100,
+    # What each button does, on press and on release. The actions the
+    # satellite runs itself (DEVICE_ACTIONS) go to it as "button_actions"; the
+    # rest the hub runs when it hears of the press. Rec mutes, the volume pair
+    # sets the volume, Play talks and Set stops, as before there was a choice.
+    "buttons": {"rec": {"press": "mute"}, "vol_up": {"press": "volume_up"},
+                "vol_down": {"press": "volume_down"}, "play": {"press": "ptt"},
+                "set": {"press": "stop"}},
 }
+# Button actions the satellite runs itself: they work with the hub down, and
+# only a button, never the hub, can undo the privacy mute.
+DEVICE_ACTIONS = frozenset({"mute", "volume_up", "volume_down", "lights", "dimmer", "brighter"})
 # Config the hub acts on itself and never sends to the satellite: the firmware
 # would ignore it, and it would cost a JSON document on a board with 300 KB of
 # heap.
@@ -58,6 +69,7 @@ REPORTED = {
     "mic_enabled": _flag,
     "speaker_enabled": _flag,
     "lights_enabled": _flag,
+    "brightness": _between(1, 100, whole=True),
 }
 # What the hub's record says for a switch the satellite has not reported yet:
 # off. Nothing is sent to a satellite, or heard from it, on a setting the hub
@@ -74,6 +86,30 @@ def default_config() -> dict:
     """A deep copy: "buttons" is a dict of dicts, and a shallow copy would let
     one satellite's mapping be edited through another's."""
     return copy.deepcopy(DEFAULT_CONFIG)
+
+
+def device_actions(buttons: dict | None) -> dict:
+    """The part of a button mapping the satellite runs itself."""
+    out: dict = {}
+    for button, edges in (buttons or {}).items():
+        for edge, act in (edges or {}).items():
+            if act in DEVICE_ACTIONS:
+                out.setdefault(button, {})[edge] = act
+    return out
+
+
+def with_button_defaults(config: dict) -> dict:
+    """A mapping saved before button actions had no Rec (the firmware kept
+    it) and no volume pair while the firmware kept those too: given them, so
+    that the buttons do what they did."""
+    buttons = {k: dict(v) for k, v in (config.get("buttons") or {}).items()}
+    if not any(a == "mute" for edges in buttons.values() for a in edges.values()):
+        buttons.setdefault("rec", {})["press"] = "mute"
+    if config.get("local_volume_buttons", True):
+        for key, act in (("vol_up", "volume_up"), ("vol_down", "volume_down")):
+            if key not in buttons:
+                buttons[key] = {"press": act}
+    return buttons
 
 
 def satellite_config(config: dict, unreported: list[str] | tuple = ()) -> dict:
@@ -170,6 +206,7 @@ class Store:
             records = None
         for n in records or ():
             cfg = default_config() | n.get("config", {})
+            cfg["buttons"] = with_button_defaults(cfg)
             self.satellites[n["id"]] = Satellite(**(n | {"config": cfg}))
         if records is not None and not f.exists():
             self.save_satellites()

@@ -510,7 +510,8 @@ def test_the_volume_a_satellite_set_with_its_own_buttons_becomes_the_hubs(client
         press(ws, "vol_up")
         ws.send_json(status(**SETTINGS | {"volume": 70}))
         until(lambda: config_of(client)["volume"] == 70, "the volume from the buttons")
-    assert [(e["satellite"], e["volume"]) for e in published if e["type"] == "volume"] == [(NID, 70)]
+    assert [(e["satellite"], e["settings"]) for e in published if e["type"] == "settings"] == [
+        (NID, {"volume": 70})]
     with client.websocket_connect("/satellites/ws") as ws:
         ws.send_json(hello(token) | SETTINGS | {"volume": 70})
         assert ws.receive_json()["config"]["volume"] == 70
@@ -546,14 +547,57 @@ def test_a_status_long_after_the_press_is_a_heartbeat_not_the_answer(client, app
         assert config_of(client)["volume"] == 60
 
 
-def test_with_its_volume_buttons_off_a_press_changes_nothing_on_the_hub(client):
-    """Off, the satellite leaves its volume alone and reports the press only;
-    its status is the volume the hub gave it, however it reads."""
+def test_a_press_of_a_button_mapped_to_nothing_changes_nothing_on_the_hub(client):
+    """The satellite leaves its volume alone and reports the press only; its
+    status is the volume the hub gave it, however it reads."""
     with client.websocket_connect("/satellites/ws") as ws:
         adopt(client, ws)
-        assert client.patch(f"/satellites/{NID}", json={"local_volume_buttons": False}).status_code == 200
-        assert ws.receive_json() == {"type": "config", "local_volume_buttons": False}
+        assert client.patch(f"/satellites/{NID}", json={"buttons": {
+            "rec": {"press": "mute"}}}).status_code == 200
         press(ws, "vol_down")
         ws.send_json(status(**SETTINGS | {"volume": 50, "rssi": -50}))
         heard(client, -50)
         assert config_of(client)["volume"] == 60
+
+
+def test_a_status_the_satellites_button_caused_is_taken_whatever_the_button(client, app):
+    """Current firmware marks it: lights and brightness as well as volume,
+    and no press window needed. Other settings in it are not believed."""
+    published = []
+    publish = app.hub.publish
+    app.hub.publish = lambda e: (published.append(e), publish(e))
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        # Current firmware says its brightness, as it does its other settings.
+        ws.send_json(status(**SETTINGS | {"brightness": 100, "rssi": -50}))
+        heard(client, -50)
+        ws.send_json(status(**SETTINGS | {"lights_enabled": False, "brightness": 35,
+                                         "mic_gain_db": 12.0}) | {"cause": "button"})
+        until(lambda: config_of(client)["brightness"] == 35, "the button's settings")
+        config = config_of(client)
+    assert config["lights_enabled"] is False and config["mic_gain_db"] == 30.0
+    assert [e["settings"] for e in published if e["type"] == "settings"] == [
+        {"lights_enabled": False, "brightness": 35}]
+
+
+def test_brightness_is_a_setting_from_1_to_100(client):
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        assert client.patch(f"/satellites/{NID}", json={"brightness": 40}).status_code == 200
+        assert ws.receive_json() == {"type": "config", "brightness": 40}
+        assert [client.patch(f"/satellites/{NID}", json={"brightness": b}).status_code
+                for b in (0, 101, 50.5)] == [422, 422, 422]
+
+
+@pytest.mark.parametrize("local, pair", [(True, True), (False, False)])
+def test_a_mapping_saved_before_button_actions_keeps_what_the_buttons_did(app, tmp_path, local, pair):
+    """No Rec in it (the firmware kept the mute) and no volume pair while the
+    firmware kept that too: given them, so nothing changes under a finger."""
+    (tmp_path / "satellites.json").write_text(json.dumps({"satellites": [{
+        "id": NID, "name": "bedroom", "model": MODEL, "token_sha256": "0" * 64,
+        "adopted_at": 1.0, "config": {"local_volume_buttons": local,
+                                      "buttons": {"play": {"press": "ptt"}}}}]}))
+    with TestClient(app.app) as c:
+        buttons = c.get(f"/satellites/{NID}").json()["config"]["buttons"]
+    assert buttons["rec"] == {"press": "mute"} and buttons["play"] == {"press": "ptt"}
+    assert ("vol_up" in buttons and "vol_down" in buttons) is pair

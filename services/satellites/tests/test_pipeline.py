@@ -747,23 +747,61 @@ def test_the_stop_button_cancels_the_conversation_and_flushes_the_speaker(client
     assert [m["type"] for m in satellite.texts() if m["type"] in ("duck", "unduck")][:2] == ["duck", "unduck"]
 
 
-def test_a_button_mapping_is_validated_and_never_sent_to_the_satellite(client, plug):
+MUTE = {"rec": {"press": "mute"}}
+ACTIONS = ["mute", "volume_up", "volume_down", "lights", "dimmer", "brighter"]
+
+
+def test_a_button_mapping_is_validated_and_firmware_without_actions_is_sent_none(client, plug):
     with client.websocket_connect("/satellites/ws") as ws:
         adopt(client, ws)
         satellite = plug(ws)
-        ok = client.patch(f"/satellites/{NID}", json={"buttons": {
+        ok = client.patch(f"/satellites/{NID}", json={"buttons": MUTE | {
             "play": {"press": "ptt"}, "mode": {"release": "webhook:https://hooks.test/x"}}})
         bad = [client.patch(f"/satellites/{NID}", json={"buttons": b}) for b in (
-            {"rec": {"press": "ptt"}},                               # the privacy mute
-            {"play": {"press": "webhook:https://u:p@hooks.test/"}},  # credentials in a URL
-            {"play": {"press": "launch"}},                           # not an action
-            {"play": {"hold": "ptt"}},                               # not an action kind
+            {"play": {"press": "ptt"}},                              # no mute left anywhere
+            {},                                                      # nor here
+            MUTE | {"play": {"press": "webhook:https://u:p@hooks.test/"}},  # credentials in a URL
+            MUTE | {"play": {"press": "launch"}},                    # not an action
+            MUTE | {"play": {"hold": "ptt"}},                        # not an action kind
         )]
         time.sleep(0.1)
     assert ok.status_code == 200
     assert ok.json()["config"]["buttons"]["mode"] == {"release": "webhook:https://hooks.test/x"}
-    assert [r.status_code for r in bad] == [422] * 4
+    assert [r.status_code for r in bad] == [422] * 5
+    assert "never be unmuted" in bad[0].text
     assert satellite.texts("config") == []
+
+
+def test_what_a_satellite_runs_itself_is_sent_to_it_and_nothing_else(client, plug):
+    """Mute, volume and lights run on the satellite, so they work with the hub
+    down and only a button undoes the mute. Talk, stop and webhooks stay on
+    the hub, and are not sent."""
+    with client.websocket_connect("/satellites/ws") as ws:
+        ws.send_json(hello(actions=ACTIONS) | SETTINGS)
+        assert ws.receive_json() == {"type": "pending"}
+        assert client.post(f"/satellites/{NID}/adopt", json={"name": "kitchen"}).status_code == 200
+        ws.send_json(hello(ws.receive_json()["token"], actions=ACTIONS) | SETTINGS)
+        welcome = ws.receive_json()
+        assert welcome["config"]["button_actions"] == {
+            "rec": {"press": "mute"}, "vol_up": {"press": "volume_up"},
+            "vol_down": {"press": "volume_down"}}
+        satellite = plug(ws)
+        assert client.patch(f"/satellites/{NID}", json={"buttons": {
+            "key1": {"press": "mute"}, "rec": {"press": "lights", "release": "ptt"},
+            "mode": {"press": "dimmer"}, "set": {"press": "stop"}}}).status_code == 200
+        wait(lambda: satellite.texts("config"), what="the config")
+    assert satellite.texts("config") == [{"type": "config", "button_actions": {
+        "key1": {"press": "mute"}, "rec": {"press": "lights"}, "mode": {"press": "dimmer"}}}]
+
+
+def test_a_press_the_satellite_ran_is_not_run_again_by_the_hub(client, app, events, plug):
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        client.patch(f"/satellites/{NID}", json={"buttons": {"play": {"press": "mute"}}})
+        ws.send_json({"type": "button", "button": "play", "action": "press"})
+        wait(lambda: of(events, "button"), what="the press")
+        time.sleep(0.2)
+    assert of(events, "wake") == [], "the hub talked on a button the satellite muted on"
 
 
 def test_a_webhook_button_posts_the_press_and_still_publishes_it(client, app, events):
@@ -775,7 +813,7 @@ def test_a_webhook_button_posts_the_press_and_still_publishes_it(client, app, ev
     app.hub.http = httpx.AsyncClient(transport=httpx.MockTransport(hook))
     with client.websocket_connect("/satellites/ws") as ws:
         adopt(client, ws)
-        client.patch(f"/satellites/{NID}", json={"buttons": {"mode": {"press": "webhook:http://hooks.test/b"}}})
+        client.patch(f"/satellites/{NID}", json={"buttons": MUTE | {"mode": {"press": "webhook:http://hooks.test/b"}}})
         ws.send_json({"type": "button", "button": "mode", "action": "press"})
         wait(lambda: posted, what="the webhook")
     assert posted == [{"satellite": "kitchen", "satellite_id": NID, "button": "mode", "action": "press",

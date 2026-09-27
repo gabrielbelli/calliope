@@ -103,7 +103,8 @@ from . import output as outputs
 from . import language as lang
 from . import router as routing
 from .mqtt import MqttBridge
-from .store import DEFAULT_CONFIG, Store, reported_config, satellite_config
+from .store import (DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions, reported_config,
+                    satellite_config)
 
 log = voice_logging.setup("voice-satellites", "SATELLITES")
 
@@ -138,9 +139,13 @@ HEADER = 16
 OTA_CHUNK = 8 * 1024
 SPEAKER_CHUNK_MS = 20
 SPEAKER_LEAD_S = 0.3  # how far ahead of real time playback is kept
-# A press of a satellite's own volume button is answered by its status in
+# A press that ran an action on the satellite is answered by its status in
 # milliseconds; a status later than this is a heartbeat, not the answer.
+# Current firmware marks that status (cause "button"); this is for firmware
+# from before 2026-09-27, which does not.
 VOLUME_PRESS_S = 2.0
+# The settings a button can change on the satellite (actions.h there).
+BUTTON_SETTINGS = ("volume", "lights_enabled", "brightness")
 
 # One second of 20 ms frames. The listener drains the queue in batches, so it
 # only fills when the thread pool falls a second behind; then the oldest audio
@@ -243,8 +248,8 @@ class Session:
         self.earcon_asks = 0
         self.lit = False          # the hub's own layer is showing something
         self.duck_holds = 0       # conversations that want this satellite ducked
-        # time.monotonic() until which a status is the answer to a press of
-        # this satellite's own volume buttons (Hub.on_button).
+        # time.monotonic() until which a status is the answer to a press that
+        # ran an action on the satellite (Hub.on_button), for older firmware.
         self.volume_press_until = 0.0
         self.update(hello)
         # Speaker or jack, from the loopback (output.py). Channel 0 is
@@ -776,17 +781,27 @@ class Hub:
         rec = self.store.satellites.get(s.id)
         return bool(rec and rec.accepts(s.hello.get("token") or None))
 
-    def take_own_volume(self, s: Session) -> None:
-        """The volume in the status that answers a press of the satellite's
-        own volume buttons is the one it now has, so it is the hub's too:
-        the page and Home Assistant show it, and the next welcome does not
-        put the old one back. Any other status is not believed on this: one
-        already on its way when the page changed the volume carries the old
-        value."""
-        volume = reported_config(s.status).get("volume")
-        if volume is not None and self.store.take_own(s.id, {"volume": volume}):
-            log.info("satellite %s set its own volume to %d", s.id, volume)
-            self.publish({"type": "volume", "satellite": s.id, "volume": volume})
+    @staticmethod
+    def button_actions(s: Session, config: dict) -> dict:
+        """The part of the mapping the satellite runs itself, for firmware
+        that says it can (caps "actions"); older firmware keeps its own."""
+        if not isinstance(s.caps.get("actions"), list) or "buttons" not in config:
+            return {}
+        return {"button_actions": device_actions(config["buttons"])}
+
+    def take_own(self, s: Session) -> None:
+        """The settings in the status that answers a button's action on the
+        satellite (volume, lights, brightness) are the ones it now has, so
+        they are the hub's too: the page and Home Assistant show them, and
+        the next welcome does not put the old ones back. Any other status is
+        not believed on these: one already on its way when the page changed
+        one carries the old value."""
+        before = dict(self.config(s))
+        mine = {k: v for k, v in reported_config(s.status).items() if k in BUTTON_SETTINGS}
+        if mine and self.store.take_own(s.id, mine):
+            changed = {k: v for k, v in mine.items() if before.get(k) != v}
+            log.info("satellite %s set its own %s", s.id, changed)
+            self.publish({"type": "settings", "satellite": s.id, "settings": changed})
 
     def take_report(self, s: Session, msg: dict) -> None:
         """Settings the hub had not had from this satellite, from its hello or
@@ -831,7 +846,8 @@ class Hub:
             self.take_report(s, s.hello)
             s.adopted = True
             await s.send_json({"type": "welcome", "name": rec.name,
-                               "config": satellite_config(rec.config, rec.unreported)})
+                               "config": satellite_config(rec.config, rec.unreported)
+                               | self.button_actions(s, rec.config)})
             self.publish({"type": "online", "satellite": s.id, "name": rec.name, "firmware": s.fw})
             await self.sync_earcons(s)
             self.start_listening(s)
@@ -1067,14 +1083,15 @@ class Hub:
     # -- buttons --------------------------------------------------------------
 
     async def on_button(self, s: Session, button: str, action: str, held_ms: int | None) -> None:
-        # A volume button the satellite acts on itself: it changes its volume
-        # and at once sends a status with the new one (clients/korvo-satellite
-        # src/main.cpp, handle_buttons), after this press on the same socket.
-        if (button in ("vol_up", "vol_down") and action == "press"
-                and self.config(s).get("local_volume_buttons", True)):
-            s.volume_press_until = time.monotonic() + VOLUME_PRESS_S
         mapping = self.config(s).get("buttons") or {}
         act = (mapping.get(button) or {}).get(action)
+        # An action the satellite ran itself (DEVICE_ACTIONS): it has already
+        # done it, and its next status says what changed. Older firmware
+        # does not mark that status, so the press opens a window for it.
+        if act in DEVICE_ACTIONS:
+            if act != "mute":
+                s.volume_press_until = time.monotonic() + VOLUME_PRESS_S
+            return
         if not act or act == "none":
             return
         if act == "ptt":
@@ -1935,9 +1952,9 @@ async def on_message(s: Session, msg: dict) -> None:
             # the firmware applies the rest and reports at once: this is where
             # the record gets them.
             hub.take_report(s, s.status)
-            if time.monotonic() <= s.volume_press_until:
+            if msg.get("cause") == "button" or time.monotonic() <= s.volume_press_until:
                 s.volume_press_until = 0.0
-                hub.take_own_volume(s)
+                hub.take_own(s)
         hub.publish({"type": "status", "satellite": s.id, "status": s.status})
         # The privacy mute stops everything: nothing more will arrive to be
         # heard, and a conversation that is waiting for it, or answering it,
@@ -1981,7 +1998,8 @@ class AdoptBody(BaseModel):
 # returned by GET /satellites, as a rule is by GET /satellites/routing.
 ButtonName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_-]{1,32}$")]
 ButtonAction = Annotated[str, StringConstraints(
-    pattern=r"^(ptt|stop|none|webhook:https?://[^\s/?#@]+(/\S*)?)$", max_length=500)]
+    pattern=r"^(ptt|stop|none|mute|volume_up|volume_down|lights|dimmer|brighter"
+            r"|webhook:https?://[^\s/?#@]+(/\S*)?)$", max_length=500)]
 
 
 class ConfigBody(BaseModel):
@@ -1992,17 +2010,19 @@ class ConfigBody(BaseModel):
     speaker_enabled: bool | None = None
     local_volume_buttons: bool | None = None
     lights_enabled: bool | None = None
-    # Replaces the whole mapping. {} maps nothing; the default is in store.py.
+    brightness: int | None = Field(default=None, ge=1, le=100)
+    # Replaces the whole mapping; the default is in store.py.
     buttons: dict[ButtonName, dict[Literal["press", "release"], ButtonAction]] | None = Field(
         default=None, max_length=16)
 
     @field_validator("buttons")
     @classmethod
-    def _rec_is_the_mute(cls, v: dict | None) -> dict | None:
-        # The firmware mutes on REC by itself, before the hub hears of it, so
-        # anything mapped there would start with the microphone cut.
-        if v and any(a != "none" for a in (v.get("rec") or {}).values()):
-            raise ValueError("rec is the satellite's own privacy mute and cannot be mapped")
+    def _keeps_a_mute(cls, v: dict | None) -> dict | None:
+        # Only a button can undo the privacy mute, so a mapping without one
+        # would leave a muted satellite muted for good.
+        if v is not None and not any(a == "mute" for edges in v.values() for a in edges.values()):
+            raise ValueError("one button must stay the privacy mute (mute), or a muted "
+                             "satellite could never be unmuted")
         return v
 
 
@@ -2289,7 +2309,8 @@ async def configure(nid: str, body: ConfigBody) -> dict:
     hub.store.save_satellites()
     s = hub.sessions.get(nid)
     if s is not None and s.adopted:
-        to_satellite = satellite_config(cfg) | ({"name": rec.name} if "name" in change else {})
+        to_satellite = (satellite_config(cfg) | ({"name": rec.name} if "name" in change else {})
+                        | (hub.button_actions(s, cfg) if "buttons" in cfg else {}))
         if to_satellite:
             await s.send_json({"type": "config", **to_satellite})
         # A ring lit by a conversation that went dark mid-way was never put

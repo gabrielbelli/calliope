@@ -7,12 +7,12 @@
 // rollback), and, in a build with a public key, the firmware signature check
 // (ota_sig.cpp).
 //
-// Buttons, locally:
-//   REC            toggles the privacy mute (mic powered down, ring red)
-//   VOL+ / VOL-    change the volume while local_volume_buttons is on
+// Buttons: every press and release is reported to the hub, and each may also
+// do one thing here (actions.h), which the hub chooses: the privacy mute,
+// volume, the lights on or off, or their brightness. Out of the box Rec mutes
+// and VOL+/- set the volume. Whatever the choice, two holds are recovery:
 //   SET held 5 s   reopens the Wi-Fi setup portal
 //   MODE held 10 s factory reset: forgets Wi-Fi, hub and adoption
-// Every press and release is also reported to the hub.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
@@ -21,6 +21,7 @@
 
 #include "board.h"
 #include "boot.h"
+#include "actions.h"
 #include "buttons.h"
 #include "codec.h"
 #include "earcons.h"
@@ -86,6 +87,38 @@ static void set_muted(bool m) {
   hub_send_status();
 }
 
+// A button's action here. A setting it changes is saved and reported at once,
+// marked as the button's, so the hub takes it as its own.
+static void run_action(Action a) {
+  switch (a) {
+    case Action::Mute:
+      set_muted(!satellite_muted);
+      return;
+    case Action::VolumeUp:
+    case Action::VolumeDown:
+      settings.volume = constrain(settings.volume + (a == Action::VolumeUp ? 10 : -10), 0, 100);
+      spk_set_volume(settings.volume);
+      break;
+    case Action::Lights:
+      settings.lights_enabled = !settings.lights_enabled;
+      lights_dark(!settings.lights_enabled);
+      break;
+    case Action::Dimmer:
+    case Action::Brighter:
+      settings.brightness = brightness_step(settings.brightness, a == Action::Brighter);
+      lights_brightness(settings.brightness);
+      break;
+    default:
+      return;
+  }
+  settings_save();
+  hub_send_status("button");
+}
+
+static Action action_for(Button b, int edge) {
+  return b == Button::None ? Action::None : (Action)settings.actions[(int)b - 1][edge];
+}
+
 static void factory_reset() {
   lights_identify(1500);
   settings_wipe();
@@ -102,16 +135,13 @@ static void handle_buttons() {
   Button pressed, released;
   uint32_t held;
   if (buttons_poll(&pressed, &released, &held)) {
-    if (released != Button::None) hub_send_button(button_name(released), "release", held);
+    if (released != Button::None) {
+      hub_send_button(button_name(released), "release", held);
+      run_action(action_for(released, 1));
+    }
     if (pressed != Button::None) {
       hub_send_button(button_name(pressed), "press", 0);
-      if (pressed == Button::Rec) set_muted(!satellite_muted);
-      if (settings.local_volume_buttons && (pressed == Button::VolUp || pressed == Button::VolDown)) {
-        settings.volume = constrain(settings.volume + (pressed == Button::VolUp ? 10 : -10), 0, 100);
-        spk_set_volume(settings.volume);
-        settings_save();
-        hub_send_status();
-      }
+      run_action(action_for(pressed, 0));
     }
   }
   Button cur = buttons_current();
@@ -131,6 +161,7 @@ void setup() {
   settings_load();
   boot_mark(BOOT_SETTINGS);
   lights_dark(!settings.lights_enabled);  // before the first frame is drawn
+  lights_brightness(settings.brightness);
   lights_begin();
   boot_mark(BOOT_LIGHTS);
   codec_begin();

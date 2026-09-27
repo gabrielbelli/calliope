@@ -191,35 +191,44 @@ def test_a_row_says_what_it_listens_for_from_the_saved_words(tmp_path):
 
 def test_a_button_mapping_is_one_the_hub_accepts(tmp_path):
     """The hub replaces the whole mapping, refuses a webhook with a user in it
-    or no scheme, and refuses anything on Rec. "none" is the default and is
-    left out."""
+    or no scheme, and refuses a mapping with no mute left in it, since only a
+    button undoes the mute. Any button may do anything else, Rec included.
+    "none" is the default and is left out."""
     got = run(tmp_path, SAT + """
       const e = (button, edge, action, url) => ({ button, edge, action, url: url || "" });
+      const mute = e("rec", "press", "mute");
       console.log(JSON.stringify({
         good: satMapping([e("play", "press", "ptt"), e("play", "release", "none"),
                           e("set", "press", "stop"), e("mode", "press", "webhook", "https://ha.local/hook"),
-                          e("rec", "press", "ptt")]),
-        userinfo: satMapping([e("mode", "press", "webhook", "https://me:pw@ha.local/hook")]),
-        scheme: satMapping([e("mode", "press", "webhook", "ha.local/hook")]),
-        empty: satMapping([e("mode", "press", "webhook", "")]),
+                          e("key1", "press", "mute"), e("rec", "press", "lights"),
+                          e("vol_up", "release", "brighter")]),
+        no_mute: satMapping([e("play", "press", "ptt"), e("rec", "press", "none")]),
+        userinfo: satMapping([mute, e("mode", "press", "webhook", "https://me:pw@ha.local/hook")]),
+        scheme: satMapping([mute, e("mode", "press", "webhook", "ha.local/hook")]),
+        empty: satMapping([mute, e("mode", "press", "webhook", "")]),
         note: satButtonsNote({ play: { press: "ptt" }, set: { press: "stop" },
                                mode: { press: "webhook:https://x.local" } }, ["play", "set", "mode"]),
+        note_device: satButtonsNote({ rec: { press: "mute" }, vol_up: { press: "volume_up" },
+                                      key1: { press: "lights" }, mode: { press: "dimmer" } },
+                                    ["rec", "mode", "vol_up", "key1"]),
         note_none: satButtonsNote({}, ["play", "set"]),
-        keys_local: satButtonKeys(sat({ caps: { buttons: ["vol_up", "vol_down", "set", "play", "mode", "rec"] },
-                                        config: { local_volume_buttons: true } })),
-        keys_free: satButtonKeys(sat({ caps: { buttons: ["vol_up", "vol_down", "set", "play", "mode", "rec"] },
-                                       config: { local_volume_buttons: false } })),
+        keys_six: satButtonKeys(sat({ caps: { buttons: ["vol_up", "vol_down", "set", "play", "mode", "rec"] } })),
+        keys_seven: satButtonKeys(sat({ caps: { buttons: ["vol_up", "vol_down", "set", "play", "mode", "rec", "key1"] } })),
         keys_offline: satButtonKeys(sat({ caps: {}, config: { buttons: { custom: { press: "ptt" } } } })) }));
     """)
-    assert got["good"] == {"mapping": {"play": {"press": "ptt"}, "set": {"press": "stop"},
-                                       "mode": {"press": "webhook:https://ha.local/hook"}}}, got
-    for refused in ("userinfo", "scheme", "empty"):
+    assert got["good"] == {"mapping": {
+        "play": {"press": "ptt"}, "set": {"press": "stop"}, "mode": {"press": "webhook:https://ha.local/hook"},
+        "key1": {"press": "mute"}, "rec": {"press": "lights"}, "vol_up": {"release": "brighter"}}}, got
+    for refused in ("no_mute", "userinfo", "scheme", "empty"):
         assert "error" in got[refused], (refused, got[refused])
+    assert "muted" in got["no_mute"]["error"]
     assert got["note"] == "Play talks, Set stops, Mode calls a webhook", got
+    assert got["note_device"] == "Rec mutes, Mode dims, Vol + turns it up, Side switches the lights", got
     assert got["note_none"] == "nothing mapped", got
-    assert got["keys_local"] == ["play", "set", "mode"], got
-    assert got["keys_free"] == ["play", "set", "mode", "vol_up", "vol_down"], got
-    assert got["keys_offline"] == ["play", "set", "mode", "custom"], got
+    # All of them, none special, in the order they sit on the board.
+    assert got["keys_six"] == ["rec", "mode", "play", "set", "vol_down", "vol_up"], got
+    assert got["keys_seven"] == ["rec", "mode", "play", "set", "vol_down", "vol_up", "key1"], got
+    assert got["keys_offline"] == ["rec", "mode", "play", "set", "vol_down", "vol_up", "custom"], got
 
 
 def test_the_health_line_counts_faults_and_not_choices(tmp_path):

@@ -13,6 +13,7 @@ static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile Status status = Status::Booting;
 static volatile bool muted = false;
 static volatile bool dark = false;
+static volatile int brightness_pct = 100;
 static volatile uint32_t identify_until = 0;
 static volatile int ota_pct = -1;
 
@@ -102,9 +103,22 @@ static void render(uint32_t t) {
   }
 }
 
+// The whole frame at brightness_pct, drawn at full scale by render().
+static void dim_frame() {
+  int pct = brightness_pct;
+  if (muted && pct < 25) pct = 25;
+  if (pct >= 100) return;
+  for (int i = 0; i < LED_COUNT; i++) {
+    uint32_t c = strip.getPixelColor(i);
+    strip.setPixelColor(i, ((c >> 16) & 0xff) * pct / 100, ((c >> 8) & 0xff) * pct / 100,
+                        (c & 0xff) * pct / 100);
+  }
+}
+
 static void task(void *) {
   for (;;) {
     render(millis());
+    dim_frame();
     strip.show();
     vTaskDelay(pdMS_TO_TICKS(30));
   }
@@ -118,6 +132,7 @@ void lights_begin() {
 }
 
 void lights_dark(bool d) { dark = d; }
+void lights_brightness(int percent) { brightness_pct = percent < 1 ? 1 : percent > 100 ? 100 : percent; }
 void lights_status(Status s) { status = s; }
 void lights_muted(bool m) { muted = m; }
 void lights_identify(uint32_t ms) { identify_until = millis() + ms; }
