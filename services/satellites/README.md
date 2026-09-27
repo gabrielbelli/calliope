@@ -432,49 +432,6 @@ next welcome does not put the old value back. Any other status is not believed
 on the volume, because one already on its way when the page changed it carries
 the old value.
 
-### AirPlay
-
-A satellite can be an AirPlay 2 speaker. The receiver is not in the hub: it is
-[Shairport Sync](https://github.com/mikebrady/shairport-sync), `voice-airplay`
-in `compose.yaml`, which a phone sees as "Korvo". It writes what it plays into
-a named pipe in a volume the hub also mounts, and the hub plays that on the
-satellite the pipe is named for (`/airplay/korvo`: the satellite called korvo,
-by name or id). `app/airplay.py` reads the pipes and mixes.
-
-- **One stream.** The satellite plays one stream from the hub, so the hub
-  mixes: the music, with the voice of a reply, `tone` or `say` on top.
-- **Out while it talks.** While a conversation is open on the satellite, or
-  voice is queued or playing, the music fades out (0.3 s), and back in when
-  it is over. Out rather than down, because a conversation listens for its
-  follow-up only once the loopback is quiet. The song carries on at the
-  phone; what the satellite missed is not played late.
-- **The lead-in is kept.** A pipe cannot report how full it is, so Shairport
-  Sync writes everything up to the first sample's moment as silence, at once
-  (a second or two of zeros in a millisecond), then releases the audio by the
-  clock, 0.5 s early. The silence is the timing and is played like the rest.
-- **Its format only.** The pipe carries raw 48 kHz 16-bit mono, the
-  satellite's own, so nothing is resampled. Raw PCM cannot say what it is. 32-bit
-  samples read as 16-bit are a loud buzz, so the first block that is not
-  silence must have even and odd samples of the same kind; stereo read as mono
-  is the song at half speed, and is refused once three seconds of audio have
-  come at more than 1.6 times mono's rate. Refused starts are logged.
-- **The satellite's clock.** Its DAC drifts from the hub's by tens of ppm,
-  enough in an hour to empty or overflow its one-second buffer. While music
-  plays, its status (`spk_buffered_ms`, every 10 s) outside 120-600 ms drops
-  or repeats one 20 ms chunk.
-- **Speaker off** still takes the music at its pace and sends none of it, so
-  turning the speaker on joins the song where it is.
-- `GET /satellites/{id}` says `"airplay": true` while music plays, and an
-  `{"type": "airplay", "satellite", "state": "playing"|"stopped"}` event
-  marks each start and stop. Music is also what the hub tells
-  [speaker or jack](#speaker-or-jack) by, two seconds at a time.
-
-The receiver has an address of its own on the LAN, by macvlan, rather than
-the host's network: AirPlay 2 needs mDNS, RTSP on 7000 and PTP on 319/320,
-and on the host that is three more open ports and a second mDNS responder
-beside the host's own. A hub restarted mid-song leaves the receiver writing
-to a pipe nobody reads until the next play; pause and play again.
-
 ### Speaker or jack
 
 The Korvo's 3.5 mm jack (headphones, or an aux cable to another amplifier) switches in hardware, and no GPIO reads its detect
@@ -746,7 +703,6 @@ phrase in macOS's default voice peaked at 0.05, and in Samantha and Daniel at
 | `SATELLITES_STT_URL` | unset | stt-stack's base URL. Unset, wake words are still heard and published, and routing says there is no STT. |
 | `SATELLITES_WAKE_WORDS` | `hey_jarvis:0.5` | Read once: the words `wake_words.json` starts with, each for every satellite, on the first start with a volume that has none. Names and thresholds, comma-separated. A name alone gets 0.5. Empty means none; push-to-talk still works. After that, [Wake words](#wake-words). |
 | `SATELLITES_MODEL_DIR` | `$SATELLITES_DATA_DIR/models` | Where wake word models live. The image's own are copied here at start; other built-in names (`alexa`, `hey_mycroft`, `hey_rhasspy`, `weather`) are fetched here once, when a word first names them, and `<name>.onnx` of your own loads by its name. |
-| `SATELLITES_AIRPLAY_DIR` | `/airplay` | Where the AirPlay receiver's pipes are, one per satellite, named for it by id or name ([AirPlay](#airplay)). A directory that is not there is no AirPlay. |
 | `SATELLITES_FRONTEND` | `1` | `0` skips echo cancellation, beamforming and noise suppression. |
 | `SATELLITES_DEBUG_AUDIO` | `0` | `1` keeps the last ten commands' surroundings under `$SATELLITES_DATA_DIR/debug`: 16 s of processed output, the first raw microphone, and the command, as WAV. It records the room; switch it on to find out why a command came back empty, then off. |
 | `SATELLITES_MQTT_URL` | unset | `mqtt://user:pass@host:1883` or `mqtts://...` (the system CA store, or `SSL_CERT_FILE`). Unset, no MQTT. |

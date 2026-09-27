@@ -45,8 +45,6 @@ def test_the_state_table_first_match_wins(tmp_path):
         updated: pick(satState(sat({ ota: { state: "verified", version: "v0.3.1" } }), mem())),
         muted: pick(satState(sat({ status: { muted: true } }), mem())),
         mic_off: pick(satState(sat({ config: { mic_enabled: false } }), mem())),
-        airplay: pick(satState(sat({ airplay: true }), mem({ words }))),
-        airplay_muted: satState(sat({ airplay: true, status: { muted: true } }), mem()).word,
         pending: pick(satState(sat({ adopted: false, name: "" }), mem())),
         seen: pick(satState(sat({ adopted: false, online: false, last_seen: 999 }), mem())),
       };
@@ -68,10 +66,6 @@ def test_the_state_table_first_match_wins(tmp_path):
     assert got["updated"]["kind"] == "done" and got["updated"]["line"] == "Now on v0.3.1"
     # Muted and Mic off are choices: a chip with no colour, not a warning.
     assert got["muted"]["kind"] == got["mic_off"]["kind"] == "neutral"
-    # Playing AirPlay is a choice too, and says what it still listens for.
-    assert got["airplay"] == {"key": "airplay", "word": "Playing AirPlay", "kind": "neutral",
-                              "state": "online", "line": "Listens for hey jarvis"}, got
-    assert got["airplay_muted"] == "Muted", "a muted satellite reads Playing AirPlay"
     assert got["pending"]["word"] == "New" and got["pending"]["kind"] == "warn"
     assert got["pending"]["line"] == "Waiting to be adopted · ID aaaaaaaaaaaa"
     assert got["seen"]["word"] == "Seen" and got["seen"]["kind"] == "neutral"

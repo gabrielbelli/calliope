@@ -192,6 +192,19 @@ parallel with the ladder's, which moves VOL+ to about 0.68 V, where it reads
 as VOL−. So KEY1 as a seventh button needs R37 fitted, R50 removed, and a
 threshold here for its 0 V.
 
+## Sound out
+
+The board is a voice device, not a music speaker ([ADR 0014](../../docs/adr/0014-voice-satellite-not-a-music-speaker.md)):
+
+- **Mono.** The ES8311 has one DAC channel; there is no stereo to be had.
+- **The 3.5 mm jack is differential.** OUTP is on the tip and OUTN, its
+  inverse, on the ring. Into a stereo amplifier that is the same sound in
+  opposite polarity on the two speakers: thin, and dizzying. For an aux
+  cable, take the tip only, or reverse one speaker's wires.
+- **A plug turns the speaker off and cuts the echo reference**, in hardware:
+  the jack's switch contacts feed both the amplifier and the ES7210 loopback.
+  The hub tells speaker from jack by that loopback while something plays.
+
 ## Kept on the device, whatever the hub says
 
 - **The privacy mute.** It powers down the ES7210 mic front-end, and only the

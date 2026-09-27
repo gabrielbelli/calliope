@@ -119,8 +119,7 @@ def connect(hub: Hub, *, rssi: int = -61, caps: dict | None = None) -> SimpleNam
         id=NID, model=MODEL, fw="v0.3.0", address="192.0.2.10", connected_at=0.0,
         status={"rssi": rssi, "volume": 60}, ota=None, hello={},
         caps={"buttons": BUTTONS} if caps is None else caps,
-        adopted=NID in hub.store.satellites, sense=None, music=SimpleNamespace(playing=False),
-        sent=[])
+        adopted=NID in hub.store.satellites, sense=None, sent=[])
 
     async def send(obj) -> None:
         s.sent.append(obj)
