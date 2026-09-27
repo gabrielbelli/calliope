@@ -11,3 +11,8 @@ const char *button_name(Button b);
 bool buttons_poll(Button *pressed, Button *released, uint32_t *held_ms);
 Button buttons_current();
 uint32_t buttons_held_ms();
+
+// What the ladder has read since the last call: the latest, lowest and highest
+// millivolts and how many polls, for the status. A press that never reaches
+// an event shows here as a dip, or does not.
+void buttons_window(uint32_t *now_mv, uint32_t *min_mv, uint32_t *max_mv, uint32_t *polls);

@@ -33,8 +33,15 @@ static Button stable = Button::None, candidate = Button::None;
 static uint8_t count = 0;
 static uint32_t since = 0;
 
+static uint32_t last_mv = 0, min_mv = UINT32_MAX, max_mv = 0, polls = 0;
+
 bool buttons_poll(Button *pressed, Button *released, uint32_t *held_ms) {
-  Button now = classify(analogReadMilliVolts(PIN_BUTTONS));
+  uint32_t mv = analogReadMilliVolts(PIN_BUTTONS);
+  last_mv = mv;
+  if (mv < min_mv) min_mv = mv;
+  if (mv > max_mv) max_mv = mv;
+  polls++;
+  Button now = classify(mv);
   if (now != candidate) {
     candidate = now;
     count = 0;
@@ -50,4 +57,14 @@ bool buttons_poll(Button *pressed, Button *released, uint32_t *held_ms) {
 }
 
 Button buttons_current() { return stable; }
+
+void buttons_window(uint32_t *now_mv, uint32_t *lo, uint32_t *hi, uint32_t *n) {
+  *now_mv = last_mv;
+  *lo = min_mv == UINT32_MAX ? last_mv : min_mv;
+  *hi = max_mv;
+  *n = polls;
+  min_mv = UINT32_MAX;
+  max_mv = 0;
+  polls = 0;
+}
 uint32_t buttons_held_ms() { return stable == Button::None ? 0 : millis() - since; }

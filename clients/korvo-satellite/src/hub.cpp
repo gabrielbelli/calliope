@@ -12,6 +12,7 @@
 
 #include "board.h"
 #include "boot.h"
+#include "buttons.h"
 #include "ca.h"
 #include "codec.h"
 #include "earcons.h"
@@ -266,6 +267,13 @@ void hub_send_status() {
   if (duck >= 0) d["duck"] = duck;
   else d["duck"] = nullptr;
   d["earcons_ready"] = earcons_ready();
+  uint32_t mv, lo, hi, polls;
+  buttons_window(&mv, &lo, &hi, &polls);
+  JsonObject b = d["buttons_mv"].to<JsonObject>();
+  b["now"] = mv;
+  b["min"] = lo;
+  b["max"] = hi;
+  b["polls"] = polls;
   send_json(d);
   last_status = millis();
 }
