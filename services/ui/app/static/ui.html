@@ -6609,6 +6609,8 @@ function wakeRowMarkup(u) {
         <div><label for="${u}-cool">Cooldown, seconds</label>
           <input type="number" id="${u}-cool" data-f="t.cooldown_s" min="0" max="600" step="1"></div>
       </div>
+      <label class="checkline" data-when="trigger"><input type="checkbox" data-t="ends_conversation">
+        Ends a conversation it is heard in</label>
       <details class="sub ww-more" data-when="command conversation">
         <summary>More<span class="sum-note"></span></summary>
         <div class="body">
@@ -6720,6 +6722,10 @@ function wakeRow(name) {
     const t = ev.target;
     if (t.dataset.tool) {
       wakeEdit(name, w => wakeTool(w, t.dataset.tool, t.checked));
+    } else if (t.dataset.t) {
+      /* A trigger's own switch: a box's value is "on" whatever it shows, so
+         it is not one of wakeField's. */
+      wakeEdit(name, w => { w.trigger = { ...(w.trigger || {}), [t.dataset.t]: t.checked }; });
     } else if (t.dataset.sat) {
       const id = t.dataset.sat;
       wakeEdit(name, w => {
@@ -6906,6 +6912,10 @@ function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
     const t = w.trigger || {};
     wakeValue(q('[data-f="t.feedback"]'), t.feedback || WAKE_SHOWN.feedback);
     wakeValue(q('[data-f="t.cooldown_s"]'), "cooldown_s" in t ? t.cooldown_s : WAKE_SHOWN.cooldown_s);
+    /* Heard in a conversation, a trigger fires and the conversation goes on
+       unless this is ticked. It was kept when saved, but only a hand edit of
+       wake_words.json could set it. */
+    q('[data-t="ends_conversation"]').checked = !!t.ends_conversation;
   }
   satNoteOnce(q(".ww-fix"), quiet ? "hint" : "warn", problem);
   /* The field it is about is described by the reason, so a screen reader on

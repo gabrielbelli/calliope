@@ -445,6 +445,8 @@ def test_a_trigger_word_sends_no_action_and_starts_stricter(tmp_path):
       wakeEdit("lumos", w => wakeSetMode(w, "trigger", "lumos"));
       const threshold = WAKE.draft.find(w => w.name === "lumos").threshold;
       wakeEdit("lumos", w => { wakeField(w, "t.feedback", "none"); wakeField(w, "t.cooldown_s", "5"); });
+      // Ends a conversation it is heard in: the box, as its change listener sets it.
+      wakeEdit("lumos", w => { w.trigger = { ...(w.trigger || {}), ends_conversation: true }; });
       wakeEdit("hey_jarvis", w => { w.threshold = 0.65; });
       wakeEdit("hey_jarvis", w => wakeSetMode(w, "trigger", "hey_jarvis"));
       const set_by_hand = WAKE.draft.find(w => w.name === "hey_jarvis").threshold;
@@ -459,7 +461,7 @@ def test_a_trigger_word_sends_no_action_and_starts_stricter(tmp_path):
     assert got["set_by_hand"] == 0.65, "a threshold somebody set was moved"
     assert got["back"] == "https://ha.local:8123", "Trigger and back lost the action"
     assert body["mode"] == "trigger" and "action" not in body, body
-    assert body["trigger"] == {"feedback": "none", "cooldown_s": 5}
+    assert body["trigger"] == {"feedback": "none", "cooldown_s": 5, "ends_conversation": True}
     assert body["threshold"] == 0.7
     assert got["line"] == "Trigger · every satellite · Home Assistant decides", got
 

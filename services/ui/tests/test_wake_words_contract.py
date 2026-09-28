@@ -291,6 +291,15 @@ def test_the_pauses_the_page_allows_are_the_hubs():
         assert bounds(router[cls]) == (int(pause["low"]), int(pause["high"])), cls
 
 
+def test_every_trigger_setting_the_hub_takes_is_offered_by_its_name():
+    """A trigger's feedback, cooldown and whether it ends a conversation:
+    the page's fields are exactly TriggerSettings'."""
+    router = {n.name: n for n in HUB_ROUTER.body if isinstance(n, ast.ClassDef)}
+    hub = {a.target.id for a in router["TriggerSettings"].body if isinstance(a, ast.AnnAssign)}
+    page = set(re.findall(r'data-f="t\.(\w+)"', WORD_MARKUP)) | set(re.findall(r'data-t="(\w+)"', WORD_MARKUP))
+    assert page == hub
+
+
 def test_the_end_phrases_the_page_allows_are_the_hubs():
     """How many and how long: the list's max_length and each phrase's."""
     router = {n.name: n for n in HUB_ROUTER.body if isinstance(n, ast.ClassDef)}
