@@ -289,6 +289,33 @@ async def test_adopted_later_and_forgotten(
     assert devices.async_get_device(identifiers={(DOMAIN, KITCHEN_ID)}) is not None
 
 
+async def test_forgotten_and_adopted_again_gets_its_device_back(
+    hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
+) -> None:
+    """Each platform remembered every satellite it had added, forgotten or
+    not, so a board forgotten and adopted again had no device and no
+    entities until a reload."""
+    fake.satellites[BEDROOM_ID] = satellite(BEDROOM_ID, "bedroom")
+    fake.push({"type": "online", "satellite": BEDROOM_ID, "name": "bedroom"})
+    await until(hass, lambda: hass.states.get("switch.bedroom_microphone") is not None)
+
+    devices = dr.async_get(hass)
+    del fake.satellites[BEDROOM_ID]
+    fake.push({"type": "pending", "satellite": BEDROOM_ID, "address": "192.168.1.51"})
+    await until(
+        hass,
+        lambda: devices.async_get_device(identifiers={(DOMAIN, BEDROOM_ID)}) is None,
+    )
+    fake.satellites[BEDROOM_ID] = satellite(BEDROOM_ID, "bedroom")
+    fake.push({"type": "online", "satellite": BEDROOM_ID, "name": "bedroom"})
+    await until(
+        hass,
+        lambda: devices.async_get_device(identifiers={(DOMAIN, BEDROOM_ID)}) is not None,
+    )
+    await until(hass, lambda: hass.states.get("switch.bedroom_microphone") is not None)
+    assert _state(hass, "binary_sensor.bedroom_online") == "on"
+
+
 async def test_last_heard_survives_a_restart(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:

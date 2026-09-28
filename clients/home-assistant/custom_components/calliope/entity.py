@@ -12,11 +12,12 @@ from homeassistant.helpers.device_registry import (
     DeviceInfo,
     format_mac,
 )
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import CalliopeConfigEntry, CalliopeCoordinator
+from .coordinator import CalliopeConfigEntry, CalliopeCoordinator, signal_removed
 
 
 def service_device_info(entry: CalliopeConfigEntry) -> DeviceInfo:
@@ -91,7 +92,11 @@ def add_per_satellite(
     build: Callable[[CalliopeCoordinator, str], list[Any]],
 ) -> None:
     """Add a platform's entities for every adopted satellite, now and each
-    time one is adopted later."""
+    time one is adopted later. A satellite whose device was removed
+    (forgotten on the hub) is forgotten here too, so adopted again it gets
+    its entities back. Not on any refresh that lacks it: a hub answering 404
+    or 503 lists none and removes no device, and its entities are still
+    there."""
     coordinator = entry.runtime_data.coordinator
     known: set[str] = set()
 
@@ -103,5 +108,14 @@ def add_per_satellite(
         known.update(new)
         async_add_entities([e for sid in new for e in build(coordinator, sid)])
 
+    @callback
+    def removed(sids: set[str]) -> None:
+        known.difference_update(sids)
+
     add_new()
     entry.async_on_unload(coordinator.async_add_listener(add_new))
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            coordinator.hass, signal_removed(entry.entry_id), removed
+        )
+    )

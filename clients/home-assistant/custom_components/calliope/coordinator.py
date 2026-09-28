@@ -60,6 +60,12 @@ def signal_voice(entry_id: str, satellite_id: str) -> str:
     return f"{DOMAIN}_{entry_id}_{satellite_id}_voice"
 
 
+def signal_removed(entry_id: str) -> str:
+    """The dispatcher signal that names the satellites whose devices were
+    just removed, so each platform adds them afresh if they come back."""
+    return f"{DOMAIN}_{entry_id}_removed"
+
+
 def classify(event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     """A hub event as (kind, attributes) for the event entity and device
     triggers, or None when it is not a happening a person would automate.
@@ -173,8 +179,11 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
 
     @callback
     def _remove_forgotten(self, satellites: Satellites) -> None:
-        """A satellite forgotten on the hub leaves Home Assistant too."""
+        """A satellite forgotten on the hub leaves Home Assistant too. The
+        platforms are told, so one adopted again gets its device and
+        entities back rather than being taken for one they already have."""
         registry = dr.async_get(self.hass)
+        removed = set()
         for device in dr.async_entries_for_config_entry(
             registry, self.config_entry.entry_id
         ):
@@ -183,6 +192,11 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
                 registry.async_update_device(
                     device.id, remove_config_entry_id=self.config_entry.entry_id
                 )
+                removed.add(sid)
+        if removed:
+            async_dispatcher_send(
+                self.hass, signal_removed(self.config_entry.entry_id), removed
+            )
 
     def word_mode(self, name: str) -> str | None:
         """command, conversation or trigger, when the hub says; else None."""
