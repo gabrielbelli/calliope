@@ -611,6 +611,22 @@ def test_the_add_list_offers_only_what_the_hub_can_load_and_is_not_listed():
     assert "left.length ? SAT_COPY.wwAddWhy : SAT_COPY.wwExhausted" in render
 
 
+def test_the_add_hint_and_last_heard_say_what_happens():
+    """A new word starts on every satellite ("*"), and the hint said it woke
+    only the ones you choose. Last heard put the score where a time goes
+    ("at 0.83") and the clock last, so the one number to set against the
+    Threshold was the hardest to read. Push-to-talk said Play button, but
+    any button can be set to Talk (and Play need not be)."""
+    assert 'satellites: ["*"]' in function("wakeAdd")
+    said = sat_copy()
+    assert said["wwAddWhy"] == "It downloads when you save, and wakes every satellite until you choose some."
+    assert f'<div class="hint" id="wwaddwhy">{said["wwAddWhy"]}</div>' in PANEL
+    assert said["wwLast"] == "Last heard on {name} at {clock}, scoring {score}."
+    update = function("wakeRowUpdate")
+    assert '"Play button"' not in update and 'ptt ? ["Talk buttons", ""]' in update
+    assert "ptt ? SAT_COPY.wwPttWhere" in update
+
+
 def test_the_threshold_slider_offers_exactly_the_range_the_hub_accepts():
     """Read from the hub itself, so the two cannot drift apart: the range, and
     where a new word starts, which is higher for a trigger."""

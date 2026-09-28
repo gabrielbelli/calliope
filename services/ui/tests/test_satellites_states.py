@@ -159,7 +159,7 @@ def test_a_satellite_is_not_offered_the_update_it_is_taking(tmp_path):
 
 def test_a_row_says_what_it_listens_for_from_the_saved_words(tmp_path):
     """A word is heard only once it has downloaded, so the line names one
-    still coming. With no word, the satellite still answers its PLAY button.
+    still coming. With no word, the satellite still answers a button set to Talk.
     On a hub with no assignment at all the line is empty rather than a guess.
     A word that failed is named only on a row it leaves with nothing to hear:
     the health line and the Wake words summary say it once, and it used to be

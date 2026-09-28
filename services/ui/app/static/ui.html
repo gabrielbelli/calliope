@@ -2416,8 +2416,8 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
                because the hub validates the set as one; a 422 leaves the copy
                on screen with the reason beside it. Remove is staged until
                Save and Keep takes it back, so it asks nothing. Push-to-talk
-               is not a wake word, but the PLAY button's behaviour is edited
-               the same way, last, and it can never be a trigger. -->
+               is not a wake word, but what a button set to Talk does is
+               edited the same way, last, and it can never be a trigger. -->
           <details id="sat-wakewords" hidden>
             <summary>Wake words<span class="sum-note" id="ww-sum"></span></summary>
             <div class="body">
@@ -2430,7 +2430,7 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
                 <div><label for="wwadd">Add a wake word</label><select id="wwadd"></select></div>
                 <button class="small tight" id="wwaddgo" type="button">Add</button>
               </div>
-              <div class="hint" id="wwaddwhy">It downloads when you save, then wakes only the satellites you choose.</div>
+              <div class="hint" id="wwaddwhy">It downloads when you save, and wakes every satellite until you choose some.</div>
               <ul class="wws" id="wwptt" role="list" hidden></ul>
               <div class="actions">
                 <button class="primary small" id="wwsave" type="button" disabled>Save wake words</button>
@@ -3978,10 +3978,14 @@ const SAT_COPY = {
   wwDirty: "Unsaved changes.",
   wwClean: "No changes to save.",
   wwRemoved: "Removed when you save.",
-  wwAddWhy: "It downloads when you save, then wakes only the satellites you choose.",
+  wwAddWhy: "It downloads when you save, and wakes every satellite until you choose some.",
   wwExhausted: "Every available wake word is already added.",
   wwDownloading: "Satellites listen for it once it has downloaded.",
-  wwLast: "Last heard at {score} on {name}, {clock}.",
+  /* Play is only where Talk starts out: any button can be set to it. */
+  wwPttWhere: "It runs on any button set to Talk in a satellite's Buttons.",
+  /* The score last, by that name: "at 0.83" read as a time, and it is the
+     one number here meant to be set against the Threshold beside it. */
+  wwLast: "Last heard on {name} at {clock}, scoring {score}.",
   wwSaved: "Saved.",
   /* The hub's reason is often an exception's own words, so the sentence
      around it says what failed; Try again beside it is the way out. */
@@ -6345,7 +6349,7 @@ function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
     : removed ? ["Removed on save", ""]
     : live && live.state && live.state !== "ready" ? (WAKE_STATE[live.state] || [live.state, ""])
     : changed ? ["Changed", ""]
-    : ptt ? ["Play button", ""]
+    : ptt ? ["Talk buttons", ""]
     : live ? WAKE_STATE.ready : ["Not saved yet", ""];
   const chip = q(".sat-state");
   satSet(chip, word);
@@ -6442,7 +6446,7 @@ function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
   }
   row.toggleAttribute("data-removed", removed);
   satSet(q(".ww-rowhint"), removed ? SAT_COPY.wwRemoved
-    : live && live.state === "downloading" ? SAT_COPY.wwDownloading : "");
+    : live && live.state === "downloading" ? SAT_COPY.wwDownloading : ptt ? SAT_COPY.wwPttWhere : "");
   const rm = q('[data-ww="remove"]');
   rm.hidden = ptt;
   satSet(rm, removed ? "Keep" : "Remove");

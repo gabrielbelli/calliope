@@ -353,7 +353,7 @@ def test_a_closed_word_says_which_one_a_save_will_change(tmp_path):
 
 
 def test_push_to_talk_is_edited_like_a_word_and_is_never_a_trigger(tmp_path):
-    """The PLAY button's behaviour is the hub's `ptt` block: a command or a
+    """What a button set to Talk does is the hub's `ptt` block: a command or a
     conversation, sent only when it changed."""
     got = run(tmp_path, MODERN + """
       await satellitesRefresh();
