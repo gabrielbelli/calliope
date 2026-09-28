@@ -12,7 +12,9 @@ What they prevent:
     back;
   * a poll, or the hub coming back after a missed one, writing the hub's
     copy over a word somebody is in the middle of editing;
-  * the rows moving on a poll, which takes the row under a finger away.
+  * the rows moving on a poll, which takes the row under a finger away;
+  * a /satellites answer read before an adopt and landing after it, which
+    rebuilt the adopted row as pending, closed, until the next poll.
 """
 
 # The harness, and the skip when node is not on PATH: pytest reads pytestmark
@@ -195,3 +197,50 @@ def test_an_update_line_keeps_the_time_it_started_when_progress_rewrites_it(tmp_
     assert got["first"] == "1970-01-01T00:16:40.000Z", got
     assert got["after"] == got["first"], "a rewrite moved the line's time past the lines above it"
     assert got["what"] == "updating to v0.3.1: 40%", got
+
+
+def test_a_poll_read_before_an_adopt_does_not_undo_it(tmp_path):
+    """A timer poll reads /satellites, Adopt is pressed and answered, the
+    adopt's own poll lands, and then the old poll does, saying the satellite
+    is pending. It rebuilt the row as pending, closed and without its
+    "adopted" line; the next poll rebuilt it adopted but shut."""
+    got = run(tmp_path, r"""
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      hub.satellites.push({ id: "cccccccccccc", name: "", adopted: false, online: true,
+                            config: {}, status: {}, wake_words: [] });
+      let holdOnce = false, held = null;
+      const real = json;
+      json = async (path, options) => {
+        const method = (options && options.method) || "GET";
+        if (method === "GET" && path === "/satellites" && holdOnce) {
+          holdOnce = false;
+          const then = { satellites: JSON.parse(JSON.stringify(hub.satellites)) };
+          return new Promise(r => { held = () => r(then); });
+        }
+        if (method === "POST" && path === "/satellites/cccccccccccc/adopt") {
+          const s = hub.satellites.find(x => x.id === "cccccccccccc");
+          s.adopted = true; s.name = "study";
+          await sleep(5);
+          return JSON.parse(JSON.stringify(s));
+        }
+        return real(path, options);
+      };
+      const builds = [];
+      const build = satelliteBuild;
+      satelliteBuild = (li, n) => { builds.push(!!n.adopted); return build(li, n); };
+      await satellitesRefresh();
+      const li = SATELLITES.rows.get("cccccccccccc");
+      builds.length = 0;
+      holdOnce = true;
+      const old = satellitesRefresh();                  // reads before the adopt
+      await sleep(10);
+      await satelliteAct(li, "adopt", stand());
+      await sleep(30);                                  // the adopt's own poll
+      held();                                           // the old one lands
+      await old;
+      await sleep(10);
+      console.log(JSON.stringify({ builds, adopted: li.dataset.adopted,
+                                   listed: SATELLITES.list.find(n => n.id === "cccccccccccc").adopted }));
+    """)
+    assert got["builds"] == [True], got
+    assert got["adopted"] == "1" and got["listed"] is True, got

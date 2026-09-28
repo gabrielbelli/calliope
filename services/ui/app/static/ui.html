@@ -4003,6 +4003,11 @@ function chosenGlossaries() {
    pending row and an adopted one are different things. */
 const SATELLITES = { rows: new Map(), timer: null, events: null, list: [], firmware: [],
                      fwFailed: null, seq: 0, seeded: false,
+                     /* The satellites' own write counter and poll numbers,
+                        for satellitesRefresh: writes counts the answers an
+                        action applied to a row (adopt, rename, a setting,
+                        forget); asked and applied number the polls. */
+                     writes: 0, asked: 0, applied: 0,
                      /* What the page itself saw. The hub keeps a satellite's
                         last_seen and firmware after it disconnects, but only
                         in memory, so these stand in across a hub restart.
@@ -4330,6 +4335,13 @@ async function satellitesRefresh() {
      PUT's own answer is the newer copy, and the next poll brings anything
      else. */
   const since = WAKE.writes, idle = !WAKE.writing;
+  /* THE SAME FOR THE SATELLITES THEMSELVES. A /satellites answer read before
+     an adopt, a rename, a setting or a forget, and landing after it, put the
+     row back as it was (adopted read as forgotten elsewhere, so the row was
+     rebuilt, closed, its focus and "adopted" line gone) until the next poll.
+     Such an answer, or one older than a poll already shown, is dropped; the
+     action's own poll follows it. */
+  const satSince = SATELLITES.writes, poll = ++SATELLITES.asked;
   const [n, f, w] = await Promise.allSettled([json("/satellites"),
     json("/satellites/firmware"), json("/satellites/wake-words")]);
   /* ONE SENTENCE IN PLACE OF THE TAB ONLY BEFORE THE HUB HAS ANSWERED. After
@@ -4351,11 +4363,15 @@ async function satellitesRefresh() {
     satNoteOnce($("sathubfail"), "bad", "");
     $("satellitesnone").hidden = true;
     $("satellitesman").hidden = false;
-    SATELLITES.list = n.value.satellites || [];
+    const current = SATELLITES.writes === satSince && poll > SATELLITES.applied;
+    if (current) {
+      SATELLITES.applied = poll;
+      SATELLITES.list = n.value.satellites || [];
+    }
     if (idle && WAKE.writes === since) wakeTake(w.status === "fulfilled" ? w.value : w.reason);
     SATELLITES.fwFailed = f.status === "rejected" ? f.reason.message : null;
     if (f.status === "fulfilled") SATELLITES.firmware = f.value.firmware || [];
-    satellitesRender(SATELLITES.list);
+    if (current) satellitesRender(SATELLITES.list);
     wakeRender();
     firmwareRender();
     satellitesHealth();
@@ -5186,6 +5202,7 @@ async function satellitePatch(li, change, host) {
   try {
     const n = await json(`/satellites/${li.dataset.id}`, { method: "PATCH", headers: JSON_BODY,
       body: JSON.stringify(change) });
+    SATELLITES.writes++;
     host.textContent = "";
     if (n && n.id) satelliteUpdate(li, n);
     return true;
@@ -5233,6 +5250,7 @@ async function satelliteAct(li, act, button) {
     if (act === "adopt") {
       const r = await json(`/satellites/${id}/adopt`, { method: "POST", headers: JSON_BODY,
         body: JSON.stringify({ name: q(".sat-adopt input").value.trim() }) });
+      SATELLITES.writes++;
       satelliteBuild(li, r);
       satPlace(li, r);
       satelliteUpdate(li, r);
@@ -5273,6 +5291,7 @@ async function satelliteAct(li, act, button) {
     } else if (act === "rename") {
       const r = await json(`/satellites/${id}`, { method: "PATCH", headers: JSON_BODY,
         body: JSON.stringify({ name: renamed }) });
+      SATELLITES.writes++;
       const field = q(".sat-rename input");
       delete field.dataset.edited;
       satPlace(li, r);
@@ -5299,6 +5318,7 @@ async function satelliteAct(li, act, button) {
       if (why) note(host, "bad", satText("updSkipped", { why }));
     } else if (act === "forget" || act === "dismiss") {
       await json(`/satellites/${id}/forget`, { method: "POST" });
+      SATELLITES.writes++;
       satForgotten(li);
     }
     satellitesRefresh();
