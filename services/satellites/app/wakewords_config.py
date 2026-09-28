@@ -99,7 +99,7 @@ DEFAULT_TRIGGER_THRESHOLD = 0.7
 # Every word assigned to a satellite is one more ONNX session run on each of
 # its 80 ms frames. openWakeWord ships five; the rest would be custom models.
 MAX_WORDS = 16
-BEHAVIOUR_FIELDS = ("mode", "language", "action", "silence_ms", "conversation", "trigger")
+BEHAVIOUR_FIELDS = ("mode", "language", "action", "silence_ms", "colour", "conversation", "trigger")
 
 
 def default_behaviour() -> routing.Behaviour:

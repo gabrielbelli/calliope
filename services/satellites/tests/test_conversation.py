@@ -565,6 +565,35 @@ def test_trigger_feedback_is_heard_and_seen_only_where_the_satellite_allows_it(
     assert [m["mode"] for m in sat.texts("lights")] == (["solid", "off"] if lights else [])
 
 
+def test_each_word_lights_the_ring_in_its_own_colour(client, app, events, plug):
+    """A word's colour is what its turn shows, listening and thinking; a
+    trigger flashes in its own; a word with none keeps the listening blue."""
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        save(client, conversation() | {"colour": "#FF4400"}, LUMOS | {"colour": "#00c060"})
+        assert {w["name"]: w.get("colour") for w in client.get("/satellites/wake-words").json()["words"]} \
+            == {"hey_jarvis": "#FF4400", "lumos": "#00c060"}
+        sat = plug(ws)
+        sat.send(np.concatenate((floor(0.2), mark("hey_jarvis"), voiced(0.8), floor(1.2, seed=1))))
+        settled(app)
+        sat.send(floor(3.0, seed=40))
+        wait(lambda: of(events, "conversation_ended"), what="the end")
+        wait(lambda: sat.texts("lights")[-1]["mode"] == "off", what="the ring out")
+        turn = [m for m in sat.texts("lights") if m["mode"] != "off"]
+        sat.send(np.concatenate((floor(0.2), mark("lumos"), floor(0.3))))
+        wait(lambda: sat.texts("lights")[-1]["mode"] == "off" and
+             any(m["mode"] == "solid" for m in sat.texts("lights")), what="the flash")
+    assert turn and all(m["color"] == [255, 68, 0] for m in turn), turn
+    [flash] = [m for m in sat.texts("lights") if m["mode"] == "solid"]
+    assert flash["color"] == [0, 192, 96]
+
+
+@pytest.mark.parametrize("colour", ["red", "#ff440", "#gg4400", "ff4400"])
+def test_a_colour_that_is_not_hex_rgb_is_refused(client, colour):
+    r = client.put("/satellites/wake-words", json={"words": [conversation() | {"colour": colour}]})
+    assert r.status_code == 422, r.text
+
+
 def test_a_trigger_heard_while_a_conversation_waits_fires_and_the_conversation_goes_on(
         client, app, events, plug):
     with client.websocket_connect("/satellites/ws") as ws:

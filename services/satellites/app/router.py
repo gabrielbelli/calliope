@@ -111,6 +111,8 @@ GLOSSARY_RETRY_S = 600.0
 
 RULE_ID = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
 WAKE_WORD = r"^(\*|[A-Za-z0-9][A-Za-z0-9 _.-]{0,63})$"
+# A wake word's ring colour, as the page's colour picker writes it.
+COLOUR = r"^#[0-9a-fA-F]{6}$"
 # BCP 47 as HA writes it ("en", "pt-BR"), or "auto".
 LANGUAGE = r"^([a-z]{2,3}(-[A-Za-z0-9]{2,8})*|auto)$"
 
@@ -235,6 +237,9 @@ class Behaviour(BaseModel):
     action: Action | None = None
     # The pause that ends the command after the wake word.
     silence_ms: int = Field(default=800, ge=200, le=3000)
+    # The colour the ring shows for this word: listening, thinking, and a
+    # trigger's flash. Unset is the hub's listening blue.
+    colour: str | None = Field(default=None, pattern=COLOUR)
     conversation: ConversationSettings = Field(default_factory=ConversationSettings)
     trigger: TriggerSettings = Field(default_factory=TriggerSettings)
 

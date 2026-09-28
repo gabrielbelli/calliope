@@ -171,6 +171,13 @@ DUCK_MS = 60_000
 EARCON_RETRY_S = 5.0   # the satellite formats its earcon storage in the background
 EARCON_RETRIES = 24
 LISTEN_COLOUR = (40, 110, 255)
+
+
+def ring_colour(behaviour: "routing.Behaviour | None") -> list[int]:
+    """The colour a word's turn shows on the ring, listening, thinking or a
+    trigger's flash: the word's own (Behaviour.colour), or the listening blue."""
+    hexa = behaviour.colour if behaviour is not None else None
+    return [int(hexa[i:i + 2], 16) for i in (1, 3, 5)] if hexa else list(LISTEN_COLOUR)
 LIGHTS_MIN_S = 0.15    # at most one direction update this often
 MAX_INJECT_S = 60
 WAKE_GRACE_S = 1.5
@@ -954,15 +961,17 @@ class Hub:
             conv.cancel("trigger")
             conv = None
         if behaviour.trigger.feedback == "earcon":
-            self.spawn(self._trigger_feedback(s, flash=conv is None), name=f"trigger-{s.id}")
+            self.spawn(self._trigger_feedback(s, flash=conv is None, colour=ring_colour(behaviour)),
+                       name=f"trigger-{s.id}")
 
-    async def _trigger_feedback(self, s: Session, flash: bool) -> None:
+    async def _trigger_feedback(self, s: Session, flash: bool,
+                                colour: list[int] | None = None) -> None:
         await self.earcon(s, "done")
         # A conversation owns the ring while it runs; a flash would put out
         # its "listening".
         leds = s.caps.get("lights")
         if flash and isinstance(leds, int) and leds > 0 and not s.lit:
-            if await self.send_lights(s, {"mode": "solid", "color": list(LISTEN_COLOUR),
+            if await self.send_lights(s, {"mode": "solid", "color": colour or list(LISTEN_COLOUR),
                                           "brightness": 96}):
                 await asyncio.sleep(TRIGGER_FLASH_S)
                 if s.conversation is None:
@@ -1482,10 +1491,12 @@ class Conversation:
             return
         self._lit_key, self._lit_at = key, now
         if animates:
-            msg = {"mode": "listen", "color": list(LISTEN_COLOUR), "brightness": 96,
+            msg = {"mode": "listen", "color": ring_colour(self.route and self.route.behaviour),
+                   "brightness": 96,
                    "direction": None if direction is None else round(direction % 360.0, 1)}
         else:
-            msg = {"mode": "pulse", "color": list(LISTEN_COLOUR), "brightness": 48}
+            msg = {"mode": "pulse", "color": ring_colour(self.route and self.route.behaviour),
+                   "brightness": 48}
         await self.hub.send_lights(s, msg)
 
     def _reply_satellite(self) -> Session | None:
@@ -1656,7 +1667,7 @@ class Conversation:
             return out, None
         if self.live and self.s.lit:
             await self.hub.send_lights(self.s, {"mode": "spin", "brightness": 40,
-                                                "color": list(LISTEN_COLOUR)})
+                                                "color": ring_colour(self.route and self.route.behaviour)})
         speech_end = self._delivered_at - self._silence_ms / 1000
         sink = Player(self, out) if self.live else dialogue.Collect()
         self.player = sink if isinstance(sink, Player) else None
@@ -2142,6 +2153,7 @@ class WakeWordBody(BaseModel):
     language: str | None = None
     action: dict | None = None
     silence_ms: int | None = None
+    colour: str | None = None
     conversation: dict | None = None
     trigger: dict | None = None
 
