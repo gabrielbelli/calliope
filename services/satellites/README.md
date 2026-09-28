@@ -76,7 +76,11 @@ it. Only these settings are taken, and only within the ranges `PATCH` accepts;
 A satellite's id is its MAC, which is no secret. While an adopted satellite is
 connected, a `hello` with its id and without its token is closed with 1008,
 so another connection cannot push it offline and report as it. A board that
-reconnects with its token replaces its own stale socket as before.
+reconnects with its token replaces its own stale socket as before. While it
+is offline, such a connection is only pending under its id: the satellite
+stays offline, with its own firmware and settings, on the page and in Home
+Assistant, and nothing that connection reports is published as its. A board
+that lost its token (a factory reset) is forgotten and adopted again.
 
 A satellite is addressed by its id (the MAC, with or without colons) or its
 name.

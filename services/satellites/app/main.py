@@ -695,9 +695,20 @@ class Hub:
         task.add_done_callback(done)
         return task
 
+    def speaks_for(self, s: Session | None) -> bool:
+        """Whether what this connection reports is its id's: it proved the
+        adoption, or nobody has adopted that id. A satellite's id is its MAC,
+        which is no secret, so a connection without the token of an adopted
+        satellite that is offline is only pending under its id: its status,
+        firmware and update are not the satellite's, on the page or in Home
+        Assistant, and the satellite stays offline."""
+        return s is not None and (s.adopted or s.id not in self.store.satellites)
+
     def describe(self, nid: str) -> dict:
         rec = self.store.satellites.get(nid)
         s = self.sessions.get(nid)
+        if not self.speaks_for(s):
+            s = None
         seen = self.seen.get(nid, {})
         return {
             "id": nid,
@@ -878,7 +889,8 @@ class Hub:
             await self.unadopt(s)
             if rec and token:
                 log.warning("satellite %s presented a token that does not match its adoption", s.id)
-            self.seen[s.id] = {"model": s.model, "fw": s.fw, "last_seen": time.time()}
+            if self.speaks_for(s):
+                self.seen[s.id] = {"model": s.model, "fw": s.fw, "last_seen": time.time()}
             await s.send_json({"type": "pending"})
             self.publish({"type": "pending", "satellite": s.id, "address": s.address})
 
@@ -2026,7 +2038,8 @@ async def satellite_socket(ws: WebSocket) -> None:
             log.warning("satellite %s disconnected during an update", s.id)
         if hub.sessions.get(s.id) is s:
             del hub.sessions[s.id]
-        hub.seen[s.id] = {"model": s.model, "fw": s.fw, "last_seen": time.time()}
+        if hub.speaks_for(s):
+            hub.seen[s.id] = {"model": s.model, "fw": s.fw, "last_seen": time.time()}
         hub.publish({"type": "offline", "satellite": s.id})
         log.info("satellite %s disconnected", s.id)
 
@@ -2050,7 +2063,8 @@ async def on_message(s: Session, msg: dict) -> None:
             if msg.get("cause") == "button" or time.monotonic() <= s.volume_press_until:
                 s.volume_press_until = 0.0
                 hub.take_own(s)
-        hub.publish({"type": "status", "satellite": s.id, "status": s.status})
+        if hub.speaks_for(s):
+            hub.publish({"type": "status", "satellite": s.id, "status": s.status})
         # The privacy mute stops everything: nothing more will arrive to be
         # heard, and a conversation that is waiting for it, or answering it,
         # ends now rather than when its follow-up times out. Going on, it
@@ -2079,8 +2093,9 @@ async def on_message(s: Session, msg: dict) -> None:
         if state in ("failed", "verified"):
             s.ota.pop("image", None)
             s.ota["finished_at"] = time.time()
-        hub.publish({"type": "ota", "satellite": s.id, "state": state, "pct": msg.get("pct"),
-                     "version": msg.get("version"), "error": msg.get("error")})
+        if hub.speaks_for(s):
+            hub.publish({"type": "ota", "satellite": s.id, "state": state, "pct": msg.get("pct"),
+                         "version": msg.get("version"), "error": msg.get("error")})
         log.info("satellite %s ota %s %s", s.id, state, msg.get("error") or "")
 
 

@@ -148,6 +148,36 @@ def test_a_hello_without_a_token_does_not_throw_the_adopted_satellite_with_that_
             assert real.receive_json() == {"type": "reboot"}
 
 
+def test_a_hello_without_a_token_does_not_report_as_an_adopted_satellite_that_is_offline(
+        client, app):
+    """With the real board offline, a connection without its token was
+    refused nothing: it became the pending session under the adopted id, and
+    GET /satellites/{id} (and Home Assistant, through MQTT) showed the
+    satellite online with that connection's firmware, status and update."""
+    got: list[dict] = []
+    publish = app.hub.publish
+    app.hub.publish = lambda event: (got.append(event), publish(event))
+    with client.websocket_connect("/satellites/ws") as real:
+        adopt(client, real)
+    wait(lambda: NID not in app.hub.sessions, what="the satellite to go offline")
+    before = client.get(f"/satellites/{NID}").json()
+    with client.websocket_connect("/satellites/ws") as impostor:
+        forged = hello(mac=MAC)
+        forged["fw"] = "forged-9"
+        impostor.send_json(forged)
+        assert impostor.receive_json() == {"type": "pending"}
+        n = len(got)
+        impostor.send_json({"type": "status", "muted": True, "volume": 3, "rssi": -1})
+        impostor.send_json({"type": "ota", "state": "verified", "version": "forged-9"})
+        wait(lambda: app.hub.sessions[NID].ota is not None, what="the forged update")
+        view = client.get(f"/satellites/{NID}").json()
+        assert [e["type"] for e in got[n:] if e.get("satellite") == NID] == []
+    keys = ("adopted", "online", "firmware", "status", "ota", "caps")
+    assert {k: view[k] for k in keys} == {k: before[k] for k in keys}
+    assert view["adopted"] is True and view["online"] is False
+    assert client.get(f"/satellites/{NID}").json()["firmware"] == before["firmware"]
+
+
 # ---- the moment of sending ---------------------------------------------------------
 
 
