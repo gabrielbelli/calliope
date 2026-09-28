@@ -909,7 +909,8 @@ class Hub:
             return
         try:
             s.ear = listening.Ear(debug_s=DEBUG_AUDIO_S, rate=s.mic_rate, channels=s.mic_channels,
-                                  frontend=self.voice.frontend)
+                                  frontend=self.voice.frontend,
+                                  silence_for=lambda word: silence_for(s.id, word))
         except ValueError as e:
             s.listen_error = str(e)
             log.warning("satellite %s will not be listened to: %s", s.id, e)
@@ -2670,12 +2671,21 @@ def _read_clip(body: bytes) -> np.ndarray:
     return np.frombuffer(pcm[:len(pcm) & ~1], dtype="<i2").astype(np.int16)
 
 
-def _hear_clip(clip: np.ndarray, wake: wakeword.WakeWords | None,
-               wake_word: str | None) -> tuple[listening.Heard | None, listening.Command | None]:
+def silence_for(nid: str, word: str) -> int | None:
+    """The pause that ends `word`'s command on this satellite (its
+    silence_ms), for the Ear to open the command with."""
+    rec = hub.store.satellites.get(nid)
+    route = routing.current().find(nid, rec.name if rec else "", word)
+    return route.behaviour.silence_ms if route is not None else None
+
+
+def _hear_clip(clip: np.ndarray, wake: wakeword.WakeWords | None, wake_word: str | None,
+               nid: str = "") -> tuple[listening.Heard | None, listening.Command | None]:
     """A clip through a fresh Ear, in the satellite's own 20 ms frames, then
-    room noise until the endpointer ends the command. Runs in the thread
-    pool."""
-    ear = listening.Ear(channels=1, frontend=False, wake=wake)
+    room noise until the endpointer ends the command, which ends on the
+    word's own pause as it would live. Runs in the thread pool."""
+    ear = listening.Ear(channels=1, frontend=False, wake=wake,
+                        silence_for=lambda word: silence_for(nid, word) if nid else None)
     if wake_word:
         ear.push_to_talk(wake_word)
     heard = command = None
@@ -2736,7 +2746,7 @@ async def inject(nid: str, request: Request, play: bool = Query(False),
                                 f"{': ' + hub.voice.error if hub.voice.error else ''}); pass "
                                 "?wake_word= to skip detection", code="wake_words_unavailable")
         wake = await loop.run_in_executor(EXECUTOR, base.clone, ready)
-    heard, command = await loop.run_in_executor(EXECUTOR, _hear_clip, clip, wake, wake_word)
+    heard, command = await loop.run_in_executor(EXECUTOR, _hear_clip, clip, wake, wake_word, nid)
     if heard is None:
         return {"satellite": nid, "heard": None, "command": None, "outcome": None, "played": False}
     behaviour = hub.voice.assignment.behaviour(heard.wake_word)

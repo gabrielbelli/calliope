@@ -167,7 +167,8 @@ class BargeInDetector:
 
 class Ear:
     def __init__(self, *, rate: int = RATE, channels: int = 4, frontend: bool = True,
-                 wake: WakeWords | None = None, debug_s: float = 0.0):
+                 wake: WakeWords | None = None, debug_s: float = 0.0,
+                 silence_for=None):
         if rate != RATE:
             # The wake word models and the router are 16 kHz only; resampling
             # a microphone here would hide a satellite that is misconfigured.
@@ -181,6 +182,11 @@ class Ear:
         self.frontend = (FrontEnd(rate=rate, ref_channel=0, mic_channels=tuple(range(1, channels)))
                          if frontend and channels > 1 else None)
         self.wake = wake
+        # word -> the pause (ms) that ends its command, or None for the
+        # Endpointer's own: the word's silence_ms, read when its command
+        # opens. Set afterwards (main.Hub.heard), the batch it was heard in
+        # was cut at the default, and a clip through /inject never got it.
+        self.silence_for = silence_for
         # Which detector `wake` is, in main.Voice.plan's terms. The hub swaps
         # the detector between two process() calls when the words assigned
         # to this satellite change, and compares this to know when to; an
@@ -402,7 +408,9 @@ class Ear:
     def _listen(self, word: str, score: float | None, at: int) -> Heard:
         self.state = "listening"
         self._turn_settings = None
-        self.endpointer = Endpointer(rate=self.rate)
+        silence_ms = self.silence_for(word) if self.silence_for is not None else None
+        self.endpointer = (Endpointer(rate=self.rate, silence_ms=silence_ms) if silence_ms
+                           else Endpointer(rate=self.rate))
         return Heard(word, None if score is None else round(score, 3),
                      None if self.direction is None else round(self.direction, 1),
                      round(at / self.rate, 3))

@@ -398,6 +398,21 @@ async def test_a_second_stop_while_a_conversation_closes_still_releases_the_sate
         routing.configure(was)
 
 
+def test_a_live_command_keeps_a_hesitation_shorter_than_its_words_pause(client, app, services, plug):
+    """A word set to 1.5 s so a speaker can hesitate: a 1 s pause mid-command
+    does not end it."""
+    save(client, {"name": "hey_jarvis", "mode": "command", "silence_ms": 1500,
+                  "action": {"destination": {"type": "echo"}}})
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        sat = plug(ws)
+        sat.send(np.concatenate((floor(0.2), mark("hey_jarvis"), voiced(0.6), floor(1.0, seed=2),
+                                 voiced(0.6), floor(2.0, seed=1))))
+        wait(lambda: services.sent("stt.test", "/v1/audio/transcriptions"), what="the command")
+    [stt] = services.sent("stt.test", "/v1/audio/transcriptions")
+    assert len(stt.content) / 2 / RATE > 2.0, "the command ended at the hesitation"
+
+
 def test_a_conversation_ends_when_the_satellite_stops_sending_audio(client, app, events, plug,
                                                                     monkeypatch):
     """The device stops streaming when muted (or its Wi-Fi drops) and says

@@ -910,6 +910,30 @@ def test_inject_runs_a_clip_through_the_whole_path_and_sends_the_satellite_nothi
     assert [e.get("injected") for e in events if e["type"] in ("wake", "routed")] == [True, True]
 
 
+@pytest.mark.parametrize("silence_ms,whole", [(1500, True), (800, False)])
+def test_inject_ends_the_command_on_the_words_own_pause(client, services, plug, silence_ms, whole):
+    """A clip through /inject always ended at the hub's 0.8 s, whatever the
+    word's silence_ms: a word set to 1.5 s so a speaker can hesitate was cut
+    at the hesitation. Live, the word's pause was set only after the batch
+    it was heard in. The Ear now opens the command with it."""
+    words = client.get("/satellites/wake-words").json()["words"]
+    put = [{k: w[k] for k in ("name", "threshold", "satellites")} for w in words]
+    for w in put:
+        if w["name"] == "hey_jarvis":
+            w |= {"mode": "command", "silence_ms": silence_ms}
+    assert client.put("/satellites/wake-words", json={"words": put}).status_code == 200
+    clip = np.concatenate((floor(0.2), wake_mark(), voiced(0.6), floor(1.0, seed=2), voiced(0.6),
+                           floor(2.0, seed=1)))
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        plug(ws)
+        r = client.post(f"/satellites/{NID}/inject", content=wav(clip))
+    assert r.status_code == 200, r.text
+    [stt] = [q for q in services.seen if q.url.host == "stt.test" and q.url.path != "/health"]
+    seconds = len(stt.content) / 2 / RATE  # the WAV, near enough
+    assert (seconds > 2.0) is whole, seconds
+
+
 def test_inject_with_play_speaks_the_reply_on_the_satellite(client, events, plug):
     with client.websocket_connect("/satellites/ws") as ws:
         adopt(client, ws)
