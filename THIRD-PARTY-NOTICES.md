@@ -130,8 +130,9 @@ own copy of either.
 | `bblanchon/ArduinoJson` | 7.4.2 | MIT |
 | `adafruit/Adafruit NeoPixel` | 1.15.1 | LGPL-3.0 |
 
-`src/ca.h` holds the ISRG Root X1 and X2 certificates, exported from the macOS
-system roots; they are public trust anchors and carry no licence terms.
+`clients/korvo-satellite/certs/lets-encrypt-roots.pem` holds the ISRG Root X1
+and X2 certificates, exported from the macOS system roots; they are public
+trust anchors and carry no licence terms.
 
 ## Copied
 

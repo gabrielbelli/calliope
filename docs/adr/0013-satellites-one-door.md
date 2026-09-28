@@ -76,7 +76,8 @@ doing its job. voice-ui once had one (30081) and it was closed for that reason.
 A satellite port would be the same exception with a worse audience: devices on
 Wi-Fi rather than a browser. The gateway already terminates TLS with the
 wildcard certificate, so riding on it gives the devices a real certificate
-chain to verify (ISRG Root X1, embedded in the firmware) at no cost.
+chain to verify (its CA's root, embedded in the firmware: Let's Encrypt's
+unless the build names another with `CALLIOPE_HUB_CA`) at no cost.
 
 This cost one thing: the gateway, which proxied only request and response, now
 relays a WebSocket. It is about forty lines, with `websockets` as the client,

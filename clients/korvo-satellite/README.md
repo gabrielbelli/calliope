@@ -32,13 +32,25 @@ pio run -e usb -t upload
 4. Adopt it on the **Satellites** tab.
 
 Release builds connect over TLS only and verify the gateway's certificate
-against ISRG Root X1 or X2, Let's Encrypt's roots. **The hub's certificate
-must chain to one of them.** One from any other CA (ZeroSSL, Google Trust
-Services, an internal CA, a self-signed one) fails the TLS handshake, and the
-satellite stays in Connecting, spinning blue, with nothing else to say why.
-For such a hub, replace the roots in `src/ca.h` with your CA's and build the
-firmware yourself. A development build with a plain `ws://` hub is made with
-`DEV_HUB`:
+against the CA certificates compiled in: by default ISRG Root X1 and X2,
+Let's Encrypt's roots (`certs/lets-encrypt-roots.pem`). **The hub's
+certificate must chain to one of them.** One from any other CA fails the TLS
+handshake, and the satellite stays in Connecting, spinning blue, with nothing
+else to say why. For a hub whose certificate comes from another CA (ZeroSSL,
+Google Trust Services, an internal CA, a self-signed one), name a PEM file of
+that CA's root when you build:
+
+```bash
+CALLIOPE_HUB_CA=~/hub-ca.pem pio run -e usb -t upload
+```
+
+The file can hold several certificates; to trust Let's Encrypt as well, add
+`certs/lets-encrypt-roots.pem` to it. The build prints `hub TLS: trusts N CA
+certificate(s) from <file>`, and stops on a file with none. Set the same
+variable for every over-the-air update too: an image built without it trusts
+Let's Encrypt only, cannot reach the hub, and is rolled back.
+
+A development build with a plain `ws://` hub is made with `DEV_HUB`:
 
 ```bash
 PLATFORMIO_BUILD_FLAGS='-DDEV_HUB=\"ws://192.0.2.10:8003\"' pio run -e usb -t upload
