@@ -5957,11 +5957,16 @@ function wakeRender() {
   for (const [name, row] of WAKE.rows) {
     if (!keep.has(name)) { row.remove(); WAKE.rows.delete(name); }
   }
+  /* WHICH WORD AN UNSAVED CHANGE IS IN. Save sends the whole set, and
+     "Unsaved changes." beside it said nothing of where they were, so each
+     row compares itself with the hub's copy, as Save does for push-to-talk. */
   words.forEach((w, i) => {
     let row = WAKE.rows.get(w.name);
     if (!row) { row = wakeRow(w.name); WAKE.rows.set(w.name, row); }
     if (box.children[i] !== row) box.insertBefore(row, box.children[i] || null);
-    wakeRowUpdate(row, w, live.get(w.name), WAKE.removed.has(w.name), effective, false);
+    const was = live.get(w.name);
+    const changed = !!WAKE.draft && !!was && wakeKey([w]) !== wakeKey([was]);
+    wakeRowUpdate(row, w, was, WAKE.removed.has(w.name), effective, false, changed);
   });
   $("wwnone").hidden = words.length > 0;
 
@@ -5970,7 +5975,8 @@ function wakeRender() {
   $("wwptt").hidden = !ptt;
   if (ptt) {
     if (!WAKE.pttRow) { WAKE.pttRow = wakeRow(WAKE_PTT); $("wwptt").append(WAKE.pttRow); }
-    wakeRowUpdate(WAKE.pttRow, ptt, null, false, effective, true);
+    const changed = !!WAKE.draftPtt && wakeKey([], ptt) !== wakeKey([], WAKE.server.ptt);
+    wakeRowUpdate(WAKE.pttRow, ptt, null, false, effective, true, changed);
   }
 
   /* The hub says which names it can load. A name it cannot, or one already in
@@ -6318,7 +6324,7 @@ function wakeValue(el, value) {
   if (el && el !== document.activeElement) el.value = value == null ? "" : String(value);
 }
 
-function wakeRowUpdate(row, w, live, removed, words, ptt) {
+function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
   const q = sel => row.querySelector(sel);
   const label = ptt ? "Push-to-talk" : wwLabel(w.name);
   satSet(q(".sat-name"), label);
@@ -6326,13 +6332,21 @@ function wakeRowUpdate(row, w, live, removed, words, ptt) {
      still coming, has failed or would be refused gets a chip. A word still
      being filled in is not refused yet: a required field left empty, or the
      one field at fault while it is being typed in, says Incomplete in dim
-     text and its reason as a plain line, and Save stays off either way. */
+     text and its reason as a plain line, and Save stays off either way.
+     THEN WHAT SAVE WILL DO TO IT, in dim text too: a closed row said Ready
+     for a word marked for removal or edited, so what a Save would send was
+     found only by opening every row. A download still coming or one that
+     failed outranks Changed: it is news from the hub, not the reader's own. */
   const problem = removed ? "" : wakeProblem(w, words);
   const at = problem ? wakeProblemAt(w, problem) : null;
   const culprit = at && q(`[data-f="${at.f}"]`);
   const quiet = !!at && (at.empty || (!!culprit && culprit === document.activeElement));
-  const [word, kind] = problem ? (quiet ? ["Incomplete", ""] : ["Needs a fix", "warn"]) : ptt ? ["Play button", ""]
-    : live ? (WAKE_STATE[live.state] || [live.state, ""]) : ["Not saved yet", ""];
+  const [word, kind] = problem ? (quiet ? ["Incomplete", ""] : ["Needs a fix", "warn"])
+    : removed ? ["Removed on save", ""]
+    : live && live.state && live.state !== "ready" ? (WAKE_STATE[live.state] || [live.state, ""])
+    : changed ? ["Changed", ""]
+    : ptt ? ["Play button", ""]
+    : live ? WAKE_STATE.ready : ["Not saved yet", ""];
   const chip = q(".sat-state");
   satSet(chip, word);
   const cls = "sat-state" + (kind ? " status " + kind : "");

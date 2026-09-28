@@ -323,6 +323,35 @@ def test_a_word_being_set_up_is_unfinished_until_a_value_is_wrong(tmp_path):
     assert got["model"] == {"f": "d.model", "empty": True}, got
 
 
+def test_a_closed_word_says_which_one_a_save_will_change(tmp_path):
+    """Save sends the whole set, and "Unsaved changes." beside it did not say
+    which word. Each row is told whether it differs from the hub's copy, and
+    a word marked for removal or changed says so closed."""
+    got = run(tmp_path, MODERN + """
+      const seen = {};
+      const paint = wakeRowUpdate;
+      wakeRowUpdate = (row, w, live, removed, words, ptt, changed) => {
+        seen[ptt ? "ptt" : w.name] = { removed, changed };
+        return paint(row, w, live, removed, words, ptt, changed);
+      };
+      await satellitesRefresh();
+      const calm = JSON.parse(JSON.stringify(seen));
+      wakeEdit("hey_jarvis", w => { w.threshold = 0.65; });
+      const edited = JSON.parse(JSON.stringify(seen));
+      wakeEdit("hey_jarvis", w => { w.threshold = 0.5; });
+      const undone = JSON.parse(JSON.stringify(seen));
+      wakeEdit("ptt", w => wakeSetMode(w, "conversation", "ptt"));
+      const ptt = JSON.parse(JSON.stringify(seen));
+      console.log(JSON.stringify({ calm, edited, undone, ptt }));
+    """)
+    assert got["calm"] == {"hey_jarvis": {"removed": False, "changed": False},
+                           "ptt": {"removed": False, "changed": False}}, got
+    assert got["edited"]["hey_jarvis"]["changed"] is True, got
+    assert got["edited"]["ptt"]["changed"] is False, got
+    assert got["undone"]["hey_jarvis"]["changed"] is False, "an edit taken back still reads Changed"
+    assert got["ptt"]["ptt"]["changed"] is True and got["ptt"]["hey_jarvis"]["changed"] is False, got
+
+
 def test_push_to_talk_is_edited_like_a_word_and_is_never_a_trigger(tmp_path):
     """The PLAY button's behaviour is the hub's `ptt` block: a command or a
     conversation, sent only when it changed."""

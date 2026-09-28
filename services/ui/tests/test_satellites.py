@@ -565,6 +565,20 @@ def test_save_is_off_with_its_reason_when_there_is_nothing_to_save():
     assert "if (wakeFirstProblem()) { wakeRender(); return; }" in function("wakeSave")
 
 
+def test_a_closed_word_says_what_a_save_will_do_to_it():
+    """A word marked for removal, or edited, said Ready closed, and the only
+    sign of a change was "Unsaved changes." beside Save. Dim words, no chip:
+    healthy is quiet, and a change the reader made is not a fault."""
+    update = function("wakeRowUpdate")
+    order = [update.index(word) for word in ('"Needs a fix"', '"Removed on save"',
+                                             'live.state !== "ready"', '"Changed"', '"Not saved yet"')]
+    assert order == sorted(order), "the state words are chosen in another order"
+    assert '["Removed on save", ""]' in update and '["Changed", ""]' in update
+    render = function("wakeRender")
+    assert "const changed = !!WAKE.draft && !!was && wakeKey([w]) !== wakeKey([was]);" in render
+    assert "wakeKey([], ptt) !== wakeKey([], WAKE.server.ptt)" in render
+
+
 def test_a_word_being_filled_in_is_incomplete_and_its_field_is_marked():
     """A new Language model or Webhook action starts with its required
     fields empty, and the row said Needs a fix in amber, with a warning box
