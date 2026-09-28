@@ -222,6 +222,11 @@ PROXIED: tuple[tuple[str, str], ...] = (
     # because this process logs `proxy=<path>` and no body; the hub has no
     # route that answers a value back.
     ("PUT", "/satellites/secrets"),
+    # A language model word's model picker, and its Test button: one short
+    # question to the destination as the form holds it, answered by the hub
+    # within 25 s, under this process's 30 s read timeout.
+    ("POST", "/satellites/llm/models"),
+    ("POST", "/satellites/llm/test"),
     ("GET", "/satellites/{nid}"),
     ("PATCH", "/satellites/{nid}"),
     ("GET", "/satellites/{nid}/listen"),

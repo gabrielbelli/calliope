@@ -1206,6 +1206,11 @@ SATELLITES_PATHS = (
     # value travel in the body, never the path, because _log records paths
     # and never bodies. Above /satellites/{nid} too: PUT has no twin there.
     ("PUT", "/satellites/secrets"),
+    # A language model word's picker (the ids its server lists) and its Test
+    # (one question to the form as it stands): POSTs with no /satellites/{nid}
+    # twin, so above it as well.
+    ("POST", "/satellites/llm/models"),
+    ("POST", "/satellites/llm/test"),
     ("GET", "/satellites/{nid}"),
     ("PATCH", "/satellites/{nid}"),
     ("GET", "/satellites/{nid}/listen"),

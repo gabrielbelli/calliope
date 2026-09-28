@@ -21,14 +21,22 @@ What these prevent:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
+from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from voice_common import errors
 
+from app import destinations, secret_store
+from app import router as router_module
 from app.destinations import Llm, Request
-from app.router import Rules, RuleSet, Router
+from app.router import Rules, RuleSet, Router, current, quiet_validation, routes
 from test_router import Fake, rule
 
 NID = "94b97e7b8be8"
@@ -296,3 +304,175 @@ def test_a_base_url_that_only_looks_like_the_endpoint_is_left_alone():
     for url in ("http://llm.test/v1", "http://llm.test/chat/completions-proxy",
                 "http://chat/completions"):
         assert Llm.model_validate(LLM | {"base_url": url}).base_url == url
+
+
+# ---- the model picker: POST /satellites/llm/models ------------------------------------------
+
+
+@pytest.fixture
+def api(fake, tmp_path):
+    router = Router(Rules(tmp_path), stt_url="http://stt.test", tts_url="http://tts.test",
+                    client=httpx.AsyncClient(transport=httpx.MockTransport(fake)))
+    app = FastAPI()
+    errors.install_errors(app)
+    quiet_validation(app)
+    app.include_router(routes)
+    app.dependency_overrides[current] = lambda: router
+    with TestClient(app) as client:
+        yield client
+
+
+# OpenRouter's shape, abridged, with the ids it would never send mixed in.
+LISTED = {"object": "list", "data": [
+    {"id": "vendor/zeta-large", "object": "model"}, {"id": "Alpha-mini", "object": "model"},
+    {"id": "beta"}, {"id": "beta"}, {"id": "x" * 121}, {"id": 7}, {"name": "no id"}, "gamma"]}
+
+
+@pytest.mark.parametrize("where", ["environment", "hub"])
+def test_the_model_list_is_the_servers_ids_sorted_and_asked_with_the_key(api, fake, monkeypatch, where):
+    if where == "environment":
+        monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+    else:
+        secret_store.current().set("SATELLITES_LLM_API_KEY", LLM_KEY)
+    fake.handlers["llm.test"] = lambda r: httpx.Response(200, json=LISTED)
+    r = api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1/chat/completions",
+                                                 "api_key_env": "SATELLITES_LLM_API_KEY"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"models": ["Alpha-mini", "beta", "gamma", "vendor/zeta-large"]}
+    asked = fake.sent("llm.test")
+    assert (asked.method, str(asked.url)) == ("GET", "http://llm.test/v1/models")
+    assert asked.headers["authorization"] == f"Bearer {LLM_KEY}"
+    assert LLM_KEY not in r.text
+
+
+def test_a_local_server_is_asked_for_its_models_without_a_key(api, fake):
+    fake.handlers["llm.test"] = lambda r: httpx.Response(200, json=[{"id": "local-7b"}, "local-1b"])
+    for named in ({"api_key_env": None}, {}):  # no name, or a name with nothing set
+        r = api.post("/satellites/llm/models", json={"base_url": "http://llm.test:8080/v1"} | named)
+        assert r.status_code == 200 and r.json() == {"models": ["local-1b", "local-7b"]}
+    assert all("authorization" not in q.headers for q in fake.seen)
+
+
+def test_a_model_list_the_server_refuses_is_a_502_in_its_own_words(api, fake, monkeypatch):
+    monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+    fake.handlers["llm.test"] = lambda r: httpx.Response(401, json={"error": {
+        "message": "Incorrect API key provided: sk-proj-****WXYZ.", "code": "invalid_api_key"}})
+    r = api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1"})
+    assert r.status_code == 502 and r.json()["error"]["code"] == "llm"
+    assert r.json()["error"]["message"] == ("the server refused the key in SATELLITES_LLM_API_KEY "
+                                            "(401): Incorrect API key provided: [key hidden]")
+    assert "WXYZ" not in r.text and LLM_KEY not in r.text
+
+
+@pytest.mark.parametrize("answer, said", [
+    (httpx.Response(200, json={"object": "list", "data": "none"}), "without a list of models"),
+    (httpx.Response(200, json={"models": ["a"]}), "without a list of models"),
+    (httpx.Response(200, text="<html>models</html>"), "without a list of models"),
+    (httpx.Response(404, text="404 page not found"), "the server answered 404: 404 page not found"),
+    (httpx.Response(301, headers={"location": "http://elsewhere.test/"}), "the server answered 301"),
+], ids=["data-not-a-list", "other-shape", "not-json", "no-models-route", "redirect"])
+def test_a_models_answer_that_is_not_a_list_is_a_502(api, fake, answer, said):
+    fake.handlers["llm.test"] = lambda r: answer
+    r = api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1"})
+    assert r.status_code == 502 and said in r.json()["error"]["message"], r.text
+    assert "elsewhere.test" not in fake.hosts()  # a redirect is not followed
+
+
+def test_a_model_list_too_long_to_hold_is_refused_and_a_silent_server_is_a_504(api, fake, monkeypatch):
+    monkeypatch.setattr(destinations, "MODELS_MAX_BYTES", 64)
+    fake.handlers["llm.test"] = lambda r: httpx.Response(200, json={"data": [{"id": "m" * 40}] * 4})
+    big = api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1"})
+    assert big.status_code == 502 and "model list is over" in big.json()["error"]["message"]
+
+    async def hang(request):
+        await asyncio.sleep(5)
+        return httpx.Response(200, json={"data": []})
+    monkeypatch.setattr(router_module, "MODELS_TIMEOUT_S", 0.05)
+    fake.handlers["llm.test"] = hang
+    slow = api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1"})
+    assert slow.status_code == 504 and slow.json()["error"]["code"] == "llm_timeout"
+
+
+def test_the_model_list_takes_what_an_action_takes_and_repeats_none_of_it(api, fake):
+    for body in ({"base_url": "ftp://llm.test"}, {"base_url": "http://llm.test", "api_key_env": LLM_KEY},
+                 {"base_url": "http://llm.test", "api_key": LLM_KEY},
+                 {"base_url": f"http://user:{LLM_KEY}@llm.test/v1"}):
+        r = api.post("/satellites/llm/models", json=body)
+        assert r.status_code == 422 and LLM_KEY not in r.text, r.text
+    assert fake.seen == []
+
+
+# ---- the Test: POST /satellites/llm/test ------------------------------------------------------
+
+
+def test_the_test_answers_with_the_reply_and_how_long_it_took(api, fake):
+    async def slow_first_word(request):
+        await asyncio.sleep(0.05)
+        return sse(delta(role="assistant", content=""), delta(content="Hello there,\n"),
+                   delta(content=" friend."), delta(finish="stop"))
+    fake.handlers["llm.test"] = slow_first_word
+    r = api.post("/satellites/llm/test", json=LLM | {"system": "Be brief."})
+    body = r.json()
+    assert r.status_code == 200, r.text
+    assert (body["model"], body["reply"], body["token_limit"]) == ("tiny", "Hello there, friend.",
+                                                                   "max_tokens")
+    assert 50 <= body["first_token_ms"] <= body["total_ms"]
+    # The question a turn would ask, with the form's own system prompt, and
+    # nothing sent to speech.
+    sent_body = json.loads(fake.sent("llm.test").content)
+    assert sent_body["messages"] == [{"role": "system", "content": "Be brief."},
+                                     {"role": "user", "content": router_module.LLM_TEST_TEXT}]
+    assert fake.hosts() == ["llm.test"]
+
+
+def test_the_test_learns_max_completion_tokens_like_a_turn(api, fake, make):
+    def server(request):
+        if "max_tokens" in json.loads(request.content):
+            return httpx.Response(400, json=WANTS_COMPLETION_TOKENS)
+        return sse(delta(content="Hi."))
+    fake.handlers["llm.test"] = server
+    r = api.post("/satellites/llm/test", json=LLM)
+    assert r.status_code == 200 and r.json()["token_limit"] == "max_completion_tokens"
+    assert r.json()["reply"] == "Hi."
+    # And a word's next turn goes straight to it.
+    asyncio.run(make(LLM).handle_text(NID, "hey_jarvis", "hi"))
+    assert "max_completion_tokens" in sent(fake)[-1] and len(sent(fake)) == 3
+
+
+def test_a_test_the_provider_refuses_is_a_502_without_the_key(api, fake, monkeypatch):
+    monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+    fake.handlers["llm.test"] = lambda r: httpx.Response(401, json={"error": {
+        "message": "Authentication Fails, Your api key: ****WXYZ is invalid",
+        "type": "authentication_error"}})
+    r = api.post("/satellites/llm/test", json=LLM)
+    assert r.status_code == 502 and r.json()["error"]["code"] == "llm"
+    assert r.json()["error"]["message"] == ("the LLM refused the key in SATELLITES_LLM_API_KEY (401): "
+                                            "Authentication Fails, Your api key: [key hidden] is invalid")
+    assert LLM_KEY not in r.text and "WXYZ" not in r.text
+    assert fake.sent("llm.test").headers["authorization"] == f"Bearer {LLM_KEY}"
+
+
+def test_a_test_that_hangs_ends_at_the_ceiling_before_the_proxy_does(api, fake, monkeypatch):
+    """voice-ui gives up on the hub after 30 s with a bare 504 of its own; the
+    hub's sentence has to arrive first."""
+    ui = (Path(__file__).resolve().parents[2] / "ui" / "app" / "main.py").read_text()
+    proxy_read_s = float(re.search(r"timeout=httpx\.Timeout\(([\d.]+), connect=", ui).group(1))
+    assert router_module.LLM_TEST_CEILING_S < proxy_read_s
+
+    async def hang(request):
+        await asyncio.sleep(5)
+        return one_body("Too late.")
+    fake.handlers["llm.test"] = hang
+    monkeypatch.setattr(router_module, "LLM_TEST_CEILING_S", 0.05)
+    r = api.post("/satellites/llm/test", json=LLM | {"timeout": 90})
+    assert r.status_code == 504 and r.json()["error"] == {
+        "message": "the model did not answer within 0.05 s", "type": "server_error",
+        "param": None, "code": "llm_timeout"}
+
+
+def test_the_test_takes_only_an_llm_destination_and_repeats_none_of_it(api, fake):
+    for body in ({"type": "echo"}, LLM | {"api_key_env": LLM_KEY}, LLM | {"api_key": LLM_KEY},
+                 {"type": "llm", "base_url": "http://llm.test/v1"}):
+        r = api.post("/satellites/llm/test", json=body)
+        assert r.status_code == 422 and LLM_KEY not in r.text, r.text
+    assert fake.seen == []

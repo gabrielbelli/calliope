@@ -110,6 +110,10 @@ name.
 | `GET /satellites/routing` | What each wake word does, which secret variables are set (never their values), the STT and TTS URLs and engine, warnings |
 | `PUT /satellites/routing` | 409 `routing_per_wake_word`: routing is saved with each wake word. [Routing](#routing). |
 | `POST /satellites/routing/test` | `{"satellite", "wake_word", "text"}`: a typed sentence through that word's action and TTS. Plays nothing. |
+| `POST /satellites/ha/pipelines` | `{"url", "token_env"}`: Home Assistant's Assist pipelines and its preferred one, asked with the token that variable holds, for an `ha_assist` word's picker. 409 `token_missing` when it holds none. |
+| `POST /satellites/llm/models` | `{"base_url", "api_key_env"}`: `{"models": [...]}`, the ids a language model server lists at `GET {base_url}/models`, asked with that key, for an `llm` word's picker. 502 in the server's own words, 504 after 10 s. |
+| `POST /satellites/llm/test` | An `llm` destination, saved or not: one short question through the same path a turn takes, with no TTS. `{"model", "reply", "first_token_ms", "total_ms", "token_limit"}`, or 502 in the provider's words, or 504 after 25 s. |
+| `PUT /satellites/secrets` | `{"name": "OPENAI_API_KEY", "value": "..."}`: store an API key on the hub under that name, or clear it with `"value": null`. Answers the wake word view. No route reads a value back. 409 `set_in_environment` when the environment already sets the name. |
 | `GET /satellites/firmware` | Uploaded images |
 | `POST /satellites/firmware?model=&version=&signature=` | The `.bin` as the raw body. It must start with the ESP32 image magic (0xE9) and fit a 4 MB slot. `signature` is base64 or base64url DER ECDSA. |
 | `DELETE /satellites/firmware/{sha256}` | |

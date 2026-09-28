@@ -44,6 +44,11 @@ PUT /satellites/routing answers 409 there, naming the route that replaced it.
     PUT  /satellites/routing       409 behind the hub: see PUT /satellites/wake-words
     POST /satellites/ha/pipelines  {"url","token_env"}: Home Assistant's Assist
                                    pipelines, for the page's picker
+    POST /satellites/llm/models    {"base_url","api_key_env"}: the ids a language
+                                   model server lists, for the page's picker
+    POST /satellites/llm/test      an llm destination, saved or not: one short
+                                   question, the reply and how long it took;
+                                   no TTS, nothing played
     POST /satellites/routing/test  {"satellite","wake_word","text"}: skips STT,
                                    runs the word's action and TTS, returns the
                                    Outcome as JSON and plays nothing
@@ -81,7 +86,9 @@ from voice_common.errors import ApiError
 from . import audio
 from . import language as lang
 from . import secret_store
-from .destinations import ENV_NAME, Destination, DestinationError, Echo, HaAssist, Url, _secret
+from .destinations import (ENV_NAME, MODELS_TIMEOUT_S, Destination, DestinationError, Echo,
+                           HaAssist, Llm, LlmUrl, Url, _scrub, _secret)
+from .destinations import Request as Asked
 
 log = logging.getLogger("voice-satellites.router")
 
@@ -845,3 +852,84 @@ async def ha_pipelines(body: PipelinesBody) -> dict:
 @routes.post("/satellites/routing/test")
 async def try_routing(body: TryBody, router: CurrentRouter) -> dict:
     return (await router.handle_text(body.satellite, body.wake_word, body.text)).as_json()
+
+
+# ---- a language model word's picker and its Test ------------------------------------
+
+
+class LlmModelsBody(BaseModel):
+    """What the model picker asks with: the address and the NAME of the key,
+    as an llm action holds them, with Llm's own patterns and default. So an
+    address the picker can ask is one a Save takes, and a pasted
+    /chat/completions is trimmed here as it is there."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: LlmUrl
+    api_key_env: str | None = Field(default="SATELLITES_LLM_API_KEY", pattern=ENV_NAME)
+
+
+def _llm_failed(e: Exception, key_env: str | None, what: str, ceiling: float) -> ApiError:
+    """A picker's or a Test's failure as the answer the page shows: a
+    timeout is 504, anything else 502, in the provider's words (already
+    scrubbed by destinations.py) or the transport's, scrubbed here."""
+    if isinstance(e, (TimeoutError, httpx.TimeoutException)):
+        return ApiError(504, f"{what} within {ceiling:g} s", type_="server_error",
+                        code="llm_timeout")
+    if isinstance(e, DestinationError):
+        return ApiError(502, str(e), type_="server_error", code="llm")
+    return ApiError(502, _scrub(f"{type(e).__name__}: {e}", _secret(key_env))[:300],
+                    type_="server_error", code="llm")
+
+
+@routes.post("/satellites/llm/models")
+async def llm_models(body: LlmModelsBody, router: CurrentRouter) -> dict:
+    """The ids a language model server lists at GET {base_url}/models, asked
+    with the key the action names, for the picker on an llm word: {"models":
+    [...]}. The page asks once the address is committed, never while it is
+    being typed, so a key is not sent to a half-typed host that happens to
+    resolve. The key goes where a saved word would send it, so this is no
+    more than saving one allows (destinations.py)."""
+    try:
+        async with asyncio.timeout(MODELS_TIMEOUT_S):
+            models = await Llm.list_models(router.client, body.base_url, body.api_key_env)
+    except (TimeoutError, DestinationError, httpx.HTTPError) as e:
+        raise _llm_failed(e, body.api_key_env, "the server did not list its models",
+                          MODELS_TIMEOUT_S) from None
+    return {"models": models}
+
+
+# The question a Test asks: short, so the answer's time is mostly the time to
+# the first word, which is what a satellite waits for.
+LLM_TEST_TEXT = "Say hello in five words or fewer."
+# Under voice-ui's 30 s read timeout, so the hub's own sentence reaches the
+# page before the proxy gives up with a bare 504.
+LLM_TEST_CEILING_S = 25.0
+
+
+@routes.post("/satellites/llm/test")
+async def llm_test(body: Llm, router: CurrentRouter) -> dict:
+    """One question to a language model destination as the form holds it,
+    saved or not: the same request path a turn takes (the key found by name,
+    the token limit's retry, streaming) and no TTS. Answers {model, reply,
+    first_token_ms, total_ms, token_limit}: how long the hub waited for the
+    first words and for all of them, which is the latency a satellite adds
+    on top of speech-to-text and speech. Nothing is saved, and nothing is
+    sent that saving the action and pressing Try a word would not send."""
+    ceiling = min(body.timeout, LLM_TEST_CEILING_S)
+    asked = Asked(satellite_id="test", satellite_name="test", wake_word="test",
+                  text=LLM_TEST_TEXT, audio_seconds=0.0)
+    pieces: list[str] = []
+    start = time.monotonic()
+    first: float | None = None
+    try:
+        async with asyncio.timeout(ceiling):
+            async for piece in body.answer(router.client, asked):
+                first = first or time.monotonic()
+                pieces.append(piece)
+    except (TimeoutError, DestinationError, httpx.HTTPError) as e:
+        raise _llm_failed(e, body.api_key_env, "the model did not answer", ceiling) from None
+    done = time.monotonic()
+    return {"model": body.model, "reply": " ".join("".join(pieces).split())[:300],
+            "first_token_ms": round((first - start) * 1000) if first else None,
+            "total_ms": round((done - start) * 1000), "token_limit": body.limit()}
