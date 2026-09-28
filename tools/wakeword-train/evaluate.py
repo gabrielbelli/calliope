@@ -12,8 +12,10 @@ and fed 16 kHz int16 audio in 80 ms frames. Three measurements:
      libritts          LibriTTS-R blends of speakers 700-903, never used in training
      say-en            natural macOS English voices (make_say_clips.py makes the say-* sets)
      say-en-robotic    Eloquence and MacinTalk English voices
-     say-ptbr          the natural Brazilian Portuguese voice, reading the English words
-     say-ptbr-robotic  Eloquence Brazilian Portuguese voices, likewise
+     say-<accent>      the natural voices of a make_say_clips.py --accent locale,
+                       reading the English words (say-ptbr for pt_BR)
+     say-<accent>-robotic  its Eloquence voices, likewise
+   Every directory there is reported, whatever its name.
    Each clip is played after 3 s of a -60 dBFS noise floor and followed by 1 s
    of it; its score is the highest frame score. Clean, and again with an
    AudioSet background under it at 10 dB SNR. Recall at a threshold is the

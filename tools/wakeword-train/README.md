@@ -20,7 +20,7 @@ every version pinned. It runs on a GPU with 4 GB of memory.
 | `oww_train.py` | runs upstream `train.py` with three more fixes that need no edit to it |
 | `train.py` | the driver: `prepare` the data, `train` models in order, make `heldout` clips |
 | `evaluate.py` | loads each `.onnx` as the hub does and measures it |
-| `make_say_clips.py` | makes held-out test clips with macOS `say` (Mac only) |
+| `make_say_clips.py` | makes held-out test clips with macOS `say` (Mac only), in English voices and in the accents you name |
 | `phrases.yaml` | the wake words: spellings, confusable phrases, test phrases |
 
 ## Quick start
@@ -39,10 +39,12 @@ run prepare                                   # about 20 GB, once
 run train --profile smoke --only hey_claude   # prove the pipeline, about 10 min
 ```
 
-On the Mac, held-out clips from `say` (it writes files and plays nothing):
+On the Mac, held-out clips from `say` (it writes files and plays nothing).
+`--accent` adds the voices of another locale reading the English words: name
+yours, and repeat it for every accent in the house.
 
 ```bash
-uv run tools/wakeword-train/make_say_clips.py --out /tmp/heldout
+uv run tools/wakeword-train/make_say_clips.py --out /tmp/heldout --accent pt_BR
 rsync -a /tmp/heldout/ gpu-host:/srv/wakeword-train/data/heldout/
 ```
 
@@ -141,13 +143,15 @@ and feeds it 16-bit 16 kHz audio in 1,280-sample frames, as
 - **Held-out positives**: clips of the wake word that no model trained on.
   `libritts` blends LibriTTS-R speakers 700 to 903, which training never
   uses, at other noise settings and another seed. The macOS `say` clips are
-  in four groups: `say-en`, 8 natural English voices (American, British,
+  in groups: `say-en`, 8 natural English voices (American, British,
   Australian, Irish, Indian, South African); `say-en-robotic`, 21 Eloquence
-  and MacinTalk voices; `say-ptbr`, Luciana, the natural Brazilian voice,
-  reading the English words; `say-ptbr-robotic`, 8 Eloquence Brazilian
-  voices. The Brazilian voices are the nearest available test of the user's
-  accent. Each clip is scored clean, and again over an AudioSet background at
-  10 dB SNR. Recall at 0.5 is the share of clips that reach 0.5.
+  and MacinTalk voices; and for each `--accent`, its natural voices and its
+  Eloquence ones reading the English words (with `--accent pt_BR`,
+  `say-ptbr` is Luciana and `say-ptbr-robotic` 8 Eloquence Brazilian
+  voices). An accent's voices are the nearest available test of how a
+  speaker with that accent says the wake word. Each clip is scored clean, and
+  again over an AudioSet background at 10 dB SNR. Recall at 0.5 is the share
+  of clips that reach 0.5.
 - **Near misses**: `eval_negatives` from `phrases.yaml`, confusable phrases
   kept out of training, in the same voices. The share that reaches 0.5 is a
   false-accept rate on near misses.
@@ -162,7 +166,7 @@ Results go to `reports/<profile>-<name>.json` (with every clip's score) and
 
 Every positive clip comes from LibriTTS-R (American audiobook readers) through
 espeak-ng's `en-us` pronunciation. How far a model carries to other voices
-depends on the word:
+depends on the word. Measured with `--accent pt_BR`:
 
 | Full model | Held-out LibriTTS-R | 8 natural macOS English voices | Luciana (Brazilian) | False activations/hour |
 |---|---|---|---|---|
@@ -175,25 +179,26 @@ the same voices showed that the voices do say "clawd" (the first two score
 exactly as "Claude" does); the British, Australian, Irish, Indian and South
 African versions of that vowel are what the model rejects. Both models are
 also very conservative: no false activation in 10.7 hours even at 0.3. So
-expect a Brazilian accent to be missed more often than the LibriTTS-R numbers
-suggest, try the hub's threshold at 0.3 first, and see below for adding
-accents to training.
+expect any accent but an American one to be missed more often than the
+LibriTTS-R numbers suggest, try the hub's threshold at 0.3 first, and see
+below for adding accents to training.
 
-## Brazilian Portuguese voices
+## Other accents
 
-Training uses English voices only. The wake words are English, so Brazilian
-Portuguese Piper voices were left out of the positive clips. The accent is
-covered by the evaluation instead: the macOS Brazilian Portuguese voices read
-the English wake words, and their scores sit in the `say` results beside the
-English voices (the per-clip scores in the JSON name the voice).
+Training uses English voices only: the wake words are English, so Piper
+voices of other languages were left out of the positive clips. Accents are
+covered by the evaluation instead: `make_say_clips.py --accent` has the macOS
+voices of a locale read the English wake words, and their scores sit in the
+`say` results beside the English voices (the per-clip scores in the JSON name
+the voice).
 
-Every Brazilian voice scored about 0.00 on `hey_claude`, in the smoke run and
-the full one. The Eloquence voices apply Portuguese spelling rules
-("KLAU-dji"), which makes them a harsh proxy, but Luciana, a natural voice,
-scored 0.00 too. If the models miss the user's own voice, the way to add the
-accent, and other accents, to training is to render the phrases with other
-voices: the pt_BR Piper voices
-(`rhasspy/piper-voices`: faber, cadu and jeff are CC0, edresson is CC BY 4.0)
+With `--accent pt_BR`, every Brazilian voice scored about 0.00 on
+`hey_claude`, in the smoke run and the full one. The Eloquence voices apply
+their language's spelling rules ("KLAU-dji"), which makes them a harsh proxy,
+but Luciana, a natural voice, scored 0.00 too. If the models miss your own
+voice, the way to add your accent, and others, to training is to render the
+phrases with other voices: Piper voices of your language (for pt_BR,
+`rhasspy/piper-voices`: faber, cadu and jeff are CC0, edresson is CC BY 4.0)
 or English Piper voices with other accents, written into `positive_train/`
 before `--generate_clips` runs. Upstream `train.py` only tops that directory
 up to `n_samples`, so pre-seeded clips become a share of the total.
