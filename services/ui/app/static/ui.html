@@ -2404,6 +2404,9 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
         <span class="hint tight" id="sathealth" aria-live="polite"></span>
       </div>
       <div class="hint" id="satellitesnone">Asking the satellite hub what is on the network…</div>
+      <!-- A hub that has answered and then stops: the list stays, with this
+           beside it, until the next poll that reaches it. -->
+      <div id="sathubfail" aria-live="polite"></div>
       <div id="satellitesman" hidden>
         <div id="satellitesempty" hidden>
           <p class="sat-empty">No satellites yet.</p>
@@ -4022,6 +4025,7 @@ const SAT_COPY = {
   routeEmpty: "Type something to send to the word's action.",
   noHub: "This deployment has no satellite hub: voice-satellites is not running.",
   hubError: "The satellite hub did not answer: {message}",
+  hubLost: "The hub stopped answering, so this may be out of date: {message}",
   askReboot: "Reboot {name}? It is back in about ten seconds.",
   askForget: "Forget {name}? It stops streaming and waits to be adopted again.",
   askMove: "Move {name} to {url}? It reboots and waits to be adopted by that hub.",
@@ -4225,13 +4229,23 @@ async function satellitesRefresh() {
   const since = WAKE.writes, idle = !WAKE.writing;
   const [n, f, w] = await Promise.allSettled([json("/satellites"),
     json("/satellites/firmware"), json("/satellites/wake-words")]);
+  /* ONE SENTENCE IN PLACE OF THE TAB ONLY BEFORE THE HUB HAS ANSWERED. After
+     that, a missed poll (a hub restarting answers 503) hid the list, every
+     open row and the three hub disclosures for three seconds, took the focus
+     out of whatever was being typed in, clamped the scroll to the top, and
+     said the deployment had no hub. The last good copy stays, as Wake words
+     and Firmware keep theirs, with the reason above it until a poll gets
+     through. */
   if (n.status === "rejected") {
     const e = n.reason;
-    $("satellitesnone").textContent = (e.status === 404 || e.status === 503)
-      ? SAT_COPY.noHub : satText("hubError", { message: e.message });
-    $("satellitesnone").hidden = false;
-    $("satellitesman").hidden = true;
+    if (!SATELLITES.seeded) {
+      $("satellitesnone").textContent = (e.status === 404 || e.status === 503)
+        ? SAT_COPY.noHub : satText("hubError", { message: e.message });
+      $("satellitesnone").hidden = false;
+      $("satellitesman").hidden = true;
+    } else satNoteOnce($("sathubfail"), "bad", satText("hubLost", { message: e.message }));
   } else {
+    satNoteOnce($("sathubfail"), "bad", "");
     $("satellitesnone").hidden = true;
     $("satellitesman").hidden = false;
     SATELLITES.list = n.value.satellites || [];

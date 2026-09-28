@@ -19,8 +19,8 @@ What they prevent:
     second takes back what the first saved;
   * a poll that left before a save and answers after it: the page's copy goes
     back to the list before the save, and the next edit's Save PUTs that;
-  * one missed poll (the hub restarting): everything the hub answers is
-    hidden, and must come back with the next poll rather than on a reload.
+  * one missed poll (the hub restarting): what the hub answered stays on
+    screen with the reason beside it, and the reason goes with the next poll.
 
 The same harness drives test_satellites_ordering.py and
 test_satellites_states.py, which import `run` from here.
@@ -334,21 +334,34 @@ def test_a_word_marked_for_removal_is_left_out_of_the_save_and_keep_undoes_it(tm
     assert got["sent"] == ["hey_jarvis"], got
 
 
-def test_one_missed_poll_does_not_hide_the_hub_until_the_page_is_reloaded(tmp_path):
-    """The hub restarts, one poll gets 503 and the tab hides everything the hub
-    answers. The next poll shows it again: Routing used to be shown only by
-    its first load, which had already happened, and stayed hidden. Its Try
-    box lives inside Wake words now, which every poll shows."""
+def test_one_missed_poll_keeps_the_tab_and_says_so_until_the_hub_is_back(tmp_path):
+    """The hub restarts and one poll gets 503. That used to hide the list,
+    every open row and the hub's disclosures for three seconds, dropping the
+    focus and the scroll, under a sentence saying there was no hub at all.
+    Once the hub has answered, the last good copy stays with the reason
+    beside it, and the reason goes with the next poll that gets through. A
+    hub that has never answered is still one sentence and no empty list."""
     got = run(tmp_path, """
-      await satellitesRefresh();
+      hub.down = true;  await satellitesRefresh();
+      const never = { man: $("satellitesman").hidden, none: $("satellitesnone").textContent };
+      hub.down = false; await satellitesRefresh();
       const before = $("sat-wakewords").hidden;
       hub.down = true;  await satellitesRefresh();
-      const gone = $("satellitesman").hidden;
+      const away = { man: $("satellitesman").hidden, words: $("sat-wakewords").hidden,
+                     said: $("sathubfail").dataset.said };
+      await satellitesRefresh();                        // still down: said once
       hub.down = false; await satellitesRefresh();
-      console.log(JSON.stringify({ shown_at_first: before === false, hidden_while_away: gone === true,
-                                   shown_after_the_hub_is_back: $("satellitesman").hidden === false
-                                     && $("sat-wakewords").hidden === false }));
+      console.log(JSON.stringify({ never, shown_at_first: before === false, away, notes,
+                                   back: $("satellitesman").hidden === false
+                                     && $("sat-wakewords").hidden === false,
+                                   cleared: $("sathubfail").dataset.said }));
     """)
+    assert got["never"]["man"] is True, got
+    assert got["never"]["none"].startswith("This deployment has no satellite hub"), got
     assert got["shown_at_first"], got
-    assert got["hidden_while_away"], got
-    assert got["shown_after_the_hub_is_back"], got
+    assert got["away"]["man"] is False and got["away"]["words"] is False, "a missed poll hid the tab"
+    lost = "The hub stopped answering, so this may be out of date: 503 Service Unavailable"
+    assert got["away"]["said"] == "bad:" + lost, got
+    assert got["notes"].count(["bad", lost]) == 1, "a standing failure was announced at every poll"
+    assert got["back"], got
+    assert got["cleared"] == "", got
