@@ -723,7 +723,7 @@ def test_a_removed_word_offers_no_list_to_ask_for_and_a_list_asked_for_keeps_the
             "[data-ww=\"models\"]')) b.hidden = true;")
     assert hide in update
     # After the render that shows them, or it would be undone at once.
-    assert update.index("wakeActionUpdate(row, w, words)") < update.index(hide)
+    assert update.index("wakeActionUpdate(row, w, words, moreFix)") < update.index(hide)
     row = function("wakeRow")
     assert "if (b.hidden) row.querySelector('[data-f=\"d.model\"]').focus();" in row
     assert "row.querySelector('[data-f=\"d.pipeline\"]').focus();" in row
@@ -740,6 +740,19 @@ def test_the_ring_colour_is_every_modes_and_its_reset_keeps_the_focus():
     assert "data-f=\"colour\"" not in function("wakeActionUpdate")
     assert ("wakeEdit(name, w => { w.colour = null; });\n"
             "      row.querySelector('[data-f=\"colour\"]').focus();") in function("wakeRow")
+
+
+def test_a_fix_under_the_closed_more_is_said_on_its_summary():
+    """The reply limit and the end phrases are under More. Closed, the row
+    said Needs a fix with its reason while the field it marked was out of
+    sight; More's own note says so, first, without opening it."""
+    update = function("wakeRowUpdate")
+    assert 'const moreFix = !!culprit && !quiet && !!culprit.closest(".ww-more");' in update
+    assert "wakeMoreNote(a, !q('[data-f=\"a.voice\"]').parentElement.hidden, moreFix)" in function("wakeActionUpdate")
+    assert "const said = fix ? [SAT_COPY.moreFix] : [];" in function("wakeMoreNote")
+    for field in ('data-f="d.max_tokens"', 'data-f="c.end_phrases"'):
+        more = WORD[WORD.index('<details class="sub ww-more"'):WORD.index("</details>", WORD.index("ww-more"))]
+        assert field in more, field
 
 
 def test_the_add_list_offers_only_what_the_hub_can_load_and_is_not_listed():
@@ -781,7 +794,7 @@ def test_a_control_off_for_its_own_reason_stays_off_on_every_render():
     alone, which switched the key box back on after Store had turned it off."""
     update = function("wakeRowUpdate")
     assert 'c.disabled = removed || c.hasAttribute("data-off");' in update
-    assert update.index("wakeActionUpdate(row, w, words)") < update.index("c.disabled = removed")
+    assert update.index("wakeActionUpdate(row, w, words, moreFix)") < update.index("c.disabled = removed")
     assert ("q('[data-f=\"a.fallback\"]').toggleAttribute(\"data-off\", !talk.length && !a.fallback);"
             in function("wakeActionUpdate"))
     assert ("q('input[type=\"password\"]').toggleAttribute(\"data-off\", !keys.canStore);"

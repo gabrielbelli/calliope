@@ -4178,6 +4178,7 @@ const SAT_COPY = {
   moreReply: "replies on {name}",
   moreSilent: "replies nowhere",
   moreVoice: "voice {v}",
+  moreFix: "needs a fix",
   /* Home Assistant's Assist pipelines, listed by the hub with the action's
      own token (POST /satellites/ha/pipelines). */
   pipePreferred: "Home Assistant's preferred",
@@ -5937,9 +5938,13 @@ function wakeLine(w, ptt) {
   return parts.join(" · ");
 }
 /* More's note: what it holds that is not the default, so closed it still
-   says whether anything in it was changed. */
-function wakeMoreNote(a, voiced) {
-  const said = [];
+   says whether anything in it was changed; and first, that the field the
+   row's fix line names is in it (`fix`). The reply limit and the end
+   phrases are under More, and closed, the row said Needs a fix with its
+   reason while the field it marked was out of sight. The note says where,
+   rather than opening the disclosure on the reader. */
+function wakeMoreNote(a, voiced, fix) {
+  const said = fix ? [SAT_COPY.moreFix] : [];
   if (a.reply_to === "none") said.push(SAT_COPY.moreSilent);
   else if (a.reply_to && a.reply_to !== "same") {
     const n = SATELLITES.list.find(x => x.id === a.reply_to);
@@ -6895,7 +6900,8 @@ function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
      was blue, and Use the default never showed. */
   wakeValue(q('[data-f="colour"]'), w.colour || WAKE_SHOWN.colour);
   q('[data-ww="colourdefault"]').hidden = !w.colour;
-  if (w.action && (w.mode === "command" || w.mode === "conversation")) wakeActionUpdate(row, w, words);
+  const moreFix = !!culprit && !quiet && !!culprit.closest(".ww-more");
+  if (w.action && (w.mode === "command" || w.mode === "conversation")) wakeActionUpdate(row, w, words, moreFix);
   if (w.mode === "trigger") {
     const t = w.trigger || {};
     wakeValue(q('[data-f="t.feedback"]'), t.feedback || WAKE_SHOWN.feedback);
@@ -6946,7 +6952,7 @@ function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
 }
 
 /* THE ACTION'S FIELDS, and only the ones its destination reads. */
-function wakeActionUpdate(row, w, words) {
+function wakeActionUpdate(row, w, words, moreFix) {
   const q = sel => row.querySelector(sel);
   const a = w.action, d = a.destination || { type: "echo" };
   const other = !!row._other || !!(w.language && !WAKE_LANGS.includes(w.language));
@@ -7029,7 +7035,7 @@ function wakeActionUpdate(row, w, words) {
   if (a.voice && !voices.includes(a.voice)) said.push([a.voice, a.voice]);
   satFillSelect(q('[data-f="a.voice"]'), said);
   wakeValue(q('[data-f="a.voice"]'), a.voice || "");
-  satSet(q(".ww-more .sum-note"), wakeMoreNote(a, !q('[data-f="a.voice"]').parentElement.hidden));
+  satSet(q(".ww-more .sum-note"), wakeMoreNote(a, !q('[data-f="a.voice"]').parentElement.hidden, moreFix));
 }
 
 /* A LANGUAGE MODEL'S PART OF THE ROW: the provider its address is, the

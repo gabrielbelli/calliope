@@ -398,6 +398,16 @@ def test_a_word_whose_model_has_gone_from_the_hub_is_named_before_save(tmp_path)
     assert got["removed"] is False, got
 
 
+def test_mores_note_says_first_that_a_fix_is_in_it(tmp_path):
+    got = run(tmp_path, MODERN + """
+      await satellitesRefresh();
+      console.log(JSON.stringify({ plain: wakeMoreNote({ reply_to: "none" }, true, false),
+                                   fix: wakeMoreNote({ reply_to: "none" }, true, true),
+                                   only: wakeMoreNote({ reply_to: "same" }, true, true) }));
+    """)
+    assert got == {"plain": "replies nowhere", "fix": "needs a fix, replies nowhere", "only": "needs a fix"}
+
+
 def test_a_conversation_word_keeps_listening_and_hands_over_to_nobody(tmp_path):
     """A conversation's follow-up and end phrases are sent; a fallback is a
     command's, and switching to conversation takes it off."""
