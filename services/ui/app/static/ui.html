@@ -4528,9 +4528,17 @@ function satState(n, mem) {
   if (ear.conversation === "routing" || ear.conversation === "replying") {
     return say("answering", "Answering", "running", listens, "online");
   }
-  if (ota.state === "verified") return say("updated", "Updated", "done", satText("lineUpdated", { v }), "online");
+  /* A STANDING CONDITION OUTRANKS A NOTICE OF SUCCESS. The hub keeps an
+     update's result for ten minutes, and a satellite muted after one read
+     "Updated" in green for that long: the one state that explains why it
+     ignores its wake word showed only once the row was opened. Speaker off
+     is Mic off's other half: it hears the word, acts on it and plays
+     nothing, and its closed row said Online. All three are choices, which
+     satellitesHealth does not count. */
   if (st.muted) return say("muted", "Muted", "neutral", listens, "online");
   if (cfg.mic_enabled === false) return say("micoff", "Mic off", "neutral", listens, "online");
+  if (cfg.speaker_enabled === false) return say("speakeroff", "Speaker off", "neutral", listens, "online");
+  if (ota.state === "verified") return say("updated", "Updated", "done", satText("lineUpdated", { v }), "online");
   return say("online", "Online", "", listens, "online");
 }
 
@@ -5448,7 +5456,8 @@ function satellitesPaint() {
 }
 
 /* ONE LINE BESIDE THE HEADING FOR WHAT IS WRONG, and nothing when all is
-   well. Muted and Mic off are choices, not faults, and are not counted. */
+   well. Muted, Mic off and Speaker off are choices, not faults, and are not
+   counted. */
 function satellitesHealth() {
   const mem = satMem(), count = { offline: 0, failed: 0, deaf: 0 };
   for (const n of SATELLITES.list) {

@@ -45,6 +45,11 @@ def test_the_state_table_first_match_wins(tmp_path):
         updated: pick(satState(sat({ ota: { state: "verified", version: "v0.3.1" } }), mem())),
         muted: pick(satState(sat({ status: { muted: true } }), mem())),
         mic_off: pick(satState(sat({ config: { mic_enabled: false } }), mem())),
+        speaker_off: pick(satState(sat({ config: { speaker_enabled: false } }), mem())),
+        muted_updated: satState(sat({ ota: { state: "verified", version: "v0.3.1" }, status: { muted: true } }),
+                                mem()).word,
+        mic_off_updated: satState(sat({ ota: { state: "verified", version: "v0.3.1" },
+                                        config: { mic_enabled: false } }), mem()).word,
         pending: pick(satState(sat({ adopted: false, name: "" }), mem())),
         seen: pick(satState(sat({ adopted: false, online: false, last_seen: 999 }), mem())),
       };
@@ -65,7 +70,10 @@ def test_the_state_table_first_match_wins(tmp_path):
     assert got["answering"] == "Answering"
     assert got["updated"]["kind"] == "done" and got["updated"]["line"] == "Now on v0.3.1"
     # Muted and Mic off are choices: a chip with no colour, not a warning.
-    assert got["muted"]["kind"] == got["mic_off"]["kind"] == "neutral"
+    assert got["muted"]["kind"] == got["mic_off"]["kind"] == got["speaker_off"]["kind"] == "neutral"
+    assert got["speaker_off"]["word"] == "Speaker off", got
+    # A standing condition outranks the ten minutes an update's result is kept.
+    assert (got["muted_updated"], got["mic_off_updated"]) == ("Muted", "Mic off"), got
     assert got["pending"]["word"] == "New" and got["pending"]["kind"] == "warn"
     assert got["pending"]["line"] == "Waiting to be adopted · ID aaaaaaaaaaaa"
     assert got["seen"]["word"] == "Seen" and got["seen"]["kind"] == "neutral"
@@ -334,6 +342,7 @@ def test_the_health_line_counts_faults_and_not_choices(tmp_path):
                          sat({ id: "a3", ota: { state: "failed", version: "v1" } }),
                          sat({ id: "a4", status: { muted: true } }),
                          sat({ id: "a5", config: { mic_enabled: false } }),
+                         sat({ id: "a7", config: { speaker_enabled: false } }),
                          sat({ id: "a6", adopted: false, online: false })];
       WAKE.server = { words: [{ name: "alexa", satellites: ["*"], state: "error" }],
                       load_error: "wake_words.json could not be loaded" };
