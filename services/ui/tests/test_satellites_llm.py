@@ -497,3 +497,31 @@ def test_a_model_list_that_failed_can_be_asked_again_from_its_row(tmp_path):
     assert got["failed"] == {"hidden": False, "text": "Ask again"}, got
     assert (got["asked"], got["state"], got["hidden"]) == (2, "ready", True), got
 
+
+def test_replacing_a_key_other_words_send_asks_first(tmp_path):
+    """Every new language model word names the same key, and a provider
+    picked keeps the name, so a second word's key replaced the first word's
+    without a question and the first started answering 401. Replace asks
+    when other saved words send the key; a No sends nothing and leaves the
+    pasted key in the box, for a Key name of its own."""
+    got = run(tmp_path, LLM_HUB + f"""
+      hub.words = [llmWord("hey_jarvis"), llmWord("alexa")];
+      hub.secrets = {{ SATELLITES_LLM_API_KEY: "hub" }};
+      await satellitesRefresh(); await settle();
+      const box = {{ value: "{KEY}" }};
+      confirming = false;
+      await wakeKeyStore("SATELLITES_LLM_API_KEY", keyRow(box), stand(), undefined, "hey_jarvis");
+      const refused = {{ sent: hub.secretCalls.length, kept: box.value === "{KEY}" }};
+      confirming = true;
+      await wakeKeyStore("SATELLITES_LLM_API_KEY", keyRow(box), stand(), undefined, "hey_jarvis");
+      // The one word that sends it: nothing to ask.
+      hub.words = [llmWord("hey_jarvis")];
+      await satellitesRefresh(); await settle();
+      box.value = "{KEY}";
+      await wakeKeyStore("SATELLITES_LLM_API_KEY", keyRow(box), stand(), undefined, "hey_jarvis");
+      console.log(JSON.stringify({{ refused, asked, sent: hub.secretCalls.length, emptied: box.value }}));
+    """)
+    assert got["refused"] == {"sent": 0, "kept": True}, got
+    assert got["asked"] == ["Replace the key stored as SATELLITES_LLM_API_KEY? alexa will send the new one too."] * 2
+    assert got["sent"] == 2 and got["emptied"] == "", got
+

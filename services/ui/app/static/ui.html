@@ -4219,6 +4219,7 @@ const SAT_COPY = {
   keyBad: "A key has no spaces or line breaks; check what was pasted.",
   keyNotKept: "The pasted key was emptied: no key can be stored under this name.",
   askKeyClear: "Clear the key stored as {var}? Every action that names it stops sending it.",
+  askKeyReplace: "Replace the key stored as {var}? {words} will send the new one too.",
   /* Test: the form as it stands, asked one short question by the hub. */
   testOk: "Answered in {s} s, the first words in {first} s: {reply}",
   testEmpty: "Answered in {s} s, with nothing to say.",
@@ -6234,12 +6235,18 @@ function wakeKeyState(name, self) {
     : { hint: satText("keyUnknown", { var: name }), canStore: true, canClear: false };
   /* A key is shared by every saved action that names it, and clearing it
      clears it for all of them. */
+  const others = wakeKeyUsers(name, self);
+  if (others.length) state.hint += " " + satText("keyShared", { words: satList(others) });
+  return state;
+}
+
+/* The saved words, and push-to-talk, other than `self` whose action sends
+   the key stored as `name`, as the page names them. */
+function wakeKeyUsers(name, self) {
   const saved = WAKE.server ? [...WAKE.server.words.map(w => [w.name, w]),
                                ...(WAKE.server.ptt ? [[WAKE_PTT, WAKE.server.ptt]] : [])] : [];
-  const others = saved.filter(([n, w]) => n !== self && w.action && w.action.destination
-    && [w.action.destination.api_key_env, w.action.destination.token_env].includes(name));
-  if (others.length) state.hint += " " + satText("keyShared", { words: satList(others.map(([n]) => wakeName(n))) });
-  return state;
+  return saved.filter(([n, w]) => n !== self && w.action && w.action.destination
+    && [w.action.destination.api_key_env, w.action.destination.token_env].includes(name)).map(([n]) => wakeName(n));
 }
 
 /* A key for the hub to hold under `name`, or null to clear it: in turn with
@@ -6271,12 +6278,24 @@ function wakeKeyBox(box, out, canStore) {
 /* Store key, or Enter in the box. The box is emptied before the request
    goes, so a request that fails leaves no copy in the page to find. A key
    stored while `base_url` is in the form is that address's: its models may
-   then be asked with it (wakeModelsFree). */
-async function wakeKeyStore(name, row, button, base_url) {
+   then be asked with it (wakeModelsFree).
+
+   REPLACE ASKS WHEN OTHER WORDS SEND THE KEY, as Clear key does. Every new
+   language model word names SATELLITES_LLM_API_KEY and a provider picked
+   keeps the name, so a second word for another provider shared the first
+   one's key, and pasting its own replaced that key without a question: the
+   first word started answering 401. A No leaves the pasted key in the box,
+   so the Key name can be changed and it stored under that. `self` is the
+   row's word. */
+async function wakeKeyStore(name, row, button, base_url, self) {
   const box = row.querySelector('input[type="password"]');
   const value = box.value.trim();
-  box.value = "";
   const out = row.querySelector(".ww-keynote");
+  const others = wakeKeyUsers(name, self);
+  if (value && WAKE_SECRET.test(value) && others.length
+      && ((WAKE.server && WAKE.server.secrets) || {})[name] === "hub"
+      && !confirm(satText("askKeyReplace", { var: name, words: satList(others) }))) return;
+  box.value = "";
   if (!value) { satSaid(out, SAT_COPY.keyEmpty); return; }
   if (!WAKE_SECRET.test(value)) { note(out, "bad", SAT_COPY.keyBad); return; }
   const done = busy(button, "Storing…");
@@ -6693,7 +6712,7 @@ function wakeRow(name) {
     } else if (b.dataset.ww === "key" || b.dataset.ww === "keyclear") {
       const d = wakeDest(name);
       if (!d || !d.api_key_env) return;
-      if (b.dataset.ww === "key") wakeKeyStore(d.api_key_env, row, b, d.base_url);
+      if (b.dataset.ww === "key") wakeKeyStore(d.api_key_env, row, b, d.base_url, name);
       else wakeKeyForget(d.api_key_env, row, b);
     }
   });
