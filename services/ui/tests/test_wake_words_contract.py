@@ -256,6 +256,25 @@ def test_what_the_page_shows_for_an_unset_setting_is_the_hubs_default():
     assert float(shown["follow_up_s"]) == default(router["ConversationSettings"], "follow_up_s")
     assert float(shown["cooldown_s"]) == default(router["TriggerSettings"], "cooldown_s")
     assert shown["feedback"] == default(router["TriggerSettings"], "feedback")
+    assert float(shown["silence_ms"]) == default(router["Behaviour"], "silence_ms")
+    assert float(shown["follow_silence_ms"]) == default(router["ConversationSettings"], "silence_ms")
+
+
+def test_the_pauses_the_page_allows_are_the_hubs():
+    """The pause that ends a command and the one that ends a follow-up: the
+    page's range is the hub's Field bounds for both."""
+    router = {n.name: n for n in HUB_ROUTER.body if isinstance(n, ast.ClassDef)}
+    pause = dict(re.findall(r"(low|high): (\d+)", re.search(r"const WAKE_PAUSE = \{([^}]*)\}", CODE).group(1)))
+
+    def bounds(cls: ast.ClassDef) -> tuple[int, int]:
+        for a in cls.body:
+            if isinstance(a, ast.AnnAssign) and a.target.id == "silence_ms":
+                kw = {k.arg: k.value.value for k in a.value.keywords}
+                return kw["ge"], kw["le"]
+        raise AssertionError(f"{cls.name}.silence_ms is gone")
+
+    for cls in ("Behaviour", "ConversationSettings"):
+        assert bounds(router[cls]) == (int(pause["low"]), int(pause["high"])), cls
 
 
 def test_try_a_word_sends_exactly_what_the_routing_test_takes():

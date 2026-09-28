@@ -183,6 +183,31 @@ def test_an_edit_sends_the_rest_of_the_entry_back_as_it_was(tmp_path):
     assert "state" not in body and "error" not in body
 
 
+def test_the_pause_that_ends_a_command_is_typed_in_seconds_and_sent_in_milliseconds(tmp_path):
+    """Hesitating mid-command used to end it at the hub's fixed 0.8 s. The
+    pause is typed in seconds, sent as the hub's silence_ms, and a value it
+    would refuse, or none, is named before Save."""
+    got = run(tmp_path, MODERN + """
+      await satellitesRefresh();
+      const word = () => WAKE.draft.find(w => w.name === "hey_jarvis");
+      wakeEdit("hey_jarvis", w => wakeField(w, "silence_ms", "5"));
+      const tooLong = wakeProblem(word(), wakeEffective());
+      wakeEdit("hey_jarvis", w => wakeField(w, "silence_ms", ""));
+      const empty = wakeProblem(word(), wakeEffective());
+      wakeEdit("hey_jarvis", w => wakeField(w, "silence_ms", "1.5"));
+      wakeEdit("hey_jarvis", w => wakeSetMode(w, "conversation", "hey_jarvis"));
+      wakeEdit("hey_jarvis", w => wakeField(w, "c.silence_ms", "0.1"));
+      const follow = wakeProblem(word(), wakeEffective());
+      wakeEdit("hey_jarvis", w => wakeField(w, "c.silence_ms", "1.2"));
+      await wakeSave();
+      console.log(JSON.stringify({ tooLong, empty, follow, body: sent("hey_jarvis") }));
+    """)
+    assert got["tooLong"] == got["empty"] == "Pause for 0.2 to 3 seconds before the command ends."
+    assert got["follow"] == "Pause for 0.2 to 3 seconds before a follow-up ends."
+    assert got["body"]["silence_ms"] == 1500
+    assert got["body"]["conversation"]["silence_ms"] == 1200
+
+
 def test_a_conversation_word_keeps_listening_and_hands_over_to_nobody(tmp_path):
     """A conversation's follow-up and end phrases are sent; a fallback is a
     command's, and switching to conversation takes it off."""
