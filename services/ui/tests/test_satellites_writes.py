@@ -276,6 +276,30 @@ def test_two_wake_word_writes_at_once_both_reach_the_hub(tmp_path):
     assert got["clean"], got
 
 
+def test_an_edit_made_while_save_is_out_is_kept_for_the_next_save(tmp_path):
+    """The rows stay live while a Save's PUT is out. An edit made then was
+    dropped with the draft when the answer came, and the page said "No
+    changes to save." It stays, and the next Save sends it."""
+    got = run(tmp_path, """
+      await satellitesRefresh();
+      tick("alexa", "aaaaaaaaaaaa");                    // the kitchen, staged
+      hub.slow = 40;
+      const saving = wakeSave();
+      await new Promise(r => setTimeout(r, 10));
+      tick("alexa", "bbbbbbbbbbbb");                    // the bedroom, meanwhile
+      await saving;
+      const kept = !!WAKE.draft && WAKE.draft.find(w => w.name === "alexa").satellites.includes("bbbbbbbbbbbb");
+      const first = hub.puts.length;
+      await wakeSave();
+      console.log(JSON.stringify({ kept, first, puts: hub.puts.length,
+        bedroom: on("alexa", "bbbbbbbbbbbb"), kitchen: on("alexa", "aaaaaaaaaaaa"),
+        clean: WAKE.draft === null }));
+    """)
+    assert got["kept"], got
+    assert (got["first"], got["puts"]) == (1, 2), got
+    assert got["bedroom"] and got["kitchen"] and got["clean"], got
+
+
 def test_a_poll_answer_that_arrives_after_a_save_cannot_undo_it(tmp_path):
     """A poll leaves, the kitchen is given alexa and saved, and then the poll's
     answer lands, holding the list from before the save. Taken as the hub's

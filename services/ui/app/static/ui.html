@@ -6961,9 +6961,16 @@ async function wakeSave() {
       if (!WAKE.draft) return;
       const ptt = WAKE.draftPtt && wakeKey([], WAKE.draftPtt) !== wakeKey([], WAKE.server.ptt)
         ? wakePttCopy(WAKE.draftPtt) : null;
+      /* What was sent, to tell an edit made while the PUT was out: the rows
+         stay live, and one ticked meanwhile was dropped with the draft and
+         the page said "No changes to save." Such a draft stays, and
+         wakeRender lets it go once it matches the hub's copy. */
+      const sent = wakeKey(wakeEffective(), WAKE.draftPtt);
       const r = await wakePut(wakeEffective().map(wakeCopy), ptt);
-      WAKE.draft = WAKE.draftPtt = null;
-      WAKE.removed.clear();
+      if (wakeKey(wakeEffective(), WAKE.draftPtt) === sent) {
+        WAKE.draft = WAKE.draftPtt = null;
+        WAKE.removed.clear();
+      }
       wakeTake(r);
       satSaid($("wwnote"), SAT_COPY.wwSaved);
     });
