@@ -161,12 +161,34 @@ async def test_a_failed_write_leaves_speech_plain(
     await hass.async_block_till_done()
 
 
+async def test_a_refused_boost_is_heard_without_the_vocabulary(
+    hass: HomeAssistant, house: None, fake: FakeCalliope, loaded: MockConfigEntry
+) -> None:
+    """A profile holding a term the model cannot spell (as one written before
+    typographic apostrophes were straightened did): the stack refuses the
+    boost, and the utterance is still transcribed, without the vocabulary."""
+    await until(hass, lambda: loaded.runtime_data.vocabulary.available)
+    fake.glossaries[GLOSSARY_PROFILE] = "Gabriel\u2019s Bedroom\n"
+    result = await _stt(hass).async_process_audio_stream(METADATA, _audio())
+    assert result == stt.SpeechResult(
+        "turn on the kitchen lights", stt.SpeechResultState.SUCCESS
+    )
+    boosted, plain = fake.calls("POST", "/v1/audio/transcriptions")
+    assert boosted["boost"] == "true"
+    assert "glossary" not in plain and "boost" not in plain
+    assert loaded.runtime_data.vocabulary.available  # the profile exists
+
+
 def test_clean() -> None:
     """One term a line, never a rule or a comment, no duplicates in the
     stack's case-insensitive sense, nothing too short to boost, and capped."""
     assert vocabulary.clean(
         ["  Luz   da cama ", "luz da CAMA", "a=b test", "#Sala", "TV", None, "Sala"]
     ) == ["Luz da cama", "a b test", "Sala"]
+    # Typographic punctuation as ASCII, symbols gone: the model spells neither.
+    assert vocabulary.clean(
+        ["Gabriel\u2019s Bedroom", "\U0001f4a1 Lamp", "Sala \u2013 TV"]
+    ) == ["Gabriel's Bedroom", "Lamp", "Sala - TV"]
     many = vocabulary.clean(f"lamp {n:03d}" for n in range(300))
     assert len(many) == vocabulary.MAX_TERMS
     assert many[-1] == f"lamp {vocabulary.MAX_TERMS - 1:03d}"

@@ -104,36 +104,41 @@ class CalliopeSpeechToText(stt.SpeechToTextEntity):
         vocabulary = self._vocabulary
         glossary = GLOSSARY_PROFILE if vocabulary and vocabulary.available else None
         try:
-            text = await self._transcribe(wav, language, glossary)
-            if text is None and vocabulary is not None:
-                # The stack no longer has the profile (its volume was reset):
-                # this utterance is heard without it, and it is written again.
-                vocabulary.async_lost()
+            try:
+                text = await self._transcribe(wav, language, glossary)
+            except CalliopeApiError as err:
+                # The vocabulary must never cost a transcription. A 400 on a
+                # request that named it is the vocabulary's: a profile the
+                # stack no longer has (its volume was reset), or a term its
+                # model cannot spell for `boost`. Heard again without it.
+                if glossary is None or err.status != 400:
+                    raise
+                _LOGGER.warning(
+                    "Calliope refused the %s vocabulary, transcribing without "
+                    "it: %s",
+                    glossary,
+                    err,
+                )
+                if vocabulary is not None and err.message.startswith(
+                    "Unknown glossary profile"
+                ):
+                    vocabulary.async_lost()
                 text = await self._transcribe(wav, language, None)
         except CalliopeError as err:
             _LOGGER.error("Calliope could not transcribe: %s", err)
             return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
-        return stt.SpeechResult((text or "").strip(), stt.SpeechResultState.SUCCESS)
+        return stt.SpeechResult(text.strip(), stt.SpeechResultState.SUCCESS)
 
     async def _transcribe(
         self, wav: bytes, language: str | None, glossary: str | None
-    ) -> str | None:
-        """The transcript, with Home Assistant's vocabulary when the stack has
-        it: boosted into Parakeet's decoder, and as hotwords on Whisper, which
-        has no boost switch. None when the stack refused the profile's name."""
-        try:
-            return await self._client.transcribe(
-                wav,
-                model="whisper-1" if self._engine == "whisper" else "parakeet",
-                language=language,
-                glossary=glossary,
-                boost=glossary is not None and self._engine == "parakeet",
-            )
-        except CalliopeApiError as err:
-            # The stack's own words for a profile it does not have; its code
-            # is the generic invalid_value.
-            if glossary and err.status == 400 and err.message.startswith(
-                "Unknown glossary profile"
-            ):
-                return None
-            raise
+    ) -> str:
+        """The transcript, with Home Assistant's vocabulary when named:
+        boosted into Parakeet's decoder, and as hotwords on Whisper, which has
+        no boost switch."""
+        return await self._client.transcribe(
+            wav,
+            model="whisper-1" if self._engine == "whisper" else "parakeet",
+            language=language,
+            glossary=glossary,
+            boost=glossary is not None and self._engine == "parakeet",
+        )

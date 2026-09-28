@@ -506,15 +506,22 @@ def test_the_wake_word_is_taken_off_the_front_of_the_transcript_and_nowhere_else
 
 # ---- Home Assistant's vocabulary ------------------------------------------------
 
-def stt_with(fake: Fake, *, engine: str | None, profiles: set[str]):
+def stt_with(fake: Fake, *, engine: str | None, profiles: set[str], spellable: bool = True):
     """stt.test answering like stt-stack: a transcription naming a glossary
-    profile it does not have is a 400 in its words; the rest name the engine."""
+    profile it does not have is a 400 in its words, and so is `boost` when
+    `spellable` is False (a term with a character the model has no piece
+    for); the rest name the engine."""
     def handler(r: httpx.Request) -> httpx.Response:
-        name = multipart(r).get("glossary")
+        parts = multipart(r)
+        name = parts.get("glossary")
         if name is not None and name.decode() not in profiles:
             return httpx.Response(400, json={"error": {
                 "message": f"Unknown glossary profile {name.decode()!r}. This deployment "
                            "has: none. See GET /glossaries.", "code": "invalid_value"}})
+        if "boost" in parts and not spellable:
+            return httpx.Response(400, json={"error": {
+                "message": "'boost' cannot be honoured for 1 term(s): 'Gabriel\u2019s Bedroom' "
+                           "at '\u2019'.", "code": "invalid_value", "param": "boost"}})
         return httpx.Response(200, json={"text": fake.stt_text},
                               headers={"x-stt-engine": engine} if engine else {})
     fake.handlers["stt.test"] = handler
@@ -560,3 +567,14 @@ async def test_without_the_profile_the_utterance_is_heard_plain_and_the_name_lef
     monkeypatch.setattr(router_module.time, "monotonic", lambda: clock)
     await router.transcribe(ONE_SECOND)
     assert transcriptions(fake)[-2]["glossary"] == b"home-assistant"
+
+
+async def test_a_refused_boost_is_heard_without_the_vocabulary(make, fake):
+    stt_with(fake, engine="parakeet", profiles={"home-assistant"}, spellable=False)
+    router = make()
+    await router.transcribe(ONE_SECOND)                   # learns the engine
+    assert await router.transcribe(ONE_SECOND) == "what time is it"
+    await router.transcribe(ONE_SECOND)
+    _, boosted, plain, later = transcriptions(fake)
+    assert boosted["boost"] == b"true"
+    assert all("glossary" not in sent and "boost" not in sent for sent in (plain, later))

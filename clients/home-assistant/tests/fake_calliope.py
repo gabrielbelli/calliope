@@ -258,6 +258,17 @@ class FakeCalliope:
                 f"{', '.join(self.glossaries) or 'none'}. See GET /glossaries.",
                 "invalid_value",
             )
+        unspellable = sorted(
+            {ch for ch in self.glossaries.get(name or "", "") if ch in "\u2019\U0001f4a1"}
+        )
+        if "boost" in fields and unspellable:
+            # stt-stack's refusal for a term the model's vocabulary cannot spell.
+            return envelope(
+                400,
+                f"'boost' cannot be honoured for 1 term(s): at {unspellable[0]!r}. "
+                "This model's vocabulary has no piece for those characters.",
+                "invalid_value",
+            )
         if "boost" in fields and self.stt_model == "whisper":
             return envelope(
                 400,

@@ -34,6 +34,7 @@ when the text differs from what was last written.
 from __future__ import annotations
 
 import logging
+import unicodedata
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 
@@ -74,6 +75,16 @@ COMMAND_WORDS: dict[str, tuple[str, ...]] = {
         "timer", "alarm",
     ),
 }
+
+# Typographic punctuation Home Assistant's frontend and phones insert, as the
+# ASCII the model's vocabulary spells. "Gabriel’s Bedroom" had no token
+# sequence for '’', and the stack refused every boosted request naming it.
+TYPOGRAPHIC = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u2032": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"',
+    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-",
+    "\u2026": "...", "\u00a0": " ",
+})
 
 HEADER = """\
 # Written by the Calliope integration in Home Assistant, from its floors,
@@ -134,14 +145,26 @@ def collect(hass: HomeAssistant) -> list[str]:
     return clean(raw)
 
 
+def _spellable(text: str) -> str:
+    """Typographic punctuation as ASCII, and no emoji or other symbols, which
+    no speech model's vocabulary spells. What is left can still hold a
+    character the model lacks (a script it was not trained on); speech-to-text
+    then falls back to transcribing without the vocabulary."""
+    text = unicodedata.normalize("NFC", text.translate(TYPOGRAPHIC))
+    return "".join(
+        " " if unicodedata.category(ch).startswith("S") else ch for ch in text
+    )
+
+
 def clean(terms: Iterable[object]) -> list[str]:
-    """One line each: whitespace collapsed, no '=' (that would make a
-    replacement rule) or leading '#' (a comment), no duplicates in the stack's
-    own sense (case-insensitive), and nothing it would not boost."""
+    """One line each: spellable, whitespace collapsed, no '=' (that would make
+    a replacement rule) or leading '#' (a comment), no duplicates in the
+    stack's own sense (case-insensitive), and nothing it would not boost."""
     out: list[str] = []
     seen: set[str] = set()
     for term in terms:
-        text = " ".join(str(term or "").replace("=", " ").split()).lstrip("#").strip()
+        text = _spellable(str(term or "")).replace("=", " ")
+        text = " ".join(text.split()).lstrip("#").strip()
         if not MIN_TERM_CHARS <= len(text) <= MAX_TERM_CHARS:
             continue
         key = text.lower()

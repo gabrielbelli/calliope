@@ -91,9 +91,9 @@ ENGINE_PROBE_S = 3.0
 # Home Assistant's own names (areas, exposed entities, their aliases), which
 # the Calliope integration keeps on stt-stack as this glossary profile
 # (clients/home-assistant/custom_components/calliope/vocabulary.py). Every
-# transcription names it; when stt-stack answers that it has no such profile,
-# the utterance is sent again without it and the name is left off for this
-# long.
+# transcription names it; when stt-stack refuses it (no such profile, or a term
+# its model cannot spell for `boost`), the utterance is sent again without it
+# and the name is left off for this long.
 HA_GLOSSARY = "home-assistant"
 GLOSSARY_RETRY_S = 600.0
 
@@ -529,7 +529,7 @@ class Router:
         # reaches STT only under Whisper: Parakeet refuses the field (400).
         self.stt_engine: str | None = None
         self._engine_asked = False
-        # When stt-stack last said it has no HA_GLOSSARY.
+        # When stt-stack last refused HA_GLOSSARY.
         self._glossary_missing: float | None = None
         self._own_client = client is None
         # follow_redirects stays False (httpx's default, stated so it is not
@@ -632,8 +632,8 @@ class Router:
         return self.stt_engine
 
     def _names_glossary(self) -> bool:
-        """Whether to name HA_GLOSSARY: always, unless stt-stack said it has
-        no such profile within GLOSSARY_RETRY_S."""
+        """Whether to name HA_GLOSSARY: always, unless stt-stack refused it
+        within GLOSSARY_RETRY_S."""
         return (self._glossary_missing is None
                 or time.monotonic() - self._glossary_missing >= GLOSSARY_RETRY_S)
 
@@ -645,9 +645,11 @@ class Router:
         Home Assistant's names go with it as HA_GLOSSARY: hotwords on either
         engine, and boosted into the decoder once stt-stack has named its
         engine as Parakeet (Whisper refuses `boost` by name, and asking
-        /health for it would add a request to every turn). A profile
-        stt-stack does not have is a 400; the utterance is then transcribed
-        again without it."""
+        /health for it would add a request to every turn). The vocabulary
+        must never cost a transcription: a 400 on a request that named it
+        (no such profile, or a term the model cannot spell for `boost`) is
+        the vocabulary's, and the utterance is transcribed again without
+        it."""
         if not self.stt_url:
             raise DestinationError("SATELLITES_STT_URL is not set, so nothing can be transcribed")
         pcm = pcm[:len(pcm) & ~1]  # whole samples only
@@ -661,7 +663,9 @@ class Router:
                 data["boost"] = "true"
         wav = audio.wav(pcm, MIC_RATE, 1)
         r = await self._post_stt(data, wav)
-        if "glossary" in data and r.status_code == 400 and "Unknown glossary profile" in r.text:
+        if "glossary" in data and r.status_code == 400:
+            log.warning("routing: stt-stack refused the %s vocabulary, transcribing without it "
+                        "for %.0f min: %s", HA_GLOSSARY, GLOSSARY_RETRY_S / 60, r.text[:300].strip())
             self._glossary_missing = time.monotonic()
             r = await self._post_stt(plain, wav)
         engine = r.headers.get("x-stt-engine")
