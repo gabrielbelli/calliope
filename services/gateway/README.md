@@ -378,6 +378,13 @@ The rules are tts-stack's, inherited deliberately rather than rewritten:
 - Keys are compared with `hmac.compare_digest` over every configured key with
   no early break, on the latin-1 wire bytes against the UTF-8-encoded
   configured key. Both of those are corrections already paid for in tts-stack.
+- **Every key is an administrator's.** There is one tier: a key issued for
+  transcription alone also reaches every `/satellites` route, so it can adopt
+  and forget satellites, listen to their microphones (`/listen`), upload
+  firmware, and point a wake word's action at an address of its choosing, and
+  the hub then sends that action's token or key there. The hub never sends its
+  own settings (its broker URL, its API keys) this way. Give the gateway only
+  keys you would trust with the hub.
 - `401` carries the OpenAI envelope with `code: invalid_api_key` and a
   `WWW-Authenticate: Bearer` header, and is answered before any backend is
   contacted.

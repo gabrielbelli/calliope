@@ -107,7 +107,7 @@ from . import audio, dialogue, earcons, listening, secret_store, signing, wakewo
 from . import output as outputs
 from . import language as lang
 from . import router as routing
-from .destinations import ENV_NAME
+from .destinations import EnvName
 from .mqtt import MqttBridge
 from .store import (DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions, reported_config,
                     satellite_config)
@@ -2203,7 +2203,7 @@ class SecretBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(pattern=ENV_NAME)
+    name: EnvName
     # Required, so a body that leaves the value out is a 422 and not a clear.
     value: Annotated[str, StringConstraints(min_length=1, max_length=4096,
                                             pattern=secret_store.SECRET_VALUE)] | None

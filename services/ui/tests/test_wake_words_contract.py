@@ -146,6 +146,15 @@ def module_string(tree: ast.Module, name: str) -> str:
     raise AssertionError(f"voice-satellites has no {name}; the contract moved")
 
 
+def hub_tuple(tree: ast.Module, name: str) -> tuple[str, ...]:
+    """The strings a module-level NAME = ("...", ...) holds."""
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name
+                                                for t in node.targets):
+            return tuple(e.value for e in node.value.elts)
+    raise AssertionError(f"voice-satellites has no {name}; the contract moved")
+
+
 def page_regex(name: str) -> str:
     """The source of a page `const NAME = /.../;`, as Python would write it."""
     found = re.search(r"const " + name + r" = /(.*)/;\n", CODE)
@@ -241,6 +250,10 @@ def test_the_page_checks_what_the_hub_checks_with_the_hubs_own_patterns():
     assert page_regex("WAKE_URL") == module_string(HUB_DESTINATIONS, "HTTP_URL")
     assert page_regex("WAKE_NAME") == module_string(HUB_WAKEWORD, "NAME")
     assert page_regex("WAKE_COLOUR") == module_string(HUB_ROUTER, "COLOUR")
+    # The hub's own settings, which no destination may send, from its tuples.
+    prefixes, words = (hub_tuple(HUB_DESTINATIONS, n) for n in ("HUB_PREFIXES", "CREDENTIAL_WORDS"))
+    assert page_regex("WAKE_HUB_SETTING") == ("^(" + "|".join(p.rstrip("_") for p in prefixes)
+                                              + ")_(?!(.*_)?(" + "|".join(words) + ")(_|$))")
     # The secret goes in as a name, and the hub's defaults are the page's.
     types = destination_types()
     for kind in ("ha_assist", "ha_conversation"):

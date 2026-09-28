@@ -308,7 +308,11 @@ holds it: `token_env` or `api_key_env` is the name of a secret, whose value
 the hub reads on every request from its environment or from the keys it holds
 ([Keys](#keys)). Unknown fields are refused, a name must look like a
 variable's (so a pasted token is a 422), and a URL with a user and password is
-refused. `GET /satellites/wake-words` says in `env` which named secrets have a
+refused. A name must not be one of the hub's own settings: under `SATELLITES_`
+(or `NODES_`) with no `TOKEN`, `KEY`, `SECRET` or `PASSWORD` in it as a word,
+such as `SATELLITES_MQTT_URL`, which carries the broker's password. It is
+refused with a 422 wherever an action, a picker or the key box names it, and
+it holds nothing for any destination. `GET /satellites/wake-words` says in `env` which named secrets have a
 value, as booleans, and in `secrets` where each value lives.
 
 | `type` | Fields | |

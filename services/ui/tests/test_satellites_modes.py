@@ -620,3 +620,23 @@ def test_conversations_and_triggers_are_logged_and_end_the_wait(tmp_path):
     assert got["fresh"] == "Conversation with hey jarvis", got
     assert got["latency"] == "1.3 s to first sound, median of 12 replies", got
     assert got["none"] == ""
+
+
+def test_a_hub_setting_named_as_a_token_is_a_fix_before_save(tmp_path):
+    """The hub refuses to send its own settings (its broker URL, its API
+    keys) as a destination's token; the page names that before Save, and a
+    per-room token under the hub's prefix is still a token."""
+    got = run(tmp_path, MODERN + """
+      await satellitesRefresh();
+      const words = () => WAKE.draft || WAKE.server.words;
+      const jarvis = () => words().find(w => w.name === "hey_jarvis");
+      const out = {};
+      for (const name of ["SATELLITES_MQTT_URL", "SATELLITES_API_KEYS", "SATELLITES_HA_TOKEN_KITCHEN"]) {
+        wakeEdit("hey_jarvis", w => wakeField(w, "d.env", name));
+        out[name] = wakeProblem(jarvis(), words());
+      }
+      console.log(JSON.stringify(out));
+    """)
+    fix = "That name is one of the hub's own settings: name a variable with TOKEN or KEY in it."
+    assert got["SATELLITES_MQTT_URL"] == fix and got["SATELLITES_API_KEYS"] == fix
+    assert got["SATELLITES_HA_TOKEN_KITCHEN"] in ("", None), got

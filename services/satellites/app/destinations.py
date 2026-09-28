@@ -49,16 +49,30 @@ value. Two things keep a value out of an action rather than hope for it:
 
 URLs with a user:password part are refused for the same reason.
 
+THE HUB'S OWN CONFIGURATION IS NEVER A DESTINATION'S SECRET (hub_setting).
+A name under the hub's prefix (SATELLITES_, or NODES_ from before the rename)
+with no TOKEN, KEY, SECRET or PASSWORD in it as a word of its own is the hub's
+own setting: its broker URL,
+which carries the broker's password, its API keys, its data directory. Such a
+name is refused where an action or a picker names it, and resolves to nothing
+anywhere else. Without that, one request to a picker (POST /satellites/llm/models
+with api_key_env SATELLITES_MQTT_URL and an address of the caller's choosing)
+sent the broker's password there as a bearer token, and no action had to be
+saved for it.
+
 NO SSRF FILTERING, AND THAT IS DELIBERATE. Every URL here comes from the
 operator's own configuration, set through PUT /satellites/wake-words, which
 sits behind the same API keys (or the gateway) as adopting satellites and
-flashing firmware. The legitimate targets are exactly the addresses an SSRF
+uploading firmware. The legitimate targets are exactly the addresses an SSRF
 filter would block: Home Assistant on the LAN, an LLM on localhost, Node-RED in
-the next container. A filter would break the main use and protect nothing,
-because whoever can save an action can already reflash every satellite. The
-trust boundary is who may write the configuration, not what it says. Redirects
-are not followed, so a destination cannot bounce a request, and its bearer
-token, to a host the action never named.
+the next container. A filter would break the main use. The trust boundary is
+who may write the configuration, not what it says: a caller with a key can
+send the credentials the actions name (a destination's token or key) to an
+address of its choosing, and nothing else. Behind the gateway that is every
+client key (GATEWAY_API_KEYS has one tier), so give the gateway only keys you
+would trust with those credentials. Redirects are not followed, so a
+destination cannot bounce a request, and its bearer token, to a host the
+action never named.
 """
 
 from __future__ import annotations
@@ -85,6 +99,32 @@ from . import tools as tooling
 # the token into token_env" into a 422 instead of a secret in the file.
 ENV_NAME = r"^[A-Z][A-Z0-9_]{0,63}$"
 HTTP_URL = r"^https?://[^/\s?#]+(/[^\s]*)?$"
+
+# The hub's own prefixes, and the words that name a credential under them.
+HUB_PREFIXES = ("SATELLITES_", "NODES_")
+CREDENTIAL_WORDS = ("TOKEN", "KEY", "SECRET", "PASSWORD")
+
+
+def hub_setting(name: str | None) -> bool:
+    """Whether `name` is the hub's own configuration, which no destination
+    may send (the module docstring): under the hub's prefix, with no word of
+    it naming a credential. SATELLITES_HA_TOKEN, SATELLITES_HA_TOKEN_KITCHEN
+    and SATELLITES_LLM_API_KEY are credentials; SATELLITES_MQTT_URL and
+    SATELLITES_API_KEYS (KEYS, the hub's own) are not."""
+    prefix = next((p for p in HUB_PREFIXES if (name or "").startswith(p)), None)
+    return prefix is not None and not set(name[len(prefix):].split("_")) & set(CREDENTIAL_WORDS)
+
+
+def _not_hub_setting(name: str | None) -> str | None:
+    if hub_setting(name):
+        raise ValueError(f"{name} is one of the hub's own settings, not a secret a destination "
+                         "may send; name a variable with TOKEN or KEY in it, such as "
+                         "SATELLITES_HA_TOKEN")
+    return name
+
+
+# The name of a secret, as an action or a picker holds it.
+EnvName = Annotated[str, Field(pattern=ENV_NAME), AfterValidator(_not_hub_setting)]
 
 
 class DestinationError(Exception):
@@ -150,8 +190,9 @@ def _held(name: str | None) -> str | None:
     compose file is how people blank a variable, and "Bearer " with nothing
     after it is never right. This is the one place a name becomes a value:
     router.env_status reads it too, so "set" means "the action will find a
-    value". What is sent is _secret's, which checks it first."""
-    if not name:
+    value". What is sent is _secret's, which checks it first. The hub's own
+    settings (hub_setting) hold nothing here, whatever path asks."""
+    if not name or hub_setting(name):
         return None
     return os.environ.get(name) or secret_store.current().get(name) or None
 
@@ -242,7 +283,7 @@ class HaConversation(_Base):
 
     type: Literal["ha_conversation"]
     url: Url
-    token_env: str = Field(default="SATELLITES_HA_TOKEN", pattern=ENV_NAME)
+    token_env: EnvName = "SATELLITES_HA_TOKEN"
     # Which conversation agent to use, e.g. "conversation.openai". Unset, HA
     # uses its default (Assist), which is what HA's own satellites do.
     agent_id: str | None = Field(default=None, max_length=120)
@@ -530,7 +571,7 @@ class Llm(_Base):
     # A local server usually needs no key, so an unset variable means "send no
     # Authorization" rather than an error. A server that does need one answers
     # 401, and GET /satellites/wake-words shows the variable as unset.
-    api_key_env: str | None = Field(default="SATELLITES_LLM_API_KEY", pattern=ENV_NAME)
+    api_key_env: EnvName | None = "SATELLITES_LLM_API_KEY"
     max_tokens: int = Field(default=400, ge=1, le=8192)
     timeout: float = Field(default=30.0, gt=0, le=120)
     stream: bool = True
@@ -808,7 +849,7 @@ class Webhook(_Base):
     # itself the secret (HA's /api/webhook/<id>) is shown by GET
     # /satellites/wake-words like any other URL; prefer a token here when the
     # receiver allows it.
-    token_env: str | None = Field(default=None, pattern=ENV_NAME)
+    token_env: EnvName | None = None
     timeout: float = Field(default=15.0, gt=0, le=120)
 
     def env_vars(self) -> list[str]:
@@ -961,7 +1002,7 @@ class HaAssist(_Base):
 
     type: Literal["ha_assist"]
     url: Url
-    token_env: str = Field(default="SATELLITES_HA_TOKEN", pattern=ENV_NAME)
+    token_env: EnvName = "SATELLITES_HA_TOKEN"
     pipeline: str | None = Field(default=None, max_length=120)
     timeout: float = Field(default=15.0, gt=0, le=120)
 

@@ -86,7 +86,7 @@ from voice_common.errors import ApiError
 from . import audio
 from . import language as lang
 from . import secret_store
-from .destinations import (ENV_NAME, MODELS_TIMEOUT_S, Destination, DestinationError, Echo,
+from .destinations import (MODELS_TIMEOUT_S, Destination, DestinationError, Echo, EnvName,
                            HaAssist, Llm, LlmUrl, Url, _held, transport_error)
 from .destinations import Request as Asked
 
@@ -840,7 +840,7 @@ class PipelinesBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     url: Url
-    token_env: str = Field(default="SATELLITES_HA_TOKEN", pattern=ENV_NAME)
+    token_env: EnvName = "SATELLITES_HA_TOKEN"
 
 
 @routes.post("/satellites/ha/pipelines")
@@ -875,7 +875,7 @@ class LlmModelsBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     base_url: LlmUrl
-    api_key_env: str | None = Field(default="SATELLITES_LLM_API_KEY", pattern=ENV_NAME)
+    api_key_env: EnvName | None = "SATELLITES_LLM_API_KEY"
 
 
 def _llm_failed(e: Exception, key_env: str | None, what: str, ceiling: float) -> ApiError:

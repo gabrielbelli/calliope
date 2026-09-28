@@ -57,9 +57,18 @@ answer. The log names a key and never its value.
   does not.
 - **A stored key can be sent to any address an action names.** This was
   already true of a key in the environment: whoever can save an action can
-  point it anywhere and press Try a word. The trust boundary is still who may
-  write the configuration (destinations.py), and those are the same callers
-  who can reflash every satellite.
+  point it anywhere and press Try a word, and a picker (the model list, the
+  Assist pipelines) sends it without a save. The trust boundary is still who
+  may write the configuration (destinations.py). This ADR first said those
+  are the same callers who can reflash every satellite; with firmware signing
+  on they are not, since a key holder cannot install firmware the board
+  refuses. So the boundary is narrower, and stated where it holds: behind the
+  gateway every client key can do this (`GATEWAY_API_KEYS` has one tier), and
+  the hub's own settings are never sent. A name under its prefix with no
+  TOKEN, KEY, SECRET or PASSWORD in it (`SATELLITES_MQTT_URL`, which carries
+  the broker's password, or `SATELLITES_API_KEYS`) is refused where an action
+  or a picker names it and resolves to nothing anywhere else
+  (destinations.hub_setting, 2026-09-28).
 
 ## Rejected
 

