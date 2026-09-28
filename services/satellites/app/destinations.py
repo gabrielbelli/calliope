@@ -80,6 +80,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import time
@@ -93,6 +94,8 @@ from . import audio
 from . import language as lang
 from . import secret_store
 from . import tools as tooling
+
+log = logging.getLogger("voice-satellites.destinations")
 
 # Upper case only, on purpose: see the module docstring. Real env var names
 # may be lower case, but refusing that costs nothing here and turns "pasted
@@ -905,7 +908,18 @@ async def ha_websocket(url: str, timeout: float):
         def process_redirect(self, exc: Exception) -> Exception:
             return exc
 
-    return _Direct(_ha_websocket_url(url), open_timeout=timeout, max_size=1 << 20)
+    return _Direct(_ha_websocket_url(url), open_timeout=timeout, max_size=HA_MAX_MESSAGE)
+
+
+# The largest message taken from Home Assistant's websocket. Its device
+# registry comes in one message, about 700 bytes a device: at 1 MiB, a house
+# of some 1,450 devices closed the connection (1009) and every Assist command
+# failed. 16 MiB is some 23,000 devices.
+HA_MAX_MESSAGE = 16 << 20
+
+
+class _NoDevice(Exception):
+    """HaAssist._device lost the connection looking the device up."""
 
 
 # The command audio goes to Home Assistant in pieces of this many bytes: well
@@ -1061,9 +1075,16 @@ class HaAssist(_Base):
         if req.state.get("ha_assist_conversation_id"):
             run["conversation_id"] = req.state["ha_assist_conversation_id"]
         async with self._session() as ws:
-            device = await self._device(ws, req.satellite_id)
-            if device:
-                run["device_id"] = device
+            try:
+                device = await self._device(ws, req.satellite_id)
+            except _NoDevice:
+                pass  # the connection went with the lookup: the intent goes on a fresh one
+            else:
+                if device:
+                    run["device_id"] = device
+                await ws.send(json.dumps(run))
+                return await self._run(ws, req)
+        async with self._session() as ws:
             await ws.send(json.dumps(run))
             return await self._run(ws, req)
 
@@ -1160,13 +1181,26 @@ class HaAssist(_Base):
 
     async def _device(self, ws, satellite_id: str) -> str | None:
         """The satellite's device id in Home Assistant, from its device
-        registry (message 1), or None when no device is the satellite's."""
+        registry (message 1), or None when no device is the satellite's.
+
+        Best effort: the id only tells Assist the room, and a lookup that
+        fails must not fail the command. One that took the connection with
+        it (a registry too big for a message) is remembered as no device for
+        DEVICE_TTL_S, and raises _NoDevice so the caller starts again."""
+        from websockets.exceptions import WebSocketException
+
         key = (self.url, satellite_id)
         cached = self.devices.get(key)
         if cached is not None and cached[1] > time.monotonic():
             return cached[0]
-        await ws.send(json.dumps({"id": 1, "type": "config/device_registry/list"}))
-        msg = await self._result(ws, 1)
+        try:
+            await ws.send(json.dumps({"id": 1, "type": "config/device_registry/list"}))
+            msg = await self._result(ws, 1)
+        except (OSError, ValueError, WebSocketException) as e:
+            log.info("ha_assist: Home Assistant's device registry was not read (%s); the "
+                     "command goes without the satellite's device", type(e).__name__)
+            self.devices[key] = (None, time.monotonic() + self.DEVICE_TTL_S)
+            raise _NoDevice from None
         found = None
         for device in (msg.get("result") or []) if msg.get("success") else []:
             if not isinstance(device, dict):

@@ -575,6 +575,44 @@ async def test_an_assist_pipeline_runs_the_transcript_at_its_intent_stage_and_it
         assert SECRET not in text
 
 
+async def test_a_device_registry_too_big_to_read_does_not_fail_the_command(fake, ha_socket):
+    """The registry comes in one message, and a large house's passed the
+    websocket's limit: the connection closed (1009), the command failed, and
+    so did every command after, since nothing was remembered. The device only
+    tells Assist the room: the intent now runs on a fresh connection, without
+    it, and the lookup is not tried again until DEVICE_TTL_S has passed."""
+    from websockets.exceptions import ConnectionClosedError
+    from websockets.frames import Close
+
+    sockets, made = ha_socket
+
+    class TooBig(FakeHaSocket):
+        async def send(self, text):
+            if not isinstance(text, bytes) and json.loads(text)["type"] == "config/device_registry/list":
+                self.sent.append(json.loads(text))
+                raise ConnectionClosedError(Close(1009, "frame exceeds limit"), None)
+            await super().send(text)
+
+    async def connect(url, timeout):
+        sock = TooBig()
+        sockets.append(sock)
+        return sock
+    HaAssist.connect = staticmethod(connect)
+    r = router(fake, hey_jarvis={"action": {"destination": ASSIST}})
+    out = await turn(r, "hey_jarvis", "turn off the lights")
+    out2 = await turn(r, "hey_jarvis", "turn on the lights")
+    assert out.error is None and out.reply_text == "The lights are off." and out2.error is None
+    assert [kinds(s) for s in sockets] == [
+        ["auth", "assist_pipeline/pipeline/get"],
+        ["auth", "config/device_registry/list"],
+        ["auth", "run:intent"],
+        ["auth", "assist_pipeline/pipeline/get"],
+        ["auth", "run:intent"]]
+    assert "device_id" not in sockets[2].sent[1]
+    from app.destinations import HA_MAX_MESSAGE
+    assert HA_MAX_MESSAGE >= 16 << 20
+
+
 async def test_an_assist_pipeline_hears_the_command_and_speaks_the_reply_itself(fake, ha_socket, caplog):
     """HOME ASSISTANT'S PIPELINE IS THE WHOLE SET-UP. It hears the command
     with its own speech-to-text, in its own language, and the reply is spoken
