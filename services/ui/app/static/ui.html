@@ -1462,11 +1462,11 @@ details.sat-row>.body>.ww-listen,details.sat-row>.body>.ww-does{margin-top:var(-
 /* The three hints under the grid are one note, not three paragraphs. */
 .sat-buttons .body>.hint+.hint{margin-top:var(--s1)}
 .sat-btns .url label{margin-bottom:var(--s1)}
-fieldset.ww-sats,fieldset.ww-mode,fieldset.sat-fs{border:0;padding:0;margin:0;min-width:0}
+fieldset.ww-sats,fieldset.ww-mode,fieldset.ww-tools,fieldset.sat-fs{border:0;padding:0;margin:0;min-width:0}
 /* The Satellites legend names a control the way Threshold beside it does, so
    it is dressed as a label; the two group legends are headings (see
    #enginerow>legend). */
-fieldset.ww-sats>legend,fieldset.ww-mode>legend{padding:0;margin-bottom:var(--s1);font-size:var(--t-label);
+fieldset.ww-sats>legend,fieldset.ww-mode>legend,fieldset.ww-tools>legend{padding:0;margin-bottom:var(--s1);font-size:var(--t-label);
   line-height:1.45;color:var(--dim);letter-spacing:.005em}
 fieldset.sat-fs>legend{margin-bottom:var(--s1)}
 fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
@@ -5446,6 +5446,9 @@ const WAKE_SHOWN = { follow_up_s: 8, cooldown_s: 3, feedback: "earcon", silence_
 /* A word's ring colour, as the colour picker writes it; unset is the hub's
    listening blue (WAKE_SHOWN.colour, main.LISTEN_COLOUR there). */
 const WAKE_COLOUR = /^#[0-9a-fA-F]{6}$/;
+/* The tools a language model word may call, as the hub names them
+   (destinations.Llm.tools); a new language model word starts with both. */
+const WAKE_TOOLS = ["web_search", "weather"];
 /* The pause that ends a command (and a follow-up), in milliseconds as the hub
    takes it; the page shows seconds. */
 const WAKE_PAUSE = { low: 200, high: 3000 };
@@ -5633,9 +5636,19 @@ function wakeSetDest(w, type) {
     d.url = (ha && ha.url) || "";
     d.token_env = (ha && ha.token_env) || "SATELLITES_HA_TOKEN";
   } else if (type === "llm") {
-    Object.assign(d, { base_url: "", model: "", api_key_env: "SATELLITES_LLM_API_KEY" });
+    Object.assign(d, { base_url: "", model: "", api_key_env: "SATELLITES_LLM_API_KEY",
+                       tools: [...WAKE_TOOLS] });
   } else if (type === "webhook") d.url = "";
   w.action = { ...(w.action || { reply_to: "same" }), destination: d };
+}
+
+/* A language model word's tool, on or off, kept in the hub's own order. */
+function wakeTool(w, tool, on) {
+  const d = w.action && w.action.destination;
+  if (!d || d.type !== "llm") return;
+  const have = new Set(d.tools || []);
+  if (on) have.add(tool); else have.delete(tool);
+  d.tools = WAKE_TOOLS.filter(x => have.has(x));
 }
 
 function wakeNumber(text) { return text === "" ? null : Number(text); }
@@ -6395,6 +6408,12 @@ function wakeRowMarkup(u) {
           <div class="hint ww-keyhint"></div>
           <div class="ww-keynote" aria-live="polite"></div>
         </div>
+        <fieldset class="ww-tools">
+          <legend>Tools</legend>
+          <label class="checkline tight"><input type="checkbox" data-tool="web_search"> Web search</label>
+          <label class="checkline tight"><input type="checkbox" data-tool="weather"> Weather</label>
+          <div class="hint">Used only when a question needs them; a search adds about a second.</div>
+        </fieldset>
         <div class="actions">
           <button class="small" type="button" data-ww="llmtest">Test</button>
           <span class="hint">Asks it one short question, as the form stands, and says how long it took.</span>
@@ -6532,7 +6551,9 @@ function wakeRow(name) {
   });
   row.addEventListener("change", ev => {
     const t = ev.target;
-    if (t.dataset.sat) {
+    if (t.dataset.tool) {
+      wakeEdit(name, w => wakeTool(w, t.dataset.tool, t.checked));
+    } else if (t.dataset.sat) {
       const id = t.dataset.sat;
       wakeEdit(name, w => {
         w.satellites = w.satellites.filter(s => s !== id && s !== "*");
@@ -6846,6 +6867,8 @@ function wakeActionUpdate(row, w, words) {
 function wakeLlmUpdate(row, w, words) {
   const q = sel => row.querySelector(sel);
   const d = w.action.destination;
+  for (const box of row.querySelectorAll("[data-tool]"))
+    if (box !== document.activeElement) box.checked = (d.tools || []).includes(box.dataset.tool);
   satFillSelect(q('[data-f="preset"]'), LLM_PRESETS);
   wakeValue(q('[data-f="preset"]'), wakePreset(d.base_url));
   const key = wakeModelsKey(d.base_url, d.api_key_env);

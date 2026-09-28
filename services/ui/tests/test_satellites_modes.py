@@ -251,7 +251,8 @@ def test_a_conversation_word_keeps_listening_and_hands_over_to_nobody(tmp_path):
     assert body["conversation"] == {"follow_up_s": 12, "end_phrases": ["thanks", "that's all"]}
     assert body["action"]["fallback"] is None
     assert body["action"]["destination"] == {"type": "llm", "base_url": "https://llm.example.com/v1",
-                                             "model": "vendor/test-model", "api_key_env": None}, body
+                                             "model": "vendor/test-model", "api_key_env": None,
+                                             "tools": ["web_search", "weather"]}, body
 
 
 def test_a_trigger_word_sends_no_action_and_starts_stricter(tmp_path):

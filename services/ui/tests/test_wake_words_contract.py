@@ -461,3 +461,12 @@ def test_the_colour_the_page_shows_for_an_unset_word_is_the_hubs_listening_blue(
              and any(getattr(x, "id", "") == "LISTEN_COLOUR" for x in n.targets)]
     hexa = "#" + "".join(f"{e.value:02x}" for e in rgb.elts)
     assert f'colour: "{hexa}"' in CODE, hexa
+
+
+def test_the_tools_the_page_offers_are_the_hubs():
+    """destinations.Llm.tools is a Literal list; the page's WAKE_TOOLS names
+    the same tools in the same order, which is the order it sends them in."""
+    hub = (HUB / "destinations.py").read_text()
+    hub_tools = re.findall(r'"(\w+)"', re.search(r"tools: list\[Literal\[([^\]]*)\]\]", hub).group(1))
+    page = re.findall(r'"(\w+)"', re.search(r"const WAKE_TOOLS = \[([^\]]*)\]", CODE).group(1))
+    assert page == hub_tools == ["web_search", "weather"]

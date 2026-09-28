@@ -367,3 +367,26 @@ def test_a_reply_limit_is_a_whole_number_or_left_to_the_hub(tmp_path):
     assert got["said"] == {"0": fix, "8193": fix, "2.5": fix, "lots": fix, "1200": ""}, got
     assert got["set"] == 1200, "the limit went as text"
     assert got["left"] is False, "an emptied limit was sent instead of left to the hub"
+
+
+def test_a_language_model_word_turns_its_tools_on_and_off_in_the_hubs_order(tmp_path):
+    """A new language model word starts with web search and weather; a box
+    unticked takes one off, and the list goes to the hub in its own order."""
+    got = run(tmp_path, LLM_HUB + """
+      await satellitesRefresh(); await settle();
+      const saved = dest("hey_jarvis").tools;
+      wakeEdit("hey_jarvis", w => wakeField(w, "dest", "echo"));
+      wakeEdit("hey_jarvis", w => wakeField(w, "dest", "llm"));
+      const fresh = dest("hey_jarvis").tools;
+      wakeEdit("hey_jarvis", w => wakeTool(w, "web_search", false));
+      wakeEdit("hey_jarvis", w => wakeTool(w, "web_search", true));
+      wakeEdit("hey_jarvis", w => wakeTool(w, "weather", false));
+      wakeEdit("hey_jarvis", w => { wakeField(w, "d.base_url", "https://llm.example.com/v1");
+                                    wakeField(w, "d.model", "gpt-test-mini"); });
+      await wakeSave();
+      console.log(JSON.stringify({ saved: saved === undefined ? "absent" : saved, fresh,
+                                   sent: sent("hey_jarvis").action.destination.tools }));
+    """)
+    assert got["saved"] == "absent", "a word saved before tools existed was given some"
+    assert got["fresh"] == ["web_search", "weather"]
+    assert got["sent"] == ["web_search"]
