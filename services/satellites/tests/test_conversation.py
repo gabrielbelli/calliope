@@ -324,6 +324,78 @@ def test_muting_the_satellite_a_reply_plays_on_ends_the_conversation_that_sent_i
     assert ended["satellite"] == NID and ended["reason"] == "muted"
 
 
+class _Socket:
+    """Just enough of a WebSocket for a Session whose sends are read back."""
+    headers: dict = {}
+    client = None
+
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    async def send_text(self, text: str) -> None:
+        self.sent.append(json.loads(text))
+
+    async def send_bytes(self, data: bytes) -> None:
+        pass
+
+
+@pytest.mark.parametrize("again", ["cancel", "stop_listening"])
+async def test_a_second_stop_while_a_conversation_closes_still_releases_the_satellite(
+        app, tmp_path, again):
+    """Stop pressed twice, or stop and a flush: the second cancel landed in
+    one of _close's sends (here, queued on the socket's lock behind the
+    speaker) and cut it short. The satellite stayed ducked and lit, and the
+    hub took it for busy: every wake word ignored until it reconnected."""
+    from app import router as routing
+
+    behaviour = routing.Behaviour.model_validate({"mode": "conversation",
+                                                  "action": {"destination": LLM}})
+
+    class OneWord:
+        def find(self, *_):
+            return routing.Route("hey_jarvis", behaviour)
+
+    was = routing._current
+    routing.configure(OneWord())
+    try:
+        h = app.Hub(app.Store(tmp_path))
+        ws = _Socket()
+        s = app.Session(ws, {"id": NID, "caps": {"duck": True, "lights": 12}})
+        s.adopted = True
+        h.sessions[s.id] = s
+        conv = app.Conversation(h, s.id, "kitchen", app.listening.Heard("hey_jarvis", 0.9, None, 0.0),
+                                session=s)
+        s.conversation = conv
+        conv.start()
+        for _ in range(100):
+            if [m["type"] for m in ws.sent] == ["lights", "duck"]:
+                break
+            await asyncio.sleep(0.01)
+        assert [m["type"] for m in ws.sent] == ["lights", "duck"], ws.sent
+        await s.lock.acquire()          # the speaker loop, mid-frame
+        conv.cancel("stop")
+        for _ in range(5):
+            await asyncio.sleep(0)
+        if again == "cancel":
+            conv.cancel("stop")
+        else:
+            h.stop_listening(s)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        s.lock.release()
+        for _ in range(100):
+            if conv.task.done():
+                break
+            await asyncio.sleep(0.01)
+        assert s.conversation is None and conv.phase == "done"
+        assert [m["type"] for m in ws.sent][2:] == ["unduck", "lights"], ws.sent
+        assert ws.sent[-1].get("mode") == "off" and s.duck_holds == 0
+        refusal = h.ptt_refusal(s)
+        assert refusal is None or refusal[0] != "satellite_busy", refusal
+    finally:
+        routing.configure(was)
+
+
 def test_a_conversation_ends_when_the_satellite_stops_sending_audio(client, app, events, plug,
                                                                     monkeypatch):
     """The device stops streaming when muted (or its Wi-Fi drops) and says

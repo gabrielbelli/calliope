@@ -1405,6 +1405,7 @@ class Conversation:
         self._command: listening.Command | None = None
         self._published = False
         self._cancelled = False
+        self._closing = False
 
     @property
     def live(self) -> bool:
@@ -1418,8 +1419,14 @@ class Conversation:
         self.commands.put_nowait(command)
 
     def cancel(self, reason: str = "cancelled") -> None:
+        """End it now, for `reason`. Not once it is closing: _close is
+        already ending it, and a second cancel (stop pressed twice, stop and
+        a flush) landing in one of its sends cut it short, before the
+        satellite was released: the duck and the ring stayed on, and the hub
+        took the satellite for busy and ignored its wake words until it
+        reconnected."""
         self.reason = self.reason or reason
-        if self.task is not None:
+        if self.task is not None and not self._closing:
             self.task.cancel()
 
     def session_view(self) -> dict | None:
@@ -1755,24 +1762,31 @@ class Conversation:
     async def _close(self) -> None:
         """Whatever the way out: a reply cut short stops, the duck is
         lifted, the ring goes out, the Ear goes back to wake words (the
-        listener sees no conversation), and a conversation says it ended."""
+        listener sees no conversation), and a conversation says it ended.
+
+        cancel() leaves it alone from here on; the bookkeeping is in a
+        finally all the same, so a task cancelled some other way (the hub
+        shutting down) still lets the satellite go."""
+        self._closing = True
         self.interruptible = False
-        if self._cancelled and self.player is not None and self.player.drop():
-            target = self.player.session()
-            if target is not None:
-                await _quietly(target.send_json({"type": "flush"}))
-        for s in list(self.ducked):
-            await self._unduck(s)
-        if self.live and self.s.lit and not self.superseded:
-            await self.hub.send_lights(self.s, {"mode": "off"})
-        if self.s is not None and self.s.conversation is self:
-            self.s.conversation = None
-        if self.memory is not None:
-            self.hub.publish({"type": "conversation_ended", "satellite": self.nid,
-                              "rule_id": self.route.id if self.route else None,
-                              "turns": self.turns, "reason": self.reason or "cancelled",
-                              "seconds": round(time.monotonic() - self.started_at, 1)})
-        self.phase = "done"
+        try:
+            if self._cancelled and self.player is not None and self.player.drop():
+                target = self.player.session()
+                if target is not None:
+                    await _quietly(target.send_json({"type": "flush"}))
+            for s in list(self.ducked):
+                await self._unduck(s)
+            if self.live and self.s.lit and not self.superseded:
+                await self.hub.send_lights(self.s, {"mode": "off"})
+        finally:
+            if self.s is not None and self.s.conversation is self:
+                self.s.conversation = None
+            if self.memory is not None:
+                self.hub.publish({"type": "conversation_ended", "satellite": self.nid,
+                                  "rule_id": self.route.id if self.route else None,
+                                  "turns": self.turns, "reason": self.reason or "cancelled",
+                                  "seconds": round(time.monotonic() - self.started_at, 1)})
+            self.phase = "done"
 
 
 # ---- the rename from "nodes" ------------------------------------------------------
