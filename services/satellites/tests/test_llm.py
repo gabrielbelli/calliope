@@ -16,7 +16,10 @@ What these prevent:
     reasoning models), or a reasoning model that spent its whole limit
     thinking;
   * reasoning read aloud;
-  * a base URL pasted as the whole endpoint, which answered 404 on every turn.
+  * a base URL pasted as the whole endpoint, which answered 404 on every turn;
+  * a key in the environment with a CR or a newline on the end, which h11
+    refused in a sentence that quoted it whole, past the scrub, into the
+    turn's error, the log and the page.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import logging
 import re
 from pathlib import Path
 
+import h11
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -222,6 +226,117 @@ async def test_a_server_that_wants_a_key_when_none_was_sent_says_which_variable(
     out = await make(LLM if named else LLM | {"api_key_env": None}).handle_text(NID, "hey_jarvis", "hi")
     assert out.error == expected
     assert "authorization" not in fake.sent("llm.test").headers
+
+
+# ---- a key the environment holds with something a header cannot carry --------------------------
+
+# What a .env saved with Windows line endings, a secret made from a file, or a
+# careless paste leaves in a key. h11 refuses each in a header, in a sentence
+# that quotes it whole with the control character escaped past _scrub.
+UNSENDABLE = {"cr": LLM_KEY + "\r", "lf": LLM_KEY + "\n", "crlf": LLM_KEY + "\r\n",
+              "tab": "\t" + LLM_KEY, "escape": LLM_KEY + "\x1b", "space": LLM_KEY.replace("-", " ", 1),
+              "non-ascii": LLM_KEY + "é"}
+REFUSED = ("SATELLITES_LLM_API_KEY is set in the hub's environment with a line break, a space or "
+           "a character outside printable ASCII in it, which no request header can carry, so it "
+           "is not sent")
+
+
+def h11_refusal(value: str) -> httpx.LocalProtocolError:
+    """The error httpx raises for an Authorization header h11 will not write,
+    in h11's own words: made by h11, so the test cannot drift from what h11
+    says. httpcore passes the sentence on unchanged."""
+    try:
+        h11.Request(method="POST", target="/v1/chat/completions",
+                    headers=[("Host", "llm.test"), ("Authorization", f"Bearer {value}".encode())])
+    except h11.LocalProtocolError as e:
+        return httpx.LocalProtocolError(str(e))
+    raise AssertionError("h11 took the header")
+
+
+def nowhere(text: str, value: str = LLM_KEY) -> None:
+    """Neither the key, nor the value as it was set, nor any sign of either:
+    the key's end, or h11's sentence that quotes it."""
+    for sign in (LLM_KEY, value.strip(), "WXYZ", "Illegal header"):
+        assert sign not in text, text
+
+
+@pytest.mark.parametrize("value", UNSENDABLE.values(), ids=UNSENDABLE.keys())
+async def test_a_key_in_the_environment_no_header_can_carry_is_named_and_not_sent(
+        make, fake, monkeypatch, caplog, value):
+    """Measured before the fix: a CR on the end reached h11, whose refusal
+    quoted the key, and _scrub's exact match missed it because the CR was
+    written as an escape. It was the turn's error, its INFO line and its
+    event."""
+    monkeypatch.setenv("SATELLITES_LLM_API_KEY", value)
+    fake.handlers["llm.test"] = lambda r: sse(delta(content="Hi."))
+    router = make(LLM)
+    with caplog.at_level(logging.INFO, logger="voice-satellites.router"):
+        out = await router.handle_text(NID, "hey_jarvis", "hi")
+        router.log_outcome(NID, "hey_jarvis", out)
+
+    assert out.error.startswith(f"destination: {REFUSED}; set it again without one"), out.error
+    for text in (out.error, json.dumps(out.as_json()), caplog.text):
+        nowhere(text, value)
+    assert "llm.test" not in fake.hosts(), "the key went anyway"
+    # It is set, and says so; what is wrong with it is the turn's to say.
+    assert router_module.env_status([Llm.model_validate(LLM)]) == {"SATELLITES_LLM_API_KEY": True}
+
+
+@pytest.mark.parametrize("value", UNSENDABLE.values(), ids=UNSENDABLE.keys())
+def test_the_picker_and_the_test_name_such_a_key_and_send_nothing(api, fake, monkeypatch, value):
+    monkeypatch.setenv("SATELLITES_LLM_API_KEY", value)
+    fake.handlers["llm.test"] = lambda r: httpx.Response(200, json=LISTED)
+    for path, body in (("/satellites/llm/models", {"base_url": "http://llm.test/v1"}),
+                       ("/satellites/llm/test", LLM)):
+        r = api.post(path, json=body)
+        assert r.status_code == 502 and r.json()["error"]["code"] == "llm", r.text
+        assert r.json()["error"]["message"].startswith(REFUSED), r.text
+        nowhere(r.text, value)
+    assert fake.seen == []
+
+
+async def test_a_transport_error_that_quotes_a_header_is_shown_by_its_type_alone(
+        api, make, fake, monkeypatch, caplog):
+    """Whatever h11 refuses, its words are never shown: the destination's
+    stage, a stage that runs through Router.stage (speech here; Home
+    Assistant's text-to-speech sends its token there), and both routes. Made
+    with a valid key, so what is proved is the transport path on its own."""
+    monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+
+    def refuse(request):
+        raise h11_refusal(LLM_KEY + "\r")
+    fake.handlers["llm.test"] = refuse
+    withheld = ("LocalProtocolError: the hub could not write the request, and h11's reason is "
+                "not shown because it can quote a header that holds a key")
+    router = make(LLM)
+    with caplog.at_level(logging.INFO, logger="voice-satellites.router"):
+        out = await router.handle_text(NID, "hey_jarvis", "hi")
+        router.log_outcome(NID, "hey_jarvis", out)
+    assert out.error == f"destination: {withheld}"
+
+    fake.handlers["llm.test"] = lambda r: sse(delta(content="Hi."))
+    fake.handlers["tts.test"] = refuse
+    spoken = await make(LLM).handle_text(NID, "hey_jarvis", "hi")
+    assert spoken.error == f"tts: {withheld}"
+
+    fake.handlers["llm.test"] = refuse
+    answers = [api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1"}),
+               api.post("/satellites/llm/test", json=LLM)]
+    for r in answers:
+        assert r.status_code == 502 and r.json()["error"]["message"] == withheld, r.text
+    for text in (out.error, json.dumps(out.as_json()), spoken.error, caplog.text,
+                 *(r.text for r in answers)):
+        nowhere(text)
+
+
+def test_any_other_transport_error_keeps_its_words_without_the_key():
+    request = httpx.Request("GET", "http://llm.test/v1/models")
+    refused = httpx.ConnectError("[Errno 111] Connection refused", request=request)
+    assert destinations.transport_error(refused, LLM_KEY) == \
+        "ConnectError: [Errno 111] Connection refused"
+    echoed = httpx.RemoteProtocolError(f"peer said {LLM_KEY}", request=request)
+    assert destinations.transport_error(echoed, None, LLM_KEY) == \
+        "RemoteProtocolError: peer said [key hidden]"
 
 
 # ---- what is spoken ------------------------------------------------------------------------

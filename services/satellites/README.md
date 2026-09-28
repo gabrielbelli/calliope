@@ -406,7 +406,11 @@ hub reads the value on every request, from one of two places, so a change
 applies from the next turn with no restart.
 
 1. **The hub's environment**, like any other setting: `OPENAI_API_KEY` in the
-   container's secret settings. The environment wins.
+   container's secret settings. The environment wins. A value with a line
+   break, a space or a character outside printable ASCII in it is not sent:
+   a `.env` saved with Windows line endings, or a secret made from a file
+   that ends in a newline, leaves one on the end. The turn, the model list
+   and Test say which variable to set again, and never what it holds.
 2. **A key stored on the hub**, from a language model word's API key box on
    the Satellites tab, or with `PUT /satellites/secrets` and `{"name":
    "OPENAI_API_KEY", "value": "..."}`; `"value": null` clears it. The hub

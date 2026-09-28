@@ -140,17 +140,60 @@ def _check_url(url: str) -> str:
 Url = Annotated[str, Field(pattern=HTTP_URL, max_length=500), AfterValidator(_check_url)]
 
 
-def _secret(name: str | None) -> str | None:
-    """The value of a named secret, or None: the process environment first,
-    then a key the hub holds (secret_store.py). Read on every request, so a
-    key stored or cleared from the page applies to the next one. An empty
-    variable is treated as unset because `FOO=` in a compose file is how
-    people blank a variable, and "Bearer " with nothing after it is never
-    right. This is the one place a name becomes a value: router.env_status
-    reads it too, so "set" means "the action will find a value"."""
+def _held(name: str | None) -> str | None:
+    """The value a named secret has, as it was found, or None: the process
+    environment first, then a key the hub holds (secret_store.py). Read on
+    every request, so a key stored or cleared from the page applies to the
+    next one. An empty variable is treated as unset because `FOO=` in a
+    compose file is how people blank a variable, and "Bearer " with nothing
+    after it is never right. This is the one place a name becomes a value:
+    router.env_status reads it too, so "set" means "the action will find a
+    value". What is sent is _secret's, which checks it first."""
     if not name:
         return None
     return os.environ.get(name) or secret_store.current().get(name) or None
+
+
+def _secret(name: str | None) -> str | None:
+    """The value to send for a named secret, or None when it has none.
+
+    A VALUE NO HEADER CAN CARRY IS REFUSED, NOT SENT. A key the hub holds was
+    checked against SECRET_VALUE when it was stored and again when the file
+    loaded; one in the environment was checked by nobody. A .env saved with
+    Windows line endings leaves a CR on the end, and a Kubernetes secret made
+    from a file keeps the file's final newline. httpx then refuses the
+    Authorization header with h11's "Illegal header value b'Bearer sk-...\\r'",
+    which quotes the key whole and writes the CR as an escape, so _scrub's
+    exact match never finds it, and the sentence reached Outcome.error, the
+    INFO log, the event stream and the page. So such a value is a
+    DestinationError that names the variable and says nothing of the value,
+    not its length, not where the bad character sits. Refused rather than
+    trimmed, as a pasted key is (secret_store.py): the hub never guesses at a
+    secret, and the fix is one line where the variable is set."""
+    value = _held(name)
+    if value is not None and not re.fullmatch(secret_store.SECRET_VALUE, value):
+        raise DestinationError(
+            f"{name} is set in the hub's environment with a line break, a space or a character "
+            "outside printable ASCII in it, which no request header can carry, so it is not "
+            "sent; set it again without one (a .env saved with Windows line endings, or a "
+            "secret made from a file that ends in a newline, does this)")
+    return value
+
+
+def transport_error(e: httpx.HTTPError, *keys: str | None) -> str:
+    """An httpx failure in one line that holds no key. Most of them name a
+    host or a socket ("ConnectError: [Errno 111] Connection refused") and are
+    worth showing. A LocalProtocolError is h11 refusing what the hub was about
+    to send, and it quotes the refused line, headers included: its words are
+    never shown, only its type and what it means. Each of `keys` is scrubbed
+    from the rest as well."""
+    if isinstance(e, httpx.LocalProtocolError):
+        return (f"{type(e).__name__}: the hub could not write the request, and h11's reason is "
+                "not shown because it can quote a header that holds a key")
+    text = f"{type(e).__name__}: {e}"
+    for key in keys:
+        text = _scrub(text, key)
+    return text
 
 
 def _json(r: httpx.Response, who: str) -> dict:
@@ -592,7 +635,7 @@ class Llm(_Base):
                     raise DestinationError("the LLM streamed a chunk that is not JSON") from None
                 if isinstance(chunk, dict) and chunk.get("error"):
                     raise DestinationError("the LLM streamed an error: "
-                                           + _provider_message(chunk, _secret(self.api_key_env)))
+                                           + _provider_message(chunk, _held(self.api_key_env)))
                 try:
                     choice = chunk["choices"][0]
                     delta = choice.get("delta") or {}

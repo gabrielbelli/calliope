@@ -87,7 +87,7 @@ from . import audio
 from . import language as lang
 from . import secret_store
 from .destinations import (ENV_NAME, MODELS_TIMEOUT_S, Destination, DestinationError, Echo,
-                           HaAssist, Llm, LlmUrl, Url, _scrub, _secret)
+                           HaAssist, Llm, LlmUrl, Url, _held, transport_error)
 from .destinations import Request as Asked
 
 log = logging.getLogger("voice-satellites.router")
@@ -291,11 +291,13 @@ class Actions(Protocol):
 
 def env_status(destinations) -> dict[str, bool]:
     """Each secret the destinations name, and whether it has a value, in the
-    environment or held by the hub (destinations._secret). Only ever a
+    environment or held by the hub (destinations._held). Only ever a
     boolean: this goes out over GET, and a value, a prefix or even a length
-    would be a start on the secret."""
+    would be a start on the secret. A value the action would refuse to
+    send (destinations._secret) is still "set": it is, and the turn's error
+    names what is wrong with it."""
     names = sorted({n for d in destinations for n in d.env_vars()})
-    return {n: _secret(n) is not None for n in names}
+    return {n: _held(n) is not None for n in names}
 
 
 def secret_sources(names) -> dict[str, str]:
@@ -637,7 +639,9 @@ class Router:
         except DestinationError as e:
             raise Failed(f"{name}: {e}") from None
         except httpx.HTTPError as e:
-            raise Failed(f"{name}: {type(e).__name__}: {e}") from None
+            # Never str(e) as it is: h11 quotes a header it refuses, and
+            # Home Assistant's text-to-speech sends its token in one.
+            raise Failed(f"{name}: {transport_error(e)}") from None
         finally:
             out.timings_ms[name] = round(out.timings_ms.get(name, 0.0)
                                          + (time.monotonic() - t) * 1000, 1)
@@ -840,7 +844,7 @@ async def ha_pipelines(body: PipelinesBody) -> dict:
     the token in `token_env`: what an ha_assist word's picker offers. The
     token goes where a saved word would send it, so this is no more than
     saving one allows (destinations.py)."""
-    if _secret(body.token_env) is None:
+    if _held(body.token_env) is None:
         raise ApiError(409, f"{body.token_env} is not set on the hub, so Home Assistant cannot "
                             "be asked", code="token_missing", param="token_env")
     try:
@@ -872,14 +876,15 @@ class LlmModelsBody(BaseModel):
 def _llm_failed(e: Exception, key_env: str | None, what: str, ceiling: float) -> ApiError:
     """A picker's or a Test's failure as the answer the page shows: a
     timeout is 504, anything else 502, in the provider's words (already
-    scrubbed by destinations.py) or the transport's, scrubbed here."""
+    scrubbed by destinations.py) or the transport's (transport_error, with
+    the key as found scrubbed from it too)."""
     if isinstance(e, (TimeoutError, httpx.TimeoutException)):
         return ApiError(504, f"{what} within {ceiling:g} s", type_="server_error",
                         code="llm_timeout")
     if isinstance(e, DestinationError):
         return ApiError(502, str(e), type_="server_error", code="llm")
-    return ApiError(502, _scrub(f"{type(e).__name__}: {e}", _secret(key_env))[:300],
-                    type_="server_error", code="llm")
+    return ApiError(502, transport_error(e, _held(key_env))[:300], type_="server_error",
+                    code="llm")
 
 
 @routes.post("/satellites/llm/models")
