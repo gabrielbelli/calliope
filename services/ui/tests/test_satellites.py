@@ -754,9 +754,15 @@ def test_the_language_model_fields_name_no_one_server():
     # The model is typed or picked: the list only suggests.
     assert '<input type="text" id="${u}-model" list="${u}-models" data-f="d.model"' in WORD
     assert '<datalist id="${u}-models"></datalist>' in WORD
-    # The shared variable field is a "Key name" on a language model word.
+    # The shared variable field is a "Key name" on a language model word,
+    # and optional on a webhook, whose examples are a webhook's and not Home
+    # Assistant's.
     assert '<label for="${u}-env" class="ww-envlabel">Token variable</label>' in WORD
-    assert 'satSet(q(".ww-envlabel"), llm ? "Key name" : "Token variable");' in function("wakeActionUpdate")
+    update = function("wakeActionUpdate")
+    assert ('satSet(q(".ww-envlabel"), llm ? "Key name" : hook ? "Token variable (optional)" '
+            ': "Token variable");') in update
+    assert '"e.g. SATELLITES_WEBHOOK_TOKEN"' in update
+    assert 'hook ? "https://hooks.example.com/…" : "https://homeassistant.local:8123"' in update
 
 
 def test_the_model_list_is_asked_only_for_an_address_nobody_is_typing():

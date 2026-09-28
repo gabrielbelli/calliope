@@ -6511,11 +6511,17 @@ function wakeActionUpdate(row, w, words) {
                               ["d.system", d.system], ["d.max_tokens", d.max_tokens]]) {
     wakeValue(q(`[data-f="${key}"]`), value);
   }
-  /* One field, two names: Home Assistant and a webhook take a token, a
-     language model a key. Either way it holds a NAME. */
-  satSet(q(".ww-envlabel"), llm ? "Key name" : "Token variable");
-  const holder = llm ? "e.g. SATELLITES_LLM_API_KEY" : "e.g. SATELLITES_HA_TOKEN";
+  /* One field, three names: Home Assistant takes a token, a webhook one it
+     can do without, a language model a key. Either way it holds a NAME. A
+     webhook's said nothing of being optional, and wore Home Assistant's
+     variable and address as its examples. */
+  const hook = d.type === "webhook";
+  satSet(q(".ww-envlabel"), llm ? "Key name" : hook ? "Token variable (optional)" : "Token variable");
+  const holder = llm ? "e.g. SATELLITES_LLM_API_KEY" : hook ? "e.g. SATELLITES_WEBHOOK_TOKEN"
+    : "e.g. SATELLITES_HA_TOKEN";
   if (q('[data-f="d.env"]').placeholder !== holder) q('[data-f="d.env"]').placeholder = holder;
+  const at = hook ? "https://hooks.example.com/…" : "https://homeassistant.local:8123";
+  if (q('[data-f="d.url"]').placeholder !== at) q('[data-f="d.url"]').placeholder = at;
   satSet(q(".ww-envhint"), llm ? "" : wakeEnvHint(env));
   if (llm) wakeLlmUpdate(row, w, words); else WAKE_MODEL_ROWS.delete(row);
   if (d.type !== "ha_assist") WAKE_PIPE_ROWS.delete(row);
