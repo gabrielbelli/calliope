@@ -1428,6 +1428,11 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
 /* Struck through AND said in words beside it (Removed when you save), so the
    staged removal never depends on the line alone. */
 .ww[data-removed] .sat-name{color:var(--dim);text-decoration:line-through}
+/* A language model word's key and Test, under its fields: the key box and its
+   buttons on one line, as Say is on a satellite, its state under it, then
+   Test and what the model said. */
+.ww-llm>*+*{margin-top:var(--s3)}
+.ww-llm>*:empty{margin-top:0}
 .satelliteevents{list-style:none;margin:0;padding:0;font-size:var(--t-label);
   font-variant-numeric:tabular-nums;max-height:14rem;overflow:auto}
 .satelliteevents li{padding:2px 0;color:var(--dim)}
@@ -4031,13 +4036,39 @@ const SAT_COPY = {
   pipeFailed: "Could not list the pipelines: {message}",
   pipeSays: "Hears with {hears}, speaks with {speaks}.",
   pipeNoEngine: "Calliope's own",
+  /* A language model word: its server's models, listed by the hub with the
+     action's key (POST /satellites/llm/models), and asked for only once the
+     address is committed. The id can always be typed. */
+  modelsAsk: "Its models are listed to pick from once the base URL is filled in.",
+  modelsLoading: "Asking {name} for its models…",
+  modelsReady: "{n} to pick from; type to narrow the list.",
+  modelsEmpty: "{name} lists no models, so type the id.",
+  modelsFailed: "Could not list the models, so type the id: {message}",
+  /* The key box. The page never holds a key to show: these are said from
+     WAKE.server.secrets, a name and where its value lives. */
+  keyHub: "A key is stored on the hub as {var}.",
+  keyEnv: "{var} is set in the hub's environment, which a stored key cannot replace.",
+  keyNone: "No key is stored as {var}; a server of your own may need none.",
+  keyUnknown: "Store a key as {var}, or save to learn whether the environment sets it.",
+  keyNoName: "Name the key to send one; with no name, no key is sent.",
+  keyShared: "Also used by {words}.",
+  keyStored: "Stored. It is not shown again.",
+  keyCleared: "The key stored as {var} is cleared.",
+  keyEmpty: "Paste the key first.",
+  keyBad: "A key has no spaces or line breaks; check what was pasted.",
+  askKeyClear: "Clear the key stored as {var}? Every action that names it stops sending it.",
+  /* Test: the form as it stands, asked one short question by the hub. */
+  testOk: "Answered in {s} s, the first words in {first} s: {reply}",
+  testEmpty: "Answered in {s} s, with nothing to say.",
+  testFailed: "The model did not answer: {message}",
   /* WHAT THE HUB WOULD REFUSE, SAID BEFORE IT IS SENT. Each is checked as
      router.Behaviour and destinations.py check it, so a Save that the page
      lets through is one the hub takes. */
   fixLang: "Write the language as a tag, for example de or nl-BE.",
   fixUrl: "Write the address in full, starting with https or http.",
   fixUserinfo: "Leave the user and password out of the address; name a token variable instead.",
-  fixModel: "Name the model to ask, for example llama3.2.",
+  fixModel: "Name the model to ask, as the provider lists it.",
+  fixMaxTokens: "Make the reply limit a whole number from 1 to 8192.",
   fixEnvNeeded: "Name the variable that holds Home Assistant's token.",
   fixEnv: "Write the name of the variable that holds the token, never the token itself.",
   fixFallback: "{word} is not a conversation word, so it cannot take over.",
@@ -5160,6 +5191,24 @@ const WAKE_LANG = /^([a-z]{2,3}(-[A-Za-z0-9]{2,8})*|auto)$/;
 const WAKE_ENV = /^[A-Z][A-Z0-9_]{0,63}$/;
 const WAKE_URL = /^https?:\/\/[^/\s?#]+(\/[^\s]*)?$/;
 const WAKE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+/* What the hub takes as a key (secret_store.SECRET_VALUE): printable, with no
+   space and no line break, which is what an Authorization header can carry. */
+const WAKE_SECRET = /^[\x21-\x7e]{1,4096}$/;
+/* WELL-KNOWN PROVIDERS, BY THE ADDRESS THEIR OPENAI-COMPATIBLE API LIVES AT.
+   Choosing one writes the Base URL and nothing else: the key's name stays as
+   it is, so a key already set under it is not lost to a pick. A server of
+   your own has no address everyone shares (localhost is the hub's own
+   container), so Other is typed. Each is read against the hub's HTTP_URL by
+   test_wake_words_contract.py. */
+const LLM_PRESETS = [
+  ["https://api.openai.com/v1", "OpenAI"],
+  ["https://api.anthropic.com/v1", "Anthropic"],
+  ["https://openrouter.ai/api/v1", "OpenRouter"],
+  ["https://api.groq.com/openai/v1", "Groq"],
+  ["https://api.mistral.ai/v1", "Mistral"],
+  ["https://api.deepseek.com", "DeepSeek"],
+  ["", "Other or self-hosted"],
+];
 /* The Language select's own options; anything else is Other and a tag. */
 const WAKE_LANGS = ["", "en", "pt-BR", "es", "fr", "it"];
 const WAKE_HA = ["ha_assist", "ha_conversation"];
@@ -5326,23 +5375,35 @@ function wakeSetDest(w, type) {
 function wakeNumber(text) { return text === "" ? null : Number(text); }
 
 /* ONE SETTER FOR EVERY FIELD. `key` is the control's data-f: "lang" and "tag"
-   are the language, "dest" the action's type, and "d.", "a.", "c." and "t."
-   a field of the destination, the action, the conversation or the trigger.
-   A required field left empty stays "" so its fix is named; an optional one
-   left empty is unset. A secret is never typed here, only the NAME of the
-   variable that holds it ("d.env", which is token_env or api_key_env). */
+   are the language, "dest" the action's type, "preset" a provider's address,
+   and "d.", "a.", "c." and "t." a field of the destination, the action, the
+   conversation or the trigger. A required field left empty stays "" so its
+   fix is named; an optional one left empty is unset. A secret is never typed
+   here, only the NAME of the variable that holds it ("d.env", which is
+   token_env or api_key_env); the key box has no data-f at all. */
 function wakeField(w, key, raw) {
   const text = String(raw == null ? "" : raw).trim();
   const [kind, name] = key.split(".");
   if (key === "lang") { if (text !== "other") w.language = text || null; return; }
   if (key === "tag") { w.language = text || null; return; }
   if (key === "dest") { wakeSetDest(w, text); return; }
+  /* Other is an address of your own, so the Base URL empties to be typed. */
+  if (key === "preset") {
+    if (w.action && w.action.destination) w.action.destination.base_url = text;
+    return;
+  }
   if (kind === "d" && w.action && w.action.destination) {
     const d = w.action.destination;
     const field = name !== "env" ? name : d.type === "llm" ? "api_key_env" : "token_env";
+    /* Empty is the hub's own default; anything else goes as a number, and
+       one the hub would refuse is named by wakeProblem. */
+    if (field === "max_tokens") {
+      if (text) d.max_tokens = Number(text); else delete d.max_tokens;
+      return;
+    }
     const needed = ["url", "base_url", "model"].includes(field)
       || (field === "token_env" && WAKE_HA.includes(d.type));
-    d[field] = text || (needed ? "" : null);
+    d[field] = (field === "base_url" ? wakeBaseUrl(text) : text) || (needed ? "" : null);
   } else if (kind === "a" && w.action) {
     w.action = { ...w.action, [name]: text || (name === "reply_to" ? "same" : null) };
   } else if (kind === "c") {
@@ -5354,6 +5415,14 @@ function wakeField(w, key, raw) {
 }
 
 function wakeWithin(v, low, high) { return typeof v === "number" && isFinite(v) && v >= low && v <= high; }
+
+/* A base URL pasted as a provider's whole endpoint (its curl example's), cut
+   back to the base as the hub cuts it (destinations._trim_endpoint), so the
+   form shows the address that will be saved. */
+function wakeBaseUrl(text) {
+  const cut = text.replace(/\/+chat\/completions\/?$/, "");
+  return WAKE_URL.test(cut) ? cut : text;
+}
 
 /* THE FIRST THING THE HUB WOULD REFUSE IN ONE ENTRY, as a sentence, or "".
    `words` is the set it would be saved with: a fallback has to name a
@@ -5373,6 +5442,8 @@ function wakeProblem(w, words) {
     if (url.split("://")[1].split("/")[0].includes("@")) return SAT_COPY.fixUserinfo;
   }
   if (d.type === "llm" && !d.model) return SAT_COPY.fixModel;
+  if (d.type === "llm" && "max_tokens" in d
+      && !(Number.isInteger(d.max_tokens) && wakeWithin(d.max_tokens, 1, 8192))) return SAT_COPY.fixMaxTokens;
   const env = d.type === "llm" ? d.api_key_env : d.token_env;
   if (WAKE_HA.includes(d.type) && !env) return SAT_COPY.fixEnvNeeded;
   if (env && !WAKE_ENV.test(env)) return SAT_COPY.fixEnv;
@@ -5524,6 +5595,200 @@ function wakePipeHint(d, entry) {
   const speaks = p.tts_engine ? bare(p.tts_engine) + (p.tts_voice ? ` as ${p.tts_voice}` : "")
     : SAT_COPY.pipeNoEngine;
   return satText("pipeSays", { hears, speaks });
+}
+
+/* ---- a language model word ------------------------------------------------ */
+
+/* The saved or draft destination of one word (or push-to-talk), by name: what
+   a row's buttons act on. */
+function wakeDest(name) {
+  const w = name === WAKE_PTT ? WAKE.draftPtt || (WAKE.server && WAKE.server.ptt)
+    : (WAKE.draft || (WAKE.server && WAKE.server.words) || []).find(x => x.name === name);
+  return (w && w.action && w.action.destination) || null;
+}
+
+/* The provider whose address the Base URL is, or Other. */
+function wakePreset(base_url) {
+  return LLM_PRESETS.some(([url]) => url && url === base_url) ? base_url : "";
+}
+
+/* A SERVER'S MODELS, ONCE PER ADDRESS AND KEY NAME for the page's life, as
+   Home Assistant's pipelines are: an entry is loading, ready ({ models }) or
+   failed ({ error }), a poll repaints from here without asking again, and a
+   failed one is asked again when its row is opened. Storing or clearing a key
+   drops the entries asked with its name (wakeModelsForget). The key never
+   reaches the page: the hub reads the one the action names. */
+const WAKE_MODELS = new Map();
+/* Per row, the entry it shows, so opening a row can find a failed one. */
+const WAKE_MODEL_ROWS = new WeakMap();
+function wakeModelsKey(base_url, api_key_env) { return JSON.stringify([base_url || "", api_key_env || ""]); }
+function wakeModelsAskable(d) {
+  const url = d.base_url || "";
+  return url.length <= 500 && WAKE_URL.test(url) && !url.split("://")[1].split("/")[0].includes("@")
+    && (!d.api_key_env || WAKE_ENV.test(d.api_key_env));
+}
+
+/* ASKED ONLY FOR A COMMITTED ADDRESS, never while the Base URL or the key's
+   name is being typed: on a row's first paint, a provider picked, and the
+   change event of either field. Not the pipeline picker's pause after the
+   last keystroke: a pause while typing https://api.groq.com would send the
+   key to https://api.groq.co, another domain, which may well resolve. */
+function wakeModelsWant(d, typing) {
+  if (typing || WAKE_MODELS.has(wakeModelsKey(d.base_url, d.api_key_env)) || !wakeModelsAskable(d)) return;
+  wakeModelsFetch(d.base_url, d.api_key_env);
+}
+
+/* The entry is made at once, so the render that asked paints it as loading;
+   the answer repaints. */
+async function wakeModelsFetch(base_url, api_key_env) {
+  const key = wakeModelsKey(base_url, api_key_env);
+  if (WAKE_MODELS.has(key)) return;
+  const entry = { state: "loading", models: [] };
+  WAKE_MODELS.set(key, entry);
+  try {
+    const r = await json("/satellites/llm/models", { method: "POST", headers: JSON_BODY,
+      body: JSON.stringify({ base_url, api_key_env: api_key_env || null }) });
+    const models = r && Array.isArray(r.models) ? r.models.filter(m => typeof m === "string") : [];
+    Object.assign(entry, { state: "ready", models });
+  } catch (e) {
+    Object.assign(entry, { state: "failed", error: e.message });
+  }
+  wakeRender();
+}
+
+function wakeModelsForget(name) {
+  for (const key of [...WAKE_MODELS.keys()]) {
+    if (JSON.parse(key)[1] === (name || "")) WAKE_MODELS.delete(key);
+  }
+}
+
+/* One line under Model: how many there are to pick from, or why there are
+   none, and that the id can always be typed. */
+function wakeModelsHint(d, entry) {
+  if (!entry) return SAT_COPY.modelsAsk;
+  const host = String(d.base_url || "").split("://").pop().split("/")[0];
+  if (entry.state === "loading") return satText("modelsLoading", { name: host });
+  if (entry.state === "failed") return satText("modelsFailed", { message: entry.error });
+  if (!entry.models.length) return satText("modelsEmpty", { name: host });
+  return satText("modelsReady", { n: satCount(entry.models.length, "model", "models") });
+}
+
+/* THE KEY BOX IS WRITE-ONLY BY CONSTRUCTION. The hub has no route that
+   answers a key, so the page is never given one to show: what it knows is
+   WAKE.server.secrets, a name and where its value lives ("environment" or
+   "hub"). {hint, canStore, canClear} for the name an action sends. */
+function wakeKeyState(name, self) {
+  if (!name || !WAKE_ENV.test(name)) return { hint: SAT_COPY.keyNoName, canStore: false, canClear: false };
+  const where = ((WAKE.server && WAKE.server.secrets) || {})[name];
+  const env = (WAKE.server && WAKE.server.env) || {};
+  const state = where === "environment" ? { hint: satText("keyEnv", { var: name }), canStore: false, canClear: false }
+    : where === "hub" ? { hint: satText("keyHub", { var: name }), canStore: true, canClear: true }
+    : name in env ? { hint: satText("keyNone", { var: name }), canStore: true, canClear: false }
+    : { hint: satText("keyUnknown", { var: name }), canStore: true, canClear: false };
+  /* A key is shared by every saved action that names it, and clearing it
+     clears it for all of them. */
+  const saved = WAKE.server ? [...WAKE.server.words.map(w => [w.name, w]),
+                               ...(WAKE.server.ptt ? [[WAKE_PTT, WAKE.server.ptt]] : [])] : [];
+  const others = saved.filter(([n, w]) => n !== self && w.action && w.action.destination
+    && [w.action.destination.api_key_env, w.action.destination.token_env].includes(name));
+  if (others.length) state.hint += " " + satText("keyShared", { words: satList(others.map(([n]) => wakeName(n))) });
+  return state;
+}
+
+/* A key for the hub to hold under `name`, or null to clear it: in turn with
+   the other wake word writes, because the answer is the whole view. The
+   value is in this call and its request body, and nowhere else. */
+function wakeKeyPut(name, value) {
+  return wakeTurn(async () => {
+    const r = await json("/satellites/secrets", { method: "PUT", headers: JSON_BODY,
+                                                  body: JSON.stringify({ name, value }) });
+    wakeModelsForget(name);
+    wakeTake(r);
+  });
+}
+function wakeKeyClear(name) { return wakeKeyPut(name, null); }
+
+/* Store key, or Enter in the box. The box is emptied before the request
+   goes, so a request that fails leaves no copy in the page to find. */
+async function wakeKeyStore(name, row, button) {
+  const box = row.querySelector('input[type="password"]');
+  const value = box.value.trim();
+  box.value = "";
+  const out = row.querySelector(".ww-keynote");
+  if (!value) { satSaid(out, SAT_COPY.keyEmpty); return; }
+  if (!WAKE_SECRET.test(value)) { note(out, "bad", SAT_COPY.keyBad); return; }
+  const done = busy(button, "Storing…");
+  try {
+    await wakeKeyPut(name, value);
+    satSaid(out, SAT_COPY.keyStored);
+  } catch (e) {
+    note(out, "bad", e.message);
+  } finally {
+    done();
+    wakeRender();
+  }
+}
+
+/* Clear key asks first: every action that names the key stops sending it. */
+async function wakeKeyForget(name, row, button) {
+  if (!confirm(satText("askKeyClear", { var: name }))) return;
+  const out = row.querySelector(".ww-keynote");
+  const done = busy(button, "Clearing…");
+  try {
+    await wakeKeyClear(name);
+    satSaid(out, satText("keyCleared", { var: name }));
+  } catch (e) {
+    note(out, "bad", e.message);
+  } finally {
+    done();
+    wakeRender();
+    /* Clear hides itself; the box it cleared takes the focus. */
+    row.querySelector('input[type="password"]').focus();
+  }
+}
+
+/* THE FORM AS IT STANDS, ASKED ONE SHORT QUESTION by the hub, through the
+   path a turn takes and with no speech: whether the address, model and key
+   work, and how long the first words and the whole reply took. {ok, text}. */
+async function wakeLlmTest(destination) {
+  try {
+    const r = await json("/satellites/llm/test", { method: "POST", headers: JSON_BODY,
+                                                   body: JSON.stringify(destination) });
+    const s = (Number(r.total_ms) / 1000).toFixed(1);
+    if (!r.reply) return { ok: true, text: satText("testEmpty", { s }) };
+    return { ok: true, text: satText("testOk", { s, first: (Number(r.first_token_ms) / 1000).toFixed(1),
+                                                 reply: r.reply }) };
+  } catch (e) {
+    return { ok: false, text: satText("testFailed", { message: e.message }) };
+  }
+}
+
+async function wakeLlmTry(name, row, button) {
+  const d = wakeDest(name);
+  if (!d || d.type !== "llm") return;
+  const out = row.querySelector(".ww-llmresult");
+  satSaid(out, "");
+  const done = busy(button, "Testing…");
+  try {
+    const r = await wakeLlmTest(wakeClone(d));
+    if (r.ok) satSaid(out, r.text); else note(out, "bad", r.text);
+  } finally {
+    done();
+  }
+}
+
+/* A datalist's options, as values and never as markup: the ids are a third
+   party's. */
+function satFillList(list, values) {
+  const sig = JSON.stringify(values);
+  if (list.dataset.sig === sig) return;
+  list.dataset.sig = sig;
+  list.textContent = "";
+  for (const v of values) {
+    const option = document.createElement("option");
+    option.value = v;
+    list.append(option);
+  }
 }
 
 /* ---- the list -------------------------------------------------------------- */
@@ -5679,13 +5944,18 @@ function wakeRowMarkup(u) {
         <div data-dest="ha_assist ha_conversation webhook"><label for="${u}-url">Address</label>
           <input type="text" inputmode="url" id="${u}-url" data-f="d.url" maxlength="500"
                  placeholder="https://homeassistant.local:8123" spellcheck="false" autocomplete="off"></div>
-        <div data-dest="llm"><label for="${u}-base">Server</label>
+        <div data-dest="llm"><label for="${u}-preset">Provider</label>
+          <select id="${u}-preset" data-f="preset"></select></div>
+        <div data-dest="llm"><label for="${u}-base">Base URL</label>
           <input type="text" inputmode="url" id="${u}-base" data-f="d.base_url" maxlength="500"
-                 placeholder="https://ollama.local:11434/v1" spellcheck="false" autocomplete="off"></div>
+                 placeholder="https://api.openai.com/v1" spellcheck="false" autocomplete="off">
+          <div class="hint">The address before /chat/completions: a provider's, or your own llama.cpp, vLLM or Ollama.</div></div>
         <div data-dest="llm"><label for="${u}-model">Model</label>
-          <input type="text" id="${u}-model" data-f="d.model" maxlength="120" placeholder="e.g. llama3.2"
-                 spellcheck="false" autocomplete="off"></div>
-        <div data-dest="ha_assist ha_conversation webhook llm"><label for="${u}-env">Token variable</label>
+          <input type="text" id="${u}-model" list="${u}-models" data-f="d.model" maxlength="120"
+                 placeholder="Pick one, or type its id" spellcheck="false" autocomplete="off">
+          <datalist id="${u}-models"></datalist>
+          <div class="hint ww-modelhint"></div></div>
+        <div data-dest="ha_assist ha_conversation webhook llm"><label for="${u}-env" class="ww-envlabel">Token variable</label>
           <input type="text" id="${u}-env" data-f="d.env" maxlength="64" placeholder="e.g. SATELLITES_HA_TOKEN"
                  spellcheck="false" autocomplete="off" autocapitalize="characters">
           <div class="hint ww-envhint"></div></div>
@@ -5693,6 +5963,24 @@ function wakeRowMarkup(u) {
           <select id="${u}-pipe" data-f="d.pipeline"></select>
           <div class="hint ww-pipehint"></div>
           <div class="hint">It hears, understands and speaks as set in Home Assistant.</div></div>
+      </div>
+      <div class="ww-llm" data-when="command conversation" data-dest="llm">
+        <div class="ww-keybox">
+          <div class="row">
+            <div class="grow"><label for="${u}-key">API key</label>
+              <input type="password" id="${u}-key" maxlength="4096" autocomplete="new-password"
+                     spellcheck="false" autocapitalize="off" placeholder="Paste it to store it on the hub"></div>
+            <button class="small tight" type="button" data-ww="key">Store key</button>
+            <button class="small tight danger" type="button" data-ww="keyclear" hidden>Clear key</button>
+          </div>
+          <div class="hint ww-keyhint"></div>
+          <div class="ww-keynote" aria-live="polite"></div>
+        </div>
+        <div class="actions">
+          <button class="small" type="button" data-ww="llmtest">Test</button>
+          <span class="hint">Asks it one short question, as the form stands, and says how long it took.</span>
+        </div>
+        <div class="ww-llmresult" aria-live="polite"></div>
       </div>
       <div class="grid2" data-when="command conversation">
         <div data-when="command"><label for="${u}-fb">If not understood, continue as a conversation with</label>
@@ -5723,6 +6011,9 @@ function wakeRowMarkup(u) {
               <input type="text" id="${u}-ends" data-f="c.end_phrases" maxlength="2000"
                      placeholder="the usual ones" spellcheck="false" autocomplete="off">
               <div class="hint">Separate them with commas; left empty, the usual English and Portuguese ones.</div></div>
+            <div data-dest="llm"><label for="${u}-max">Reply limit, tokens</label>
+              <input type="number" id="${u}-max" data-f="d.max_tokens" min="1" max="8192" step="1" placeholder="400">
+              <div class="hint">A reasoning model spends part of it thinking before it answers.</div></div>
           </div>
           <div data-dest="llm"><label for="${u}-system">System prompt</label>
             <textarea id="${u}-system" data-f="d.system" maxlength="8000"></textarea></div>
@@ -5748,12 +6039,19 @@ function wakeRow(name) {
      (a token set, Home Assistant back) happens elsewhere. toggle does not
      bubble, so it is heard on the disclosure itself. */
   row.querySelector("details.sat-row").addEventListener("toggle", ev => {
+    if (!ev.target.open) return;
+    let again = false;
     const mine = WAKE_PIPE_ROWS.get(row);
     const entry = mine && WAKE_PIPES.get(mine.key);
-    if (!ev.target.open || !entry || entry.state !== "failed") return;
-    WAKE_PIPES.delete(mine.key);
-    WAKE_PIPE_ROWS.delete(row);
-    wakeRender();
+    if (entry && entry.state === "failed") {
+      WAKE_PIPES.delete(mine.key);
+      WAKE_PIPE_ROWS.delete(row);
+      again = true;
+    }
+    const models = WAKE_MODEL_ROWS.get(row);
+    const listed = models && WAKE_MODELS.get(models);
+    if (listed && listed.state === "failed") { WAKE_MODELS.delete(models); again = true; }
+    if (again) wakeRender();
   });
   row.addEventListener("click", ev => {
     const b = ev.target.closest("button");
@@ -5762,6 +6060,20 @@ function wakeRow(name) {
     else if (b.dataset.scope) wakeScope(name, b.dataset.scope);
     else if (b.dataset.ww === "remove") wakeRemove(name, b);
     else if (b.dataset.ww === "retry") wakeRetry(b);
+    else if (b.dataset.ww === "llmtest") wakeLlmTry(name, row, b);
+    else if (b.dataset.ww === "key" || b.dataset.ww === "keyclear") {
+      const d = wakeDest(name);
+      if (!d || !d.api_key_env) return;
+      if (b.dataset.ww === "key") wakeKeyStore(d.api_key_env, row, b);
+      else wakeKeyForget(d.api_key_env, row, b);
+    }
+  });
+  /* Enter in the key box stores it, as Store key does: the box is not in a
+     form, so nothing else would. */
+  row.addEventListener("keydown", ev => {
+    if (ev.key !== "Enter" || ev.target.type !== "password") return;
+    ev.preventDefault();
+    row.querySelector('[data-ww="key"]').click();
   });
   /* Text and numbers as they are typed, a select once it is chosen: a select
      fires both events, and taken twice it would be two edits. */
@@ -5780,12 +6092,21 @@ function wakeRow(name) {
         w.satellites = w.satellites.filter(s => s !== id && s !== "*");
         if (t.checked) w.satellites.push(id);
       });
+    } else if (t.dataset.f === "d.base_url" || t.dataset.f === "d.env") {
+      /* The address or the key's name is committed (the box was left, or
+         Enter): the moment a language model's models are asked, and not a
+         keystroke sooner. */
+      const d = wakeDest(name);
+      if (d && d.type === "llm") wakeModelsWant(d, false);
+      wakeRender();
     } else if (t.dataset.f && t.tagName === "SELECT") {
       /* Other is a choice with nothing to save until a tag is typed, so the
-         row remembers it; the tag field takes the focus. */
+         row remembers it; the tag field takes the focus. A provider's Other
+         is the same: the Base URL is emptied, to be typed. */
       if (t.dataset.f === "lang") row._other = t.value === "other";
       wakeEdit(name, w => wakeField(w, t.dataset.f, t.value));
       if (t.dataset.f === "lang" && row._other) row.querySelector('[data-f="tag"]').focus();
+      if (t.dataset.f === "preset" && !t.value) row.querySelector('[data-f="d.base_url"]').focus();
     }
   });
   return row;
@@ -5962,13 +6283,20 @@ function wakeActionUpdate(row, w, words) {
     part.hidden = part.dataset.nodest.split(" ").includes(d.type);
   }
   q(".ww-tag").hidden = !other || q(".ww-lang").hidden;
-  const env = d.type === "llm" ? d.api_key_env : d.token_env;
+  const llm = d.type === "llm";
+  const env = llm ? d.api_key_env : d.token_env;
   for (const [key, value] of [["d.url", d.url], ["d.base_url", d.base_url], ["d.model", d.model],
                               ["d.env", env], ["d.agent_id", d.agent_id],
-                              ["d.system", d.system]]) {
+                              ["d.system", d.system], ["d.max_tokens", d.max_tokens]]) {
     wakeValue(q(`[data-f="${key}"]`), value);
   }
-  satSet(q(".ww-envhint"), wakeEnvHint(env));
+  /* One field, two names: Home Assistant and a webhook take a token, a
+     language model a key. Either way it holds a NAME. */
+  satSet(q(".ww-envlabel"), llm ? "Key name" : "Token variable");
+  const holder = llm ? "e.g. SATELLITES_LLM_API_KEY" : "e.g. SATELLITES_HA_TOKEN";
+  if (q('[data-f="d.env"]').placeholder !== holder) q('[data-f="d.env"]').placeholder = holder;
+  satSet(q(".ww-envhint"), llm ? "" : wakeEnvHint(env));
+  if (llm) wakeLlmUpdate(row, w, words); else WAKE_MODEL_ROWS.delete(row);
   if (d.type !== "ha_assist") WAKE_PIPE_ROWS.delete(row);
   else {
     wakePipesWant(row, d);
@@ -6002,6 +6330,36 @@ function wakeActionUpdate(row, w, words) {
   satFillSelect(q('[data-f="a.voice"]'), said);
   wakeValue(q('[data-f="a.voice"]'), a.voice || "");
   satSet(q(".ww-more .sum-note"), wakeMoreNote(a, !q('[data-f="a.voice"]').parentElement.hidden));
+}
+
+/* A LANGUAGE MODEL'S PART OF THE ROW: the provider its address is, the
+   models its server lists, the key's state and whether Test can run. The key
+   hint replaces wakeEnvHint here, because a stored key is a value the hub
+   holds and not only a variable that is set. */
+function wakeLlmUpdate(row, w, words) {
+  const q = sel => row.querySelector(sel);
+  const d = w.action.destination;
+  satFillSelect(q('[data-f="preset"]'), LLM_PRESETS);
+  wakeValue(q('[data-f="preset"]'), wakePreset(d.base_url));
+  const key = wakeModelsKey(d.base_url, d.api_key_env);
+  WAKE_MODEL_ROWS.set(row, key);
+  wakeModelsWant(d, [q('[data-f="d.base_url"]'), q('[data-f="d.env"]')].includes(document.activeElement));
+  const entry = WAKE_MODELS.get(key);
+  satFillList(q("datalist"), entry && entry.state === "ready" ? entry.models : []);
+  satSet(q(".ww-modelhint"), wakeModelsHint(d, entry));
+  /* A hub from before keys could be stored reports no `secrets`: no box. */
+  q(".ww-keybox").hidden = !WAKE.server || !WAKE.server.secrets;
+  /* Push-to-talk's behaviour has no name of its own. */
+  const keys = wakeKeyState(d.api_key_env, w.name || WAKE_PTT);
+  satSet(q(".ww-keyhint"), keys.hint);
+  const store = q('[data-ww="key"]');
+  if (store.getAttribute("aria-busy") !== "true") {
+    store.disabled = !keys.canStore;
+    satSet(store, keys.canClear ? "Replace key" : "Store key");
+  }
+  q('[data-ww="keyclear"]').hidden = !keys.canClear;
+  const test = q('[data-ww="llmtest"]');
+  if (test.getAttribute("aria-busy") !== "true") test.disabled = !!wakeProblem(w, words);
 }
 
 $("wwaddgo").addEventListener("click", () => {

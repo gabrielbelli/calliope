@@ -168,8 +168,8 @@ def test_a_conversation_word_keeps_listening_and_hands_over_to_nobody(tmp_path):
       wakeEdit("alexa", w => wakeField(w, "c.end_phrases", "thanks, that's all ,  "));
       wakeEdit("alexa", w => wakeField(w, "dest", "llm"));
       const needs = wakeProblem(WAKE.draft.find(w => w.name === "alexa"), wakeEffective());
-      wakeEdit("alexa", w => { wakeField(w, "d.base_url", "https://ollama.local:11434/v1");
-                               wakeField(w, "d.model", "llama3.2"); wakeField(w, "d.env", ""); });
+      wakeEdit("alexa", w => { wakeField(w, "d.base_url", "https://llm.example.com/v1");
+                               wakeField(w, "d.model", "vendor/test-model"); wakeField(w, "d.env", ""); });
       await wakeSave();
       console.log(JSON.stringify({ needs, body: sent("alexa") }));
     """)
@@ -178,8 +178,8 @@ def test_a_conversation_word_keeps_listening_and_hands_over_to_nobody(tmp_path):
     assert body["mode"] == "conversation"
     assert body["conversation"] == {"follow_up_s": 12, "end_phrases": ["thanks", "that's all"]}
     assert body["action"]["fallback"] is None
-    assert body["action"]["destination"] == {"type": "llm", "base_url": "https://ollama.local:11434/v1",
-                                             "model": "llama3.2", "api_key_env": None}, body
+    assert body["action"]["destination"] == {"type": "llm", "base_url": "https://llm.example.com/v1",
+                                             "model": "vendor/test-model", "api_key_env": None}, body
 
 
 def test_a_trigger_word_sends_no_action_and_starts_stricter(tmp_path):

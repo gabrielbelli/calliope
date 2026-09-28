@@ -76,7 +76,12 @@ const window = {};
 class Option {}
 // note() is recorded, so a scenario can read what the reader was told.
 const notes = [];
-const paintRange = () => {}, confirm = () => true;
+const paintRange = () => {};
+// confirm() is recorded and answered with `confirming`, so a scenario can
+// see what was asked and say no.
+const asked = [];
+let confirming = true;
+const confirm = question => { asked.push(String(question)); return confirming; };
 const note = (host, kind, text) => { if (text) notes.push([kind, String(text)]); };
 const busy = () => () => {};
 const reason = (p, fallback) => fallback;
@@ -116,9 +121,23 @@ const hub = {
       stt_language: "pt", tts_engine: "tts.calliope_kokoro", tts_language: "pt-BR", tts_voice: "pf_dora" }] },
   pipeCalls: [],
   pipesFail: "",
+  // A language model server's ids, as the hub lists them for the picker, and
+  // the hub's answer to a Test; each *Fail, when set, is its 502 sentence.
+  models: ["gpt-test-mini", "vendor/test-large"],
+  modelCalls: [],
+  modelsFail: "",
+  testCalls: [],
+  testFail: "",
+  // Keys: PUT /satellites/secrets. `secrets` is the hub's name -> "hub" or
+  // "environment" map, undefined for a hub from before keys could be
+  // stored; `environment` is the names the hub's environment sets.
+  secretCalls: [],
+  secrets: undefined,
+  environment: [],
 };
 const answer = () => JSON.parse(JSON.stringify({ available: hub.available, words: hub.words,
                                                  ptt: hub.ptt, custom: hub.custom, env: hub.env,
+                                                 secrets: hub.secrets,
                                                  warnings: hub.warnings, load_error: null }));
 let held = [];
 function release() { for (const r of held) r(); held = []; }
@@ -183,6 +202,32 @@ async function json(path, options) {
     await later();
     if (hub.pipesFail) { const e = new Error(hub.pipesFail); e.status = 502; throw e; }
     return JSON.parse(JSON.stringify(hub.pipes));
+  }
+  if (method === "POST" && path === "/satellites/llm/models") {
+    hub.modelCalls.push(JSON.parse(options.body));
+    await later();
+    if (hub.modelsFail) { const e = new Error(hub.modelsFail); e.status = 502; throw e; }
+    return { models: [...hub.models] };
+  }
+  if (method === "POST" && path === "/satellites/llm/test") {
+    hub.testCalls.push(JSON.parse(options.body));
+    await later();
+    if (hub.testFail) { const e = new Error(hub.testFail); e.status = 502; throw e; }
+    return { model: JSON.parse(options.body).model, reply: "Hello there.", first_token_ms: 420,
+             total_ms: 1260, token_limit: "max_tokens" };
+  }
+  if (method === "PUT" && path === "/satellites/secrets") {
+    const body = JSON.parse(options.body);
+    hub.secretCalls.push(body);
+    await later();
+    if (body.value !== null && hub.environment.includes(body.name)) {
+      const e = new Error("409 " + body.name + " is set in the hub's environment"); e.status = 409; throw e;
+    }
+    hub.secrets = { ...(hub.secrets || {}) };
+    hub.env = { ...(hub.env || {}) };
+    if (body.value === null) { delete hub.secrets[body.name]; if (body.name in hub.env) hub.env[body.name] = false; }
+    else { hub.secrets[body.name] = "hub"; if (body.name in hub.env) hub.env[body.name] = true; }
+    return answer();
   }
   throw new Error("the fake hub has no " + method + " " + path);
 }

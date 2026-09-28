@@ -201,14 +201,31 @@ def test_every_destination_the_page_offers_is_one_the_hub_takes_and_all_are_offe
     assert set(re.findall(r"(\w+):", table)) == hub
 
 
+def destination_fields() -> list[tuple[str, str]]:
+    """(owners, field) for each d.* field in a word's row, read from the
+    markup between its data-dest and the next one. The reader used to match
+    `data-dest=... .*? data-f="d.x"` lazily across elements, so a block with
+    no d.* field of its own (the key box, the Test button, the provider
+    picker) was read as owning the next block's field: an llm block placed
+    before the Assist pipeline would have read as "llm has pipeline"."""
+    marks = [(m.start(), m.group(1)) for m in re.finditer(r'data-dest="([^"]+)"', WORD_MARKUP)]
+    out = []
+    for i, (at, owners) in enumerate(marks):
+        end = marks[i + 1][0] if i + 1 < len(marks) else len(WORD_MARKUP)
+        out += [(owners, f) for f in re.findall(r'data-f="d\.(\w+)"', WORD_MARKUP[at:end])]
+    # Every field is inside some data-dest, or it would be read as nobody's.
+    assert len(out) == WORD_MARKUP.count('data-f="d.'), "a d.* field sits outside every data-dest"
+    return out
+
+
 def test_every_destination_field_the_page_writes_is_one_that_type_has():
     """destinations.py forbids unknown fields: a field sent to the wrong type
     is a 422, and one misspelt is too. data-dest says which types show a
     field; "env" is the NAME of the secret's variable, token_env or
     api_key_env by type."""
     types = destination_types()
-    shown = re.findall(r'data-dest="([^"]+)">.*?data-f="d\.(\w+)"', WORD_MARKUP, re.S)
-    assert len(shown) >= 7, "the field reader stopped finding fields"
+    shown = destination_fields()
+    assert len(shown) >= 8, "the field reader stopped finding fields"
     for owners, field in shown:
         for kind in owners.split():
             name = field if field != "env" else "api_key_env" if kind == "llm" else "token_env"
@@ -312,3 +329,105 @@ def test_a_rows_conversation_and_latency_are_read_by_the_names_the_hub_uses():
     assert "l.p50_first_audio_ms" in page_function("satLatency")
     state = page_function("satState")
     assert "ear.session" in state and "talk.rule_id" in state and "talk.turns" in state
+
+
+# ---- a language model word: its key, its model list, its Test -----------------------
+
+HUB_SECRETS = ast.parse((HUB / "secret_store.py").read_text())
+
+
+def hub_function(tree: ast.Module, name: str) -> ast.AsyncFunctionDef | ast.FunctionDef:
+    found = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.name == name]
+    assert found, f"voice-satellites has no {name}; the contract moved"
+    return found[0]
+
+
+def sent_keys(function: str, call: str) -> set[str]:
+    """The keys of the object literal a page function sends in `call`'s
+    JSON.stringify({...}), shorthand ones included."""
+    body = page_function(function)
+    body = body[body.index(call):]
+    literal = body[body.index("JSON.stringify({") + len("JSON.stringify({"):body.index("})")]
+    keys = set(re.findall(r"(\w+)\s*:", literal))
+    keys |= set(re.findall(r"(?:^|,)\s*(\w+)\s*(?=,|$)", literal.strip()))
+    return keys
+
+
+def field_call(cls: ast.ClassDef, name: str) -> dict:
+    """The keywords of a Field(...) (or a StringConstraints inside an
+    Annotated) that declares `name`, as Python values."""
+    for a in cls.body:
+        if isinstance(a, ast.AnnAssign) and a.target.id == name:
+            calls = [c for c in ast.walk(a) if isinstance(c, ast.Call)]
+            return {k.arg: ast.literal_eval(k.value) for c in calls for k in c.keywords
+                    if isinstance(k.value, ast.Constant)}
+    raise AssertionError(f"{cls.name}.{name} is gone")
+
+
+def test_the_key_the_page_stores_is_shaped_as_the_hub_takes_it():
+    """PUT /satellites/secrets refuses a field it does not know and a value
+    it would not send; the page checks a pasted key with the hub's own
+    pattern before it goes, and sends exactly the two fields."""
+    assert sent_keys("wakeKeyPut", 'json("/satellites/secrets"') == fields(hub_class("SecretBody"))
+    assert page_regex("WAKE_SECRET") == module_string(HUB_SECRETS, "SECRET_VALUE")
+    assert '@app.put("/satellites/secrets")' in (HUB / "main.py").read_text()
+    assert "WAKE_SECRET.test(value)" in page_function("wakeKeyStore")
+
+
+def test_the_model_list_request_is_what_the_hub_takes():
+    body = hub_class("LlmModelsBody", HUB_ROUTER)
+    assert sent_keys("wakeModelsFetch", 'json("/satellites/llm/models"') == fields(body)
+    # The name a picker asks with by default is the one a saved action sends.
+    assert default(body, "api_key_env") == default(destination_types()["llm"], "api_key_env")
+    # And the page reads what the route answers.
+    answered = dict_keys(hub_function(HUB_ROUTER, "llm_models"))
+    assert set(re.findall(r"\br\.(\w+)", page_function("wakeModelsFetch"))) <= answered
+
+
+def test_the_test_sends_a_destination_the_hub_validates_as_llm():
+    """POST /satellites/llm/test takes the destination itself, validated as
+    the Llm model a Save validates it as; the page sends the draft
+    destination whole, and only an llm one."""
+    route = hub_function(HUB_ROUTER, "llm_test")
+    annotation = next(a.annotation for a in route.args.args if a.arg == "body")
+    assert isinstance(annotation, ast.Name) and annotation.id == "Llm"
+    assert 'body: JSON.stringify(destination) })' in page_function("wakeLlmTest")
+    try_it = page_function("wakeLlmTry")
+    assert 'if (!d || d.type !== "llm") return;' in try_it and "wakeLlmTest(wakeClone(d))" in try_it
+    answered = dict_keys(route)
+    read = set(re.findall(r"\br\.(\w+)", page_function("wakeLlmTest")))
+    assert read and read <= answered, read - answered
+
+
+def test_every_preset_is_an_address_the_hub_takes():
+    table = CODE[CODE.index("const LLM_PRESETS = ["):]
+    table = table[:table.index("];")]
+    presets = re.findall(r'\["([^"]*)", "([^"]+)"\]', table)
+    assert len(presets) >= 6, "the preset reader stopped finding presets"
+    urls = [url for url, _ in presets if url]
+    assert len(urls) == len(presets) - 1, "there is not exactly one Other"
+    for url in urls:
+        assert re.fullmatch(module_string(HUB_DESTINATIONS, "HTTP_URL"), url), url
+        # Saved as it is shown: the hub strips a trailing slash and a
+        # /chat/completions, so a preset with either would never read as chosen.
+        assert not url.endswith("/") and not url.endswith("/chat/completions"), url
+
+
+def test_the_reply_limit_bounds_are_the_hubs():
+    hub = field_call(destination_types()["llm"], "max_tokens")
+    box = WORD_MARKUP[WORD_MARKUP.index('data-f="d.max_tokens"'):]
+    box = box[:box.index(">")]
+    assert f'min="{hub["ge"]}" max="{hub["le"]}" step="1" placeholder="{hub["default"]}"' in box
+    assert f'wakeWithin(d.max_tokens, {hub["ge"]}, {hub["le"]})' in page_function("wakeProblem")
+
+
+def test_the_key_sources_the_page_names_are_the_ones_the_hub_reports():
+    """GET /satellites/wake-words says where each key lives. A word spelt
+    differently on the two sides would read as "no key stored", and offer
+    Store for a key the environment holds."""
+    assert "secrets" in ANSWER_FIELDS and "WAKE.server.secrets" in CODE
+    reported = {c.value for c in ast.walk(hub_function(HUB_ROUTER, "secret_sources"))
+                if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+    named = set(re.findall(r'where === "(\w+)"', page_function("wakeKeyState")))
+    assert named == {"environment", "hub"} and named <= reported

@@ -212,7 +212,7 @@ def test_a_poll_never_rebuilds_a_row_so_an_open_disclosure_stays_open():
     assert "row.open = true;" in function("satelliteAct")
     assert "box.open = true;" in function("satGoWakeWords")
     assert 'row.querySelector("details.sat-row").open = true;' in listener("wwaddgo")
-    for name in ("wakeRender", "wakeRowUpdate", "wakeActionUpdate"):
+    for name in ("wakeRender", "wakeRowUpdate", "wakeActionUpdate", "wakeLlmUpdate"):
         assert ".open" not in function(name), f"{name} decides whether a disclosure is open"
     assert "if (!row) { row = wakeRow(w.name); WAKE.rows.set(w.name, row); }" in function("wakeRender")
 
@@ -262,8 +262,14 @@ def test_nothing_a_satellite_says_about_itself_reaches_innerhtml():
     fw = firmware[firmware.index("row.innerHTML = `"):]
     assert "${" not in fw[:fw.index("`;")], "firmwareRow interpolates into markup"
     for name in ("satelliteUpdate", "satButtons", "satDevice", "wakeRowUpdate", "wakeRender",
-                 "wakeActionUpdate", "satellitesHealth", "wakeTryWords", "satFillSelect"):
+                 "wakeActionUpdate", "satellitesHealth", "wakeTryWords", "satFillSelect",
+                 "wakeLlmUpdate", "wakeModelsFetch", "wakeModelsHint", "satFillList",
+                 "wakeKeyStore", "wakeKeyForget", "wakeLlmTry"):
         assert "innerHTML" not in function(name), f"{name} writes markup"
+    # A server's model ids are a third party's words: options made one by
+    # one, with the id as the value.
+    fill = function("satFillList")
+    assert 'document.createElement("option")' in fill and "option.value = v;" in fill
     # A custom model's name is the hub's, and anyone who can upload chooses
     # it: its row is markup with no hole at all, and the name goes in as text.
     models = function("wakeModels")
@@ -392,7 +398,8 @@ SAMPLES = {"name": "Kitchen", "old": "Kitchen", "new": "Bedroom", "id": "a1b2c3d
            "n": "3 satellites", "k": "2 warnings", "score": "0.82", "b": "Vol −",
            "how": "strong", "word": "hey mycroft", "var": "SATELLITES_HA_TOKEN_KITCHEN",
            "s": "1.3", "output": "Jack (aux)", "hears": "home_assistant_cloud (en-GB)",
-           "speaks": "calliope_kokoro as pf_dora"}
+           "speaks": "calliope_kokoro as pf_dora", "first": "0.4",
+           "reply": "Hello! How can I help you today?"}
 
 
 def sat_copy() -> dict[str, str]:
@@ -581,6 +588,77 @@ def test_every_wake_word_request_is_one_the_gateway_fence_can_read():
     only a literal path and a literal method."""
     assert CODE.count('json("/satellites/wake-words", { method: "PUT"') == 1
     assert CODE.count('json("/satellites/wake-words")') == 1
+    assert CODE.count('json("/satellites/llm/models", { method: "POST"') == 1
+    assert CODE.count('json("/satellites/llm/test", { method: "POST"') == 1
+    assert CODE.count('json("/satellites/secrets", { method: "PUT"') == 1
+
+
+# ------------------------------------------------ a language model word --
+
+
+def test_the_key_box_is_write_only():
+    """The page stores a key and is never given one back. The box has no
+    data-f, so the row's input handler never copies it into the draft or a
+    Save; a browser is told not to fill it with a saved password; and the
+    box is emptied before the request goes, so a failed one leaves no copy."""
+    box = WORD[WORD.index('id="${u}-key"') - 30:]
+    box = box[:box.index(">") + 1]
+    assert '<input type="password" id="${u}-key"' in box
+    assert 'autocomplete="new-password"' in box and 'spellcheck="false"' in box
+    assert "data-f" not in box, "the key box feeds the draft"
+    assert 'maxlength="4096"' in box
+    store = function("wakeKeyStore")
+    assert store.index('box.value = "";') < store.index("await "), \
+        "the box still holds the key while the request is out"
+    for name in ("wakeKeyStore", "wakeKeyPut", "wakeKeyForget", "wakeKeyClear"):
+        body = function(name)
+        for leak in ("store.set", "console.", "localStorage", "WAKE.draft", "WAKE.server ="):
+            assert leak not in body, f"{name} keeps the key somewhere: {leak}"
+    # Clearing asks first, and nothing asks by prompt().
+    forget = function("wakeKeyForget")
+    assert forget.index('confirm(satText("askKeyClear"') < forget.index("await ")
+
+
+def test_the_language_model_fields_name_no_one_server():
+    """The owner's words: "openai compatible APIs, not this ollama example".
+    No placeholder or generated sentence names one server's address or one
+    model; the Base URL's example is a hosted provider's, and the hint beside
+    it names self-hosted servers only as some among several."""
+    placeholders = re.findall(r'placeholder="([^"]*)"', WORD)
+    for text in placeholders + list(sat_copy().values()):
+        assert "ollama" not in text.lower() and "llama3" not in text.lower(), text
+    assert 'data-f="d.base_url" maxlength="500"\n                 placeholder="https://api.openai.com/v1"' in WORD
+    assert '<label for="${u}-base">Base URL</label>' in WORD
+    assert 'placeholder="Pick one, or type its id"' in WORD
+    # The model is typed or picked: the list only suggests.
+    assert '<input type="text" id="${u}-model" list="${u}-models" data-f="d.model"' in WORD
+    assert '<datalist id="${u}-models"></datalist>' in WORD
+    # The shared variable field is a "Key name" on a language model word.
+    assert '<label for="${u}-env" class="ww-envlabel">Token variable</label>' in WORD
+    assert 'satSet(q(".ww-envlabel"), llm ? "Key name" : "Token variable");' in function("wakeActionUpdate")
+
+
+def test_the_model_list_is_asked_only_for_an_address_nobody_is_typing():
+    """The pipeline picker asks 600 ms after the last keystroke, which would
+    send a key to a half-typed host that happens to resolve. The model list
+    is asked on a row's first paint, a provider picked, or a committed field,
+    and never while the Base URL or the key's name has the focus."""
+    want = function("wakeModelsWant")
+    assert "setTimeout" not in want and "typing ||" in want
+    update = function("wakeLlmUpdate")
+    assert ("wakeModelsWant(d, [q('[data-f=\"d.base_url\"]'), q('[data-f=\"d.env\"]')]"
+            ".includes(document.activeElement));") in update
+    row = function("wakeRow")
+    assert 't.dataset.f === "d.base_url" || t.dataset.f === "d.env"' in row
+    assert "wakeModelsWant(d, false);" in row
+
+
+def test_test_waits_for_a_form_the_hub_would_take_and_says_why_beside_it():
+    """Test sends the form as it stands; one the hub would refuse is a 422
+    the row already names in its fix line, so Test is greyed until then."""
+    assert '<button class="small" type="button" data-ww="llmtest">Test</button>' in WORD
+    assert "test.disabled = !!wakeProblem(w, words);" in function("wakeLlmUpdate")
+    assert '<div class="ww-llmresult" aria-live="polite"></div>' in WORD
 
 
 def test_a_wake_word_event_updates_the_list_and_is_not_logged_to_nobody():
