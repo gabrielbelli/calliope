@@ -296,17 +296,180 @@ class ThinkFilter:
         return out
 
 
+# ---- the language model: any OpenAI-compatible /chat/completions -----------------
+
+# GET {base_url}/models, for the page's picker: a list is small, but a server
+# that streams one without end must not hold the hub's memory or a request.
+MODELS_TIMEOUT_S = 10.0
+MODELS_MAX_BYTES = 8 * 1024 * 1024
+MODELS_MAX = 2000
+MODEL_ID_MAX = 120          # Llm.model's own max_length
+# Of a refusal's body: its first sentence is what is shown.
+ERROR_READ_MAX = 64 * 1024
+
+
+def _trim_endpoint(url: str) -> str:
+    """A base URL pasted as the whole endpoint, as a provider's curl example
+    writes it, cut back to the base: ".../v1/chat/completions" would be asked
+    for ".../v1/chat/completions/chat/completions" and answer 404 on every
+    turn. Trimmed rather than refused, because a wake_words.json that holds
+    one such URL would stop loading, and a file that does not load switches
+    every wake word off (wakewords_config.Assignment.open)."""
+    trimmed = re.sub(r"/+chat/completions$", "", url)
+    return trimmed if re.match(HTTP_URL, trimmed) else url
+
+
+LlmUrl = Annotated[Url, AfterValidator(_trim_endpoint)]
+
+
+def _text(content: object) -> str:
+    """The words in a message's `content`: a string, or the "text" parts of a
+    list of parts. Mistral's reasoning models answer with a "thinking" part
+    and a "text" part; the thinking is not the answer. Anything else holds no
+    words to speak."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(p["text"] for p in content if isinstance(p, dict)
+                       and p.get("type") == "text" and isinstance(p.get("text"), str))
+    return ""
+
+
+def _scrub(text: str, key: str | None) -> str:
+    """`text` with the key taken out. OpenAI's 401 says "Incorrect API key
+    provided: sk-proj-****...WXYZ" and DeepSeek's "Your api key: ****WXYZ is
+    invalid": masked, but ending in the key's real last characters, and
+    env_status rules out even a prefix. So the exact value goes, and so does
+    any word with three or more asterisks in it, which is how every provider
+    seen so far writes a masked key."""
+    if key:
+        text = text.replace(key, "[key hidden]")
+    return re.sub(r"\S+", lambda m: "[key hidden]" if m.group().count("*") >= 3 else m.group(),
+                  text)
+
+
+def _parsed(raw: str) -> object:
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+def _said(value: object) -> str | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _provider_message(raw: str | dict, key: str | None) -> str:
+    """The provider's own sentence out of an error body, or out of an error
+    chunk of a stream: error.message, else error.code or error.type, else
+    error as a string, else message, else detail as a string, else the body
+    as it came. One line, at most 300 characters, and scrubbed of the key."""
+    body = raw if isinstance(raw, dict) else _parsed(raw)
+    text = None
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            text = _said(err.get("message")) or _said(err.get("code")) or _said(err.get("type"))
+        else:
+            text = _said(err)
+        text = text or _said(body.get("message"))
+        if text is None and isinstance(body.get("detail"), str):
+            text = _said(body["detail"])
+    if text is None:
+        text = raw if isinstance(raw, str) else json.dumps(raw)
+    return " ".join(_scrub(text, key).split())[:300] or "no reason given"
+
+
+def _refusal(status: int, raw: str, key: str | None, key_env: str | None,
+             who: str = "the LLM") -> str:
+    """A refusal in the provider's words. A 401 or 403 also names the
+    variable to fix, as Home Assistant's does, because "401" alone does not
+    say which of several keys it was."""
+    said = _provider_message(raw, key)
+    if status in (401, 403):
+        if key:
+            return f"{who} refused the key in {key_env} ({status}): {said}"
+        if key_env:
+            return f"{who} wants a key ({status}) and {key_env} has none: {said}"
+        return f"{who} wants a key ({status}) and the action names none to send: {said}"
+    return f"{who} answered {status}: {said}"
+
+
+def _wants_completion_tokens(status: int, raw: str) -> bool:
+    """A 400 about max_tokens that asks for max_completion_tokens instead.
+    OpenAI's, verbatim: {"error": {"message": "Unsupported parameter:
+    'max_tokens' is not supported with this model. Use
+    'max_completion_tokens' instead.", "type": "invalid_request_error",
+    "param": "max_tokens", "code": "unsupported_parameter"}}."""
+    if status != 400:
+        return False
+    body = _parsed(raw)
+    err = body.get("error") if isinstance(body, dict) else None
+    if isinstance(err, dict):
+        message, param, code = (str(err.get(k) or "") for k in ("message", "param", "code"))
+    else:
+        message, param, code = str(err or raw), "", ""
+    return ("max_tokens" in f"{message} {param} {code}"
+            and ("max_completion_tokens" in message or code == "unsupported_parameter"))
+
+
+async def _read_capped(r: httpx.Response, cap: int) -> tuple[bytes, bool]:
+    """At most `cap` bytes of a streamed body, and whether there was more."""
+    got = bytearray()
+    async for chunk in r.aiter_bytes():
+        got += chunk
+        if len(got) > cap:
+            return bytes(got[:cap]), True
+    return bytes(got), False
+
+
+async def _read_error(r: httpx.Response) -> str:
+    data, _ = await _read_capped(r, ERROR_READ_MAX)
+    return data.decode("utf-8", "replace")
+
+
 class Llm(_Base):
-    """An OpenAI-compatible chat model: OpenAI itself, llama.cpp, Ollama, vLLM.
+    """Any OpenAI-compatible chat model, hosted or your own: OpenAI,
+    Anthropic's compatibility endpoint, OpenRouter, Groq, Mistral, DeepSeek,
+    or llama.cpp, vLLM or Ollama on a machine of yours. What is sent is the
+    part of POST /chat/completions every one of them takes: `model`,
+    `messages`, one token limit and `stream`, and nothing more.
 
     Streamed by default ("stream": true, server-sent events), so the first
     sentence can be synthesised while the model is still writing the rest. A
     server that ignores the flag and answers with one JSON body is read as
-    that; `stream: false` asks for one body in the first place."""
+    that; `stream: false` asks for one body in the first place.
+
+    THE TOKEN LIMIT HAS TWO NAMES. OpenAI's reasoning and GPT-5-class models
+    refuse `max_tokens` with a 400 and take `max_completion_tokens`, and
+    llama.cpp, Ollama, DeepSeek and Mistral know only `max_tokens`; some
+    strict servers refuse a field they do not know. So max_tokens goes first,
+    and a 400 that names it and asks for the other (_wants_completion_tokens)
+    is asked again, once, with max_completion_tokens at the same number. The
+    answer is kept for the process in limit_names, so later turns go straight
+    to the right name: one refused request per model per start, and no host
+    sniffing that would miss Azure or a proxy in front of OpenAI.
+
+    NO TEMPERATURE, AND NO stream_options. A reasoning model refuses any
+    temperature but its default, every provider's default is sensible, and
+    some servers refuse stream_options outright.
+
+    WHAT IS SPOKEN is the answer's text: `content` as a string, or the "text"
+    parts of a list of parts (_text). `reasoning_content` and `reasoning`
+    (DeepSeek, vLLM, OpenRouter) are never read, and an inline <think> block
+    is dropped (ThinkFilter). A model that spent its whole limit thinking and
+    said nothing (finish_reason "length") is an error that names the fix,
+    rather than a reply spoken as silence.
+
+    A REFUSAL IS SHOWN IN THE PROVIDER'S OWN WORDS (_provider_message), with
+    any key in it hidden (_scrub): it reaches Outcome.error, the event stream,
+    the INFO log and the page."""
 
     type: Literal["llm"]
-    base_url: Url  # e.g. https://api.openai.com/v1
-    model: str = Field(min_length=1, max_length=120)
+    base_url: LlmUrl  # e.g. https://api.openai.com/v1
+    model: str = Field(min_length=1, max_length=MODEL_ID_MAX)
     system: str | None = Field(default=None, max_length=8000)
     # A local server usually needs no key, so an unset variable means "send no
     # Authorization" rather than an error. A server that does need one answers
@@ -315,6 +478,10 @@ class Llm(_Base):
     max_tokens: int = Field(default=400, ge=1, le=8192)
     timeout: float = Field(default=30.0, gt=0, le=120)
     stream: bool = True
+
+    # (base_url, model) -> "max_completion_tokens", once that server refused
+    # max_tokens for that model. Per process and learned, like HaAssist.devices.
+    limit_names: ClassVar[dict] = {}
 
     def env_vars(self) -> list[str]:
         return [self.api_key_env] if self.api_key_env else []
@@ -332,27 +499,59 @@ class Llm(_Base):
         messages.append({"role": "user", "content": req.text})
         return messages
 
-    def _headers(self) -> dict:
+    def limit(self) -> str:
+        """The name this server takes the token limit by, as far as is known."""
+        return self.limit_names.get((self.base_url, self.model), "max_tokens")
+
+    def _body(self, req: Request, limit: str, stream: bool) -> dict:
+        body = {"model": self.model, "messages": self.messages(req), limit: self.max_tokens}
+        if stream:
+            body["stream"] = True
+        return body
+
+    def _spent(self) -> str:
+        return (f"the model spent its whole reply limit ({self.max_tokens} tokens) before "
+                "answering; raise it under More, or choose a model that does not reason first")
+
+    @contextlib.asynccontextmanager
+    async def _open(self, client: httpx.AsyncClient, req: Request, stream: bool):
+        """POST /chat/completions, as a response under 400. The one retry with
+        max_completion_tokens happens here, before the caller reads anything;
+        any other refusal is raised in the provider's words."""
         key = _secret(self.api_key_env)
-        return {"Authorization": f"Bearer {key}"} if key else {}
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        limit = self.limit()
+        while True:
+            async with client.stream("POST", f"{self.base_url}/chat/completions", headers=headers,
+                                     timeout=self.timeout,
+                                     json=self._body(req, limit, stream)) as r:
+                if r.status_code >= 400:
+                    raw = await _read_error(r)
+                    if limit == "max_tokens" and _wants_completion_tokens(r.status_code, raw):
+                        limit = "max_completion_tokens"
+                        self.limit_names[(self.base_url, self.model)] = limit
+                        continue
+                    raise DestinationError(_refusal(r.status_code, raw, key, self.api_key_env))
+                yield r
+                return
 
-    def _body(self, req: Request) -> dict:
-        return {"model": self.model, "messages": self.messages(req), "max_tokens": self.max_tokens}
-
-    @staticmethod
-    def _content(data: dict) -> str | None:
+    def _content(self, data: dict) -> str | None:
         try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
+            choice = data["choices"][0]
+            message = choice["message"]
+            # A model stopped by its limit may send no content at all.
+            content = (message.get("content") if choice.get("finish_reason") == "length"
+                       else message["content"])
+        except (KeyError, IndexError, TypeError, AttributeError):
             raise DestinationError("the LLM answered without choices[0].message.content") from None
-        if not isinstance(content, str):
-            return None
-        content = re.sub(r"<think>.*?(</think>|$)", "", content, flags=re.S).strip()
-        return content or None
+        text = re.sub(r"<think>.*?(</think>|$)", "", _text(content), flags=re.S).strip()
+        if not text and choice.get("finish_reason") == "length":
+            raise DestinationError(self._spent())
+        return text or None
 
     async def call(self, client: httpx.AsyncClient, req: Request) -> str | None:
-        r = await client.post(f"{self.base_url}/chat/completions", headers=self._headers(),
-                              timeout=self.timeout, json=self._body(req))
+        async with self._open(client, req, stream=False) as r:
+            await r.aread()
         return self._content(_json(r, "the LLM"))
 
     async def answer(self, client: httpx.AsyncClient, req: Request) -> AsyncIterator[str]:
@@ -361,12 +560,7 @@ class Llm(_Base):
             if text:
                 yield text
             return
-        async with client.stream("POST", f"{self.base_url}/chat/completions",
-                                 headers=self._headers(), timeout=self.timeout,
-                                 json=self._body(req) | {"stream": True}) as r:
-            if r.status_code >= 400:
-                await r.aread()
-                raise DestinationError(f"the LLM answered {r.status_code}: {r.text[:200].strip()}")
+        async with self._open(client, req, stream=True) as r:
             if "text/event-stream" not in r.headers.get("content-type", ""):
                 # A server that does not stream (or ignores the flag) answers
                 # with the whole body: the fallback, read as the buffered call.
@@ -376,6 +570,7 @@ class Llm(_Base):
                     yield text
                 return
             think = ThinkFilter()
+            spoke, finish = False, None
             async for line in r.aiter_lines():
                 if not line.startswith("data:"):
                     continue  # comments, event names, blank separators
@@ -387,18 +582,55 @@ class Llm(_Base):
                 except ValueError:
                     raise DestinationError("the LLM streamed a chunk that is not JSON") from None
                 if isinstance(chunk, dict) and chunk.get("error"):
-                    raise DestinationError(f"the LLM streamed an error: {str(chunk['error'])[:200]}")
+                    raise DestinationError("the LLM streamed an error: "
+                                           + _provider_message(chunk, _secret(self.api_key_env)))
                 try:
-                    piece = chunk["choices"][0]["delta"].get("content")
+                    choice = chunk["choices"][0]
+                    delta = choice.get("delta") or {}
                 except (KeyError, IndexError, TypeError, AttributeError):
-                    continue  # a role-only or usage chunk
-                if isinstance(piece, str) and piece:
+                    continue  # a usage chunk
+                finish = choice.get("finish_reason") or finish
+                piece = _text(delta.get("content")) if isinstance(delta, dict) else ""
+                if piece:
                     out = think.feed(piece)
                     if out:
+                        spoke = spoke or bool(out.strip())
                         yield out
             rest = think.flush()
             if rest:
+                spoke = spoke or bool(rest.strip())
                 yield rest
+            if not spoke and finish == "length":
+                raise DestinationError(self._spent())
+
+    @staticmethod
+    async def list_models(client: httpx.AsyncClient, base_url: str,
+                          api_key_env: str | None) -> list[str]:
+        """The model ids a server lists at GET {base_url}/models, for the
+        page's picker, asked with the key the action would send. OpenAI's
+        shape is {"data": [{"id": ...}]}; a bare list of those, or of ids, is
+        taken too. Ids over MODEL_ID_MAX characters could not be saved and are
+        left out; the rest come back unique, sorted without regard to case,
+        and at most MODELS_MAX of them (OpenRouter lists several hundred).
+        Nothing is filtered by what it looks like: a name-based rule for
+        embedding or speech models would rot, and typing narrows the list."""
+        key = _secret(api_key_env)
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        async with client.stream("GET", f"{base_url}/models", headers=headers,
+                                 timeout=MODELS_TIMEOUT_S) as r:
+            if r.status_code >= 300:
+                raise DestinationError(_refusal(r.status_code, await _read_error(r), key,
+                                                api_key_env, who="the server"))
+            data, over = await _read_capped(r, MODELS_MAX_BYTES)
+        if over:
+            raise DestinationError(f"the server's model list is over {MODELS_MAX_BYTES >> 20} MiB")
+        body = _parsed(data.decode("utf-8", "replace"))
+        items = body.get("data") if isinstance(body, dict) else body
+        if not isinstance(items, list):
+            raise DestinationError("the server answered /models without a list of models")
+        ids = {i for i in ((x.get("id") if isinstance(x, dict) else x) for x in items)
+               if isinstance(i, str) and i.strip() and len(i) <= MODEL_ID_MAX}
+        return sorted(ids, key=lambda i: (i.casefold(), i))[:MODELS_MAX]
 
 
 class Webhook(_Base):
