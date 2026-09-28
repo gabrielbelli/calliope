@@ -917,7 +917,7 @@ services:
       # (services/satellites/README.md). Unset, there is no MQTT at all. The
       # password is in the URL, so this belongs in the app's secret settings
       # rather than in this file.
-      # SATELLITES_MQTT_URL: "mqtt://calliope:password@homeassistant.lan:1883"
+      # SATELLITES_MQTT_URL: "mqtt://calliope:password@homeassistant.local:1883"
       # The token for a routing rule of type ha_conversation, which names this
       # variable rather than holding the token: rules.json is returned by GET
       # /satellites/routing, and a secret in it would be one request away from

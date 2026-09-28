@@ -23,13 +23,14 @@ out of `GATEWAY_API_KEYS`, is
 
 ## Status
 
-Measured on the development server (25 Sep 2026) with the first board, an ESP32-Korvo, adopted
-over `wss://` to the gateway, or to a proxy in front of it (`wss://calliope.example.com`):
+Measured on a development server with no GPU (an eight-thread Xeon E5-2697 v4, 25 Sep 2026)
+with the first board, an ESP32-Korvo, adopted over `wss://` to the gateway, or to a proxy in
+front of it (`wss://calliope.example.com`):
 
 - **Working on the board:** adoption (keeping the satellite's own settings),
   config, lights off, a four-channel stream with no dropped frames, and live
-  listening: front-end plus wake word at a real-time factor of 0.09 on the
-  server's Xeon, 24 % of one core, 215 MiB.
+  listening: front-end plus wake word at a real-time factor of 0.09 on that
+  Xeon, 24 % of one core, 215 MiB.
 - **Signed updates, on the board:** a signed 1.17 MB release image installed in
   20 s, including through the Satellites tab's route. The hub will not send an
   unsigned image to a satellite that advertises a key. With the hub bypassed,
@@ -272,7 +273,7 @@ The Satellites tab edits the same entries through `GET` and `PUT
  "words": [
   {"name": "alexa", "threshold": 0.6, "satellites": ["*"],
    "mode": "command", "language": null,
-   "action": {"destination": {"type": "ha_assist", "url": "http://homeassistant.lan:8123"},
+   "action": {"destination": {"type": "ha_assist", "url": "http://homeassistant.local:8123"},
               "reply_to": "same", "voice": null, "fallback": "hey_jarvis"},
    "silence_ms": 800},
   {"name": "hey_jarvis", "threshold": 0.5, "satellites": ["*"],

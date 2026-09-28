@@ -132,10 +132,10 @@ async def test_without_tools_nothing_about_tools_is_sent(fake, client):
 
 
 async def test_every_prompt_has_the_local_date_and_time(fake, client, monkeypatch):
-    monkeypatch.setenv("SATELLITES_TIMEZONE", "America/Sao_Paulo")
+    monkeypatch.setenv("SATELLITES_TIMEZONE", "Etc/GMT+3")  # UTC-3: the sign is POSIX's
     line = tools.now_line(datetime.datetime(2026, 9, 28, 20, 30, tzinfo=datetime.timezone.utc))
     assert line == ("Now it is Monday 28 September 2026, 17:30, local time, "
-                    "time zone America/Sao_Paulo.")
+                    "time zone Etc/GMT+3.")
     fake.handlers["llm.test"] = lambda r: sse(delta("stop", content="Hi."))
     await said(LLM, client)
     assert "Now it is " in sent(fake)[0]["messages"][0]["content"]
@@ -149,15 +149,15 @@ OPEN_METEO = {"current": {"temperature_2m": 21.4, "apparent_temperature": 22.0, 
 
 
 async def test_the_weather_at_home_comes_from_the_environment(fake, client, monkeypatch):
-    monkeypatch.setenv("SATELLITES_HOME_LAT", "-23.5")
-    monkeypatch.setenv("SATELLITES_HOME_LON", "-46.6")
+    monkeypatch.setenv("SATELLITES_HOME_LAT", "10.0")
+    monkeypatch.setenv("SATELLITES_HOME_LON", "20.0")
     monkeypatch.setenv("SATELLITES_HOME_NAME", "Home Town")
     fake.handlers["api.open-meteo.com"] = lambda r: httpx.Response(200, json=OPEN_METEO)
     text = await tools.run("weather", "{}", client, ["weather"], "en")
     assert text.startswith("Weather for Home Town. Now: partly cloudy, 21.4 °C")
     assert "2026-09-29: light rain, 16.0 to 23.0 °C, rain chance 80%, 6.2 mm" in text
     [forecast] = [r for r in fake.seen if r.url.host == "api.open-meteo.com"]
-    assert (forecast.url.params["latitude"], forecast.url.params["longitude"]) == ("-23.5", "-46.6")
+    assert (forecast.url.params["latitude"], forecast.url.params["longitude"]) == ("10.0", "20.0")
 
 
 async def test_the_weather_somewhere_named_is_geocoded_in_the_questions_language(fake, client):
@@ -174,13 +174,13 @@ async def test_home_and_its_time_zone_come_from_home_assistant_when_not_configur
     monkeypatch.setattr(tools, "_home_assistant", lambda: ("http://ha.test:8123", "SATELLITES_HA_TOKEN"))
     monkeypatch.setenv("SATELLITES_HA_TOKEN", "ha-token-do-not-leak")
     fake.handlers["ha.test"] = lambda r: httpx.Response(200, json={
-        "latitude": -23.5, "longitude": -46.6, "location_name": "Casa", "time_zone": "America/Sao_Paulo"})
+        "latitude": 10.0, "longitude": 20.0, "location_name": "Home", "time_zone": "Etc/GMT+3"})
     await tools.prime(client)
     [config] = [r for r in fake.seen if r.url.host == "ha.test"]
     assert config.url.path == "/api/config"
     assert config.headers["authorization"] == "Bearer ha-token-do-not-leak"
     line = tools.now_line(datetime.datetime(2026, 9, 28, 20, 30, tzinfo=datetime.timezone.utc))
-    assert line.endswith("17:30, local time (Casa), time zone America/Sao_Paulo.")
+    assert line.endswith("17:30, local time (Home), time zone Etc/GMT+3.")
     await tools.prime(client)  # kept, not asked again
     assert len([r for r in fake.seen if r.url.host == "ha.test"]) == 1
 
