@@ -642,15 +642,22 @@ def test_the_model_list_is_asked_only_for_an_address_nobody_is_typing():
     """The pipeline picker asks 600 ms after the last keystroke, which would
     send a key to a half-typed host that happens to resolve. The model list
     is asked on a row's first paint, a provider picked, or a committed field,
-    and never while the Base URL or the key's name has the focus."""
+    and never while the Base URL or the key's name has the focus. Whether it
+    is asked without a press at all is wakeModelsFree's, which every caller
+    reaches with the word's saved destination (test_satellites_llm.py)."""
     want = function("wakeModelsWant")
-    assert "setTimeout" not in want and "typing ||" in want
+    assert "setTimeout" not in want and "typing ||" in want and "!wakeModelsFree(d, saved)" in want
     update = function("wakeLlmUpdate")
     assert ("wakeModelsWant(d, [q('[data-f=\"d.base_url\"]'), q('[data-f=\"d.env\"]')]"
-            ".includes(document.activeElement));") in update
+            ".includes(document.activeElement), saved);") in update
+    assert "const saved = wakeSavedDest(w.name || WAKE_PTT);" in update
+    assert "q('[data-ww=\"models\"]').hidden = !waiting;" in update
     row = function("wakeRow")
     assert 't.dataset.f === "d.base_url" || t.dataset.f === "d.env"' in row
-    assert "wakeModelsWant(d, false);" in row
+    assert "wakeModelsWant(d, false, wakeSavedDest(name));" in row
+    assert 'b.dataset.ww === "models"' in row and "wakeModelsList(d);" in row
+    assert ('<button class="small tight ww-modelsgo" type="button" data-ww="models" hidden>'
+            'List models</button>') in WORD
 
 
 def test_test_waits_for_a_form_the_hub_would_take_and_says_why_beside_it():

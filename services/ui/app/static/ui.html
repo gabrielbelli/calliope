@@ -1433,6 +1433,8 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
    Test and what the model said. */
 .ww-llm>*+*{margin-top:var(--s3)}
 .ww-llm>*:empty{margin-top:0}
+/* List models, under the line that says what pressing it sends where. */
+.ww-modelsgo{margin-top:var(--s2)}
 .satelliteevents{list-style:none;margin:0;padding:0;font-size:var(--t-label);
   font-variant-numeric:tabular-nums;max-height:14rem;overflow:auto}
 .satelliteevents li{padding:2px 0;color:var(--dim)}
@@ -4038,8 +4040,10 @@ const SAT_COPY = {
   pipeNoEngine: "Calliope's own",
   /* A language model word: its server's models, listed by the hub with the
      action's key (POST /satellites/llm/models), and asked for only once the
-     address is committed. The id can always be typed. */
+     address is committed, and by itself only where the key would go there
+     anyway (wakeModelsFree). The id can always be typed. */
   modelsAsk: "Its models are listed to pick from once the base URL is filled in.",
+  modelsWait: "List models sends the key in {var} to {name}; check the key is for it.",
   modelsLoading: "Asking {name} for its models…",
   modelsReady: "{n} to pick from; type to narrow the list.",
   modelsEmpty: "{name} lists no models, so type the id.",
@@ -5621,6 +5625,10 @@ function wakePreset(base_url) {
 const WAKE_MODELS = new Map();
 /* Per row, the entry it shows, so opening a row can find a failed one. */
 const WAKE_MODEL_ROWS = new WeakMap();
+/* The address and key name pairs the reader said may be asked, with List
+   models or by storing a key while that address was in the form, for the
+   page's life (wakeModelsFree). */
+const WAKE_MODELS_ASKED = new Set();
 function wakeModelsKey(base_url, api_key_env) { return JSON.stringify([base_url || "", api_key_env || ""]); }
 function wakeModelsAskable(d) {
   const url = d.base_url || "";
@@ -5628,15 +5636,64 @@ function wakeModelsAskable(d) {
     && (!d.api_key_env || WAKE_ENV.test(d.api_key_env));
 }
 
+/* The destination a word (or push-to-talk) is saved with, or null: what its
+   turns send, whatever the draft says. */
+function wakeSavedDest(name) {
+  if (!WAKE.server) return null;
+  const w = name === WAKE_PTT ? WAKE.server.ptt : (WAKE.server.words || []).find(x => x.name === name);
+  return (w && w.action && w.action.destination) || null;
+}
+
+/* WHETHER THE LIST MAY BE ASKED WITHOUT A PRESS. Asking sends the key the
+   name holds to the address, so it goes by itself only where that sends a
+   key nowhere new: the address and name the word is saved with, which its
+   every turn sends it to already; a name the hub says holds nothing, so no
+   key goes at all; or a pair the reader asked for (WAKE_MODELS_ASKED).
+   Anything else waits for List models. A provider picked keeps the key's
+   name (wakeField), so asking at once sent the key the last provider was
+   given to the next one before it could be renamed or its own key stored;
+   arrowing through a closed Provider select, which fires change for each
+   option on Windows and Linux, sent it to every provider on the list. A
+   name changed while the address stays is the same risk the other way
+   round, and waits too. */
+function wakeModelsFree(d, saved) {
+  const name = d.api_key_env;
+  if (!name) return true;
+  if (((WAKE.server && WAKE.server.env) || {})[name] === false) return true;
+  if (saved && saved.base_url === d.base_url && saved.api_key_env === name) return true;
+  return WAKE_MODELS_ASKED.has(wakeModelsKey(d.base_url, name));
+}
+
+/* Whether the row shows List models: an address that could be asked and
+   has not been, and that may not be asked without a press. */
+function wakeModelsWaiting(d, saved) {
+  return !WAKE_MODELS.has(wakeModelsKey(d.base_url, d.api_key_env)) && wakeModelsAskable(d)
+    && !wakeModelsFree(d, saved);
+}
+
 /* ASKED ONLY FOR A COMMITTED ADDRESS, never while the Base URL or the key's
    name is being typed: on a row's first paint, a provider picked, and the
    change event of either field. Not the pipeline picker's pause after the
    last keystroke: a pause halfway through a provider's address would send
    the key to whatever host the half-typed one names, and a domain cut short
-   can be another domain that resolves. */
-function wakeModelsWant(d, typing) {
-  if (typing || WAKE_MODELS.has(wakeModelsKey(d.base_url, d.api_key_env)) || !wakeModelsAskable(d)) return;
+   can be another domain that resolves. `saved` is the word's saved
+   destination, for wakeModelsFree. */
+function wakeModelsWant(d, typing, saved) {
+  if (typing || WAKE_MODELS.has(wakeModelsKey(d.base_url, d.api_key_env)) || !wakeModelsAskable(d)
+      || !wakeModelsFree(d, saved)) return;
   wakeModelsFetch(d.base_url, d.api_key_env);
+}
+
+/* List models: the reader's say-so for this address and key name, kept for
+   the page's life, so a poll or a reopened row asks again by itself. */
+function wakeModelsList(d) {
+  if (!wakeModelsAskable(d)) return;
+  const key = wakeModelsKey(d.base_url, d.api_key_env);
+  WAKE_MODELS_ASKED.add(key);
+  const entry = WAKE_MODELS.get(key);
+  if (entry && entry.state === "failed") WAKE_MODELS.delete(key);
+  wakeModelsFetch(d.base_url, d.api_key_env);
+  wakeRender();
 }
 
 /* The entry is made at once, so the render that asked paints it as loading;
@@ -5664,10 +5721,12 @@ function wakeModelsForget(name) {
 }
 
 /* One line under Model: how many there are to pick from, or why there are
-   none, and that the id can always be typed. */
-function wakeModelsHint(d, entry) {
-  if (!entry) return SAT_COPY.modelsAsk;
+   none, and that the id can always be typed. `waiting` is wakeModelsWaiting:
+   what List models would send, and where. */
+function wakeModelsHint(d, entry, waiting) {
   const host = String(d.base_url || "").split("://").pop().split("/")[0];
+  if (waiting) return satText("modelsWait", { var: d.api_key_env, name: host });
+  if (!entry) return SAT_COPY.modelsAsk;
   if (entry.state === "loading") return satText("modelsLoading", { name: host });
   if (entry.state === "failed") return satText("modelsFailed", { message: entry.error });
   if (!entry.models.length) return satText("modelsEmpty", { name: host });
@@ -5710,8 +5769,10 @@ function wakeKeyPut(name, value) {
 function wakeKeyClear(name) { return wakeKeyPut(name, null); }
 
 /* Store key, or Enter in the box. The box is emptied before the request
-   goes, so a request that fails leaves no copy in the page to find. */
-async function wakeKeyStore(name, row, button) {
+   goes, so a request that fails leaves no copy in the page to find. A key
+   stored while `base_url` is in the form is that address's: its models may
+   then be asked with it (wakeModelsFree). */
+async function wakeKeyStore(name, row, button, base_url) {
   const box = row.querySelector('input[type="password"]');
   const value = box.value.trim();
   box.value = "";
@@ -5721,6 +5782,7 @@ async function wakeKeyStore(name, row, button) {
   const done = busy(button, "Storing…");
   try {
     await wakeKeyPut(name, value);
+    if (base_url) WAKE_MODELS_ASKED.add(wakeModelsKey(base_url, name));
     satSaid(out, SAT_COPY.keyStored);
   } catch (e) {
     note(out, "bad", e.message);
@@ -5955,7 +6017,8 @@ function wakeRowMarkup(u) {
           <input type="text" id="${u}-model" list="${u}-models" data-f="d.model" maxlength="120"
                  placeholder="Pick one, or type its id" spellcheck="false" autocomplete="off">
           <datalist id="${u}-models"></datalist>
-          <div class="hint ww-modelhint"></div></div>
+          <div class="hint ww-modelhint"></div>
+          <button class="small tight ww-modelsgo" type="button" data-ww="models" hidden>List models</button></div>
         <div data-dest="ha_assist ha_conversation webhook llm"><label for="${u}-env" class="ww-envlabel">Token variable</label>
           <input type="text" id="${u}-env" data-f="d.env" maxlength="64" placeholder="e.g. SATELLITES_HA_TOKEN"
                  spellcheck="false" autocomplete="off" autocapitalize="characters">
@@ -6062,10 +6125,13 @@ function wakeRow(name) {
     else if (b.dataset.ww === "remove") wakeRemove(name, b);
     else if (b.dataset.ww === "retry") wakeRetry(b);
     else if (b.dataset.ww === "llmtest") wakeLlmTry(name, row, b);
-    else if (b.dataset.ww === "key" || b.dataset.ww === "keyclear") {
+    else if (b.dataset.ww === "models") {
+      const d = wakeDest(name);
+      if (d && d.type === "llm") wakeModelsList(d);
+    } else if (b.dataset.ww === "key" || b.dataset.ww === "keyclear") {
       const d = wakeDest(name);
       if (!d || !d.api_key_env) return;
-      if (b.dataset.ww === "key") wakeKeyStore(d.api_key_env, row, b);
+      if (b.dataset.ww === "key") wakeKeyStore(d.api_key_env, row, b, d.base_url);
       else wakeKeyForget(d.api_key_env, row, b);
     }
   });
@@ -6098,7 +6164,7 @@ function wakeRow(name) {
          Enter): the moment a language model's models are asked, and not a
          keystroke sooner. */
       const d = wakeDest(name);
-      if (d && d.type === "llm") wakeModelsWant(d, false);
+      if (d && d.type === "llm") wakeModelsWant(d, false, wakeSavedDest(name));
       wakeRender();
     } else if (t.dataset.f && t.tagName === "SELECT") {
       /* Other is a choice with nothing to save until a tag is typed, so the
@@ -6344,10 +6410,13 @@ function wakeLlmUpdate(row, w, words) {
   wakeValue(q('[data-f="preset"]'), wakePreset(d.base_url));
   const key = wakeModelsKey(d.base_url, d.api_key_env);
   WAKE_MODEL_ROWS.set(row, key);
-  wakeModelsWant(d, [q('[data-f="d.base_url"]'), q('[data-f="d.env"]')].includes(document.activeElement));
+  const saved = wakeSavedDest(w.name || WAKE_PTT);
+  wakeModelsWant(d, [q('[data-f="d.base_url"]'), q('[data-f="d.env"]')].includes(document.activeElement), saved);
   const entry = WAKE_MODELS.get(key);
+  const waiting = wakeModelsWaiting(d, saved);
   satFillList(q("datalist"), entry && entry.state === "ready" ? entry.models : []);
-  satSet(q(".ww-modelhint"), wakeModelsHint(d, entry));
+  satSet(q(".ww-modelhint"), wakeModelsHint(d, entry, waiting));
+  q('[data-ww="models"]').hidden = !waiting;
   /* A hub from before keys could be stored reports no `secrets`: no box. */
   q(".ww-keybox").hidden = !WAKE.server || !WAKE.server.secrets;
   /* Push-to-talk's behaviour has no name of its own. */

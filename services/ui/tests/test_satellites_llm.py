@@ -15,6 +15,8 @@ What they prevent:
   * a preset that changes the key's name, so a key already set is lost;
   * the model list asked on every poll, or while an address is typed, or not
     asked again once a key is stored;
+  * a key sent by the model list to a provider just picked, before the key's
+    name could be changed or that provider's key stored;
   * a key kept anywhere on the page after it is stored: in the draft, a Save,
     a note or the browser's storage;
   * a key stored under a name the environment sets, where it would never be
@@ -75,6 +77,9 @@ def test_a_preset_fills_the_base_url_and_a_typed_address_reads_as_other(tmp_path
 
 def test_the_models_are_asked_once_per_address_and_key_name_and_a_failure_leaves_free_text(tmp_path):
     got = run(tmp_path, LLM_HUB + """
+      // Neither name holds a key, so no key goes and each list is asked by
+      // itself (wakeModelsFree); one that holds a key is the next test's.
+      hub.env = { SATELLITES_LLM_API_KEY: false, OPENROUTER_API_KEY: false };
       await satellitesRefresh(); await settle();
       const first = hub.modelCalls.length;
       await satellitesRefresh(); await settle();
@@ -107,6 +112,74 @@ def test_the_models_are_asked_once_per_address_and_key_name_and_a_failure_leaves
     # The list only ever suggests: a typed id is saved as it is.
     assert got["saved"]["model"] == "my-own-model"
     assert got["saved"]["base_url"] == "https://other.example.com/v1"
+
+
+def test_a_key_goes_by_itself_only_where_the_word_already_sends_it(tmp_path):
+    """Measured before: with a key stored under the word's name, picking each
+    provider in turn asked all six for their models with it, because a pick
+    keeps the name. So an operator moving from one provider to another sent
+    the first one's key to the second before they could rename it or store
+    the second's, and arrowing through a closed select sent it to all six.
+    Now only the saved address and name are asked by themselves; anything
+    else waits for List models, and the pair pressed is remembered."""
+    got = run(tmp_path, LLM_HUB + """
+      hub.env = { SATELLITES_LLM_API_KEY: true };
+      hub.secrets = { SATELLITES_LLM_API_KEY: "hub" };
+      await satellitesRefresh(); await settle();
+      const saved = hub.modelCalls.slice();
+      for (const [url] of LLM_PRESETS.filter(([u]) => u)) {
+        wakeEdit("hey_jarvis", w => wakeField(w, "preset", url)); await settle();
+      }
+      const picked = hub.modelCalls.length;
+      // Typed and committed, as the Base URL's change event commits it.
+      wakeEdit("hey_jarvis", w => wakeField(w, "d.base_url", "https://other.example.com/v1"));
+      wakeModelsWant(dest("hey_jarvis"), false, wakeSavedDest("hey_jarvis")); await settle();
+      const typed = hub.modelCalls.length;
+      const d = dest("hey_jarvis"), was = wakeSavedDest("hey_jarvis");
+      const waiting = wakeModelsWaiting(d, was);
+      const hint = wakeModelsHint(d, WAKE_MODELS.get(wakeModelsKey(d.base_url, d.api_key_env)), waiting);
+      wakeModelsList(d); await settle();
+      const pressed = hub.modelCalls.slice(picked);
+      const after = wakeModelsWaiting(d, was);
+      await satellitesRefresh(); await settle();
+      const polled = hub.modelCalls.length;
+      // The other way round: the saved address, and a name that may hold
+      // another provider's key.
+      wakeEdit("hey_jarvis", w => { wakeField(w, "d.base_url", "https://llm.example.com/v1");
+                                    wakeField(w, "d.env", "OPENROUTER_API_KEY"); });
+      wakeModelsWant(dest("hey_jarvis"), false, wakeSavedDest("hey_jarvis")); await settle();
+      console.log(JSON.stringify({ saved, picked, typed, waiting, hint, pressed, after, polled,
+                                   renamed: hub.modelCalls.length }));
+    """)
+    # The saved address and name, at the row's first paint, as before.
+    assert got["saved"] == [{"base_url": "https://llm.example.com/v1", "api_key_env": NAME}]
+    assert got["picked"] == 1, "a provider picked was sent the key"
+    assert got["typed"] == 1, "a typed address was sent the key"
+    assert got["waiting"] is True and got["hint"] == (
+        f"List models sends the key in {NAME} to other.example.com; check the key is for it.")
+    assert got["pressed"] == [{"base_url": "https://other.example.com/v1", "api_key_env": NAME}]
+    assert got["after"] is False and got["polled"] == 2, "a poll asked again"
+    assert got["renamed"] == 2, "a renamed key was sent to the saved address"
+
+
+def test_a_key_stored_while_an_address_is_in_the_form_lists_its_models(tmp_path):
+    """Storing a key with a provider's address in the form says the key is
+    that provider's, so its models are asked with it, without a press."""
+    got = run(tmp_path, LLM_HUB + f"""
+      hub.env = {{ SATELLITES_LLM_API_KEY: true }};
+      hub.secrets = {{ SATELLITES_LLM_API_KEY: "hub" }};
+      await satellitesRefresh(); await settle();
+      wakeEdit("hey_jarvis", w => wakeField(w, "preset", "https://api.deepseek.com")); await settle();
+      const before = hub.modelCalls.length;
+      await wakeKeyStore("SATELLITES_LLM_API_KEY", keyRow({{ value: "{KEY}" }}), stand(),
+                         dest("hey_jarvis").base_url);
+      await settle();
+      console.log(JSON.stringify({{ before, asked: hub.modelCalls.slice(before),
+                                   waiting: wakeModelsWaiting(dest("hey_jarvis"), wakeSavedDest("hey_jarvis")) }}));
+    """)
+    assert got["before"] == 1
+    assert got["asked"] == [{"base_url": "https://api.deepseek.com", "api_key_env": NAME}], got
+    assert got["waiting"] is False
 
 
 def test_a_stored_key_is_sent_once_and_is_nowhere_on_the_page_afterwards(tmp_path):

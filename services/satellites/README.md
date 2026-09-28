@@ -322,7 +322,11 @@ conversation lasts, so HA keeps its own context between turns.
 
 Any server that answers OpenAI's `POST /chat/completions` works. The
 Satellites tab's Provider list fills in these base URLs, and a model is picked
-from the ids the server lists at `GET {base_url}/models` or typed.
+from the ids the server lists at `GET {base_url}/models` or typed. Asking for
+that list sends the key, so the tab asks by itself only for the address and
+key name a word is saved with, or a name that holds no key. A provider just
+picked, a typed address or a renamed key waits for List models, or for a key
+stored while that address is in the form.
 
 | Provider | `base_url` | |
 |---|---|---|
