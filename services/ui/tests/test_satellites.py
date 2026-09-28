@@ -483,7 +483,14 @@ def test_an_assist_word_takes_its_pipeline_from_a_list_and_its_voice_from_home_a
         owner = WORD[:WORD.index(field)]
         owner = owner[owner.rindex("<div"):]
         assert 'data-nodest="ha_assist"' in owner, f"{field} is still asked of an Assist word"
+    # A failed list is asked again from the row; the line that restated what
+    # the ready hint says (hears with, speaks with) is gone.
+    assert '<button class="link" type="button" data-ww="pipes" hidden>Ask again</button>' in pick + WORD
+    assert "It hears, understands and speaks as set in Home Assistant." not in WORD
+    assert 'b.dataset.ww === "pipes"' in function("wakeRow")
+    assert "let again = wakePipesForget(row);" in function("wakeRow")
     update = function("wakeActionUpdate")
+    assert "q('[data-ww=\"pipes\"]').hidden = !entry || entry.state !== \"failed\";" in update
     assert 'row.querySelectorAll("[data-nodest]")' in update
     assert 'q(".ww-tag").hidden = !other || q(".ww-lang").hidden;' in update
     assert CODE.count('json("/satellites/ha/pipelines", { method: "POST"') == 1

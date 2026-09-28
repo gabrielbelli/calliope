@@ -136,7 +136,34 @@ def test_a_pipeline_list_that_failed_says_why_and_a_new_address_is_asked_once_ty
     assert got["kept"] == [["", "Home Assistant's preferred"], ["01alexa", "01alexa"]]
     assert got["typing"] == 1, "a request went out while the address was still being typed"
     assert got["asked"] == ["https://ha.local:8123", "https://ha.other:8123"]
-    assert got["ask"] == "Fill in the address and token variable to list Home Assistant's pipelines."
+    assert got["ask"] == "Fill in the address and token variable to list the pipelines set up in Home Assistant."
+
+
+def test_a_pipeline_list_that_failed_is_asked_again_from_its_row(tmp_path):
+    """A failure was kept for the page's life, and the only retry was to shut
+    the word and open it again, which nothing said. Ask again forgets it and
+    the row asks at once; a list that did not fail is never forgotten."""
+    got = run(tmp_path, MODERN + """
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      hub.pipesFail = "502 SATELLITES_HA_TOKEN is not set";
+      await satellitesRefresh();
+      await sleep(30);
+      const row = WAKE.rows.get("hey_jarvis");
+      const d = () => WAKE.server.words.find(w => w.name === "hey_jarvis").action.destination;
+      const state = () => WAKE_PIPES.get(wakePipesKey(d())).state;
+      const out = { failed: state() };
+      hub.pipesFail = "";
+      out.forgot = wakePipesForget(row);
+      wakeRender();
+      await sleep(30);
+      out.again = state();
+      out.calls = hub.pipeCalls.length;
+      out.kept = wakePipesForget(row);
+      console.log(JSON.stringify(out));
+    """)
+    assert got["failed"] == "failed" and got["forgot"] is True, got
+    assert got["again"] == "ready" and got["calls"] == 2, got
+    assert got["kept"] is False, "a list that loaded was forgotten"
 
 
 def test_an_edit_sends_the_rest_of_the_entry_back_as_it_was(tmp_path):

@@ -4058,7 +4058,7 @@ const SAT_COPY = {
   pipePreferred: "Home Assistant's preferred",
   pipePreferredNamed: "Home Assistant's preferred ({name})",
   pipeGone: "{id} (not in Home Assistant)",
-  pipeAsk: "Fill in the address and token variable to list Home Assistant's pipelines.",
+  pipeAsk: "Fill in the address and token variable to list the pipelines set up in Home Assistant.",
   pipeLoading: "Asking Home Assistant for its pipelines…",
   pipeFailed: "Could not list the pipelines: {message}",
   pipeSays: "Hears with {hears}, speaks with {speaks}.",
@@ -5612,6 +5612,20 @@ function wakePipesWant(row, d) {
   mine.timer = setTimeout(() => wakePipesFetch(url, token_env), was ? 600 : 0);
 }
 
+/* A LIST THAT FAILED IS FORGOTTEN, so the row asks again: when the row is
+   opened, or with Ask again beside the reason. The fix (a token set, Home
+   Assistant back) happens elsewhere, and a failure used to be kept for the
+   page's life, so the only retry was closing the word and opening it again,
+   which nothing said. True when there was one to forget. */
+function wakePipesForget(row) {
+  const mine = WAKE_PIPE_ROWS.get(row);
+  const entry = mine && WAKE_PIPES.get(mine.key);
+  if (!entry || entry.state !== "failed") return false;
+  WAKE_PIPES.delete(mine.key);
+  WAKE_PIPE_ROWS.delete(row);
+  return true;
+}
+
 async function wakePipesFetch(url, token_env) {
   const key = wakePipesKey({ url, token_env });
   if (WAKE_PIPES.has(key)) return;
@@ -6115,7 +6129,7 @@ function wakeRowMarkup(u) {
         <div data-dest="ha_assist"><label for="${u}-pipe">Assist pipeline</label>
           <select id="${u}-pipe" data-f="d.pipeline"></select>
           <div class="hint ww-pipehint"></div>
-          <div class="hint">It hears, understands and speaks as set in Home Assistant.</div></div>
+          <button class="link" type="button" data-ww="pipes" hidden>Ask again</button></div>
       </div>
       <div class="ww-llm" data-when="command conversation" data-dest="llm">
         <div class="ww-keybox">
@@ -6194,14 +6208,7 @@ function wakeRow(name) {
      bubble, so it is heard on the disclosure itself. */
   row.querySelector("details.sat-row").addEventListener("toggle", ev => {
     if (!ev.target.open) return;
-    let again = false;
-    const mine = WAKE_PIPE_ROWS.get(row);
-    const entry = mine && WAKE_PIPES.get(mine.key);
-    if (entry && entry.state === "failed") {
-      WAKE_PIPES.delete(mine.key);
-      WAKE_PIPE_ROWS.delete(row);
-      again = true;
-    }
+    let again = wakePipesForget(row);
     const models = WAKE_MODEL_ROWS.get(row);
     const listed = models && WAKE_MODELS.get(models);
     if (listed && listed.state === "failed") { WAKE_MODELS.delete(models); again = true; }
@@ -6215,6 +6222,13 @@ function wakeRow(name) {
     else if (b.dataset.ww === "remove") wakeRemove(name, b);
     else if (b.dataset.ww === "retry") wakeRetry(b);
     else if (b.dataset.ww === "llmtest") wakeLlmTry(name, row, b);
+    else if (b.dataset.ww === "pipes") {
+      /* Ask again hides itself as the list loads; the picker it fills takes
+         the focus. */
+      wakePipesForget(row);
+      wakeRender();
+      row.querySelector('[data-f="d.pipeline"]').focus();
+    }
     else if (b.dataset.ww === "models") {
       const d = wakeDest(name);
       if (d && d.type === "llm") wakeModelsList(d);
@@ -6494,6 +6508,7 @@ function wakeActionUpdate(row, w, words) {
     satFillSelect(q('[data-f="d.pipeline"]'), wakePipeOptions(d, entry));
     wakeValue(q('[data-f="d.pipeline"]'), d.pipeline || "");
     satSet(q(".ww-pipehint"), wakePipeHint(d, entry));
+    q('[data-ww="pipes"]').hidden = !entry || entry.state !== "failed";
   }
 
   /* The words it can hand over to: the conversation words in the set it
