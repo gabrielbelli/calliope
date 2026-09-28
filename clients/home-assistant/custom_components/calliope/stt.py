@@ -10,6 +10,12 @@ names one engine (backends.stt.health.model), which is the one entity.
 Audio goes to POST /v1/audio/transcriptions as one WAV, with `model` naming
 the entity's engine. Parakeet detects the language itself and refuses a
 `language` field, so none is sent to it; Whisper takes one as a hint.
+
+Home Assistant's names (vocabulary.py) go only to an engine that boosts
+(`accepts_boost`, Parakeet), boosted unless the stack has decode-time biasing
+off (/health's `hotwords`). Whisper is not sent them: it takes a glossary's
+terms as hotwords, and the stack measured terms absent from the audio raising
+its word error rate by 28%.
 """
 
 from __future__ import annotations
@@ -61,6 +67,21 @@ def stt_engines(health: dict) -> list[dict]:
     ]
 
 
+def stt_hotwords(health: dict) -> bool:
+    """Whether the stack biases its decoder at all (STT_HOTWORDS); True when
+    it does not say."""
+    try:
+        return health["backends"]["stt"]["health"]["hotwords"] is not False
+    except (KeyError, TypeError):
+        return True
+
+
+def refuses_boost(err: CalliopeApiError) -> bool:
+    """Whether a 400 is the stack refusing `boost`, not the vocabulary: a
+    term its model cannot spell, or biasing that is off."""
+    return "'boost'" in err.message
+
+
 def stt_ready(health: dict) -> bool:
     """Whether the stack's speech-to-text has finished loading its engines."""
     try:
@@ -102,8 +123,9 @@ async def async_setup_entry(
             hass.config_entries.async_update_entry(
                 entry, data={**entry.data, CONF_LEGACY_STT: legacy}
             )
+    hotwords = stt_hotwords(health)
     async_add_entities(
-        CalliopeSpeechToText(entry, engine, legacy=engine["id"] == legacy)
+        CalliopeSpeechToText(entry, engine, legacy=engine["id"] == legacy, hotwords=hotwords)
         for engine in engines
     )
 
@@ -114,7 +136,12 @@ class CalliopeSpeechToText(stt.SpeechToTextEntity):
     _attr_has_entity_name = True
 
     def __init__(
-        self, entry: CalliopeConfigEntry, engine: dict, *, legacy: bool = False
+        self,
+        entry: CalliopeConfigEntry,
+        engine: dict,
+        *,
+        legacy: bool = False,
+        hotwords: bool = True,
     ) -> None:
         """The engine's id, family, languages and what it takes."""
         self._client = entry.runtime_data.client
@@ -122,7 +149,11 @@ class CalliopeSpeechToText(stt.SpeechToTextEntity):
         self._model = engine["id"]
         self._engine = str(engine.get("family") or self._model)
         self._accepts_language = bool(engine.get("accepts_language"))
-        self._accepts_boost = bool(engine.get("accepts_boost"))
+        # Names only to an engine that boosts; the boost itself only while
+        # the stack has biasing on and has not refused it for this text.
+        self._names = bool(engine.get("accepts_boost"))
+        self._accepts_boost = self._names and hotwords
+        self._boost_refused_for: str | None = None
         languages = engine.get("languages")
         self._languages = (
             [str(lang) for lang in languages]
@@ -186,43 +217,66 @@ class CalliopeSpeechToText(stt.SpeechToTextEntity):
         if self._accepts_language and metadata.language:
             language = metadata.language.split("-")[0].lower()
         vocabulary = self._vocabulary
-        glossary = GLOSSARY_PROFILE if vocabulary and vocabulary.available else None
+        glossary = (
+            GLOSSARY_PROFILE if self._names and vocabulary and vocabulary.available else None
+        )
+        boost = (
+            glossary is not None
+            and self._accepts_boost
+            and (self._boost_refused_for is None
+                 or self._boost_refused_for != vocabulary.written)
+        )
         try:
             try:
-                text = await self._transcribe(wav, language, glossary)
+                text = await self._transcribe(wav, language, glossary, boost)
             except CalliopeApiError as err:
-                # The vocabulary must never cost a transcription. A 400 on a
-                # request that named it is the vocabulary's: a profile the
-                # stack no longer has (its volume was reset), or a term its
-                # model cannot spell for `boost`. Heard again without it.
-                if glossary is None or err.status != 400:
+                # The vocabulary must never cost a transcription. A refused
+                # boost (a term the model cannot spell, biasing off) keeps
+                # the names and their repairs, which the stack still
+                # applies, and is not asked for again until the vocabulary
+                # changes, or the entity reloads when biasing is off.
+                if not (boost and err.status == 400 and refuses_boost(err)):
                     raise
                 _LOGGER.warning(
-                    "Calliope refused the %s vocabulary, transcribing without "
-                    "it: %s",
+                    "Calliope refused to boost the %s vocabulary; its names go "
+                    "without the boost: %s",
                     glossary,
                     err,
                 )
-                if vocabulary is not None and err.message.startswith(
-                    "Unknown glossary profile"
-                ):
-                    vocabulary.async_lost()
-                text = await self._transcribe(wav, language, None)
+                if err.code == "unsupported_parameter":
+                    self._accepts_boost = False
+                else:
+                    self._boost_refused_for = vocabulary.written
+                text = await self._transcribe(wav, language, glossary, False)
+        except CalliopeApiError as err:
+            # Any other 400 on a request that named the vocabulary is the
+            # vocabulary's: a profile the stack no longer has (its volume
+            # was reset). Heard again without it.
+            if glossary is None or err.status != 400:
+                _LOGGER.error("Calliope could not transcribe: %s", err)
+                return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
+            _LOGGER.warning(
+                "Calliope refused the %s vocabulary, transcribing without it: %s",
+                glossary,
+                err,
+            )
+            if vocabulary is not None and err.message.startswith("Unknown glossary profile"):
+                vocabulary.async_lost()
+            try:
+                text = await self._transcribe(wav, language, None, False)
+            except CalliopeError as again:
+                _LOGGER.error("Calliope could not transcribe: %s", again)
+                return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
         except CalliopeError as err:
             _LOGGER.error("Calliope could not transcribe: %s", err)
             return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
         return stt.SpeechResult(text.strip(), stt.SpeechResultState.SUCCESS)
 
     async def _transcribe(
-        self, wav: bytes, language: str | None, glossary: str | None
+        self, wav: bytes, language: str | None, glossary: str | None, boost: bool
     ) -> str:
-        """The transcript, with Home Assistant's vocabulary when named:
-        boosted into Parakeet's decoder, and as hotwords on Whisper, which has
-        no boost switch."""
+        """The transcript, with Home Assistant's vocabulary when named, and
+        boosted into the decoder when `boost`."""
         return await self._client.transcribe(
-            wav,
-            model=self._model,
-            language=language,
-            glossary=glossary,
-            boost=glossary is not None and self._accepts_boost,
+            wav, model=self._model, language=language, glossary=glossary, boost=boost
         )

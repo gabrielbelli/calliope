@@ -131,6 +131,9 @@ class FakeCalliope:
         # than the list; stt_status is that health's status.
         self.stt_models: list[dict[str, Any]] | None = None
         self.stt_status = "ok"
+        # /health's hotwords: False is a stack with STT_HOTWORDS=0, which
+        # refuses `boost`.
+        self.stt_hotwords = True
         self.health_body: dict[str, Any] | None = None
         self.transcript = "turn on the kitchen lights"
         # Glossary profiles by name, as PUT /glossaries/{name} stored them.
@@ -224,6 +227,7 @@ class FakeCalliope:
                             "status": self.stt_status,
                             "model": self.stt_model,
                             "threads": 8,
+                            "hotwords": self.stt_hotwords,
                         }
                         | ({} if self.stt_models is None else {"models": self.stt_models}),
                     },
@@ -273,6 +277,13 @@ class FakeCalliope:
                 f"'boost' cannot be honoured for 1 term(s): at {unspellable[0]!r}. "
                 "This model's vocabulary has no piece for those characters.",
                 "invalid_value",
+            )
+        if "boost" in fields and not self.stt_hotwords:
+            return envelope(
+                400,
+                "Unsupported parameter: 'boost' cannot be honoured: this "
+                "deployment has STT_HOTWORDS=0.",
+                "unsupported_parameter",
             )
         if "boost" in fields and self.stt_model == "whisper":
             return envelope(

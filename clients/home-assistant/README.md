@@ -218,9 +218,14 @@ Whisper's languages, and sends the language as a hint.
 `home-assistant` on the stack. It holds the names of your floors and areas,
 the names of the entities exposed to Assist, the aliases of all three, and a
 short list of command words ("liga", "apaga", "turn on"…) for the languages
-your pipelines use. Every transcription names that profile. Parakeet boosts
-the terms in its decoder, and Whisper takes them as hotwords. The terms only
-bias recognition: a term never replaces another word.
+your pipelines use. Every Parakeet transcription names that profile, and
+Parakeet boosts the terms in its decoder, unless the stack has biasing off
+(`STT_HOTWORDS=0`). The terms only bias recognition: a term never replaces
+another word. Whisper is not sent the profile: it takes a profile's terms as
+hotwords, and the stack measured terms absent from the audio raising its
+word error rate by 28%. If the stack refuses the boost (a name with a
+character the model cannot spell), the names and repairs still go, without
+the boost, until the vocabulary changes.
 
 For Portuguese the profile also carries repair rules for commands the model
 runs together: spoken quickly, "desliga a luz da cama" can come back as
@@ -228,10 +233,11 @@ runs together: spoken quickly, "desliga a luz da cama" can come back as
 
 The profile is written about 10 seconds after Home Assistant starts, and again
 10 seconds after an area, floor, device, entity or exposure setting changes.
-It is also checked every hour, and written only when it changed. It holds at
-most 200 terms (the stack's per-request boost limit), taken in the order
-above. The satellite hub asks for the same profile when it transcribes a
-command itself.
+It is also checked every hour, and written only when it changed. The stack
+boosts at most 200 phrases a request, the repairs' corrected phrases among
+them, so the profile holds at most 200 terms less those, taken in the order
+above; a house with more names logs which were left out. The satellite hub
+asks for the same profile when it transcribes a command itself.
 
 **Text-to-speech.** The languages and voices come from `GET /voices` at setup.
 A Kokoro voice name starts with its language (`pf_dora` is Brazilian

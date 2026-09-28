@@ -16,11 +16,15 @@ Parakeet's decoder when a request asks for `boost`, and repairs its own
 capitalisation. A bare term has no `heard =` side, so it never rewrites some
 other word into a name. The stack measured absent terms at no cost on Parakeet
 (services/stt/app/openai_api.py, _boost), so a list that names every room is
-safe on a command about one of them.
+safe on a command about one of them. Not on Whisper, where it measured them
+raising the word error rate by 28%: Whisper is not sent the profile (stt.py).
 
-The order is floors, areas, entities, command words, and the list stops at
-MAX_TERMS, the number of phrases the stack boosts per request by default
-(STT_BOOST_MAX_PHRASES). Terms shorter than MIN_TERM_CHARS are left out, since
+The order is floors, areas, entities, command words. The stack boosts at most
+STT_BOOST_MAX_PHRASES (200) phrases a request, chosen alphabetically from the
+terms and every repair's intended side, which it boosts too. So the terms stop
+at MAX_TERMS less the repairs' distinct intended sides: then the stack boosts
+every phrase, and what is dropped when a house has more names is decided here,
+in this order, and said. Terms shorter than MIN_TERM_CHARS are left out, since
 the stack does not boost them (STT_BOOST_MIN_PHRASE_CHARS).
 
 The profile is first built once Home Assistant has started, then after any
@@ -156,7 +160,9 @@ def collect_repairs(hass: HomeAssistant) -> list[tuple[str, str]]:
 
 @callback
 def collect(hass: HomeAssistant) -> list[str]:
-    """The terms, in order, cleaned, de-duplicated and capped."""
+    """The terms, in order, cleaned, de-duplicated and capped at what is
+    left of MAX_TERMS once the repairs' intended sides are counted."""
+    repairs = collect_repairs(hass)
     raw: list[str] = []
     for floor in fr.async_get(hass).async_list_floors():
         raw += [floor.name, *sorted(floor.aliases)]
@@ -166,7 +172,7 @@ def collect(hass: HomeAssistant) -> list[str]:
         raw += [name, *aliases]
     for lang in _languages(hass):
         raw += COMMAND_WORDS.get(lang, ())
-    return clean(raw)
+    return clean(raw, MAX_TERMS - len({intended for _, intended in repairs}))
 
 
 def _spellable(text: str) -> str:
@@ -180,10 +186,11 @@ def _spellable(text: str) -> str:
     )
 
 
-def clean(terms: Iterable[object]) -> list[str]:
+def clean(terms: Iterable[object], limit: int = MAX_TERMS) -> list[str]:
     """One line each: spellable, whitespace collapsed, no '=' (that would make
     a replacement rule) or leading '#' (a comment), no duplicates in the
-    stack's own sense (case-insensitive), and nothing it would not boost."""
+    stack's own sense (case-insensitive), nothing it would not boost, and no
+    more than `limit`."""
     out: list[str] = []
     seen: set[str] = set()
     for term in terms:
@@ -196,14 +203,15 @@ def clean(terms: Iterable[object]) -> list[str]:
             continue
         seen.add(key)
         out.append(text)
-    if len(out) > MAX_TERMS:
+    if len(out) > limit:
         _LOGGER.warning(
-            "Home Assistant has %d names for the speech-to-text vocabulary; "
-            "only the first %d are sent (floors, areas, then entities)",
+            "Home Assistant has %d terms for the speech-to-text vocabulary; "
+            "only the first %d are sent (floors, areas, entities, then command "
+            "words), so that the stack boosts every one",
             len(out),
-            MAX_TERMS,
+            limit,
         )
-    return out[:MAX_TERMS]
+    return out[:limit]
 
 
 def render(terms: list[str], repairs: list[tuple[str, str]] = ()) -> str:

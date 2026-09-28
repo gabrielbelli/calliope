@@ -107,18 +107,35 @@ async def test_stt_asks_for_it(
     assert (sent["glossary"], sent["boost"]) == (GLOSSARY_PROFILE, "true")
 
 
-async def test_whisper_gets_it_without_boost(
+async def test_whisper_is_not_sent_the_names(
     hass: HomeAssistant, house: None, fake: FakeCalliope, entry: MockConfigEntry
 ) -> None:
-    """Whisper takes the profile's terms as hotwords and refuses `boost`."""
+    """Whisper takes a profile's terms as hotwords, and the stack measured
+    terms absent from the audio raising its word error rate by 28%: a list
+    of every room is mostly absent terms. It is sent no vocabulary."""
     fake.stt_model = "whisper"
     assert await hass.config_entries.async_setup(entry.entry_id)
     await until(hass, lambda: entry.runtime_data.vocabulary.available)
     result = await _stt(hass).async_process_audio_stream(METADATA, _audio())
     assert result.result is stt.SpeechResultState.SUCCESS
     [sent] = fake.calls("POST", "/v1/audio/transcriptions")
-    assert sent["glossary"] == GLOSSARY_PROFILE
-    assert "boost" not in sent
+    assert "glossary" not in sent and "boost" not in sent
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+async def test_a_stack_with_biasing_off_gets_the_names_without_boost(
+    hass: HomeAssistant, house: None, fake: FakeCalliope, entry: MockConfigEntry
+) -> None:
+    """STT_HOTWORDS=0: /health says so, and every request refused `boost`,
+    was sent again without the names, and logged a warning."""
+    fake.stt_hotwords = False
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await until(hass, lambda: entry.runtime_data.vocabulary.available)
+    result = await _stt(hass).async_process_audio_stream(METADATA, _audio())
+    assert result.result is stt.SpeechResultState.SUCCESS
+    [sent] = fake.calls("POST", "/v1/audio/transcriptions")
+    assert sent["glossary"] == GLOSSARY_PROFILE and "boost" not in sent
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
 
@@ -185,21 +202,25 @@ async def test_a_failed_write_leaves_speech_plain(
     await hass.async_block_till_done()
 
 
-async def test_a_refused_boost_is_heard_without_the_vocabulary(
+async def test_a_refused_boost_keeps_the_names_and_is_not_asked_again(
     hass: HomeAssistant, house: None, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:
     """A profile holding a term the model cannot spell (as one written before
     typographic apostrophes were straightened did): the stack refuses the
-    boost, and the utterance is still transcribed, without the vocabulary."""
+    boost. The names and their repairs, which the stack still applies, stay;
+    the boost is not asked for again until the vocabulary changes. Every
+    utterance used to go twice, the second time with no names at all."""
     await until(hass, lambda: loaded.runtime_data.vocabulary.available)
-    fake.glossaries[GLOSSARY_PROFILE] = "Gabriel\u2019s Bedroom\n"
-    result = await _stt(hass).async_process_audio_stream(METADATA, _audio())
-    assert result == stt.SpeechResult(
-        "turn on the kitchen lights", stt.SpeechResultState.SUCCESS
-    )
-    boosted, plain = fake.calls("POST", "/v1/audio/transcriptions")
+    fake.glossaries[GLOSSARY_PROFILE] = "Guest\u2019s Bedroom\n"
+    for _ in range(3):
+        result = await _stt(hass).async_process_audio_stream(METADATA, _audio())
+        assert result == stt.SpeechResult(
+            "turn on the kitchen lights", stt.SpeechResultState.SUCCESS
+        )
+    boosted, *plain = fake.calls("POST", "/v1/audio/transcriptions")
     assert boosted["boost"] == "true"
-    assert "glossary" not in plain and "boost" not in plain
+    assert len(plain) == 3
+    assert all(s["glossary"] == GLOSSARY_PROFILE and "boost" not in s for s in plain)
     assert loaded.runtime_data.vocabulary.available  # the profile exists
 
 
@@ -216,3 +237,19 @@ def test_clean() -> None:
     many = vocabulary.clean(f"lamp {n:03d}" for n in range(300))
     assert len(many) == vocabulary.MAX_TERMS
     assert many[-1] == f"lamp {vocabulary.MAX_TERMS - 1:03d}"
+
+
+async def test_the_terms_leave_room_for_the_repairs(hass: HomeAssistant) -> None:
+    """The stack boosts its first 200 phrases alphabetically, the repairs'
+    intended sides among them. A Portuguese house with 165 names sent 186
+    terms, the stack chose from 226 phrases, and the ones cut were the
+    command words and repairs, silently. The terms now stop where the
+    repairs' phrases fit beside them, and what is cut is the last names."""
+    hass.config.language = "pt-BR"
+    areas = ar.async_get(hass)
+    for n in range(300):
+        areas.async_create(f"Sala {n:03d}")
+    terms = vocabulary.collect(hass)
+    intended = {i for _, i in vocabulary.collect_repairs(hass)}
+    assert intended and len(terms) + len(intended) == vocabulary.MAX_TERMS
+    assert terms[0] == "Sala 000" and "desliga" not in terms
