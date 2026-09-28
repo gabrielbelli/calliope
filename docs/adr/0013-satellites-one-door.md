@@ -8,6 +8,16 @@
 This feature was called **nodes** until 2026-09-25, when it was renamed
 **satellites**. The decision below did not change.
 
+**A pre-release migration.** The rename came before the feature was
+released, so only a deployment that ran a pre-release image, and a board
+flashed from one, has anything below to do. A new install has none of it:
+no `voice-nodes`, no `NODES_*` settings, no `nodes.json`, and firmware that
+dials `/satellites/ws`. What the hub and gateway keep for the old names (the
+`/nodes/ws` alias, reading `nodes.json`, the start-up warnings about
+`NODES_*`) does nothing on such an install, and goes once no board reports
+firmware from before the rename. The volume keeps the name `nodes-data` for
+the reason given below, on new installs too.
+
 ### What changed for an operator
 
 | Before | After | What to do |

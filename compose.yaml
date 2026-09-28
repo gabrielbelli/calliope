@@ -862,15 +862,17 @@ services:
   # deleting this block and setting GATEWAY_SATELLITES_URL to "" leaves the
   # rest of the stack unchanged.
   #
-  # THE ONE SERVICE THAT WAS RENAMED, from voice-nodes (2026-09-25). What the
-  # rule at the top of this file protects is kept: the volume below keeps its
-  # old name, and the only thing that resolves this hostname is
-  # GATEWAY_SATELLITES_URL, in this same file. What the rename costs is the old
-  # container. An `up` without --remove-orphans leaves voice-nodes running
-  # (restart: unless-stopped) on the same volume as this one and, with MQTT
-  # set, under the same Home Assistant unique ids, so it takes the entities
-  # back each time it restarts. Deploy with --remove-orphans, or remove
-  # voice-nodes by hand, and check that it is gone (ADR 0013, "Renamed").
+  # THE ONE SERVICE THAT WAS RENAMED, from voice-nodes, its pre-release name
+  # (2026-09-25); only a deployment that ran a pre-release image has a
+  # voice-nodes to remove. What the rule at the top of this file protects is
+  # kept: the volume below keeps its old name, and the only thing that
+  # resolves this hostname is GATEWAY_SATELLITES_URL, in this same file. What
+  # the rename costs is the old container. An `up` without --remove-orphans
+  # leaves voice-nodes running (restart: unless-stopped) on the same volume as
+  # this one and, with MQTT set, under the same Home Assistant unique ids, so
+  # it takes the entities back each time it restarts. Deploy with
+  # --remove-orphans, or remove voice-nodes by hand, and check that it is gone
+  # (ADR 0013, "Renamed").
   voice-satellites:
     container_name: voice-satellites
     image: ghcr.io/gabrielbelli/calliope-satellites:v0.2.0

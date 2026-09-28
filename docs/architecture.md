@@ -39,7 +39,7 @@ not directory names, and they are deliberately not renamed to match the layout.
 own image defaults and in what is already deployed; the named volumes and
 container names are keyed on them too, so renaming would orphan the models
 already on disk to rename a hostname nobody types. The one exception is
-`voice-nodes`, renamed `voice-satellites` with the feature
+`voice-nodes`, the pre-release name, renamed `voice-satellites` with the feature
 ([ADR 0013](adr/0013-satellites-one-door.md#renamed)): its volume keeps the name
 `nodes-data`, and the old container has to be removed when the rename is
 deployed.

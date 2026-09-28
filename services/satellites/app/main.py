@@ -1969,8 +1969,8 @@ app.include_router(routing.routes)
 
 # ---- the device socket -------------------------------------------------------
 
-# TWO PATHS, ONE HANDLER. The feature was called "nodes" until 2026-09-25, and
-# a board in the field runs firmware that connects to /nodes/ws. Its next
+# TWO PATHS, ONE HANDLER. The feature was called "nodes" in pre-release builds
+# until 2026-09-25, and a board flashed from one connects to /nodes/ws. Its next
 # firmware arrives over that same socket, so a hub that stopped answering the
 # old path would strand the board on the old image with USB as the only way
 # back. Nothing about a connection depends on the path it came in on. The

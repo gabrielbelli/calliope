@@ -91,7 +91,7 @@ name.
 | Route | What it does |
 |---|---|
 | `WS /satellites/ws` | The device connection. Protocol below. |
-| `WS /nodes/ws` | The same handler, under the feature's name until 2026-09-25. A board in the field runs firmware that connects here, and its next firmware arrives over this socket, so the old path stays until no board reports firmware from before the rename ([ADR 0013](../../docs/adr/0013-satellites-one-door.md#renamed)). The gateway relays both. |
+| `WS /nodes/ws` | The same handler, under the name pre-release builds used until 2026-09-25. A board flashed from one runs firmware that connects here, and its next firmware arrives over this socket, so the old path stays until no board reports firmware from before the rename ([ADR 0013](../../docs/adr/0013-satellites-one-door.md#renamed)). The gateway relays both. |
 | `GET /satellites` | Every satellite seen since the hub started, adopted or not, with its listening state, earcons and `wake_words` (the names assigned to it) |
 | `GET /satellites/events` | Server-sent events: buttons, wake words, routing, conversations and their turns, triggers, status, updates, satellites coming and going, a wake word's model becoming ready, a volume set with the satellite's own buttons (`volume`), speaker or jack (`output`) |
 | `GET /satellites/wake-words` | `{"available", "words", "ptt", "custom", "env", "secrets", "tools", "warnings", "load_error"}`: the names the hub can load, each word's whole entry with its `state` and `error`, push-to-talk's entry, which secrets the actions name have a value, where each value lives, and which language model tools work here (`web_search` only with `SATELLITES_SEARXNG_URL`). [Wake words](#wake-words). |
@@ -815,7 +815,7 @@ phrase in macOS's default voice peaked at 0.05, and in Samantha and Daniel at
 
 | Variable | Default | |
 |---|---|---|
-| `SATELLITES_DATA_DIR` | `/data` | `satellites.json`, `rules.json`, `wake_words.json`, `secrets.json`, `firmware/` and `models/`. Mount a volume: losing it un-adopts every satellite. `secrets.json` holds the API keys stored from the Satellites tab, mode 0600, so the volume's backups hold them too ([Keys](#keys)). A volume from before the rename holds `nodes.json` instead; the hub reads it once and writes `satellites.json`, and leaves the old file where it is. |
+| `SATELLITES_DATA_DIR` | `/data` | `satellites.json`, `rules.json`, `wake_words.json`, `secrets.json`, `firmware/` and `models/`. Mount a volume: losing it un-adopts every satellite. `secrets.json` holds the API keys stored from the Satellites tab, mode 0600, so the volume's backups hold them too ([Keys](#keys)). A volume from a pre-release build before the rename holds `nodes.json` instead; the hub reads it once and writes `satellites.json`, and leaves the old file where it is. |
 | `SATELLITES_TTS_URL` | unset | tts-stack's base URL, for `say` and every reply. Unset, `say` answers 503 and names this variable. |
 | `SATELLITES_TTS_VOICE` | `bm_george` | |
 | `SATELLITES_SEARXNG_URL` | unset | A SearXNG with JSON output on (`search.formats: [html, json]`), for the `web_search` tool. Unset, the tool tells the model search is not set up. SafeSearch is the instance's own setting. |
@@ -837,7 +837,7 @@ phrase in macOS's default voice peaked at 0.05, and in Samantha and Daniel at
 | `SATELLITES_API_KEYS` | unset | As on the other backends. Behind the gateway it stays unset. |
 | `SATELLITES_LOG_LEVEL` | `INFO` | Transcripts and replies are logged only at `DEBUG`. |
 
-Before 2026-09-25 every one of these was `NODES_*`. The old names are not
+In pre-release builds before 2026-09-25 every one of these was `NODES_*`. The old names are not
 read. At start the hub logs a warning for each `NODES_*` variable still set,
 with the name it reads now, except one that a wake word's action names: an
 action carried over from a rule saved before the rename says `"token_env":

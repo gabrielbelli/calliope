@@ -117,7 +117,7 @@ here would quietly undo that.
 | `GET /v1/models/{id}` | answered here, indexed off that same list | — |
 | `GET /health` | all three | — |
 | `GET`, `POST`, `PUT`, `PATCH`, `DELETE` `/satellites/...` | voice-satellites, if deployed | streamed through. Listed one by one in `SATELLITES_PATHS`; the hub's own README has what each does |
-| `WS /satellites/ws`, `WS /nodes/ws` | voice-satellites | relayed frame for frame, and **not** behind `GATEWAY_API_KEYS` ([ADR 0013](../../docs/adr/0013-satellites-one-door.md)). `/nodes/ws` is the path firmware from before 2026-09-25 dials |
+| `WS /satellites/ws`, `WS /nodes/ws` | voice-satellites | relayed frame for frame, and **not** behind `GATEWAY_API_KEYS` ([ADR 0013](../../docs/adr/0013-satellites-one-door.md)). `/nodes/ws` is the path pre-release firmware from before 2026-09-25 dials, kept until no such board is left |
 
 **Native routes mount flat and unprefixed, and nothing is rewritten.** That is
 load-bearing rather than cosmetic. tts-long answers a long request with
@@ -563,7 +563,7 @@ this in code.
 | `GATEWAY_STT_URL` | `http://stt-stack:8000` | |
 | `GATEWAY_TTS_URL` | `http://tts-stack:8001` | |
 | `GATEWAY_TTS_LONG_URL` | `http://tts-long:8002` | |
-| `GATEWAY_SATELLITES_URL` | `http://voice-satellites:8003` | The satellite hub. `""` runs without it: its routes answer `503` and `/health` leaves it out. Read as `GATEWAY_NODES_URL` before 2026-09-25, which is no longer read |
+| `GATEWAY_SATELLITES_URL` | `http://voice-satellites:8003` | The satellite hub. `""` runs without it: its routes answer `503` and `/health` leaves it out. `GATEWAY_NODES_URL`, its name in pre-release builds before 2026-09-25, is not read |
 | `GATEWAY_LONG_MODELS` | `chatterbox,tts-long` | Comma-separated `model` values routed to tts-long, and the set `GET /v1/models` advertises for it. Must agree with tts-long's `TTS_ENGINES` minus the `tts-long` alias — `docs/tests/test_deployment.py` asserts it has not drifted. Adding an engine here without adding it there advertises a name that 400s; the other way round hides an engine the box can run |
 | `GATEWAY_STT_TIMEOUT` | `900` | Read timeout, seconds |
 | `GATEWAY_TTS_TIMEOUT` | `300` | Read timeout, seconds |

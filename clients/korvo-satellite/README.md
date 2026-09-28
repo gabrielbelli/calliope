@@ -69,10 +69,11 @@ new image only if it reaches the hub again afterwards; otherwise the bootloader
 rolls back. An image can also be uploaded from the Satellites tab, but only
 unsigned, so a satellite that requires signatures refuses it.
 
-This firmware connects to `/satellites/ws`. Firmware from before 2026-09-25,
-when the feature was called nodes, connects to `/nodes/ws` and names its setup
-network `calliope-node-XXXX`. The gateway and the hub still answer the old
-path, so a board on that firmware is updated over the air like any other
+This firmware connects to `/satellites/ws`. Pre-release firmware from before
+2026-09-25, when the feature was called nodes, connects to `/nodes/ws` and
+names its setup network `calliope-node-XXXX`. Until no such board is left,
+the gateway and the hub still answer the old path, so a board on that
+firmware is updated over the air like any other
 ([ADR 0013](../../docs/adr/0013-satellites-one-door.md#renamed)).
 
 ### Signed firmware

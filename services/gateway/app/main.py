@@ -1239,11 +1239,13 @@ for _method, _path in SATELLITES_PATHS:
 
 
 # THE DEVICE SOCKET HAS TWO PATHS AND ONE HANDLER. The feature was called
-# "nodes" until 2026-09-25, and a board in the field runs firmware that
-# connects to /nodes/ws. Its next firmware arrives over that same socket, so a
-# gateway that stopped answering the old path would strand the board on the
-# old image with USB as the only way back. Both paths relay to the hub's
-# /satellites/ws; the hub answers the old one too, for the same reason.
+# "nodes" in pre-release builds until 2026-09-25, and a board flashed from one
+# runs firmware that connects to /nodes/ws. Its next firmware arrives over that
+# same socket, so a gateway that stopped answering the old path would strand
+# the board on the old image with USB as the only way back. Both paths relay
+# to the hub's /satellites/ws; the hub answers the old one too, for the same
+# reason. A pre-release migration (ADR 0013): the alias goes once no board
+# reports firmware from before the rename.
 SATELLITES_SOCKET = "/satellites/ws"
 LEGACY_SATELLITES_SOCKET = "/nodes/ws"
 
