@@ -1378,6 +1378,14 @@ details.sub>.body{padding:0 0 var(--s4)}
    is its state ("hey jarvis, lumos", "v0.3.1 is ready for 2 satellites"), so
    the hub's lines inform without being opened. */
 .sum-note{margin-left:var(--s2);font-weight:400;color:var(--dim)}
+/* A HANGING INDENT, so a note that wraps keeps the one left edge. On a phone
+   "Firmware v0.3.1-4-g1a2b3c4 is ready for 2 satellites" ran onto a second
+   line that started under the chevron, left of every satellite's name. The
+   first line does not move. The chevron is an inline-block, so it would
+   take the negative indent for its own glyph and draw it outside its box:
+   it is set back to none. */
+.sat-hub>details>summary{padding-left:1em;text-indent:-1em}
+.sat-hub>details>summary::before{text-indent:0}
 .sat-listens{margin:0}
 #tab-satellites .actions .hint{margin-top:0}
 /* Forget and Delete are last and pushed to the line end, where a hand

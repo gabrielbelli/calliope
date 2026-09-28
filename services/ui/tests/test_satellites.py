@@ -150,6 +150,14 @@ def test_a_summary_is_a_thumb_high_on_a_phone():
     assert "#tab-satellites details>summary{min-height:44px}" in block
 
 
+def test_a_hub_summary_that_wraps_keeps_the_left_edge():
+    """The satellite rows keep their text clear of the chevron with a grid;
+    the hub's summaries are a title and a note in plain inline text, and on
+    a phone the note's second line started under the chevron."""
+    assert ".sat-hub>details>summary{padding-left:1em;text-indent:-1em}" in BARE_CSS
+    assert ".sat-hub>details>summary::before{text-indent:0}" in BARE_CSS
+
+
 def test_a_segmented_button_shows_its_focus_ring_and_greys_when_off():
     """The shared ring stands 2px outside a button, and .seg{overflow:hidden}
     cut it off: Command, which Add focuses, and Every satellite showed no
