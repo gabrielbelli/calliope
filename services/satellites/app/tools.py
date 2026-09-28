@@ -7,9 +7,12 @@ spoken sentence, never a page to read aloud.
     web_search   SearXNG's JSON API (SATELLITES_SEARXNG_URL): the top results'
                  titles and snippets, and any direct answer or infobox. No page
                  is fetched: snippets are what make it fast, and they hold the
-                 answer to most of what a voice assistant is asked.
+                 answer to most of what a voice assistant is asked. SafeSearch
+                 is the instance's own setting.
     weather      Open-Meteo (no key): now and the next three days, at home or
-                 at a named place (its geocoder, in the question's language).
+                 at a named place (its geocoder, in the question's language),
+                 in the household's units (SATELLITES_UNITS, else Home
+                 Assistant's unit system, else metric).
 
 The date and time are not a tool. They go into every language model's
 system prompt (now_line), so "what day is it" costs no round trip.
@@ -18,16 +21,18 @@ WHERE HOME IS. SATELLITES_HOME_LAT, SATELLITES_HOME_LON, SATELLITES_HOME_NAME
 and SATELLITES_TIMEZONE, when set. Otherwise Home Assistant's own configuration
 (GET /api/config: latitude, longitude, location name, time zone), asked through
 the first Home Assistant action a wake word has, with that action's token, and
-kept for HOME_TTL_S. Neither: the weather needs a place named, and the clock is
-UTC.
+kept for HOME_TTL_S; a failed ask is not repeated for HOME_RETRY_S. Every
+language model turn primes it, with tools or without, since every prompt
+carries the time. Neither: the weather needs a place named, and the clock is
+TZ's, else UTC.
 
-A tool never raises into the turn. A search that fails, times out or finds
-nothing returns a sentence saying so, and the model answers without it.
+A tool never raises into the turn. A search that fails, times out, finds
+nothing or answers in a shape it does not expect returns a sentence saying so,
+and the model answers without it.
 """
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import json
 import logging
@@ -44,6 +49,7 @@ SEARCH_TIMEOUT_S = 4.0
 WEATHER_TIMEOUT_S = 4.0
 HOME_TIMEOUT_S = 3.0
 HOME_TTL_S = 3600.0
+HOME_RETRY_S = 300.0
 RESULTS = 5
 SNIPPET_CHARS = 280
 OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
@@ -78,7 +84,7 @@ WMO = {0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "overcast", 45: "fo
        95: "thunderstorm", 96: "thunderstorm with hail", 99: "thunderstorm with hail"}
 
 _home: dict | None = None
-_home_at = 0.0
+_home_at: float | None = None  # when Home Assistant was last asked, answered or not
 
 
 def guidance(names) -> str:
@@ -116,6 +122,15 @@ def _from_env() -> dict | None:
         return None
 
 
+def _units() -> str:
+    """"us" (°F, mph, inches) or "metric": SATELLITES_UNITS, else Home
+    Assistant's unit system as /api/config gave it, else metric."""
+    chosen = (os.getenv("SATELLITES_UNITS") or "").strip().lower()
+    if chosen in ("us", "metric"):
+        return chosen
+    return (_home or {}).get("units") or "metric"
+
+
 def _home_assistant() -> tuple[str, str] | None:
     """The first Home Assistant action's address and token variable."""
     from . import (
@@ -131,33 +146,43 @@ def _home_assistant() -> tuple[str, str] | None:
 
 async def prime(client: httpx.AsyncClient) -> None:
     """Know where home is: from the environment, or asked of Home Assistant
-    once per HOME_TTL_S. Quiet on failure: the clock falls back to UTC."""
+    once per HOME_TTL_S, and after a failure not again for HOME_RETRY_S, so a
+    Home Assistant that is down or refuses the token costs one turn a round
+    trip, not every turn. Quiet on failure, a bad token included: the clock
+    falls back to TZ or UTC, and the turn goes on."""
     global _home, _home_at
     env = _from_env()
     if env:
         _home = env
         return
-    if _home is not None and time.monotonic() - _home_at < HOME_TTL_S:
+    if _home_at is not None and time.monotonic() - _home_at < (HOME_TTL_S if _home is not None
+                                                                  else HOME_RETRY_S):
         return
     _home_at = time.monotonic()
     found = _home_assistant()
     if not found:
         return
-    from .destinations import (
-        _secret,  # noqa: PLC0415 - one place turns a name into a value
+    from .destinations import (  # noqa: PLC0415 - one place turns a name into a value
+        DestinationError,
+        _secret,
     )
     url, token_env = found
-    token = _secret(token_env)
-    if not token:
-        return
     try:
+        token = _secret(token_env)
+        if not token:
+            return
         r = await client.get(f"{url}/api/config", headers={"Authorization": f"Bearer {token}"},
                              timeout=HOME_TIMEOUT_S)
         c = r.json() if r.status_code == 200 else {}
+        units = c.get("unit_system") if isinstance(c.get("unit_system"), dict) else {}
+        # A Home Assistant with no location set still knows its time zone.
+        home = {"name": c.get("location_name") or None, "time_zone": c.get("time_zone"),
+                "units": "us" if units.get("temperature") == "°F" else "metric"}
         if isinstance(c.get("latitude"), (int, float)) and isinstance(c.get("longitude"), (int, float)):
-            _home = {"lat": c["latitude"], "lon": c["longitude"],
-                     "name": c.get("location_name") or "home", "time_zone": c.get("time_zone")}
-    except (httpx.HTTPError, ValueError, AttributeError) as e:
+            home |= {"lat": c["latitude"], "lon": c["longitude"], "name": home["name"] or "home"}
+        if home["time_zone"] or "lat" in home:
+            _home = home
+    except (httpx.HTTPError, ValueError, AttributeError, DestinationError) as e:
         log.info("tools: Home Assistant's location was not read (%s)", type(e).__name__)
 
 
@@ -175,7 +200,7 @@ async def run(name: str, arguments: str, client: httpx.AsyncClient, allowed, lan
         if name == "web_search":
             return await web_search(client, str(args.get("query") or "").strip(), language)
         return await weather(client, str(args.get("location") or "").strip(), language)
-    except (httpx.HTTPError, ValueError, KeyError, TypeError, asyncio.TimeoutError) as e:
+    except Exception as e:  # noqa: BLE001 - any answer in a shape not expected; CancelledError is not one
         log.info("tools: %s failed: %s", name, type(e).__name__)
         return f"The {name.replace('_', ' ')} failed ({type(e).__name__}); answer without it."
 
@@ -186,7 +211,9 @@ async def web_search(client: httpx.AsyncClient, query: str, language: str | None
         return "Web search is not set up on this hub (SATELLITES_SEARXNG_URL); answer without it."
     if not query:
         return "The search had no query."
-    params = {"q": query, "format": "json", "safesearch": "0"}
+    # No safesearch: the instance's own setting stands. Forced off, what it
+    # found was read aloud in a home, to whoever asked.
+    params = {"q": query, "format": "json"}
     if language and language != "auto":
         params["language"] = language
     r = await client.get(f"{base}/search", params=params, timeout=SEARCH_TIMEOUT_S)
@@ -224,24 +251,27 @@ async def weather(client: httpx.AsyncClient, location: str, language: str | None
                  "name": ", ".join(p for p in (h.get("name"), h.get("admin1"), h.get("country")) if p)}
     else:
         await prime(client)
-        if not _home:
+        if not _home or "lat" not in _home:
             return "Where home is is not known here; ask for a named place."
         place = _home
+    us = _units() == "us"
+    deg, speed, depth = ("°F", "mph", "in") if us else ("°C", "km/h", "mm")
     r = await client.get(OPEN_METEO, params={
         "latitude": place["lat"], "longitude": place["lon"], "timezone": "auto", "forecast_days": 3,
         "current": "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m",
         "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum",
-    }, timeout=WEATHER_TIMEOUT_S)
+    } | ({"temperature_unit": "fahrenheit", "wind_speed_unit": "mph", "precipitation_unit": "inch"}
+         if us else {}), timeout=WEATHER_TIMEOUT_S)
     r.raise_for_status()
     d = r.json()
     now, daily = d.get("current") or {}, d.get("daily") or {}
     days = []
     for i, day in enumerate(daily.get("time") or []):
         days.append(f"{day}: {WMO.get(daily['weather_code'][i], 'unknown')}, "
-                    f"{daily['temperature_2m_min'][i]} to {daily['temperature_2m_max'][i]} °C, "
+                    f"{daily['temperature_2m_min'][i]} to {daily['temperature_2m_max'][i]} {deg}, "
                     f"rain chance {daily['precipitation_probability_max'][i]}%, "
-                    f"{daily['precipitation_sum'][i]} mm")
+                    f"{daily['precipitation_sum'][i]} {depth}")
     return (f"Weather for {place['name']}. Now: {WMO.get(now.get('weather_code'), 'unknown')}, "
-            f"{now.get('temperature_2m')} °C (feels like {now.get('apparent_temperature')} °C), "
-            f"humidity {now.get('relative_humidity_2m')}%, wind {now.get('wind_speed_10m')} km/h, "
-            f"precipitation {now.get('precipitation')} mm.\nNext days:\n" + "\n".join(days))
+            f"{now.get('temperature_2m')} {deg} (feels like {now.get('apparent_temperature')} {deg}), "
+            f"humidity {now.get('relative_humidity_2m')}%, wind {now.get('wind_speed_10m')} {speed}, "
+            f"precipitation {now.get('precipitation')} {depth}.\nNext days:\n" + "\n".join(days))

@@ -16,7 +16,7 @@ from test_llm import LLM, ask, delta, one_body, sent, sse
 from test_router import Fake
 
 from app import tools
-from app.destinations import Llm
+from app.destinations import DestinationError, Llm
 
 SEARX = {"results": [
     {"title": "Race report", "content": "Norris won the Singapore Grand Prix on Sunday.",
@@ -29,10 +29,10 @@ SEARX = {"results": [
 def env(monkeypatch):
     monkeypatch.setenv("SATELLITES_SEARXNG_URL", "http://searx.test")
     for name in ("SATELLITES_HOME_LAT", "SATELLITES_HOME_LON", "SATELLITES_HOME_NAME",
-                 "SATELLITES_TIMEZONE", "TZ", "SATELLITES_LLM_API_KEY"):
+                 "SATELLITES_TIMEZONE", "TZ", "SATELLITES_LLM_API_KEY", "SATELLITES_UNITS"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(tools, "_home", None)
-    monkeypatch.setattr(tools, "_home_at", 0.0)
+    monkeypatch.setattr(tools, "_home_at", None)
     monkeypatch.setattr(Llm, "limit_names", {})
 
 
@@ -183,3 +183,88 @@ async def test_home_and_its_time_zone_come_from_home_assistant_when_not_configur
     assert line.endswith("17:30, local time (Casa), time zone America/Sao_Paulo.")
     await tools.prime(client)  # kept, not asked again
     assert len([r for r in fake.seen if r.url.host == "ha.test"]) == 1
+
+
+async def test_a_word_without_tools_tells_the_time_in_home_assistants_zone(fake, client, monkeypatch):
+    """Home was primed only for a word with tools, so the default language
+    model word, with none, told the time in UTC although the README promised
+    Home Assistant's zone. A Home Assistant with no location set still gives
+    its zone, and its unit system."""
+    monkeypatch.setattr(tools, "_home_assistant", lambda: ("http://ha.test:8123", "SATELLITES_HA_TOKEN"))
+    monkeypatch.setenv("SATELLITES_HA_TOKEN", "ha-token-do-not-leak")
+    fake.handlers["ha.test"] = lambda r: httpx.Response(200, json={
+        "time_zone": "America/New_York", "unit_system": {"temperature": "°F", "length": "mi"}})
+    fake.handlers["llm.test"] = lambda r: sse(delta("stop", content="Hi."))
+    await said(LLM, client)
+    assert "time zone America/New_York." in sent(fake)[0]["messages"][0]["content"]
+    assert tools._units() == "us"
+    assert await tools.run("weather", "{}", client, ["weather"], "en") == (
+        "Where home is is not known here; ask for a named place.")
+
+
+async def test_a_home_assistant_that_fails_is_not_asked_again_every_turn(fake, client, monkeypatch):
+    """A failed /api/config was asked again on every turn, each a round trip
+    (up to 3 s on a Home Assistant that times out) before the model."""
+    monkeypatch.setattr(tools, "_home_assistant", lambda: ("http://ha.test:8123", "SATELLITES_HA_TOKEN"))
+    monkeypatch.setenv("SATELLITES_HA_TOKEN", "ha-token-do-not-leak")
+    fake.handlers["ha.test"] = lambda r: httpx.Response(502, text="bad gateway")
+    await tools.prime(client)
+    await tools.prime(client)
+    assert len([r for r in fake.seen if r.url.host == "ha.test"]) == 1
+    monkeypatch.setattr(tools, "_home_at", tools._home_at - tools.HOME_RETRY_S - 1)
+    await tools.prime(client)
+    assert len([r for r in fake.seen if r.url.host == "ha.test"]) == 2, "never asked again"
+
+
+async def test_a_bad_home_assistant_token_does_not_fail_the_turn(fake, client, monkeypatch):
+    """A token with a line break raised out of prime, so every language
+    model turn failed with Home Assistant's token error."""
+    monkeypatch.setattr(tools, "_home_assistant", lambda: ("http://ha.test:8123", "SATELLITES_HA_TOKEN"))
+    monkeypatch.setenv("SATELLITES_HA_TOKEN", "abc\r")
+    fake.handlers["llm.test"] = lambda r: sse(delta("stop", content="Hi."))
+    assert await said(SEARCHING, client) == "Hi."
+    assert [r for r in fake.seen if r.url.host == "ha.test"] == []
+
+
+@pytest.mark.parametrize("body", [{"results": ["text"]}, ["a", "b"]])
+async def test_a_search_answer_in_another_shape_is_a_failed_search_not_a_failed_turn(fake, client, body):
+    fake.handlers["searx.test"] = lambda r: httpx.Response(200, json=body)
+    assert await tools.run("web_search", '{"query": "f1"}', client, ["web_search"], "en") == (
+        "The web search failed (AttributeError); answer without it.")
+
+
+async def test_a_search_leaves_safesearch_to_the_instance(fake, client):
+    await tools.run("web_search", '{"query": "f1"}', client, ["web_search"], "en")
+    [search] = [r for r in fake.seen if r.url.host == "searx.test"]
+    assert "safesearch" not in search.url.params
+
+
+async def test_the_weather_is_in_the_households_units(fake, client, monkeypatch):
+    monkeypatch.setenv("SATELLITES_HOME_LAT", "40.7")
+    monkeypatch.setenv("SATELLITES_HOME_LON", "-74.0")
+    monkeypatch.setenv("SATELLITES_UNITS", "us")
+    fake.handlers["api.open-meteo.com"] = lambda r: httpx.Response(200, json=OPEN_METEO)
+    text = await tools.run("weather", "{}", client, ["weather"], "en")
+    [forecast] = [r for r in fake.seen if r.url.host == "api.open-meteo.com"]
+    assert (forecast.url.params["temperature_unit"], forecast.url.params["wind_speed_unit"],
+            forecast.url.params["precipitation_unit"]) == ("fahrenheit", "mph", "inch")
+    assert "21.4 °F" in text and "9.5 mph" in text and "6.2 in" in text and "°C" not in text
+
+
+async def test_a_model_that_ignores_tool_choice_none_fails_in_words_not_silence(fake, client):
+    """Asked with tool_choice none, a server that ignores it asks for tools
+    again: the turn ended with nothing said and no error."""
+    fake.handlers["llm.test"] = lambda r: sse(delta("tool_calls", tool_calls=[
+        {"index": 0, "id": "x", "function": {"name": "web_search", "arguments": '{"query": "again"}'}}]))
+    with pytest.raises(DestinationError, match="still asked for tools after 2 rounds"):
+        await said(SEARCHING, client)
+
+
+async def test_what_a_one_body_answer_says_beside_its_tool_calls_is_spoken(fake, client):
+    def model(r: httpx.Request) -> httpx.Response:
+        if not has_tool_result(r):
+            return one_body("Let me check.", "tool_calls", tool_calls=[{"id": "c", "type": "function",
+                            "function": {"name": "web_search", "arguments": '{"query": "f1"}'}}])
+        return one_body("Norris won.")
+    fake.handlers["llm.test"] = model
+    assert await said(SEARCHING | {"stream": False}, client) == "Let me check. Norris won."

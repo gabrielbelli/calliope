@@ -631,9 +631,12 @@ class Llm(_Base):
         model asks for tools, they run together (tools.run, which never
         raises), their results go back, and it is asked again; after
         TOOL_ROUNDS it is asked with tool_choice "none" and must answer. Text
-        a model says before asking ("let me check") is spoken as it comes."""
-        if self.tools:
-            await tooling.prime(client)
+        a model says before asking ("let me check") is spoken as it comes.
+
+        Home is primed on every turn, tools or none: the prompt's time is in
+        Home Assistant's zone, and a word without tools never learnt it, so
+        it told the time in UTC. Cached, and quiet on failure (tools.prime)."""
+        await tooling.prime(client)
         messages = self.messages(req)
         for n in range(self.TOOL_ROUNDS + 1):
             calls: dict[int, dict] = {}
@@ -643,6 +646,12 @@ class Llm(_Base):
                                           calls):
                 said.append(piece)
                 yield piece
+            if calls and final and self.tools and not "".join(said).strip():
+                # Some servers ignore tool_choice: the turn would end in
+                # silence, with nothing to say why.
+                raise DestinationError(f"the model still asked for tools after {self.TOOL_ROUNDS} "
+                                       "rounds and said nothing; this server may ignore tool_choice, "
+                                       "so turn the word's tools off or choose another model")
             if not calls or final:
                 return
             asked = [calls[i] for i in sorted(calls)]
@@ -686,6 +695,13 @@ class Llm(_Base):
                     wanted = None
                 if wanted and self.tools:
                     self._gather(calls, wanted)
+                    # What it said beside the calls ("let me check") is
+                    # spoken, as it is when streamed; the space keeps it a
+                    # sentence apart from the answer that follows.
+                    content = data["choices"][0]["message"].get("content")
+                    text = re.sub(r"<think>.*?(</think>|$)", "", _text(content), flags=re.S).strip()
+                    if text:
+                        yield text + " "
                     return
                 text = self._content(data)
                 if text:
