@@ -417,7 +417,7 @@ SAMPLES = {"name": "Kitchen", "old": "Kitchen", "new": "Bedroom", "id": "a1b2c3d
            "how": "strong", "word": "hey mycroft", "var": "SATELLITES_HA_TOKEN_KITCHEN",
            "s": "1.3", "output": "Jack (aux)", "hears": "home_assistant_cloud (en-GB)",
            "speaks": "calliope_kokoro as pf_dora", "first": "0.4",
-           "reply": "Hello! How can I help you today?"}
+           "reply": "Hello! How can I help you today?", "buttons": "Rec or Mode"}
 
 
 def sat_copy() -> dict[str, str]:

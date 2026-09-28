@@ -231,6 +231,28 @@ def test_a_button_mapping_is_one_the_hub_accepts(tmp_path):
     assert got["keys_offline"] == ["rec", "mode", "play", "set", "vol_down", "vol_up", "custom"], got
 
 
+def test_a_muted_satellite_names_the_button_that_unmutes_it(tmp_path):
+    """Mute can be on any button since buttons became freely mapped, and Rec
+    can be set to something else. The row sent the owner to Rec whatever it
+    now does, and a press on the device is the only way out of a mute."""
+    got = run(tmp_path, SAT + """
+      const muted = buttons => sat({ status: { muted: true }, config: { buttons } });
+      console.log(JSON.stringify({
+        mode: satWhy(muted({ rec: { press: "ptt" }, mode: { press: "mute" } })),
+        two: satWhy(muted({ rec: { press: "mute" }, key1: { release: "mute" } })),
+        none: satWhy(muted({})),
+        unmuted: satWhy(sat({ config: { buttons: { rec: { press: "mute" } } } })),
+        offline: satWhy(sat({ online: false, status: { muted: true } })) }));
+    """)
+    assert got["mode"] == ("It is muted on the device, and only its Mode button turns the "
+                           "microphones back on."), got
+    assert "Rec" not in got["mode"], got
+    assert "its Rec or Side button" in got["two"], got
+    assert got["none"] == "It is muted on the device, and only a button on it turns the microphones back on."
+    assert got["unmuted"] == "", got
+    assert got["offline"].startswith("It is offline"), got
+
+
 def test_the_health_line_counts_faults_and_not_choices(tmp_path):
     got = run(tmp_path, SAT + """
       SATELLITES.list = [sat({ id: "a1", online: false }), sat({ id: "a2", online: false }),

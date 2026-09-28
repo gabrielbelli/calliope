@@ -3934,7 +3934,11 @@ const SAT_COPY = {
   pendBlink: "Blink lights its ring for five seconds, so you can tell identical boxes apart.",
   pendOffline: "It has to be online to be adopted.",
   whyOffline: "It is offline, so settings you change here are sent when it reconnects.",
-  whyMuted: "It is muted on the device, and only its Rec button turns the microphones back on.",
+  /* Named from the saved mapping: mute can be on any button, and Rec can be
+     set to something else. The one way out of a mute is a press on the
+     device, so this is the sentence on the row that has to be right. */
+  whyMuted: "It is muted on the device, and only its {buttons} button turns the microphones back on.",
+  whyMutedAny: "It is muted on the device, and only a button on it turns the microphones back on.",
   outJack: "Something is plugged into its jack (aux), so its own speaker stays silent.",
   outSeen: "{output}, heard at {clock}",
   outUnknown: "Not known until it plays something",
@@ -4668,8 +4672,8 @@ function satelliteUpdate(li, n) {
   if (s.bar !== null) {
     q(".bar-fill").style.transform = `scaleX(${Math.max(0, Math.min(1, s.bar)).toFixed(4)})`;
   }
-  const cfg = n.config || {}, st = n.status || {};
-  satSet(q(".sat-why"), !n.online ? SAT_COPY.whyOffline : st.muted ? SAT_COPY.whyMuted : "");
+  const cfg = n.config || {};
+  satSet(q(".sat-why"), satWhy(n));
   satSet(q(".sat-output"), n.online && n.output === "jack" ? SAT_COPY.outJack : "");
   satLevel(q('[data-cfg="volume"]'), cfg.volume);
   satLevel(q('[data-cfg="mic_gain_db"]'), cfg.mic_gain_db);
@@ -4789,6 +4793,19 @@ function satMapping(entries) {
   }
   return { mapping };
 }
+/* The buttons that mute, by name, in the order they sit. */
+function satMuteButtons(n) {
+  const m = (n.config || {}).buttons || {};
+  return satButtonKeys(n).filter(k => Object.values(m[k] || {}).includes("mute")).map(satButtonName);
+}
+/* The open row's first line: why it is not simply well, or nothing. */
+function satWhy(n) {
+  if (!n.online) return SAT_COPY.whyOffline;
+  if (!(n.status || {}).muted) return "";
+  const mutes = satMuteButtons(n);
+  return mutes.length ? satText("whyMuted", { buttons: mutes.join(" or ") }) : SAT_COPY.whyMutedAny;
+}
+
 function satButtonsNote(mapping, keys) {
   const said = edge => keys.map(key => {
     const act = (mapping[key] || {})[edge] || "", b = satButtonName(key);
