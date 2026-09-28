@@ -1471,15 +1471,24 @@ fieldset.ww-sats>legend,fieldset.ww-mode>legend{padding:0;margin-bottom:var(--s1
 fieldset.sat-fs>legend{margin-bottom:var(--s1)}
 fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
 .ww-pick{display:flex;flex-wrap:wrap;column-gap:var(--s4)}
-/* Struck through AND said in words beside it (Removed when you save), so the
-   staged removal never depends on the line alone. */
+/* Struck through AND said in words beside it (Removed on save, the summary's
+   state word), so the staged removal never depends on the line alone. */
 .ww[data-removed] .sat-name{color:var(--dim);text-decoration:line-through}
 /* The Mode and Satellites legends grey with the labels, which the .grid2 and
    .row rules do not reach. */
 .ww[data-removed] fieldset>legend{opacity:.55}
 /* The field a word's fix is about, so the eye finds it as a screen reader
-   does (aria-invalid, described by the fix line). */
+   does (aria-invalid, described by the fix line). Only once it is a fix: an
+   Incomplete field is described and not marked (wakeRowUpdate). */
 .ww [aria-invalid=true]{border-color:var(--warn)}
+/* THE FIX LINE KEEPS ITS BOX FROM INCOMPLETE TO NEEDS A FIX. Leaving a field
+   that holds a wrong value turns the plain line into the .note.warn box, and
+   the box's padding made it 16px taller. It sits above the row's Remove, and
+   the render runs on focusout, between a mouse press and its release: Remove
+   dropped under the pointer, the release landed above it, and no click
+   fired. The plain line takes the note's padding, so only the ink and the
+   fill change, and the words do not move either. */
+.ww-fix>.hint{padding:var(--s2) var(--s3)}
 /* A language model word's key and Test, under its fields: the key box and its
    buttons on one line, as Say is on a satellite, its state under it, then
    Test and what the model said. */
@@ -4072,7 +4081,6 @@ const SAT_COPY = {
   wwNone: "Pick at least one satellite, or choose Every satellite.",
   wwDirty: "Unsaved changes.",
   wwClean: "No changes to save.",
-  wwRemoved: "Removed when you save.",
   wwAddWhy: "It downloads when you save, and wakes every satellite until you choose some.",
   wwExhausted: "Every available wake word is already added.",
   wwDownloading: "Satellites listen for it once it has downloaded.",
@@ -5697,7 +5705,8 @@ function wakeProblem(w, words) {
 }
 
 /* WHERE A PROBLEM IS, AND WHETHER IT IS ONLY UNFINISHED. `f` is the data-f
-   of the field that fixes it, which is marked aria-invalid; `empty` is a
+   of the field that fixes it, which the reason describes, and which is
+   marked aria-invalid once the word says Needs a fix; `empty` is a
    required field not filled in yet, which is a word being set up rather than
    one somebody got wrong. A new Language model or Webhook action starts with
    its address and model empty (wakeSetDest), and those used to raise the
@@ -6434,8 +6443,12 @@ function wakeRow(name) {
       row.querySelector('[data-f="d.pipeline"]').focus();
     }
     else if (b.dataset.ww === "models") {
+      /* It hides itself once the list is asked for, as Ask again does, and
+         the focus went with it to the page: the Model field it fills takes
+         it instead. */
       const d = wakeDest(name);
       if (d && d.type === "llm") wakeModelsList(d);
+      if (b.hidden) row.querySelector('[data-f="d.model"]').focus();
     } else if (b.dataset.ww === "key" || b.dataset.ww === "keyclear") {
       const d = wakeDest(name);
       if (!d || !d.api_key_env) return;
@@ -6644,17 +6657,20 @@ function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
     wakeValue(q('[data-f="t.cooldown_s"]'), "cooldown_s" in t ? t.cooldown_s : WAKE_SHOWN.cooldown_s);
   }
   satNoteOnce(q(".ww-fix"), quiet ? "hint" : "warn", problem);
-  /* The field it is about is marked, and its description is the reason, so
-     a screen reader on that field hears what is wrong with it. */
+  /* The field it is about is described by the reason, so a screen reader on
+     that field hears what it still needs, and MARKED ONLY ONCE IT IS A FIX.
+     An empty required field, or the one being typed in, is Incomplete:
+     aria-invalid there was "invalid entry" read out on a field nobody had
+     touched yet, and it drew the amber edge on the render that chose
+     Webhook: the warning before a key was pressed, which 8a44cb4 took off
+     the chip, left on the field. */
   for (const f of row.querySelectorAll("[data-f]")) {
-    const bad = f === culprit;
-    if ((f.getAttribute("aria-invalid") === "true") === bad) continue;
-    if (bad) {
-      f.setAttribute("aria-invalid", "true");
-      f.setAttribute("aria-describedby", q(".ww-fix").id);
-    } else {
-      f.removeAttribute("aria-invalid");
-      f.removeAttribute("aria-describedby");
+    const about = f === culprit, bad = about && !quiet;
+    if ((f.getAttribute("aria-invalid") === "true") !== bad) {
+      if (bad) f.setAttribute("aria-invalid", "true"); else f.removeAttribute("aria-invalid");
+    }
+    if (f.hasAttribute("aria-describedby") !== about) {
+      if (about) f.setAttribute("aria-describedby", q(".ww-fix").id); else f.removeAttribute("aria-describedby");
     }
   }
 
@@ -6665,8 +6681,17 @@ function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
   for (const c of row.querySelectorAll(".body input, .body select, .body textarea, .seg button")) {
     c.disabled = removed || c.hasAttribute("data-off");
   }
+  /* Ask again and List models ask the hub for a list, and then hand the focus
+     to the field it fills. On a removed word that field is greyed, so a press
+     left the focus nowhere, and they stayed live on a struck-through row.
+     Hidden here, after wakeActionUpdate has shown them: the next render
+     after Keep shows them again. */
+  if (removed) for (const b of row.querySelectorAll('[data-ww="pipes"], [data-ww="models"]')) b.hidden = true;
   row.toggleAttribute("data-removed", removed);
-  satSet(q(".ww-rowhint"), removed ? SAT_COPY.wwRemoved
+  /* A removed word says so once, as its summary's state word (Removed on
+     save), beside the struck-through name. The row said it a second time
+     here, in other words, beside Keep. */
+  satSet(q(".ww-rowhint"), removed ? ""
     : live && live.state === "downloading" ? SAT_COPY.wwDownloading : ptt ? SAT_COPY.wwPttWhere : "");
   const rm = q('[data-ww="remove"]');
   rm.hidden = ptt;

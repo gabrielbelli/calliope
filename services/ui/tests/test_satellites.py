@@ -634,7 +634,10 @@ def test_removing_a_word_is_staged_and_can_be_kept():
     assert "confirm(" not in remove and "confirm(" not in function("wakeSave")
     update = function("wakeRowUpdate")
     assert 'satSet(rm, removed ? "Keep" : "Remove");' in update
-    assert "SAT_COPY.wwRemoved" in update
+    # Said once, as the summary's state word; the row hint beside Keep said
+    # it again in other words ("Removed when you save.").
+    assert '["Removed on save", ""]' in update
+    assert "wwRemoved" not in CODE and 'satSet(q(".ww-rowhint"), removed ? ""' in update
     assert 'rm.classList.toggle("danger", !removed);' in update, "Keep is drawn as a destructive button"
     assert "button.focus();" in remove, "focus is lost when Remove becomes Keep"
 
@@ -673,13 +676,17 @@ def test_a_word_being_filled_in_is_incomplete_and_its_field_is_marked():
     several rows from the field, before a key was pressed. Empty, or being
     typed in, is Incomplete in dim text with the reason as a plain line; a
     value the hub would refuse is still Needs a fix. Either way the field is
-    aria-invalid and described by the reason, which nothing named before."""
+    described by the reason, which nothing named before; it is aria-invalid,
+    with the amber edge that follows, only at Needs a fix. Marked while
+    Incomplete, it was "invalid entry" read out, and drawn amber, on the
+    render that chose Webhook."""
     update = function("wakeRowUpdate")
     assert "const at = problem ? wakeProblemAt(w, problem) : null;" in update
     assert "(at.empty || (!!culprit && culprit === document.activeElement))" in update
     assert '(quiet ? ["Incomplete", ""] : ["Needs a fix", "warn"])' in update
-    assert 'f.setAttribute("aria-invalid", "true");' in update
-    assert 'f.setAttribute("aria-describedby", q(".ww-fix").id);' in update
+    assert "const about = f === culprit, bad = about && !quiet;" in update
+    assert 'if (bad) f.setAttribute("aria-invalid", "true");' in update
+    assert 'if (about) f.setAttribute("aria-describedby", q(".ww-fix").id);' in update
     assert '<div class="ww-fix" id="${u}-fix"></div>' in WORD
     assert ".ww [aria-invalid=true]{border-color:var(--warn)}" in BARE_CSS
     # A field left is read again: while it had the focus it was only typed.
@@ -690,6 +697,35 @@ def test_a_word_being_filled_in_is_incomplete_and_its_field_is_marked():
     for key in re.findall(r"SAT_COPY\.(fix\w+)", function("wakeProblem")):
         assert f"[SAT_COPY.{key}]" in at, f"{key} names no field"
     assert '|| ["a.fallback"]' in at
+
+
+def test_a_fix_line_turning_to_a_warning_does_not_move_what_is_under_it():
+    """Leaving a field that holds a wrong value turns the plain fix line into
+    the .note.warn box, on focusout, between a mouse press and its release.
+    The box's padding made it 16px taller, so Remove dropped under the
+    pointer and the press landed on nothing. The plain line has the note's
+    box, so only the ink and the fill change."""
+    note = re.search(r"\.note\{[^}]*\}", BARE_CSS).group(0)
+    assert "padding:var(--s2) var(--s3)" in note and "margin-top:var(--s2)" in note
+    assert ".ww-fix>.hint{padding:var(--s2) var(--s3)}" in BARE_CSS
+    assert re.search(r"\.hint\{[^}]*margin-top:var\(--s2\)", BARE_CSS)
+    assert 'satNoteOnce(q(".ww-fix"), quiet ? "hint" : "warn", problem);' in function("wakeRowUpdate")
+
+
+def test_a_removed_word_offers_no_list_to_ask_for_and_a_list_asked_for_keeps_the_focus():
+    """Ask again and List models hide themselves once pressed and hand the
+    focus to the field they fill. On a removed word that field is greyed, so
+    Ask again, live on a struck-through row, left the focus on the page; and
+    List models handed it to nothing at all."""
+    update = function("wakeRowUpdate")
+    hide = ("if (removed) for (const b of row.querySelectorAll('[data-ww=\"pipes\"], "
+            "[data-ww=\"models\"]')) b.hidden = true;")
+    assert hide in update
+    # After the render that shows them, or it would be undone at once.
+    assert update.index("wakeActionUpdate(row, w, words)") < update.index(hide)
+    row = function("wakeRow")
+    assert "if (b.hidden) row.querySelector('[data-f=\"d.model\"]').focus();" in row
+    assert "row.querySelector('[data-f=\"d.pipeline\"]').focus();" in row
 
 
 def test_the_add_list_offers_only_what_the_hub_can_load_and_is_not_listed():
