@@ -127,6 +127,10 @@ class FakeCalliope:
             "zf_xiaobei",
         ]
         self.stt_model = "parakeet"
+        # GET /health's backends.stt.health.models, or None for a stack older
+        # than the list; stt_status is that health's status.
+        self.stt_models: list[dict[str, Any]] | None = None
+        self.stt_status = "ok"
         self.health_body: dict[str, Any] | None = None
         self.transcript = "turn on the kitchen lights"
         # Glossary profiles by name, as PUT /glossaries/{name} stored them.
@@ -217,10 +221,11 @@ class FakeCalliope:
                         "reachable": True,
                         "http_status": 200,
                         "health": {
-                            "status": "ok",
+                            "status": self.stt_status,
                             "model": self.stt_model,
                             "threads": 8,
-                        },
+                        }
+                        | ({} if self.stt_models is None else {"models": self.stt_models}),
                     },
                     "tts": {
                         "url": "http://tts-stack:8001",

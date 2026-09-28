@@ -179,11 +179,16 @@ internally, but has no HTTP route for it.
 
 ## Calliope in an Assist pipeline
 
-The integration adds two engines to Home Assistant.
+The integration adds the stack's engines to Home Assistant: one
+speech-to-text entity for each engine the stack serves (`GET /health`,
+`backends.stt.health.models`), and Kokoro for text-to-speech. It checks the
+list every 5 minutes and reloads itself when it changes, so a model added to
+the stack appears in Assist's menu without a restart.
 
 | Entity | Engine | Languages |
 |---|---|---|
 | `stt.calliope_parakeet` | Parakeet TDT 0.6B v3, through `POST /v1/audio/transcriptions` | Parakeet's 25 European languages |
+| `stt.calliope_parakeet_pt_br` | Its Brazilian Portuguese fine-tune, when the stack loads it (`STT_MODELS=parakeet,parakeet-pt-br`) | Portuguese |
 | `tts.calliope_kokoro` | Kokoro, through `POST /v1/audio/speech` | English (US and UK), Brazilian Portuguese, Spanish, French, Hindi, Italian, Japanese and Mandarin, as far as the stack has voices |
 
 To use them:

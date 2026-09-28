@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timedelta
+
 from homeassistant.const import CONF_API_KEY, CONF_URL, CONF_VERIFY_SSL, Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 
 from .api import CalliopeAuthError, CalliopeClient, CalliopeError
@@ -20,6 +24,7 @@ from .coordinator import (
 )
 from .entity import service_device_info
 from .services import async_setup_services
+from .stt import stt_engines, stt_ready
 from .vocabulary import Vocabulary
 
 PLATFORMS = [
@@ -34,6 +39,13 @@ PLATFORMS = [
 ]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+_LOGGER = logging.getLogger(__name__)
+
+# How often the stack is asked which speech-to-text engines it serves. A change
+# (a model added to or taken off the stack) reloads the entry, so Assist's
+# menu follows the stack without anyone touching Home Assistant.
+ENGINE_CHECK = timedelta(minutes=5)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -75,7 +87,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: CalliopeConfigEntry) -> 
     coordinator.async_start()
     for unsub in entry.runtime_data.vocabulary.async_start():
         entry.async_on_unload(unsub)
+    entry.async_on_unload(_watch_engines(hass, entry, client))
     return True
+
+
+@callback
+def _watch_engines(
+    hass: HomeAssistant, entry: CalliopeConfigEntry, client: CalliopeClient
+):
+    """Reload the entry when the stack's speech-to-text engines change. The
+    list is only compared once the stack says it has finished loading them:
+    one still starting lists none."""
+    serving = [e["id"] for e in stt_engines(entry.runtime_data.health)]
+
+    async def _check(_now: datetime) -> None:
+        try:
+            health = await client.health()
+        except CalliopeError:
+            return
+        if not stt_ready(health):
+            return
+        now_serving = [e["id"] for e in stt_engines(health)]
+        if now_serving != serving:
+            _LOGGER.info(
+                "Calliope's speech-to-text engines changed from %s to %s; reloading",
+                ", ".join(serving),
+                ", ".join(now_serving),
+            )
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+
+    return async_track_time_interval(hass, _check, ENGINE_CHECK)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: CalliopeConfigEntry) -> bool:

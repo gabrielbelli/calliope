@@ -1,9 +1,15 @@
-"""Calliope as the speech-to-text of an Assist pipeline.
+"""Calliope as the speech-to-text of an Assist pipeline: one entity per engine.
 
-Audio goes to POST /v1/audio/transcriptions as one WAV. The engine is the one
-the deployment loaded (GET /health, backends.stt.health.model): Parakeet by
-default, which detects the language itself and refuses a `language` field,
-so none is sent to it; Whisper takes one as a hint.
+The stack lists the engines it serves in GET /health (backends.stt.health.
+models), the default first, with the languages each hears and whether it takes
+a `language` field. Each becomes an entity, so Assist's speech-to-text menu
+offers what this Calliope actually runs: "Parakeet" (25 languages, detected),
+"Parakeet pt-BR" (Portuguese only), and so on. A stack older than that list
+names one engine (backends.stt.health.model), which is the one entity.
+
+Audio goes to POST /v1/audio/transcriptions as one WAV, with `model` naming
+the entity's engine. Parakeet detects the language itself and refuses a
+`language` field, so none is sent to it; Whisper takes one as a hint.
 """
 
 from __future__ import annotations
@@ -25,6 +31,44 @@ _LOGGER = logging.getLogger(__name__)
 PARALLEL_UPDATES = 0
 
 
+# Names for engine ids that read badly as ids. Anything else is shown as its id.
+ENGINE_NAMES = {"parakeet-pt-br": "Parakeet pt-BR"}
+
+
+def stt_engines(health: dict) -> list[dict]:
+    """The engines the stack serves, the default first. An engine is a dict:
+    id, family, default, languages, accepts_language, accepts_boost."""
+    try:
+        models = health["backends"]["stt"]["health"]["models"]
+    except (KeyError, TypeError):
+        models = None
+    listed = [
+        m for m in (models if isinstance(models, list) else [])
+        if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]
+    ]
+    if listed:
+        return listed
+    engine = stt_engine(health)
+    return [
+        {
+            "id": engine,
+            "family": engine,
+            "default": True,
+            "languages": WHISPER_LANGUAGES if engine == "whisper" else PARAKEET_LANGUAGES,
+            "accepts_language": engine == "whisper",
+            "accepts_boost": engine == "parakeet",
+        }
+    ]
+
+
+def stt_ready(health: dict) -> bool:
+    """Whether the stack's speech-to-text has finished loading its engines."""
+    try:
+        return health["backends"]["stt"]["health"]["status"] == "ok"
+    except (KeyError, TypeError):
+        return False
+
+
 def stt_engine(health: dict) -> str:
     """parakeet or whisper, from the gateway's /health; parakeet when it
     does not say."""
@@ -40,28 +84,50 @@ async def async_setup_entry(
     entry: CalliopeConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """One speech-to-text entity per gateway."""
-    async_add_entities([CalliopeSpeechToText(entry)])
+    """One speech-to-text entity per engine the stack serves."""
+    async_add_entities(
+        CalliopeSpeechToText(entry, engine)
+        for engine in stt_engines(entry.runtime_data.health)
+    )
 
 
 class CalliopeSpeechToText(stt.SpeechToTextEntity):
-    """Parakeet (or Whisper) on the Calliope stack."""
+    """One engine on the Calliope stack: Parakeet, a fine-tune of it, Whisper."""
 
     _attr_has_entity_name = True
 
-    def __init__(self, entry: CalliopeConfigEntry) -> None:
-        """Decide the languages from the engine the stack runs."""
+    def __init__(self, entry: CalliopeConfigEntry, engine: dict) -> None:
+        """The engine's id, family, languages and what it takes."""
         self._client = entry.runtime_data.client
         self._vocabulary = entry.runtime_data.vocabulary
-        self._engine = stt_engine(entry.runtime_data.health)
-        self._attr_translation_key = self._engine
-        self._attr_unique_id = f"{entry.entry_id}_stt"
+        self._model = engine["id"]
+        self._engine = str(engine.get("family") or self._model)
+        self._accepts_language = bool(engine.get("accepts_language"))
+        self._accepts_boost = bool(engine.get("accepts_boost"))
+        languages = engine.get("languages")
+        self._languages = (
+            [str(lang) for lang in languages]
+            if isinstance(languages, list) and languages
+            else (WHISPER_LANGUAGES if self._engine == "whisper" else PARAKEET_LANGUAGES)
+        )
+        if engine.get("default"):
+            # The default keeps the id every entity had before there were
+            # several, so a pipeline that picked stt.calliope_parakeet still
+            # finds it.
+            self._attr_unique_id = f"{entry.entry_id}_stt"
+        else:
+            self._attr_unique_id = f"{entry.entry_id}_stt_{self._model}"
+        if self._model in ("parakeet", "whisper"):
+            self._attr_translation_key = self._model
+        else:
+            self._attr_name = ENGINE_NAMES.get(self._model, self._model)
         self._attr_device_info = service_device_info(entry)
 
     @property
     def supported_languages(self) -> list[str]:
-        """Parakeet v3's 25 European languages, or Whisper's."""
-        return WHISPER_LANGUAGES if self._engine == "whisper" else PARAKEET_LANGUAGES
+        """What this engine hears: Parakeet v3's 25 European languages,
+        Portuguese alone for its pt-BR fine-tune, or Whisper's."""
+        return self._languages
 
     @property
     def supported_formats(self) -> list[stt.AudioFormats]:
@@ -99,7 +165,7 @@ class CalliopeSpeechToText(stt.SpeechToTextEntity):
         # file, which is sent as it is.
         wav = bytes(audio) if audio[:4] == b"RIFF" else wav_bytes(bytes(audio), 16000)
         language = None
-        if self._engine == "whisper" and metadata.language:
+        if self._accepts_language and metadata.language:
             language = metadata.language.split("-")[0].lower()
         vocabulary = self._vocabulary
         glossary = GLOSSARY_PROFILE if vocabulary and vocabulary.available else None
@@ -137,8 +203,8 @@ class CalliopeSpeechToText(stt.SpeechToTextEntity):
         no boost switch."""
         return await self._client.transcribe(
             wav,
-            model="whisper-1" if self._engine == "whisper" else "parakeet",
+            model=self._model,
             language=language,
             glossary=glossary,
-            boost=glossary is not None and self._engine == "parakeet",
+            boost=glossary is not None and self._accepts_boost,
         )
