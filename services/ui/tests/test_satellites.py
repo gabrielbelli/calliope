@@ -330,6 +330,11 @@ def test_what_needs_the_satellite_is_greyed_with_its_reason_and_never_hidden():
     assert needs["tone"] == "online speaker"
     assert needs["listen"] == "online mic unmuted"
     assert needs["reboot"] == needs["move"] == needs["update"] == "online idle"
+    # Set up the ring lights the ring, which a mute paints red: greyed with
+    # its reason before the press, not refused after it.
+    assert needs["ring"] == "online lights unmuted"
+    assert '<div class="hint sat-ringwhy"></div>' in DEVICE
+    assert 'li.querySelector(".sat-ringwhy")' in function("satDevice")
     assert 'type="submit" data-needs="online speaker">Say' in ADOPTED
     body = function("satNeeds")
     assert "lights: cfg.lights_enabled !== false" in body and "unmuted: !st.muted" in body
@@ -414,6 +419,27 @@ def test_a_forgotten_row_hands_focus_on():
     assert "rows[at + 1] || rows[at - 1]" in body
     assert '(target || $("sat-h")).focus();' in body
     assert 'id="sat-h" tabindex="-1"' in PANEL
+
+
+def test_setting_up_the_ring_keeps_the_focus_with_its_steps():
+    """Each step hid the button just pressed, so the focus fell to the page
+    and a keyboard began again at the top of the document. And the panel is
+    opened by a button, which said nothing of being open."""
+    show = function("satRingShow")
+    assert 'open.setAttribute("aria-expanded", String(step !== null));' in show
+    assert 'const lost = !!held && box.contains(held) && !!held.closest("[hidden]");' in show
+    assert "held === open && step === \"top\"" in show
+    assert "to.focus({ preventScroll: true });" in show
+    for goes_to in ("'[data-act=\"ring-cw\"]'", "'[data-act=\"ring-next\"]'"):
+        assert goes_to in show
+    assert 'aria-expanded="false" aria-controls="${u}-ringset">Set up the ring' in DEVICE
+    assert '<div class="sat-ringset" id="${u}-ringset" hidden>' in DEVICE
+    # Every step goes through satRingShow, which is what moves the focus.
+    setup = function("satRingSetup")
+    assert setup.count("satRingShow(li, null);") == 3 and "satRingShow(li, li._ring.step);" in setup
+    # The box names what the wizard asks, and the panel's rows do not touch.
+    assert "> LEDs run anticlockwise</label>" in DEVICE and "Upside down" not in DEVICE
+    assert ".sat-ringsay{margin:0}" in BARE_CSS and ".sat-ringset>*+*{margin-top:var(--s2)}" in BARE_CSS
 
 
 def test_the_update_bar_moves_a_transform_and_is_hidden_from_a_reader():

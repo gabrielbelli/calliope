@@ -1444,6 +1444,11 @@ details.sat-row>.body>.ww-listen,details.sat-row>.body>.ww-does{margin-top:var(-
 .sat-btns{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,1fr);
   gap:var(--s2) var(--s3);align-items:center}
 .sat-btns .hd{font-size:var(--t-label);color:var(--dim)}
+/* Ring set-up: the question and its two rows of buttons, --s2 apart, where
+   the <p> kept the browser's 1em under it and the rows of 44px targets on a
+   phone touched. */
+.sat-ringsay{margin:0}
+.sat-ringset>*+*{margin-top:var(--s2)}
 .sat-btns .url,.sat-btns .bnote{grid-column:2/-1}
 .sat-btns .bnote{margin-top:0}
 /* The three hints under the grid are one note, not three paragraphs. */
@@ -3979,6 +3984,8 @@ const SAT_COPY = {
   ringWay: "The bar runs from the brightest LED. Which way does it go, as you look at it?",
   ringSaved: "Saved: the volume bar starts at 12 o'clock and fills clockwise.",
   ringMuted: "It is muted, so the ring shows red: unmute it with its button first.",
+  ringLightsOff: "Turn Lights on to set up the ring.",
+  ringMutedWhy: "Unmute it with its button to set up the ring; muted, the ring shows red.",
   /* The scheme without its colon and slashes: test_ui.py keeps every plain
      http address out of this file, so a fetch to one cannot hide in copy. */
   btnBadUrl: "Write the webhook as a full web address, starting with https or http.",
@@ -4558,12 +4565,14 @@ function satAdoptedMarkup(u) {
                 <option value="0">LED 1</option><option value="1">LED 2</option><option value="2">LED 3</option><option value="3">LED 4</option>
                 <option value="4">LED 5</option><option value="5">LED 6</option><option value="6">LED 7</option><option value="7">LED 8</option>
                 <option value="8">LED 9</option><option value="9">LED 10</option><option value="10">LED 11</option><option value="11">LED 12</option></select></div>
-            <label class="checkline tight"><input type="checkbox" data-cfg="ring_upside_down"> Upside down</label>
+            <label class="checkline tight"><input type="checkbox" data-cfg="ring_upside_down"> LEDs run anticlockwise</label>
           </div>
           <div class="actions">
-            <button class="small" type="button" data-act="ring" data-needs="online lights">Set up the ring…</button>
+            <button class="small" type="button" data-act="ring" data-needs="online lights unmuted"
+                    aria-expanded="false" aria-controls="${u}-ringset">Set up the ring…</button>
           </div>
-          <div class="sat-ringset" hidden>
+          <div class="hint sat-ringwhy"></div>
+          <div class="sat-ringset" id="${u}-ringset" hidden>
             <p class="hint sat-ringsay" aria-live="polite"></p>
             <div class="actions sat-ringtop">
               <button class="small" type="button" data-act="ring-prev" aria-label="Move the lit LED back">◀</button>
@@ -5021,6 +5030,11 @@ function satDevice(li, n, s) {
   const cfg = n.config || {};
   if (top !== document.activeElement && Number.isInteger(cfg.ring_top)) top.value = String(cfg.ring_top);
   if (flip !== document.activeElement) flip.checked = cfg.ring_upside_down === true;
+  /* Why Set up the ring is greyed, beside it and before it is pressed: it
+     lights the ring, which Lights off leaves dark and a mute paints red.
+     Offline is said once for the whole of Device, under Reboot. */
+  satSet(li.querySelector(".sat-ringwhy"), !n.online ? ""
+    : cfg.lights_enabled === false ? SAT_COPY.ringLightsOff : st.muted ? SAT_COPY.ringMutedWhy : "");
   const field = li.querySelector(".sat-rename input");
   if (field !== document.activeElement && !field.dataset.edited) field.value = n.name || "";
   satSet(li.querySelector(".sat-devhint"), !n.online ? SAT_COPY.devOffline
@@ -5198,13 +5212,29 @@ function satRingDraw(li) {
     body: JSON.stringify({ mode: "pixels", pixels: px, brightness: 200 }) });
 }
 
+/* A PANEL OPENED BY ITS BUTTON, SO THE BUTTON SAYS SO (aria-expanded), and
+   the focus follows the steps. Each step hides the buttons that were just
+   pressed: That's the top hides its own row, and Clockwise, Anticlockwise,
+   Cancel and the idle cancel hide the whole panel, and each time the focus
+   fell to the page, so a keyboard started again from the top of the
+   document. It goes to the next step's first button, or back to Set up the
+   ring when the panel shuts; and from Set up the ring to ▶ when it opens,
+   as Move puts it in its field. Otherwise it is left where it is. */
 function satRingShow(li, step) {
-  const box = li.querySelector(".sat-ringset");
+  const box = li.querySelector(".sat-ringset"), open = li.querySelector('[data-act="ring"]');
+  const held = document.activeElement;
   box.hidden = step === null;
-  if (step === null) return;
-  box.querySelector(".sat-ringtop").hidden = step !== "top";
-  box.querySelector(".sat-ringway").hidden = step !== "way";
-  satSet(box.querySelector(".sat-ringsay"), step === "top" ? SAT_COPY.ringTop : SAT_COPY.ringWay);
+  open.setAttribute("aria-expanded", String(step !== null));
+  if (step !== null) {
+    box.querySelector(".sat-ringtop").hidden = step !== "top";
+    box.querySelector(".sat-ringway").hidden = step !== "way";
+    satSet(box.querySelector(".sat-ringsay"), step === "top" ? SAT_COPY.ringTop : SAT_COPY.ringWay);
+  }
+  const lost = !!held && box.contains(held) && !!held.closest("[hidden]");
+  if (!lost && !(held === open && step === "top")) return;
+  const to = step === null ? open
+    : box.querySelector(step === "way" ? '[data-act="ring-cw"]' : '[data-act="ring-next"]');
+  to.focus({ preventScroll: true });
 }
 
 async function satRingSetup(li, act, button) {
