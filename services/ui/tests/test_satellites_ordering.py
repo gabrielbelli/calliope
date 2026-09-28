@@ -80,3 +80,38 @@ def test_a_poll_never_reorders_the_rows_and_a_rename_does(tmp_path):
     assert got["first"] == 2, got
     assert got["moved_on_poll"] is False, got
     assert got["moved_on_rename"] == ["zed"], got
+
+
+def test_activity_opens_its_stream_again_after_the_hub_restarts(tmp_path):
+    """A reconnect that gets the proxy's 503 closes an EventSource for good,
+    and nothing looked: after a hub restart Activity was silent until a
+    reload, with the empty log still saying to press a button. A closed
+    stream is let go and the next poll that reaches the hub opens another;
+    meanwhile Activity and its summary say it is not connected."""
+    got = run(tmp_path, """
+      const sources = [];
+      globalThis.EventSource = window.EventSource = class {
+        constructor(url) { this.url = url; this.readyState = 0; sources.push(this); } };
+      await satellitesRefresh();
+      const first = sources[0];
+      first.onerror();                                  // reconnecting by itself
+      const retrying = { held: SATELLITES.events === first, said: $("evstate").textContent };
+      await satellitesRefresh();
+      const opened_while_retrying = sources.length;
+      first.readyState = 2;                             // CLOSED: a non-200 answer
+      first.onerror();
+      const lost = { said: $("evstate").textContent, sum: $("ev-sum").textContent,
+                     none: $("evnone").hidden };
+      await satellitesRefresh();
+      const second = sources[1];
+      second.onopen();
+      console.log(JSON.stringify({ retrying, opened_while_retrying, lost, count: sources.length,
+                                   url: second && second.url, current: SATELLITES.events === second,
+                                   cleared: $("evstate").textContent, sum: $("ev-sum").textContent }));
+    """)
+    lost = "Not receiving activity from the hub; it reconnects when the hub answers."
+    assert got["retrying"] == {"held": True, "said": lost}, got
+    assert got["opened_while_retrying"] == 1, "a second stream was opened beside one still retrying"
+    assert got["lost"] == {"said": lost, "sum": "not connected", "none": True}, got
+    assert got["count"] == 2 and got["url"] == "/ui/api/satellites/events" and got["current"], got
+    assert got["cleared"] == "" and got["sum"] == "", got

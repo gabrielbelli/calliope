@@ -2512,9 +2512,12 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
           </details>
 
           <details id="sat-activity">
-            <summary>Activity</summary>
+            <summary>Activity<span class="sum-note" id="ev-sum"></span></summary>
             <div class="body">
               <div class="hint">Buttons, wake words, conversations, triggers, updates and satellites coming and going.</div>
+              <!-- Whether the stream is connected: empty while it is
+                   (satEventsSay). -->
+              <div class="hint" id="evstate" aria-live="polite"></div>
               <ol class="satelliteevents" id="satelliteevents"></ol>
               <div class="hint" id="evnone">Press a button on a satellite to see its event arrive.</div>
             </div>
@@ -4040,6 +4043,8 @@ const SAT_COPY = {
   fwUploaded: "Uploaded {v}.",
   fwChoose: "Choose a .bin first.",
   routeEmpty: "Type something to send to the word's action.",
+  evLost: "Not receiving activity from the hub; it reconnects when the hub answers.",
+  sumEvLost: "not connected",
   noHub: "This deployment has no satellite hub: voice-satellites is not running.",
   hubError: "The satellite hub did not answer: {message}",
   hubLost: "The hub stopped answering, so this may be out of date: {message}",
@@ -6969,10 +6974,26 @@ $("fwupload").addEventListener("click", async () => {
    starting or ending asks the hub again so its row says so, and "rebooting"
    is remembered so an update that restarts the satellite reads as
    Restarting rather than Offline. */
+/* A STREAM THAT ENDS IS OPENED AGAIN BY THE NEXT POLL, AND SAYS SO MEANWHILE.
+   The browser reconnects a dropped stream by itself, but a reconnect that
+   gets a non-200 answer (the UI's proxy answers 503 while the hub is down)
+   closes it for good. Nothing looked, so after a hub restart Activity went
+   silent until a reload: rows stopped lighting Listening, Last heard stopped
+   arriving, and the empty log still said to press a button, which sent the
+   owner to hardware that was working. A closed stream is let go, so the next
+   poll that reaches the hub opens another (satellitesRefresh calls this),
+   and Activity says it is not connected until one opens. */
 function satellitesListen() {
   if (SATELLITES.events || !window.EventSource) return;
-  SATELLITES.events = new EventSource("/ui/api/satellites/events");
-  SATELLITES.events.onmessage = m => {
+  const source = new EventSource("/ui/api/satellites/events");
+  SATELLITES.events = source;
+  source.onopen = () => satEventsSay("");
+  source.onerror = () => {
+    /* 2 is EventSource.CLOSED: it will not try again by itself. */
+    if (source.readyState === 2 && SATELLITES.events === source) SATELLITES.events = null;
+    satEventsSay(SAT_COPY.evLost);
+  };
+  source.onmessage = m => {
     let ev; try { ev = JSON.parse(m.data); } catch { return; }
     /* Every ten seconds per satellite: noise here. */
     if (ev.type === "status") return;
@@ -7038,6 +7059,14 @@ function satellitesListen() {
       satellitesRefresh();
     }
   };
+}
+
+/* The stream's state, in Activity and on its closed summary, as Wake words
+   and Firmware say theirs; the empty log's "press a button" waits for it. */
+function satEventsSay(text) {
+  satSet($("evstate"), text);
+  satSet($("ev-sum"), text ? SAT_COPY.sumEvLost : "");
+  $("evnone").hidden = !!text || $("satelliteevents").children.length > 0;
 }
 
 /* What a button changed on the device, in words. */
