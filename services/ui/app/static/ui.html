@@ -5396,6 +5396,10 @@ function wakeSetDest(w, type) {
   const was = (w.action && w.action.destination) || {};
   if (!WAKE_DEST_WORD[type] || was.type === type) return;
   const d = { type };
+  /* Assist hides Language (its pipeline has one), so a tag the hub would
+     refuse is dropped here: kept, it held Save off with a reason whose only
+     field was out of sight. A good tag is kept for a move back. */
+  if (type === "ha_assist" && w.language && !WAKE_LANG.test(w.language)) w.language = null;
   if (WAKE_HA.includes(type)) {
     const ha = WAKE_HA.includes(was.type) ? was : wakeAnyHa();
     d.url = (ha && ha.url) || "";
@@ -5553,7 +5557,11 @@ function wakeLine(w, ptt) {
   if (w.mode === "trigger") parts.push(SAT_COPY.lineTrigger);
   else {
     parts.push(wakeDoes(w.action));
-    if (w.language) parts.push(w.language);
+    /* Not an Assist word's: its pipeline sets the language, the field is
+       hidden, and the hub reads none, so a tag here would be a setting
+       that does nothing. */
+    const d = (w.action && w.action.destination) || {};
+    if (w.language && d.type !== "ha_assist") parts.push(w.language);
   }
   return parts.join(" · ");
 }

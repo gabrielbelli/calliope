@@ -256,7 +256,15 @@ def test_a_language_hint_is_a_tag_or_nothing(tmp_path):
       say("nl-BE", "tag");
       await wakeSave();
       out.sent = sent("hey_jarvis").language;
-      out.line = wakeLine(WAKE.server.words.find(w => w.name === "hey_jarvis"));
+      const saved = WAKE.server.words.find(w => w.name === "hey_jarvis");
+      out.line = wakeLine(saved);
+      out.line_agent = wakeLine({ ...saved, action: { ...saved.action,
+                                  destination: { ...saved.action.destination, type: "ha_conversation" } } });
+      // A tag the hub would refuse, typed under another action, then Assist,
+      // which hides the only field that could fix it.
+      wakeEdit("hey_jarvis", w => { wakeField(w, "dest", "webhook"); wakeField(w, "tag", "Deutsch"); });
+      wakeEdit("hey_jarvis", w => wakeField(w, "dest", "ha_assist"));
+      out.hidden_bad = WAKE.draft.find(w => w.name === "hey_jarvis").language;
       console.log(JSON.stringify(out));
     """)
     assert got["br"] == "pt-BR" and got["auto"] is None
@@ -266,7 +274,11 @@ def test_a_language_hint_is_a_tag_or_nothing(tmp_path):
     assert got["bad_problem"] == "Write the language as a tag, for example de or nl-BE.", got
     assert got["save_off"] is True
     assert got["sent"] == "nl-BE"
-    assert got["line"] == "Command · every satellite · Home Assistant Assist · nl-BE", got
+    # An Assist word's pipeline sets its language, so its closed line names
+    # none; the conversation agent reads the hint, so its line does.
+    assert got["line"] == "Command · every satellite · Home Assistant Assist", got
+    assert got["line_agent"] == "Command · every satellite · Home Assistant · nl-BE", got
+    assert got["hidden_bad"] is None, "a refused tag stays behind a hidden field and holds Save off"
 
 
 def test_what_the_hub_would_refuse_is_named_and_save_waits(tmp_path):
@@ -388,7 +400,7 @@ def test_push_to_talk_is_edited_like_a_word_and_is_never_a_trigger(tmp_path):
       const refused = (WAKE.draftPtt || WAKE.server.ptt).mode;
       const still_clean = WAKE.draft === null;
       wakeEdit("ptt", w => wakeSetMode(w, "conversation", "ptt"));
-      wakeEdit("ptt", w => wakeField(w, "dest", "ha_assist"));
+      wakeEdit("ptt", w => wakeField(w, "dest", "ha_conversation"));
       wakeEdit("ptt", w => wakeField(w, "lang", "pt-BR"));
       const line = wakeLine(WAKE.draftPtt, true);
       await wakeSave();
@@ -397,10 +409,10 @@ def test_push_to_talk_is_edited_like_a_word_and_is_never_a_trigger(tmp_path):
     """)
     assert got["refused"] == "command", "push-to-talk became a trigger"
     assert got["still_clean"], "a refused mode left an unsaved change behind"
-    assert got["line"] == "Conversation · Home Assistant Assist · pt-BR", got
+    assert got["line"] == "Conversation · Home Assistant · pt-BR", got
     ptt = got["ptt"]
     assert ptt["mode"] == "conversation" and ptt["language"] == "pt-BR"
-    assert ptt["action"]["destination"] == {"type": "ha_assist", "url": "https://ha.local:8123",
+    assert ptt["action"]["destination"] == {"type": "ha_conversation", "url": "https://ha.local:8123",
                                             "token_env": "SATELLITES_HA_TOKEN"}, ptt
     assert "name" not in ptt and "threshold" not in ptt and "satellites" not in ptt
     assert got["keys"] == ["words", "ptt"] and got["words"] == ["hey_jarvis"], got
