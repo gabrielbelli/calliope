@@ -31,8 +31,8 @@ from fastapi.testclient import TestClient
 from app import audio, wakeword
 from app.wakeword import Detection
 from test_frontend import dbfs, echo, echo_paths, plane_wave, sensor_noise, speechlike
-from test_pipeline import (EARCON_CAPS, FRAME, NID, RATE, EarconStore, FakeWakeWords, Satellite,
-                           Services, adopt, floor, hello, of, route_to_fakes, voiced, wait)
+from test_pipeline import (EARCON_CAPS, FRAME, MAC2, NID, NID2, RATE, EarconStore, FakeWakeWords,
+                           Satellite, Services, adopt, floor, hello, of, route_to_fakes, voiced, wait)
 from test_pipeline import env  # noqa: F401  (a fixture)
 
 MARKS = {30000: "hey_jarvis", -30000: "lumos", 20000: "alexa"}
@@ -252,6 +252,74 @@ def test_a_privacy_mute_ends_the_conversation_at_once(client, app, events, plug)
         [ended] = wait(lambda: of(events, "conversation_ended"), timeout=3, what="the end")
         assert app.hub.sessions[NID].conversation is None
     assert ended["reason"] == "muted"
+
+
+def long_reply(services: Services, seconds: float = 8.0) -> None:
+    """The next reply, spoken for `seconds`: still playing when a test acts."""
+    reply = speechlike(seconds, seed=1) * dbfs(-20)
+    services.tts_audio.append(np.frombuffer(audio.resample(
+        np.clip(reply, -32768, 32767).astype("<i2").tobytes(), 16000, 24000), "<i2"))
+
+
+def test_the_privacy_mute_is_a_kill_switch_for_whatever_the_satellite_was_doing(
+        client, app, events, services, plug):
+    """ONE PRESS STOPS A SATELLITE THAT IS STUCK. A reply is playing and a
+    duck that nothing will release is held on it: the mute ends the
+    conversation, flushes the speaker, lifts the duck, and puts the Ear back
+    to wake words, so nothing of what it was doing is still there at unmute."""
+    long_reply(services)
+    services.transcripts.append("tell me a long story")
+    services.answers.append(["Once upon a time there was a very long story."])
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        save(client, conversation(follow_up_s=30))
+        sat = plug(ws)
+        sat.send(np.concatenate((floor(0.2), mark("hey_jarvis"), voiced(0.8), floor(1.2, seed=1))))
+        wait(lambda: len(sat.speaker()) >= 5, what="the reply to start")
+        s = app.hub.sessions[NID]
+        s.duck_holds += 1
+        before = len(sat.texts())
+        ws.send_json({"type": "status", "muted": True})
+        [ended] = wait(lambda: of(events, "conversation_ended"), timeout=3, what="the end")
+        wait(lambda: s.conversation is None and s.duck_holds == 0, what="the duck to lift")
+        time.sleep(0.2)
+        played = len(sat.speaker())
+        time.sleep(0.5)
+        assert len(sat.speaker()) == played, "the reply went on playing after the mute"
+        ws.send_json({"type": "status", "muted": False})
+        wait(lambda: s.status.get("muted") is False, what="the unmute")
+        sat.send(floor(0.5, seed=5))
+        wait(lambda: not s.ear_reset, what="the Ear to be reset")
+        assert s.ear.state == "idle" and not s.lit
+        after = [m["type"] for m in sat.texts()[before:]]
+    assert ended["reason"] == "muted"
+    assert "flush" in after and "unduck" in after
+    assert len(services.sent("stt.test", "/v1/audio/transcriptions")) == 1
+
+
+def test_muting_the_satellite_a_reply_plays_on_ends_the_conversation_that_sent_it(
+        client, app, events, services, plug):
+    """The kitchen hears, the bedroom answers: the bedroom's mute stops the
+    kitchen's conversation, since it is the bedroom that is talking."""
+    long_reply(services)
+    services.transcripts.append("tell me a long story")
+    services.answers.append(["Once upon a time there was a very long story."])
+    with client.websocket_connect("/satellites/ws") as ws1, \
+            client.websocket_connect("/satellites/ws") as ws2:
+        adopt(client, ws1, name="kitchen")
+        adopt(client, ws2, name="bedroom", mac=MAC2)
+        save(client, {"name": "hey_jarvis", "mode": "conversation",
+                      "action": {"destination": LLM, "reply_to": "bedroom"},
+                      "conversation": {"follow_up_s": 30}})
+        kitchen, bedroom = plug(ws1), plug(ws2, NID2)
+        kitchen.send(np.concatenate((floor(0.2), mark("hey_jarvis"), voiced(0.8),
+                                     floor(1.2, seed=1))))
+        wait(lambda: len(bedroom.speaker()) >= 5, what="the reply in the bedroom")
+        ws2.send_json({"type": "status", "muted": True})
+        [ended] = wait(lambda: of(events, "conversation_ended"), timeout=3, what="the end")
+        wait(lambda: app.hub.sessions[NID].conversation is None, what="the kitchen to be free")
+    assert ended["satellite"] == NID and ended["reason"] == "muted"
+    assert bedroom.texts("flush")
 
 
 def test_a_conversation_ends_when_the_satellite_stops_sending_audio(client, app, events, plug,

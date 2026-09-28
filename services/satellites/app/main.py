@@ -251,6 +251,9 @@ class Session:
         # time.monotonic() until which a status is the answer to a press that
         # ran an action on the satellite (Hub.on_button), for older firmware.
         self.volume_press_until = 0.0
+        # Set by the privacy mute (Hub.on_mute): the listener puts the Ear
+        # back to wake words before it next hears anything.
+        self.ear_reset = False
         self.update(hello)
         # Speaker or jack, from the loopback (output.py). Channel 0 is
         # the loopback on a satellite with more than one channel.
@@ -989,6 +992,36 @@ class Hub:
         if s.conversation is not None:
             s.conversation.cancel("stop")
 
+    async def on_mute(self, s: Session) -> None:
+        """The privacy mute, the moment it goes on: a kill switch for the
+        satellite, not only for its microphone. Whatever it was in the middle
+        of ends -- its conversation and any other one answering or ducked on
+        it, the audio queued and playing, the duck, the hub's lights, what
+        the Ear was listening for -- so one press stops a satellite that is
+        stuck (answering itself, say), and nothing of it comes back at unmute."""
+        ended = 0
+        for other in list(self.sessions.values()):
+            c = other.conversation
+            if c is not None and (other is s or s in c.ducked
+                                  or (c.player is not None and c.player.session() is s)):
+                c.cancel("muted")
+                ended += 1
+        played = s.flush_speaker()
+        await _quietly(s.send_json({"type": "flush"}))
+        # Every conversation that held a duck here was cancelled above, and
+        # finds nothing to lift when it closes; a hold left over from anything
+        # else goes too.
+        if s.duck_holds > 0:
+            s.duck_holds = 0
+            if s.caps.get("duck"):
+                await _sent(s.send_if(lambda: s.adopted, {"type": "unduck"}))
+        if s.lit:
+            await self.send_lights(s, {"mode": "off"})
+        s.ear_reset = True
+        s.volume_press_until = 0.0
+        log.info("satellite %s muted: %d conversation(s) ended%s", s.id, ended,
+                 ", its speaker flushed" if played else "")
+
     # -- what a satellite can see and hear -------------------------------------
 
     def lights_allowed(self, s: Session) -> bool:
@@ -1138,6 +1171,10 @@ async def listen_loop(h: Hub, s: Session) -> None:
         ear = s.ear
         if ear is None:
             return
+        if s.ear_reset:
+            s.ear_reset = False
+            ear.cancel_ptt()
+            ear.release()
         if not h.may_listen(s):
             ear.cancel_ptt()
             continue
@@ -1946,6 +1983,7 @@ async def on_message(s: Session, msg: dict) -> None:
         s.update(msg)
         await hub.greet(s)
     elif kind == "status":
+        was_muted = bool(s.status.get("muted"))
         s.status = {k: v for k, v in msg.items() if k != "type"}
         if s.adopted:
             # After a welcome that left out settings the hub did not know,
@@ -1958,8 +1996,11 @@ async def on_message(s: Session, msg: dict) -> None:
         hub.publish({"type": "status", "satellite": s.id, "status": s.status})
         # The privacy mute stops everything: nothing more will arrive to be
         # heard, and a conversation that is waiting for it, or answering it,
-        # ends now rather than when its follow-up times out.
-        if s.status.get("muted") and s.conversation is not None:
+        # ends now rather than when its follow-up times out. Going on, it
+        # clears the rest of what the satellite was doing too (Hub.on_mute).
+        if s.status.get("muted") and s.adopted and not was_muted:
+            await hub.on_mute(s)
+        elif s.status.get("muted") and s.conversation is not None:
             s.conversation.cancel("muted")
     elif kind == "button" and s.adopted:
         hub.publish({"type": "button", "satellite": s.id, "button": msg.get("button"),

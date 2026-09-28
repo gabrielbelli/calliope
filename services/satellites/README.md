@@ -417,7 +417,7 @@ choice:
 
 | Action | Runs on | What happens |
 |---|---|---|
-| `mute` | the satellite | Toggles the privacy mute |
+| `mute` | the satellite | Toggles the privacy mute. Going on, it is a kill switch: the satellite's conversation ends (and any other one answering or ducked on it), its audio stops, the duck lifts and the hub's lights go out, so one press stops a satellite that is stuck |
 | `volume_up`, `volume_down` | the satellite | Volume up or down one of 12 steps (step k is k × 100 / 12 %, about 4 dB apart), and the ring shows the level for 1.5 s |
 | `lights` | the satellite | Night mode: the ring off, or back on |
 | `dimmer`, `brighter` | the satellite | Brightness down or up a step (10, 20, 35, 60, 100 %) |
