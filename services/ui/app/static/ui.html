@@ -5009,8 +5009,13 @@ function satDevice(li, n, s) {
     n.online ? ["Connected", n.connected_at ? satText("connected", { clock: satClock(n.connected_at) }) : ""]
              : ["Last seen", last ? satClock(last) : ""],
     ["ID", n.id]].filter(f => f[1]);
+  /* REBUILT ONLY WHEN WHICH FACTS THERE ARE CHANGES; a value is written in
+     place, as satSet writes everything else. The Wi-Fi signal moves by a
+     dBm with most status reports and the reply time after each reply, and
+     rebuilding the list for that took away a selection of the Address or
+     the ID in the middle of copying it. */
   const dl = li.querySelector(".facts");
-  const sig = JSON.stringify(facts);
+  const sig = facts.map(f => f[0]).join("|");
   if (dl.dataset.sig !== sig) {
     dl.dataset.sig = sig;
     dl.textContent = "";
@@ -5020,7 +5025,7 @@ function satDevice(li, n, s) {
       dd.textContent = value;
       dl.append(dt, dd);
     }
-  }
+  } else facts.forEach(([, value], i) => satSet(dl.children[i * 2 + 1], value));
   const img = satImageFor(n);
   li._img = img;
   const box = li.querySelector(".sat-update");

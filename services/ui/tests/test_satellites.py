@@ -386,6 +386,15 @@ def test_a_failed_setting_is_reported_beside_the_control():
     assert 'scope.querySelector(":scope > .sat-note")' in function("satNoteFor")
 
 
+def test_the_device_facts_are_written_in_place_and_not_rebuilt_on_a_poll():
+    """The Wi-Fi signal moves with most status reports, and rebuilding the
+    list for it took away a selection of the Address or ID mid-copy."""
+    device = function("satDevice")
+    assert 'const sig = facts.map(f => f[0]).join("|");' in device
+    assert "satSet(dl.children[i * 2 + 1], value)" in device
+    assert "JSON.stringify(facts)" not in device
+
+
 def test_the_one_filled_button_on_the_list_is_adopt():
     """Settings apply on change, so an adopted row has no go button; the
     destructive ones are outlined and last."""
