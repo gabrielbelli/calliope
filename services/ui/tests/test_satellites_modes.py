@@ -504,6 +504,12 @@ def test_conversations_and_triggers_are_logged_and_end_the_wait(tmp_path):
       out.lines.ended_turn = satEventWhat({ type: "turn", turn: 3, rule_id: "hey_jarvis",
                                             transcript: "thanks", ended: true });
       out.heard = WAKE.heard.get("lumos").score;
+      out.bad = [{ type: "routed", rule_id: "hey_jarvis", error: "Home Assistant refused" },
+                 { type: "ota", state: "failed", error: "bad signature" },
+                 { type: "conversation_ended", turns: 1, reason: "error" },
+                 { type: "conversation_ended", turns: 1, reason: "silence" },
+                 { type: "ota", state: "verified" }, { type: "button", button: "play", action: "press" }]
+        .map(satEventBad);
       const sat = { id, name: "Kitchen", adopted: true, online: true, config: {}, status: {},
                     listening: { state: "listening", conversation: "replying",
                                  session: { rule_id: "hey_jarvis", turns: 2 } },
@@ -525,6 +531,7 @@ def test_conversations_and_triggers_are_logged_and_end_the_wait(tmp_path):
     assert lines["ended_odd"] == "conversation ended after 1 turn: listening failed"
     assert lines["ended_turn"] == 'hey jarvis, turn 3: "thanks" ended it'
     assert got["heard"] == 0.91, "a trigger's score does not reach its row's Last heard"
+    assert got["bad"] == [True, True, True, False, False, False], "a failure is not marked in the log"
     assert got["state"] == ["In conversation", "running", "Conversation with hey jarvis · 2 turns"], got
     assert got["fresh"] == "Conversation with hey jarvis", got
     assert got["latency"] == "1.3 s to first sound, median of 12 replies", got

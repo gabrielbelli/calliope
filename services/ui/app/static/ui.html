@@ -1478,9 +1478,21 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
 .ww-llm>*:empty{margin-top:0}
 /* List models, under the line that says what pressing it sends where. */
 .ww-modelsgo{margin-top:var(--s2)}
+.sat-log{max-height:14rem;overflow:auto}
+.sat-log:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* An empty log is no gap above the line that says what will fill it. */
+.sat-log:has(> ol:empty){margin-top:0}
 .satelliteevents{list-style:none;margin:0;padding:0;font-size:var(--t-label);
-  font-variant-numeric:tabular-nums;max-height:14rem;overflow:auto}
-.satelliteevents li{padding:2px 0;color:var(--dim)}
+  font-variant-numeric:tabular-nums}
+/* THE TIME IS A COLUMN. A line with a transcript and a reply wraps, and ran
+   back under the time; the rest now hangs beside it. A failure is --bad ink
+   and a 2px --bad rule, never a fill, as .note.bad is, so the one failure
+   among fifty is what the eye finds; every other line is indented by the
+   rule's width, so a failed line's time stays in the column. Not a
+   transparent border on every line: forced colours paints those in. */
+.satelliteevents li{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:var(--s2);
+  padding:2px 0 2px calc(var(--s2) + 2px);color:var(--dim)}
+.satelliteevents li.bad{color:var(--bad);border-left:2px solid var(--bad);padding-left:var(--s2)}
 .satelliteevents li b{color:var(--ink);font-weight:600}
 .satelliteevents li,details.sat-row .facts dd{overflow-wrap:anywhere}
 @media (max-width:30rem){
@@ -2518,7 +2530,18 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
               <!-- Whether the stream is connected: empty while it is
                    (satEventsSay). -->
               <div class="hint" id="evstate" aria-live="polite"></div>
-              <ol class="satelliteevents" id="satelliteevents"></ol>
+              <!-- A LOG, SO A SCREEN READER HEARS A LINE ARRIVE, which is the
+                   point of pressing a button with this open; only additions,
+                   so an update's line rewritten in place is not read again
+                   at every 10%. role="log" cannot go on an <ol>, and
+                   role="list" because Safari drops list semantics under
+                   list-style:none. The box scrolls, so it takes the focus
+                   once it holds a line (satEventAdd): Safari does not make
+                   a scroller focusable, and a keyboard could not reach the
+                   older lines. -->
+              <div class="sat-log" role="log" aria-label="Satellite activity" aria-relevant="additions">
+                <ol class="satelliteevents" id="satelliteevents" role="list"></ol>
+              </div>
               <div class="hint" id="evnone">Press a button on a satellite to see its event arrive.</div>
             </div>
           </details>
@@ -7046,19 +7069,41 @@ function satellitesListen() {
       row._last = satText("lastEvent", { what, time: new Date(ev.at * 1000).toLocaleTimeString() });
       if (row._n) satelliteUpdate(row, row._n);
     }
-    const li = document.createElement("li");
-    li.innerHTML = "<span></span> <b></b> ";
-    li.querySelector("span").textContent = new Date(ev.at * 1000).toLocaleTimeString();
-    li.querySelector("b").textContent = who;
-    li.append(what);
-    const list = $("satelliteevents");
-    list.prepend(li);
-    while (list.children.length > 50) list.lastChild.remove();
+    satEventAdd(satEventLine(document.createElement("li"), ev, who, what));
     $("evnone").hidden = true;
     if (!["button", "wake", "routed", "turn", "triggered"].includes(ev.type) && satellitesOpen()) {
       satellitesRefresh();
     }
   };
+}
+
+/* ONE LINE OF THE LOG, written into `li`: the time as a column of its own,
+   at one width (a bare toLocaleTimeString() gave "9:05:03 PM" and "10:05:03
+   PM", so the names did not line up), then who and what. A failure is
+   marked, which every line used to look the same as. Only text nodes are
+   written into a line that has them, so one rewritten in place is not an
+   addition to the log. */
+function satEventLine(li, ev, who, what) {
+  if (!li.querySelector("time")) li.innerHTML = "<time></time><span><b></b> </span>";
+  const when = new Date(ev.at * 1000), time = li.querySelector("time");
+  satSet(time, when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  if (isFinite(when)) time.dateTime = when.toISOString();
+  const lead = li.querySelector("span");
+  satSet(lead.querySelector("b"), who);
+  if (lead.childNodes.length > 2) satSet(lead.lastChild, what); else lead.append(what);
+  li.classList.toggle("bad", satEventBad(ev));
+  return li;
+}
+function satEventBad(ev) {
+  return !!ev.error || (ev.type === "ota" && ev.state === "failed")
+    || (ev.type === "conversation_ended" && ev.reason === "error");
+}
+/* Newest first, fifty kept; the box takes the focus once it can scroll. */
+function satEventAdd(li) {
+  const list = $("satelliteevents");
+  list.prepend(li);
+  while (list.children.length > 50) list.lastChild.remove();
+  list.parentElement.tabIndex = 0;
 }
 
 /* The stream's state, in Activity and on its closed summary, as Wake words

@@ -905,6 +905,26 @@ def test_the_stream_remembers_what_the_hub_does_not():
         "an update that broke off is called Offline"
 
 
+def test_activity_is_a_log_a_screen_reader_hears_and_a_keyboard_can_scroll():
+    """Activity exists to show an event arrive when a button is pressed, and
+    it was a plain list: silent to a screen reader, and a scroll box Safari
+    never lets a keyboard reach. role="log" cannot go on an <ol>."""
+    activity = PANEL[PANEL.index('<details id="sat-activity">'):PANEL.index('<details id="sat-firmware">')]
+    assert ('<div class="sat-log" role="log" aria-label="Satellite activity" aria-relevant="additions">'
+            in activity)
+    assert '<ol class="satelliteevents" id="satelliteevents" role="list"></ol>' in activity
+    assert "list.parentElement.tabIndex = 0;" in function("satEventAdd")
+    assert ".sat-log{max-height:14rem;overflow:auto}" in BARE_CSS
+    assert ".sat-log:focus-visible{outline:2px solid var(--accent);" in BARE_CSS
+    # A line is a time column and the rest, and a failure is marked.
+    line = function("satEventLine")
+    assert '"<time></time><span><b></b> </span>"' in line
+    assert 'hour: "2-digit", minute: "2-digit", second: "2-digit"' in line
+    assert 'li.classList.toggle("bad", satEventBad(ev));' in line
+    assert "grid-template-columns:auto minmax(0,1fr)" in BARE_CSS[BARE_CSS.index(".satelliteevents li{"):][:120]
+    assert ".satelliteevents li.bad{color:var(--bad);border-left:2px solid var(--bad)" in BARE_CSS
+
+
 def test_an_event_names_a_button_as_the_page_does():
     """Activity and Try it said "vol_up press", the firmware's id, beside a
     Buttons grid that calls it Vol +."""
