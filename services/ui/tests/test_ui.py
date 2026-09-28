@@ -116,6 +116,27 @@ def test_an_oversized_upload_is_refused_before_a_byte_is_forwarded(client):
     assert len(gateway.seen) == before
 
 
+def test_a_satellite_upload_over_its_own_ceiling_is_refused_here(client):
+    """A firmware image or a wake word model is a few MB, and the hub held one
+    whole in memory before it could refuse it. They passed MAX_UPLOAD_BYTES,
+    an audio file's 2 GB, unchecked: they have a ceiling of their own."""
+    from app import main
+    api, gateway, _ = client()
+
+    def uploads() -> list[str]:
+        return [r.url.path for r in gateway.seen if r.url.path.startswith("/satellites/")]
+    big = b"x" * (main.MAX_SATELLITE_UPLOAD_BYTES + 1)
+    for path in ("/ui/api/satellites/firmware?model=esp32-korvo",
+                 "/ui/api/satellites/wake-words/models?name=big"):
+        response = api.post(path, content=big, headers={"content-type": "application/octet-stream"})
+        assert response.status_code == 413, path
+        assert response.json()["error"]["code"] == "upload_too_large"
+    assert uploads() == [], "an oversized body was forwarded anyway"
+    small = api.post("/ui/api/satellites/firmware?model=esp32-korvo", content=b"x" * 4096,
+                     headers={"content-type": "application/octet-stream"})
+    assert small.status_code != 413 and uploads() == ["/satellites/firmware"]
+
+
 def test_the_key_is_checked_against_the_gateway_and_nowhere_else(client):
     api, gateway, _ = client()
     gateway.keys = ("sk-real",)

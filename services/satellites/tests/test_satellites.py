@@ -148,6 +148,22 @@ def test_firmware_that_is_not_an_esp32_image_is_refused(client):
     assert_four_field_envelope(r)
 
 
+def test_an_oversized_upload_is_refused_before_it_is_held_whole(client, app):
+    """request.body() held an upload of any size in memory before comparing
+    it with the limit. A declared length over it is refused before a byte is
+    read, and one sent without a length as soon as it passes it."""
+    big = bytes([0xE9]) + bytes(app.MAX_FIRMWARE)
+    r = client.post("/satellites/firmware", params={"model": MODEL}, content=big)
+    assert r.status_code == 413 and r.json()["error"]["code"] == "upload_too_large"
+
+    def chunks():
+        for _ in range(app.MAX_FIRMWARE // 65536 + 2):
+            yield bytes([0xE9]) * 65536
+    r = client.post("/satellites/firmware", params={"model": MODEL}, content=chunks())
+    assert r.status_code == 413 and r.json()["error"]["code"] == "upload_too_large"
+    assert client.get("/satellites/firmware").json()["firmware"] == []
+
+
 def test_an_update_is_sent_in_frames_the_satellite_can_take(client, app):
     # THE DEFECT: 16 KB chunks. The Arduino WebSockets library drops the whole
     # connection on any frame over 15 KB, and the first real update died 17 ms

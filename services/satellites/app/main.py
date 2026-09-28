@@ -2318,7 +2318,8 @@ async def upload_wake_word_model(request: Request,
     checked to be an openWakeWord classifier before it is written, then
     offered in `available` like a built-in and assigned the same way. A
     replaced model is picked up by every satellite that listens for it."""
-    data = await request.body()
+    data = await _body_within(request, wakewords_config.MAX_MODEL_BYTES,
+                              "a wake word model is under")
     try:
         wakewords_config.check_model(name, data)
     except ValueError as e:
@@ -2354,7 +2355,7 @@ async def list_firmware() -> dict:
 async def upload_firmware(request: Request, model: str = Query(..., max_length=64),
                           version: str = Query("unknown", max_length=64),
                           signature: str | None = Query(None, max_length=200)) -> dict:
-    image = await request.body()
+    image = await _body_within(request, MAX_FIRMWARE, "an OTA slot holds")
     if not image:
         raise ApiError(400, "empty body: send the .bin as the request body")
     if len(image) > MAX_FIRMWARE:
@@ -2369,6 +2370,23 @@ async def upload_firmware(request: Request, model: str = Query(..., max_length=6
     log.info("firmware %s stored: %s %s, %d bytes, %s", fw.sha256[:12], model, version, fw.size,
              "signed" if sig else "unsigned")
     return vars(fw)
+
+
+async def _body_within(request: Request, limit: int, says: str) -> bytes:
+    """The request body, refused with a 413 once it passes `limit`: by its
+    Content-Length before a byte is read, or as it is read. request.body()
+    held an upload of any size whole in memory before it could be refused."""
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > limit:
+        raise ApiError(413, f"the upload is {declared} bytes; {says} {limit}",
+                       code="upload_too_large")
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            raise ApiError(413, f"the upload is over {limit} bytes; {says} {limit}",
+                           code="upload_too_large")
+    return bytes(body)
 
 
 @app.delete("/satellites/firmware/{sha256}")

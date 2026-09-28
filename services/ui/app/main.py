@@ -256,6 +256,13 @@ PROXIED: tuple[tuple[str, str], ...] = (
 UPLOAD_PATHS = frozenset({"/v1/audio/transcriptions", "/v1/audio/translations",
                           "/transcribe"})
 
+# The Satellites tab's uploads, a firmware image and a wake word model, have a
+# ceiling of their own: the hub holds one whole in memory before it can refuse
+# it, and MAX_UPLOAD_BYTES (2 GB) is an audio file's. This is above what the
+# hub takes (4 MB for firmware, 5 MB for a model), so the hub still says why.
+SATELLITE_UPLOAD_PATHS = frozenset({"/satellites/firmware", "/satellites/wake-words/models"})
+MAX_SATELLITE_UPLOAD_BYTES = 8 * 1024 * 1024
+
 # Where the page reaches the proxied routes from when this service is behind
 # the gateway. Both mounts are live at once: the bare paths still work for a
 # direct caller on this service's own port, and /ui/api works from the
@@ -509,6 +516,15 @@ async def _forward(request: Request) -> Response:
                 f"is {config.MAX_UPLOAD_BYTES / 1024**3:.1f} GB. The page "
                 "normally extracts the audio in your browser first, which "
                 "turns a 2 GB video into about 15 MB.",
+                code="upload_too_large")
+
+    if path in SATELLITE_UPLOAD_PATHS and request.method == "POST":
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > MAX_SATELLITE_UPLOAD_BYTES:
+            return error_response(
+                413,
+                f"that file is {int(declared) / 1024**2:.1f} MB; a firmware image or a "
+                f"wake word model is under {MAX_SATELLITE_UPLOAD_BYTES // 1024**2} MB",
                 code="upload_too_large")
 
     client: httpx.AsyncClient = request.app.state.client
