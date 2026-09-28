@@ -49,8 +49,8 @@ PSG_DIR = Path("/opt/piper-sample-generator")
 log = logging.getLogger("wakeword-train")
 
 # ---------------------------------------------------------------------------
-# Profiles. `full` takes about 1.5 h per model on the GTX 1050 Ti (4 GB) on
-# holocron; `smoke` proves the pipeline end to end in about 10 min.
+# Profiles. `full` takes about 1.5 h per model on a GTX 1050 Ti (4 GB) with
+# 4 CPUs; `smoke` proves the pipeline end to end in about 10 min.
 # ---------------------------------------------------------------------------
 PROFILES = {
     # steps: at 3,000 the rising negative weight collapses the model to a

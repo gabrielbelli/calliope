@@ -3,7 +3,8 @@
 #
 #   docker build -t wakeword-train:1 tools/wakeword-train
 #
-# CUDA 12.2 is what driver 535 reports as its ceiling (nvidia-smi on holocron).
+# CUDA 12.2 is what driver 535 reports as its ceiling (nvidia-smi on the GTX
+# 1050 Ti host this was built and tested on).
 # The CUDA libraries themselves come from the torch wheels (CUDA 12.1, cuDNN 9);
 # LD_LIBRARY_PATH below points onnxruntime-gpu at the same copies.
 FROM nvidia/cuda:12.2.2-base-ubuntu22.04

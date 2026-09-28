@@ -109,9 +109,9 @@ the clips and features: after changing a phrase or a sample count, delete
 | `n_samples_val` | 500 | 5,000 |
 | `steps` (sequence 1; sequences 2 and 3 add a tenth each) | 10,000 | 50,000 |
 | `tts_batch_size` | 50 | 50 |
-| Time on holocron (GTX 1050 Ti, 4 CPUs) | 10 min | about 85 min per model |
+| Time on a GTX 1050 Ti (4 GB) with 4 CPUs | 10 min | about 85 min per model |
 
-Measured on holocron: the generator makes about 80 positive and 35 to 60
+Measured on that GPU: the generator makes about 80 positive and 35 to 60
 negative clips a second (negatives run at a seventh of the batch size, and
 batch 50 fills 3.8 of the GPU's 4 GB); augmentation and features run at about
 60 clips a second; training runs at about 78 steps a second. So `full` spends

@@ -1,4 +1,5 @@
-# Every package in the training image, as built and tested on holocron on 2026-09-25
+# Every package in the training image, as built and tested on a CUDA 12.2 host
+# (GTX 1050 Ti, driver 535) on 2026-09-25
 # (pip freeze of an install of requirements.txt). The Dockerfile installs this file;
 # openwakeword==0.6.0 is installed after it with --no-deps. Regenerate: see README.
 --extra-index-url https://download.pytorch.org/whl/cu121
