@@ -177,7 +177,8 @@ the LED set as 12 o'clock, `ring_top`, clockwise as seen, which
 night mode (the ring off or on), or the ring's brightness down or up a step.
 They run here so they work with the hub down and only a button can undo the
 mute. The hub sends the table as `button_actions`; until it does, Rec mutes
-and VOL+/- set the volume. A table without a mute keeps Rec as the mute. A
+and VOL+/- set the volume. A table without a mute keeps Rec as the mute, and
+so does one whose only mute is KEY1, which a stock board does not wire. A
 setting a button changes is saved and reported at once, in a status marked
 `"cause": "button"`. Two holds are recovery, whatever the buttons are set to:
 
@@ -221,8 +222,10 @@ The board is a voice device, not a music speaker ([ADR 0014](../../docs/adr/0014
 
 ## Kept on the device, whatever the hub says
 
-- **The privacy mute.** It powers down the ES7210 mic front-end, and only the
-  REC button turns it off.
+- **The privacy mute.** It powers down the ES7210 mic front-end, and only a
+  button set to mute (REC, out of the box) turns it off. It is saved on the
+  satellite, so a restart, a power cut or an update the hub sends leaves the
+  microphones off and the ring red; a factory reset clears it.
 - **The volume ceiling.** 100 % is 0 dB at the DAC; the codec's +32 dB of
   digital gain is never used.
 - **Recovery:** the setup portal, the factory reset, and firmware rollback.

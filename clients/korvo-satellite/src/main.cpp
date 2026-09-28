@@ -80,10 +80,14 @@ static void run_wifi(bool force_portal) {
   WiFi.setSleep(false);    // modem sleep adds tens of ms of jitter to audio
 }
 
+// Saved, so that the mute outlives a restart (setup() puts it back before the
+// hub is reached): otherwise a reboot or an update from the hub would turn the
+// microphones back on.
 static void set_muted(bool m) {
-  satellite_muted = m;
+  satellite_muted = settings.muted = m;
   mic_power(!m);
   lights_muted(m);
+  settings_save();
   hub_send_status();
 }
 
@@ -162,11 +166,14 @@ void setup() {
   settings_load();
   boot_mark(BOOT_SETTINGS);
   lights_dark(!settings.lights_enabled);  // before the first frame is drawn
+  satellite_muted = settings.muted;       // likewise: red from the first frame
+  lights_muted(settings.muted);
   lights_brightness(settings.brightness);
   lights_ring(settings.ring_top, settings.ring_upside_down);
   lights_begin();
   boot_mark(BOOT_LIGHTS);
-  codec_begin();
+  codec_begin();  // powers the microphones up
+  if (satellite_muted) mic_power(false);
   boot_mark(BOOT_CODEC);
   mic_set_gain_db(settings.mic_gain_db);
   boot_mark(BOOT_GAIN);

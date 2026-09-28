@@ -34,6 +34,7 @@ void settings_load() {
   settings.mic_enabled = prefs.getBool("mic_on", true);
   settings.speaker_enabled = prefs.getBool("spk_on", true);
   settings.lights_enabled = prefs.getBool("lights_on", true);
+  settings.muted = prefs.getBool("muted", false);
   settings.brightness = prefs.getInt("bright", 100);
   // ring_bottom, the setting for an hour on 27 Sep 2026, named the opposite LED.
   settings.ring_top = prefs.isKey("ring_top") ? prefs.getInt("ring_top", 0)
@@ -58,6 +59,7 @@ void settings_save() {
   prefs.putBool("mic_on", settings.mic_enabled);
   prefs.putBool("spk_on", settings.speaker_enabled);
   prefs.putBool("lights_on", settings.lights_enabled);
+  prefs.putBool("muted", settings.muted);
   prefs.putInt("bright", settings.brightness);
   prefs.putInt("ring_top", settings.ring_top);
   prefs.putBool("ring_flip", settings.ring_upside_down);

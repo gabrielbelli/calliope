@@ -308,6 +308,9 @@ void hub_send_button(const char *name, const char *action, uint32_t held_ms) {
 // table, so a button left out does nothing here. A table with no mute in it
 // would leave a muted board with no way back, so Rec keeps it; the hub
 // refuses such a table before it gets here.
+// The mute is kept through restarts and only a button undoes it, so a table
+// must leave one that can: a mute on KEY1 alone does not count, since a stock
+// board does not wire it (buttons.h). Otherwise Rec keeps the mute.
 static void apply_button_actions(JsonObjectConst m) {
   memset(settings.actions, 0, sizeof(settings.actions));
   bool mute = false;
@@ -317,7 +320,7 @@ static void apply_button_actions(JsonObjectConst m) {
     for (uint8_t e = 0; e < 2; e++) {
       Action a = action_parse(edges[e ? "release" : "press"] | "");
       settings.actions[i - 1][e] = (uint8_t)a;
-      mute |= a == Action::Mute;
+      mute |= a == Action::Mute && (Button)i != Button::Key1;
     }
   }
   if (!mute) settings.actions[(int)Button::Rec - 1][0] = (uint8_t)Action::Mute;

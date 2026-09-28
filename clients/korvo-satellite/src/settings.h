@@ -15,6 +15,10 @@ struct Settings {
   bool mic_enabled = true;
   bool speaker_enabled = true;
   bool lights_enabled = true;  // false: the ring stays dark, whatever happens
+  // The privacy mute, kept through restarts: a reboot or an update sent by the
+  // hub must not turn the microphones back on. Only a button undoes it (or a
+  // factory reset, which forgets everything).
+  bool muted = false;
   int brightness = 100;        // percent, of whatever the ring shows
   int ring_top = 0;             // the LED at 12 o'clock as mounted: a bar on the ring starts there
   bool ring_upside_down = false;  // the bar runs the other way round (LED order seen reversed)
