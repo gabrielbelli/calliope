@@ -240,6 +240,7 @@ def test_the_page_checks_what_the_hub_checks_with_the_hubs_own_patterns():
     assert page_regex("WAKE_ENV") == module_string(HUB_DESTINATIONS, "ENV_NAME")
     assert page_regex("WAKE_URL") == module_string(HUB_DESTINATIONS, "HTTP_URL")
     assert page_regex("WAKE_NAME") == module_string(HUB_WAKEWORD, "NAME")
+    assert page_regex("WAKE_COLOUR") == module_string(HUB_ROUTER, "COLOUR")
     # The secret goes in as a name, and the hub's defaults are the page's.
     types = destination_types()
     for kind in ("ha_assist", "ha_conversation"):
@@ -450,3 +451,13 @@ def test_the_key_sources_the_page_names_are_the_ones_the_hub_reports():
                 if isinstance(c, ast.Constant) and isinstance(c.value, str)}
     named = set(re.findall(r'where === "(\w+)"', page_function("wakeKeyState")))
     assert named == {"environment", "hub"} and named <= reported
+
+
+def test_the_colour_the_page_shows_for_an_unset_word_is_the_hubs_listening_blue():
+    """A word with no colour lights the ring in main.LISTEN_COLOUR; the page's
+    picker and the row's dot show the same blue."""
+    main = ast.parse((HUB / "main.py").read_text())
+    [rgb] = [n.value for n in main.body if isinstance(n, ast.Assign)
+             and any(getattr(x, "id", "") == "LISTEN_COLOUR" for x in n.targets)]
+    hexa = "#" + "".join(f"{e.value:02x}" for e in rgb.elts)
+    assert f'colour: "{hexa}"' in CODE, hexa

@@ -208,6 +208,26 @@ def test_the_pause_that_ends_a_command_is_typed_in_seconds_and_sent_in_milliseco
     assert got["body"]["conversation"]["silence_ms"] == 1200
 
 
+def test_a_word_takes_its_own_ring_colour_and_can_go_back_to_the_default(tmp_path):
+    """The picker's colour is sent as the hub's `colour`; Use the default
+    sends null; a colour the hub would refuse is named before Save."""
+    got = run(tmp_path, MODERN + """
+      await satellitesRefresh();
+      const word = () => WAKE.draft.find(w => w.name === "hey_jarvis");
+      wakeEdit("hey_jarvis", w => wakeField(w, "colour", "red"));
+      const bad = wakeProblem(word(), wakeEffective());
+      wakeEdit("hey_jarvis", w => wakeField(w, "colour", "#ff4400"));
+      await wakeSave();
+      const picked = sent("hey_jarvis");
+      wakeEdit("hey_jarvis", w => { w.colour = null; });
+      await wakeSave();
+      console.log(JSON.stringify({ bad, picked, cleared: sent("hey_jarvis") }));
+    """)
+    assert got["bad"] == "Pick the ring colour with the colour picker."
+    assert got["picked"]["colour"] == "#ff4400"
+    assert got["cleared"]["colour"] is None
+
+
 def test_a_conversation_word_keeps_listening_and_hands_over_to_nobody(tmp_path):
     """A conversation's follow-up and end phrases are sent; a fallback is a
     command's, and switching to conversation takes it off."""

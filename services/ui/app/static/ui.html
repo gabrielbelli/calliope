@@ -1474,6 +1474,11 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
 /* Struck through AND said in words beside it (Removed on save, the summary's
    state word), so the staged removal never depends on the line alone. */
 .ww[data-removed] .sat-name{color:var(--dim);text-decoration:line-through}
+/* The word's ring colour, beside its name, so a closed row says it. */
+.ww-dot{display:inline-block;width:.65em;height:.65em;border-radius:50%;margin-right:.45em;
+  vertical-align:.05em;box-shadow:0 0 0 1px var(--line)}
+.ww-colour input[type=color]{width:3rem;height:2rem;padding:0;border:1px solid var(--line);
+  border-radius:6px;background:none;cursor:pointer}
 /* The Mode and Satellites legends grey with the labels, which the .grid2 and
    .row rules do not reach. */
 .ww[data-removed] fieldset>legend{opacity:.55}
@@ -4224,6 +4229,7 @@ const SAT_COPY = {
   fixFallback: "{word} is not a conversation word, so it cannot take over.",
   fixFollow: "Keep listening for 1 to 60 seconds.",
   fixPause: "Pause for 0.2 to 3 seconds before the command ends.",
+  fixColour: "Pick the ring colour with the colour picker.",
   fixPauseFollow: "Pause for 0.2 to 3 seconds before a follow-up ends.",
   fixCooldown: "Make the cooldown 0 to 600 seconds.",
   fixPhrase: "Keep each end phrase to 64 characters.",
@@ -5435,7 +5441,11 @@ const WAKE = { server: null, draft: null, draftPtt: null, removed: new Set(), fa
    test_wake_words_contract.py, so neither can move alone. */
 const WAKE_PTT = "ptt";
 const WAKE_THRESHOLD = { usual: 0.5, trigger: 0.7 };
-const WAKE_SHOWN = { follow_up_s: 8, cooldown_s: 3, feedback: "earcon", silence_ms: 800, follow_silence_ms: 600 };
+const WAKE_SHOWN = { follow_up_s: 8, cooldown_s: 3, feedback: "earcon", silence_ms: 800, follow_silence_ms: 600,
+                     colour: "#286eff" };
+/* A word's ring colour, as the colour picker writes it; unset is the hub's
+   listening blue (WAKE_SHOWN.colour, main.LISTEN_COLOUR there). */
+const WAKE_COLOUR = /^#[0-9a-fA-F]{6}$/;
 /* The pause that ends a command (and a follow-up), in milliseconds as the hub
    takes it; the page shows seconds. */
 const WAKE_PAUSE = { low: 200, high: 3000 };
@@ -5493,12 +5503,12 @@ function wakeTurn(write) {
 function wakeCopy(w) {
   return { name: w.name, threshold: w.threshold, satellites: [...w.satellites], mode: w.mode,
            language: w.language, action: w.mode === "trigger" ? undefined : w.action,
-           silence_ms: w.silence_ms, conversation: w.conversation, trigger: w.trigger };
+           silence_ms: w.silence_ms, colour: w.colour, conversation: w.conversation, trigger: w.trigger };
 }
 /* Push-to-talk's entry: a word's, without a name, a threshold or satellites. */
 function wakePttCopy(p) {
   return { mode: p.mode, language: p.language, action: p.action, silence_ms: p.silence_ms,
-           conversation: p.conversation, trigger: p.trigger };
+           colour: p.colour, conversation: p.conversation, trigger: p.trigger };
 }
 function wakeClone(v) { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
 /* Keys sorted, so the hub's order and the page's compare equal. */
@@ -5648,6 +5658,7 @@ function wakeField(w, key, raw) {
   /* The pause that ends a command, typed in seconds and kept in milliseconds.
      Empty is left for wakeProblem to name, as an empty follow-up time is. */
   if (key === "silence_ms") { w.silence_ms = wakeMs(text); return; }
+  if (key === "colour") { w.colour = text || null; return; }
   /* Other is an address of your own, so the Base URL empties to be typed. */
   if (key === "preset") {
     if (w.action && w.action.destination) w.action.destination.base_url = text;
@@ -5718,6 +5729,7 @@ function wakeProblem(w, words) {
   }
   if (w.mode !== "trigger" && "silence_ms" in w && !wakeWithin(w.silence_ms, WAKE_PAUSE.low, WAKE_PAUSE.high))
     return SAT_COPY.fixPause;
+  if (w.colour != null && !WAKE_COLOUR.test(w.colour)) return SAT_COPY.fixColour;
   if (w.mode === "conversation") {
     const c = w.conversation || {};
     if ("follow_up_s" in c && !wakeWithin(c.follow_up_s, 1, 60)) return SAT_COPY.fixFollow;
@@ -5750,6 +5762,7 @@ function wakeProblemAt(w, problem) {
     [SAT_COPY.fixEnvKey]: ["d.env"],
     [SAT_COPY.fixFollow]: ["c.follow_up_s"],
     [SAT_COPY.fixPause]: ["silence_ms"],
+    [SAT_COPY.fixColour]: ["colour"],
     [SAT_COPY.fixPauseFollow]: ["c.silence_ms"],
     [SAT_COPY.fixPhrase]: ["c.end_phrases"],
   }[problem] || ["a.fallback"];
@@ -6290,7 +6303,7 @@ function wakeRowMarkup(u) {
   return `
   <details class="sat-row">
     <summary><span class="sat-sum">
-      <span class="sat-name"></span>
+      <span class="sat-name"><span class="ww-dot" aria-hidden="true"></span><span class="ww-label"></span></span>
       <span class="sat-state"></span>
       <span class="sat-line"></span>
     </span></summary>
@@ -6402,6 +6415,12 @@ function wakeRowMarkup(u) {
         <div data-when="conversation"><label for="${u}-fpause">Pause that ends a follow-up, seconds</label>
           <input type="number" id="${u}-fpause" data-f="c.silence_ms" min="0.2" max="3" step="0.1"></div>
       </div>
+      <div class="grid2 ww-colour">
+        <div><label for="${u}-colour">Ring colour</label>
+          <div class="row"><input type="color" id="${u}-colour" data-f="colour">
+            <button class="small tight" type="button" data-ww="colourdefault" hidden>Use the default</button></div>
+          <div class="hint">What the ring shows while this word listens, thinks or flashes.</div></div>
+      </div>
       <div class="grid2 ww-does" data-when="trigger">
         <div><label for="${u}-feel">When heard</label>
           <select id="${u}-feel" data-f="t.feedback">
@@ -6465,6 +6484,7 @@ function wakeRow(name) {
     if (b.dataset.mode) wakeEdit(name, w => wakeSetMode(w, b.dataset.mode, name));
     else if (b.dataset.scope) wakeScope(name, b.dataset.scope);
     else if (b.dataset.ww === "remove") wakeRemove(name, b);
+    else if (b.dataset.ww === "colourdefault") wakeEdit(name, w => { w.colour = null; });
     else if (b.dataset.ww === "retry") wakeRetry(b);
     else if (b.dataset.ww === "llmtest") wakeLlmTry(name, row, b);
     else if (b.dataset.ww === "pipes") {
@@ -6594,7 +6614,8 @@ function wakeValue(el, value) {
 function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
   const q = sel => row.querySelector(sel);
   const label = ptt ? "Push-to-talk" : wwLabel(w.name);
-  satSet(q(".sat-name"), label);
+  satSet(q(".ww-label"), label);
+  q(".ww-dot").style.background = w.colour || WAKE_SHOWN.colour;
   /* Ready is plain text, as Online is on a satellite: only a word that is
      still coming, has failed or would be refused gets a chip. A word still
      being filled in is not refused yet: a required field left empty, or the
@@ -6796,6 +6817,8 @@ function wakeActionUpdate(row, w, words) {
   q('[data-f="a.fallback"]').toggleAttribute("data-off", !talk.length && !a.fallback);
   const c = w.conversation || {};
   wakeValue(q('[data-f="c.follow_up_s"]'), "follow_up_s" in c ? c.follow_up_s : WAKE_SHOWN.follow_up_s);
+  wakeValue(q('[data-f="colour"]'), w.colour || WAKE_SHOWN.colour);
+  q('[data-ww="colourdefault"]').hidden = !w.colour;
   const seconds = ms => (typeof ms === "number" && isFinite(ms) ? ms / 1000 : null);
   wakeValue(q('[data-f="silence_ms"]'), seconds("silence_ms" in w ? w.silence_ms : WAKE_SHOWN.silence_ms));
   wakeValue(q('[data-f="c.silence_ms"]'),
