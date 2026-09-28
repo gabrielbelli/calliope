@@ -5,7 +5,7 @@
 """Held-out clips from macOS `say`, for evaluate.py. Runs on a Mac only.
 
     uv run make_say_clips.py --out /tmp/heldout
-    rsync -a /tmp/heldout/ holocron.gabrielbelli.com:/srv/wakeword-train/data/heldout/
+    rsync -a /tmp/heldout/ gpu-host:/srv/wakeword-train/data/heldout/
 
 `say -o` renders to a file and plays nothing. Clips are 16 kHz mono 16-bit
 WAV. Positives are each model's `eval` texts in every English voice and every

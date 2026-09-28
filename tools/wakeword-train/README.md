@@ -43,7 +43,7 @@ On the Mac, held-out clips from `say` (it writes files and plays nothing):
 
 ```bash
 uv run tools/wakeword-train/make_say_clips.py --out /tmp/heldout
-rsync -a /tmp/heldout/ holocron.gabrielbelli.com:/srv/wakeword-train/data/heldout/
+rsync -a /tmp/heldout/ gpu-host:/srv/wakeword-train/data/heldout/
 ```
 
 Then the full run, detached:

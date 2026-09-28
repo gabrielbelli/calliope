@@ -19,7 +19,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import CalliopeAuthError, CalliopeClient, CalliopeError
-from .const import DEFAULT_URL, DOMAIN
+from .const import DOMAIN, EXAMPLE_URL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +27,8 @@ _LOGGER = logging.getLogger(__name__)
 def _schema(defaults: Mapping[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
-            vol.Required(CONF_URL, default=defaults.get(CONF_URL, DEFAULT_URL)): str,
+            # Empty on a first setup; what was entered, when reconfiguring.
+            vol.Required(CONF_URL, description={"suggested_value": defaults.get(CONF_URL)}): str,
             vol.Optional(
                 CONF_API_KEY,
                 description={"suggested_value": defaults.get(CONF_API_KEY)},
@@ -93,7 +94,7 @@ class CalliopeConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=_schema(user_input or {}),
             errors=errors,
-            description_placeholders={"example_url": DEFAULT_URL},
+            description_placeholders={"example_url": EXAMPLE_URL},
         )
 
     async def async_step_reauth(
@@ -152,5 +153,5 @@ class CalliopeOptionsFlow(OptionsFlow):
             step_id="init",
             data_schema=_schema(user_input or self.config_entry.data),
             errors=errors,
-            description_placeholders={"example_url": DEFAULT_URL},
+            description_placeholders={"example_url": EXAMPLE_URL},
         )

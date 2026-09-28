@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.calliope.const import DEFAULT_URL, DOMAIN
+from custom_components.calliope.const import DOMAIN, EXAMPLE_URL
 
 from .fake_calliope import FakeCalliope
 
@@ -30,13 +30,16 @@ async def _start(hass: HomeAssistant) -> dict:
     )
 
 
-async def test_form_defaults_to_orko(hass: HomeAssistant) -> None:
-    """The URL field starts at the production gateway."""
+async def test_the_form_suggests_no_address_and_shows_a_neutral_example(hass: HomeAssistant) -> None:
+    """Nobody's own address is baked in: the field starts empty, and the
+    example beside it is example.com."""
     result = await _start(hass)
     assert result["type"] is FlowResultType.FORM
     schema = result["data_schema"].schema
     url = next(k for k in schema if k == CONF_URL)
-    assert url.default() == DEFAULT_URL
+    assert not (url.description or {}).get("suggested_value")
+    assert result["description_placeholders"]["example_url"] == EXAMPLE_URL
+    assert "example.com" in EXAMPLE_URL
 
 
 @pytest.mark.usefixtures("no_setup")

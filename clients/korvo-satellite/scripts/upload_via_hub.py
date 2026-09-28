@@ -40,7 +40,9 @@ def fw_version(env):
 
 
 def upload(source, target, env):
-    base = os.environ.get("CALLIOPE_URL", "https://calliope.gabrielbelli.com").rstrip("/")
+    base = os.environ.get("CALLIOPE_URL", "").rstrip("/")
+    if not base:
+        sys.exit("CALLIOPE_URL is not set: the hub's base URL, e.g. https://calliope.example.com")
     satellite = os.environ.get("CALLIOPE_SATELLITE")
     key = os.environ.get("CALLIOPE_API_KEY")
     if not satellite:

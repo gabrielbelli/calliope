@@ -24,7 +24,7 @@ out of `GATEWAY_API_KEYS`, is
 ## Status
 
 Measured on orko (25 Sep 2026) with the first board, an ESP32-Korvo, adopted
-over `wss://calliope.gabrielbelli.com` (the lab's HAProxy, in front of the gateway on `orko:30080`):
+over `wss://` to the gateway, or to a proxy in front of it (`wss://calliope.example.com`):
 
 - **Working on the board:** adoption (keeping the satellite's own settings),
   config, lights off, a four-channel stream with no dropped frames, and live
@@ -695,7 +695,7 @@ MQTT.
 say -v Samantha -o /tmp/q.aiff "hey jarvis, what time is it"   # writes a file, plays nothing
 ffmpeg -loglevel error -i /tmp/q.aiff -ar 16000 -ac 1 -c:a pcm_s16le /tmp/q.wav
 curl -sS -H "Authorization: Bearer $KEY" --data-binary @/tmp/q.wav \
-  https://calliope.gabrielbelli.com/satellites/kitchen/inject | jq
+  https://calliope.example.com/satellites/kitchen/inject | jq
 ```
 
 The answer carries `heard` (wake word, score, position), `command` (why it

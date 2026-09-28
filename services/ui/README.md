@@ -4,7 +4,7 @@ One page in front of the gateway, and the three things a browser cannot do for
 itself.
 
 ```
-  https://calliope.gabrielbelli.com/ui   (the lab's HAProxy, then orko:30080)
+  https://calliope.example.com/ui   (the gateway, or a proxy in front of it)
         |
         |  every XHR, same origin, no credential in the browser
         v

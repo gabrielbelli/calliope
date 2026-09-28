@@ -1,4 +1,4 @@
-"""The gateway against the three real services on orko, or nothing at all.
+"""The gateway against the three real services of a deployment, or nothing at all.
 
 The mocked suite proves the routing rules. It cannot prove the two things that
 only a real backend can disagree about: that these paths exist on the far side
@@ -6,8 +6,8 @@ with these shapes, and that streaming a real multipart upload and a real audio
 response through httpx produces the bytes the client asked for.
 
 So this runs the actual app in-process with its backend URLs pointed at the
-live containers, over real sockets. It is SKIPPED, not failed, when orko is
-unreachable — the usual case on a CI runner, on a train, or when the NAS is
+live containers, over real sockets. It is SKIPPED, not failed, when no host
+is named or it is unreachable — the usual case on a CI runner, on a train, or when the NAS is
 asleep — because a test suite that fails when someone's house is offline stops
 being read.
 
@@ -16,7 +16,7 @@ Nothing here queues a Chatterbox job. tts-long runs one job at a time on a
 a shared machine would be a test suite people learn to avoid running. The long
 path is exercised read-only, through GET /jobs.
 
-    GATEWAY_LIVE_HOST=orko.gabrielbelli.com   the host the three run on
+    GATEWAY_LIVE_HOST=nas.example.com   the host the three run on (unset: skipped)
     GATEWAY_LIVE=0                            skip even when it is reachable
 """
 
@@ -29,7 +29,7 @@ import httpx
 import pytest
 from conftest import gateway  # noqa: F401  (imported for the fixture's module)
 
-HOST = os.getenv("GATEWAY_LIVE_HOST", "orko.gabrielbelli.com")
+HOST = os.getenv("GATEWAY_LIVE_HOST", "")
 BACKENDS = {"stt": f"http://{HOST}:8000",
             "tts": f"http://{HOST}:8001",
             "tts_long": f"http://{HOST}:8002"}
@@ -39,6 +39,8 @@ def _reachable() -> str | None:
     """None if all three answer /health, otherwise why not."""
     if os.getenv("GATEWAY_LIVE") == "0":
         return "GATEWAY_LIVE=0"
+    if not HOST:
+        return "GATEWAY_LIVE_HOST is not set"
     for name, url in BACKENDS.items():
         try:
             response = httpx.get(f"{url}/health", timeout=3.0)
