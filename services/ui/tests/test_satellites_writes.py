@@ -393,3 +393,38 @@ def test_a_firmware_image_is_uploaded_only_with_its_version_and_the_form_is_empt
                                               "Device shows it under Firmware."]], got
     assert got["uploads"] == ["/satellites/firmware?model=esp32-korvo-v1.1&version=v0.3.1-4-g1a2b3c4"], got
     assert got["left"] == ["", "", ""], "the last image's version waits in the box for the next one"
+
+
+def test_update_every_satellite_updates_only_the_ones_it_would_change(tmp_path):
+    """"all" on the hub reflashed every satellite of the model, those already
+    on the image included. Only the adopted, online ones of its model that
+    run something else are sent it, one request each, and a skip is named."""
+    got = run(tmp_path, """
+      await satellitesRefresh();
+      SATELLITES.list = [
+        { id: "a1", name: "kitchen", adopted: true, online: true, model: "m1", firmware: "v2" },
+        { id: "b2", name: "bedroom", adopted: true, online: true, model: "m1", firmware: "v1" },
+        { id: "c3", name: "hall", adopted: true, online: true, model: "m1", firmware: "v1" },
+        { id: "d4", name: "attic", adopted: true, online: false, model: "m1", firmware: "v1" },
+        { id: "e5", name: "garage", adopted: true, online: true, model: "m2", firmware: "v1" },
+        { id: "f6", name: "", adopted: false, online: true, model: "m1", firmware: "v1" }];
+      const posts = [];
+      const real = json;
+      json = async (path, o) => {
+        if (path !== "/satellites/ota") return real(path, o);
+        const body = JSON.parse(o.body);
+        posts.push(body.satellite);
+        return body.satellite === "c3" ? { started: [], skipped: { c3: "already updating" } }
+                                       : { started: [body.satellite], skipped: {} };
+      };
+      const fw = { sha256: "f".repeat(64), version: "v2", model: "m1" };
+      const due = firmwareDue(fw).map(n => n.id);
+      await firmwareAct(fw, "all", stand());
+      const sent = posts.slice();
+      await firmwareAct({ ...fw, model: "m3" }, "all", stand());
+      console.log(JSON.stringify({ due, sent, after_none: posts.length, notes }));
+    """)
+    assert got["due"] == ["b2", "c3"], got
+    assert got["sent"] == ["b2", "c3"], "a satellite already on the image, or offline, was sent it"
+    assert got["after_none"] == 2, "an image no satellite needs was sent anyway"
+    assert got["notes"] == [["warn", "Updating 1 satellite. Skipped hall: already updating."]], got

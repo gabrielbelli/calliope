@@ -4081,6 +4081,9 @@ const SAT_COPY = {
   fwFailed: "The firmware list did not load: {message}",
   fwStarted: "Updating {n}.",
   fwSkipped: "Skipped {name}: {why}.",
+  fwNoneStarted: "No satellite started the update.",
+  fwNoneDue: "Every satellite of this model that is online already runs it.",
+  fwNoneOnline: "No satellite of this model is online.",
   fwUploaded: "Uploaded {v}.",
   fwChoose: "Choose a .bin first.",
   fwVersion: "Type the version exactly as the build reports it; Device shows it under Firmware.",
@@ -6899,6 +6902,16 @@ function firmwareRender() {
     box.textContent = "";
     for (const fw of list) box.append(firmwareRow(fw, satNewest(fw.model) === fw));
   }
+  /* EVERY POLL, IN PLACE: whether each image's Update every satellite (or
+     Roll back) has anything to do, greyed with the reason when not. */
+  for (const row of box.children) {
+    const go = row._fw && row.querySelector('[data-fw="all"], [data-fw="back"]');
+    if (!go) continue;
+    const due = firmwareDue(row._fw);
+    if (go.getAttribute("aria-busy") !== "true") go.disabled = !due.length;
+    const online = SATELLITES.list.some(n => n.adopted && n.online && n.model === row._fw.model);
+    satSet(row.querySelector(".fw-why"), due.length ? "" : online ? SAT_COPY.fwNoneDue : SAT_COPY.fwNoneOnline);
+  }
   satSet($("fw-sum"), firmwareSummary());
   /* The model the house runs, unless somebody has typed one. */
   const model = $("fwmodel");
@@ -6919,8 +6932,10 @@ function firmwareRow(fw, newest) {
     <div class="actions">
       <button class="small" type="button" data-fw="all">Update every satellite</button>
       <button class="small" type="button" data-fw="back">Roll back every satellite</button>
+      <span class="hint fw-why"></span>
       <button class="small danger end" type="button" data-fw="delete">Delete</button>
     </div>`;
+  row._fw = fw;
   row.querySelector(newest ? '[data-fw="back"]' : '[data-fw="all"]').remove();
   const go = row.querySelector('[data-fw="all"], [data-fw="back"]');
   go.setAttribute("aria-label", `${go.textContent} to ${fw.version}`);
@@ -6950,6 +6965,16 @@ function firmwareSummary() {
   return current ? SAT_COPY.sumFwCurrent : satCount(list.length, "image", "images");
 }
 
+/* THE SATELLITES AN IMAGE WOULD CHANGE: adopted, online, of its model, not
+   already on it and not installing something now. The hub's "all" skips
+   none of these, so Update every satellite reflashed every satellite of the
+   model, those already current included, and with every one offline it
+   answered 404 "no satellite matches 'all'". */
+function firmwareDue(fw) {
+  return SATELLITES.list.filter(n => n.adopted && n.online && n.model === fw.model
+    && satFirmware(n) !== fw.version && !satGoingTo(n));
+}
+
 function satCommonModel() {
   const count = new Map();
   for (const n of SATELLITES.list) if (n.adopted && n.model) count.set(n.model, (count.get(n.model) || 0) + 1);
@@ -6965,14 +6990,25 @@ async function firmwareAct(fw, act, button) {
   const done = busy(button, act === "all" ? "Updating…" : act === "back" ? "Rolling back…" : "Deleting…");
   try {
     if (act === "all" || act === "back") {
-      const r = await json("/satellites/ota", { method: "POST", headers: JSON_BODY,
-        body: JSON.stringify({ satellite: "all", sha256: fw.sha256 }) });
-      const said = [satText("fwStarted", { n: satCount((r.started || []).length, "satellite", "satellites") })];
-      for (const [sid, why] of Object.entries(r.skipped || {})) {
-        const li = SATELLITES.rows.get(sid);
-        said.push(satText("fwSkipped", { name: li && li._n ? satName(li._n) : sid, why }));
+      /* One request per satellite that is due, so one already on the image
+         is left alone; a satellite the hub skips, or one whose request
+         fails, is named, as the per-satellite Update names its own. */
+      let started = 0;
+      const skipped = [];
+      for (const n of firmwareDue(fw)) {
+        try {
+          const r = await json("/satellites/ota", { method: "POST", headers: JSON_BODY,
+            body: JSON.stringify({ satellite: n.id, sha256: fw.sha256 }) });
+          started += (r.started || []).length;
+          for (const why of Object.values(r.skipped || {})) {
+            skipped.push(satText("fwSkipped", { name: satName(n), why }));
+          }
+        } catch (e) { skipped.push(satText("fwSkipped", { name: satName(n), why: e.message })); }
       }
-      satSaid(host, said.join(" "));
+      const lead = started ? satText("fwStarted", { n: satCount(started, "satellite", "satellites") })
+        : SAT_COPY.fwNoneStarted;
+      if (skipped.length) note(host, "warn", [lead, ...skipped].join(" "));
+      else satSaid(host, lead);
       satellitesRefresh();
     } else if (act === "delete") {
       const at = [...$("fwlist").children].indexOf(button.closest("li"));

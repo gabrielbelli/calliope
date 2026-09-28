@@ -983,6 +983,17 @@ def test_update_every_satellite_is_on_the_newest_image_only():
     assert "row.querySelector(newest ? '[data-fw=\"back\"]' : '[data-fw=\"all\"]').remove();" in row
     assert 'data-fw="back">Roll back every satellite</button>' in row
     assert "an older image?" in SCRIPT[SCRIPT.index("askRollback:"):][:120]
+    # Greyed, with the reason beside it, when no satellite would change: the
+    # hub's "all" skips none already on the image, and with every satellite
+    # offline it answered 404 "no satellite matches 'all'".
+    assert '<span class="hint fw-why"></span>' in row and "row._fw = fw;" in row
+    assert "go.disabled = !due.length;" in render and 'row.querySelector(".fw-why")' in render
+    due = function("firmwareDue")
+    assert "n.adopted && n.online && n.model === fw.model" in due
+    assert "satFirmware(n) !== fw.version && !satGoingTo(n)" in due
+    act = function("firmwareAct")
+    assert 'satellite: "all"' not in act and "for (const n of firmwareDue(fw))" in act
+    assert "JSON.stringify({ satellite: n.id, sha256: fw.sha256 })" in act
 
 
 def test_a_satellite_that_has_gone_is_a_word_a_reason_and_forget():
