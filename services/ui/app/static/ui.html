@@ -6320,14 +6320,22 @@ async function wakeLlmTest(destination) {
   }
 }
 
+/* A RESULT IS ABOUT THE FORM IT TESTED. "Answered in 0.9 s" stayed under a
+   model, address, key name or tool changed since, and read as proof that
+   the form as it now stands works; row._tested is what was sent, and the
+   render clears the result once the form differs (wakeLlmUpdate). An
+   answer to a form changed while it was out is not written at all. */
 async function wakeLlmTry(name, row, button) {
   const d = wakeDest(name);
   if (!d || d.type !== "llm") return;
   const out = row.querySelector(".ww-llmresult");
   satSaid(out, "");
+  const sent = JSON.stringify(wakeStable(d));
+  row._tested = sent;
   const done = busy(button, "Testing…");
   try {
     const r = await wakeLlmTest(wakeClone(d));
+    if (row._tested !== sent) return;
     if (r.ok) satSaid(out, r.text); else note(out, "bad", r.text);
   } finally {
     done();
@@ -7063,8 +7071,17 @@ function wakeLlmUpdate(row, w, words) {
   q('input[type="password"]').toggleAttribute("data-off", !keys.canStore);
   wakeKeyBox(q('input[type="password"]'), q(".ww-keynote"), keys.canStore);
   q('[data-ww="keyclear"]').hidden = !keys.canClear;
+  /* Test sends the destination alone, so only a problem in it greys Test: a
+     pause out of range or a Language tag greyed a working address, model
+     and key, and nothing beside Test said why. */
   const test = q('[data-ww="llmtest"]');
-  if (test.getAttribute("aria-busy") !== "true") test.disabled = !!wakeProblem(w, words);
+  if (test.getAttribute("aria-busy") !== "true") {
+    test.disabled = !!wakeProblem({ mode: "command", action: { destination: d } }, words);
+  }
+  if (row._tested && row._tested !== JSON.stringify(wakeStable(d))) {
+    row._tested = null;
+    satSaid(q(".ww-llmresult"), "");
+  }
 }
 
 $("wwaddgo").addEventListener("click", () => {

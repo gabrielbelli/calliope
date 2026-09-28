@@ -927,7 +927,8 @@ def test_test_waits_for_a_form_the_hub_would_take_and_says_why_beside_it():
     """Test sends the form as it stands; one the hub would refuse is a 422
     the row already names in its fix line, so Test is greyed until then."""
     assert '<button class="small" type="button" data-ww="llmtest">Test</button>' in WORD
-    assert "test.disabled = !!wakeProblem(w, words);" in function("wakeLlmUpdate")
+    assert "test.disabled = !!wakeProblem({ mode: \"command\", action: { destination: d } }, words);" \
+        in function("wakeLlmUpdate")
     assert '<div class="ww-llmresult" aria-live="polite"></div>' in WORD
 
 

@@ -443,3 +443,35 @@ def test_an_action_changed_and_changed_back_keeps_what_it_had(tmp_path):
     assert (d["base_url"], d["model"], d["system"], d["max_tokens"], d["tools"]) == (
         "https://llm.example.com/v1", "gpt-test-mini", "You are terse.", 900, ["weather"]), d
     assert got["hook"] == "https://hooks.example.com/voice"
+
+
+def test_test_is_greyed_only_by_its_destination_and_its_result_goes_when_the_form_changes(tmp_path):
+    """Test sends the destination alone, but any problem on the word greyed
+    it, a Language tag included, with nothing beside it saying why. And its
+    result stayed under a model changed since, reading as proof that the
+    form as it now stands works."""
+    got = run(tmp_path, LLM_HUB + """
+      await satellitesRefresh(); await settle();
+      const row = WAKE.rows.get("hey_jarvis");
+      const els = new Map(), find = row.querySelector;
+      row.querySelector = sel => { if (!els.has(sel)) els.set(sel, find(sel)); return els.get(sel); };
+      const result = { textContent: "", append(line) { this.textContent += line.textContent; } };
+      els.set(".ww-llmresult", result);
+      const test = () => row.querySelector('[data-ww="llmtest"]').disabled;
+      wakeEdit("hey_jarvis", w => wakeField(w, "tag", "Deutsch"));
+      const tag = test();
+      wakeEdit("hey_jarvis", w => wakeField(w, "d.model", ""));
+      const model = test();
+      wakeEdit("hey_jarvis", w => { wakeField(w, "tag", ""); wakeField(w, "d.model", "gpt-test-mini"); });
+      await wakeLlmTry("hey_jarvis", row, stand());
+      const said = result.textContent;
+      wakeRender();
+      const kept = result.textContent;
+      wakeEdit("hey_jarvis", w => wakeField(w, "d.model", "vendor/test-large"));
+      console.log(JSON.stringify({ tag, model, said, kept, changed: result.textContent }));
+    """)
+    assert got["tag"] is False, "a problem outside the destination greyed Test"
+    assert got["model"] is True, got
+    assert got["said"] == got["kept"] == "Answered in 1.3 s, the first words in 0.4 s: Hello there.", got
+    assert got["changed"] == "", "a result stayed under a form it did not test"
+
