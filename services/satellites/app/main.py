@@ -1864,6 +1864,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="voice-satellites", lifespan=lifespan)
 errors.install_errors(app)
+# After install_errors, whose 422 under /satellites repeats what was sent
+# (router.quiet_validation says where that was measured).
+routing.quiet_validation(app)
 health.install_health(app, details=lambda: {
     "satellites": {"online": len(hub.sessions), "adopted": len(hub.store.satellites),
               "pending": sum(1 for s in hub.sessions.values() if not s.adopted)},

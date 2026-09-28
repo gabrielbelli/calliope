@@ -69,9 +69,13 @@ from pathlib import Path
 from typing import Annotated, Callable, Literal, Protocol
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, FastAPI
+from fastapi import Request as HttpRequest
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import (AliasChoices, BaseModel, ConfigDict, Field, StringConstraints,
                       field_validator, model_validator)
+from voice_common import errors
 from voice_common.errors import ApiError
 
 from . import audio
@@ -735,6 +739,36 @@ def current() -> Router:
     if _current is None:
         _current = Router(Rules(Path(os.environ.get("SATELLITES_DATA_DIR", "/data"))))
     return _current
+
+
+def quiet_validation(app: FastAPI) -> None:
+    """A refused body is answered with what was wrong, never with what was sent.
+
+    FastAPI's own 422 carries pydantic's `input` for every error, which is the
+    rejected value itself, and `ctx` and `url` beside it. Under /satellites
+    that is the handler voice_common.errors leaves in place (it reshapes /v1
+    only), so the answer repeated whatever the caller sent. Measured through
+    TestClient before this existed: POST /satellites/ha/pipelines with a Home
+    Assistant token pasted as `token_env` answered 422 with the token in the
+    body, and PUT /satellites/routing did the same through RuleSet. A secret
+    sent to the wrong field would then sit in the page's error line, the
+    browser's network log and any proxy that keeps response bodies.
+
+    So every error is reduced to {type, loc, msg}. pydantic v2's `msg` says
+    what was expected ("String should match pattern ..."), not what arrived;
+    the one kind that quotes the caller is a discriminator's unknown tag, and
+    that is a destination's `type`, never a secret. The page's reason() reads
+    only `loc` and `msg`. /v1 paths keep the OpenAI envelope, which already
+    names the field and not its value. Call it after errors.install_errors,
+    whose handler for the same exception it replaces."""
+
+    @app.exception_handler(RequestValidationError)
+    async def _refused(request: HttpRequest, exc: RequestValidationError) -> JSONResponse:
+        if errors.v1_path(request.url.path):
+            return errors.validation_error_response(exc)
+        return JSONResponse(status_code=422, content={"detail": [
+            {"type": e.get("type"), "loc": list(e.get("loc") or ()), "msg": e.get("msg")}
+            for e in exc.errors()]})
 
 
 class TryBody(BaseModel):

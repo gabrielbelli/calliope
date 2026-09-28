@@ -28,7 +28,7 @@ from voice_common import errors
 from app import audio
 from app.destinations import Echo
 from app import router as router_module
-from app.router import Rule, Rules, RuleSet, Router, current, routes
+from app.router import Rule, Rules, RuleSet, Router, current, quiet_validation, routes
 
 NID = "94b97e7b8be8"
 MAC = "94:B9:7E:7B:8B:E8"
@@ -116,6 +116,7 @@ def api(make):
     router = make()
     app = FastAPI()
     errors.install_errors(app)
+    quiet_validation(app)
     app.include_router(routes)
     app.dependency_overrides[current] = lambda: router
     with TestClient(app) as client:
@@ -464,6 +465,21 @@ def test_a_secret_pasted_into_a_rule_is_refused_rather_than_saved(api, tmp_path,
     r = client.put("/satellites/routing", json={"rules": [{"id": "ha", "destination": destination}]})
     assert r.status_code == 422
     assert not (tmp_path / "rules.json").exists()
+    # Nor is it sent back: FastAPI's own 422 carried each rejected value as
+    # `input`, which put the token in the answer, the page and any proxy log.
+    assert SECRET not in r.text and LLM_KEY not in r.text
+    assert all(set(e) == {"type", "loc", "msg"} for e in r.json()["detail"]), r.json()
+
+
+def test_the_pipeline_picker_does_not_repeat_a_pasted_token(api):
+    """The token pasted where its variable's name belongs, which is the
+    mistake the pattern exists to catch. Measured before quiet_validation:
+    422, with the token in the body."""
+    client, _ = api
+    r = client.post("/satellites/ha/pipelines", json={"url": "http://ha.test:8123", "token_env": SECRET})
+    assert r.status_code == 422
+    assert SECRET not in r.text
+    assert r.json()["detail"][0]["loc"] == ["body", "token_env"]
 
 
 @pytest.mark.parametrize("rules", [
