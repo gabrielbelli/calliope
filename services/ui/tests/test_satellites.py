@@ -634,6 +634,29 @@ def test_the_add_hint_and_last_heard_say_what_happens():
     assert "ptt ? SAT_COPY.wwPttWhere" in update
 
 
+def test_an_open_word_reads_as_mode_who_hears_it_and_what_it_does():
+    """Every block in a word stood the same --s3 apart as two fields of one
+    grid, so an open command word was one even block of eight to ten fields."""
+    assert WORD.count('class="grid2 ww-does"') == 2, "the action or the trigger grid lost its group"
+    assert ("details.sat-row>.body>.ww-listen,details.sat-row>.body>.ww-does{margin-top:var(--s5)}"
+            in BARE_CSS)
+    # It has to outrank the owl rule it corrects.
+    assert "details.sat-row>.body>*+*," in BARE_CSS
+
+
+def test_a_control_off_for_its_own_reason_stays_off_on_every_render():
+    """The fallback opened to one choice on every command word of a first
+    setup, and the removal loop set every control's disabled from `removed`
+    alone, which switched the key box back on after Store had turned it off."""
+    update = function("wakeRowUpdate")
+    assert 'c.disabled = removed || c.hasAttribute("data-off");' in update
+    assert update.index("wakeActionUpdate(row, w, words)") < update.index("c.disabled = removed")
+    assert ("q('[data-f=\"a.fallback\"]').toggleAttribute(\"data-off\", !talk.length && !a.fallback);"
+            in function("wakeActionUpdate"))
+    assert ("q('input[type=\"password\"]').toggleAttribute(\"data-off\", !keys.canStore);"
+            in function("wakeLlmUpdate"))
+
+
 def test_the_threshold_slider_offers_exactly_the_range_the_hub_accepts():
     """Read from the hub itself, so the two cannot drift apart: the range, and
     where a new word starts, which is higher for a trigger."""

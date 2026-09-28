@@ -1395,6 +1395,12 @@ details.sub>.body{padding:0 0 var(--s4)}
    which rounds to two columns and never to one; on a phone the 12.5rem floor
    wins and it is one column. */
 .ww .grid2{grid-template-columns:repeat(auto-fill,minmax(max(12.5rem,calc(50% - var(--s3))),1fr))}
+/* THREE GROUPS, NOT ONE LATTICE. Every block in a word stood --s3 apart,
+   the gap between two fields of one grid, so an open command word was eight
+   to ten fields in one even block. Mode, who hears it (.ww-listen) and what
+   it does (.ww-does) are --s5 apart, as the page's own pairs are; the
+   destination's fields and the fallback stay at --s3 under Action. */
+details.sat-row>.body>.ww-listen,details.sat-row>.body>.ww-does{margin-top:var(--s5)}
 /* Try a word and Custom models close the Wake words body as one short list. */
 .sat-hub .body>details.sub+details.sub{margin-top:0}
 /* A select is as wide as its longest option, and a satellite can be called
@@ -6091,7 +6097,7 @@ function wakeRowMarkup(u) {
           <div class="hint ww-scopehint"></div>
         </fieldset>
       </div>
-      <div class="grid2" data-when="command conversation">
+      <div class="grid2 ww-does" data-when="command conversation">
         <div class="ww-lang" data-nodest="ha_assist"><label for="${u}-lang">Language</label>
           <select id="${u}-lang" data-f="lang">
             <option value="">Auto (detect)</option>
@@ -6165,7 +6171,7 @@ function wakeRowMarkup(u) {
         <div data-when="conversation"><label for="${u}-follow">Keep listening after a reply, seconds</label>
           <input type="number" id="${u}-follow" data-f="c.follow_up_s" min="1" max="60" step="1"></div>
       </div>
-      <div class="grid2" data-when="trigger">
+      <div class="grid2 ww-does" data-when="trigger">
         <div><label for="${u}-feel">When heard</label>
           <select id="${u}-feel" data-f="t.feedback">
             <option value="earcon">Chime and flash</option>
@@ -6462,9 +6468,12 @@ function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
     }
   }
 
-  /* A word marked for removal is greyed whole, with the reason on its row. */
+  /* A word marked for removal is greyed whole, with the reason on its row.
+     data-off is a control that is off for a reason of its own (the fallback
+     with nobody to hand to, the key box when Store is off), which this loop
+     used to switch back on at every render. */
   for (const c of row.querySelectorAll(".body input, .body select, .body textarea, .seg button")) {
-    c.disabled = removed;
+    c.disabled = removed || c.hasAttribute("data-off");
   }
   row.toggleAttribute("data-removed", removed);
   satSet(q(".ww-rowhint"), removed ? SAT_COPY.wwRemoved
@@ -6527,6 +6536,11 @@ function wakeActionUpdate(row, w, words) {
   satFillSelect(q('[data-f="a.fallback"]'), hand);
   wakeValue(q('[data-f="a.fallback"]'), a.fallback || "");
   satSet(q(".ww-fbhint"), talk.length ? "" : SAT_COPY.fbNone);
+  /* With nobody to hand over to, the one option is the one there is: greyed,
+     with fbNone as its reason, rather than a live select that opens to no
+     choice on every command word of a first setup. A fallback already set is
+     left pressable, so it can be taken off. */
+  q('[data-f="a.fallback"]').toggleAttribute("data-off", !talk.length && !a.fallback);
   const c = w.conversation || {};
   wakeValue(q('[data-f="c.follow_up_s"]'), "follow_up_s" in c ? c.follow_up_s : WAKE_SHOWN.follow_up_s);
   wakeValue(q('[data-f="c.end_phrases"]'), (c.end_phrases || []).join(", "));
@@ -6573,6 +6587,7 @@ function wakeLlmUpdate(row, w, words) {
     store.disabled = !keys.canStore;
     satSet(store, keys.canClear ? "Replace key" : "Store key");
   }
+  q('input[type="password"]').toggleAttribute("data-off", !keys.canStore);
   wakeKeyBox(q('input[type="password"]'), q(".ww-keynote"), keys.canStore);
   q('[data-ww="keyclear"]').hidden = !keys.canClear;
   const test = q('[data-ww="llmtest"]');
