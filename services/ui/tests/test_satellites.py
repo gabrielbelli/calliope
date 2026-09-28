@@ -755,6 +755,19 @@ def test_a_fix_under_the_closed_more_is_said_on_its_summary():
         assert field in more, field
 
 
+def test_a_removed_word_greys_its_key_test_and_colour_buttons():
+    """The removal loop greys fields and the mode buttons. Clear key, which
+    clears a key other words share, Store key, Test and Use the default
+    stayed pressable on a struck-through row."""
+    update = function("wakeRowUpdate")
+    for ww in ("keyclear", "colourdefault", "key", "llmtest"):
+        assert f'[data-ww=\"{ww}\"]' in update, ww
+    assert 'if (b.dataset.ww === "keyclear" || b.dataset.ww === "colourdefault") b.disabled = removed;' in update
+    assert "else if (removed) b.disabled = true;" in update
+    # After the render that sets Store key and Test from the form.
+    assert update.index("wakeActionUpdate(row, w, words, moreFix)") < update.index("else if (removed) b.disabled")
+
+
 def test_the_add_list_offers_only_what_the_hub_can_load_and_is_not_listed():
     render = function("wakeRender")
     assert "(WAKE.server.available || []).filter(a => !keep.has(a))" in render

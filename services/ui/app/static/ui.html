@@ -6938,6 +6938,18 @@ function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
      Hidden here, after wakeActionUpdate has shown them: the next render
      after Keep shows them again. */
   if (removed) for (const b of row.querySelectorAll('[data-ww="pipes"], [data-ww="models"]')) b.hidden = true;
+  /* The row's other buttons, greyed with its fields. Clear key cleared a key
+     every word naming it shares, and Use the default edited the draft of a
+     word that will not be sent, which Keep then brought back. Clear key and
+     Use the default follow `removed` both ways; Store key and Test are set
+     again by wakeLlmUpdate, which runs first on the render after Keep. A
+     button mid-request is left as busy() set it. */
+  for (const b of row.querySelectorAll('[data-ww="keyclear"], [data-ww="colourdefault"], '
+                                        + '[data-ww="key"], [data-ww="llmtest"]')) {
+    if (b.getAttribute("aria-busy") === "true") continue;
+    if (b.dataset.ww === "keyclear" || b.dataset.ww === "colourdefault") b.disabled = removed;
+    else if (removed) b.disabled = true;
+  }
   row.toggleAttribute("data-removed", removed);
   /* A removed word says so once, as its summary's state word (Removed on
      save), beside the struck-through name. The row said it a second time
