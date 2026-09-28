@@ -565,7 +565,8 @@ def test_the_model_list_takes_what_an_action_takes_and_repeats_none_of_it(api, f
 # ---- the Test: POST /satellites/llm/test ------------------------------------------------------
 
 
-def test_the_test_answers_with_the_reply_and_how_long_it_took(api, fake):
+def test_the_test_answers_with_the_reply_and_how_long_it_took(api, fake, monkeypatch):
+    monkeypatch.setattr(destinations.tooling, "now_line", lambda: "Now it is noon.")
     async def slow_first_word(request):
         await asyncio.sleep(0.05)
         return sse(delta(role="assistant", content=""), delta(content="Hello there,\n"),
@@ -580,7 +581,7 @@ def test_the_test_answers_with_the_reply_and_how_long_it_took(api, fake):
     # The question a turn would ask, with the form's own system prompt, and
     # nothing sent to speech.
     sent_body = json.loads(fake.sent("llm.test").content)
-    assert sent_body["messages"] == [{"role": "system", "content": "Be brief."},
+    assert sent_body["messages"] == [{"role": "system", "content": "Be brief.\n\nNow it is noon."},
                                      {"role": "user", "content": router_module.LLM_TEST_TEXT}]
     assert fake.hosts() == ["llm.test"]
 

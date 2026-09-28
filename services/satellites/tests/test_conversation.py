@@ -777,7 +777,8 @@ def test_words_saved_before_actions_take_the_rule_they_would_have_run(env, monke
     assert (words["hey_jarvis"]["threshold"], words["hey_jarvis"]["language"],
             words["hey_jarvis"]["action"]["destination"]["type"]) == (0.6, "pt-BR", "ha_conversation")
     assert words["alexa"]["action"] == {"destination": LLM | {"system": None, "api_key_env": "SATELLITES_LLM_API_KEY",
-                                                              "max_tokens": 400, "timeout": 30.0, "stream": True},
+                                                              "max_tokens": 400, "timeout": 30.0, "stream": True,
+                                                              "tools": []},
                                         "reply_to": "none", "voice": None, "fallback": None}
     assert saved["ptt"]["action"]["destination"]["type"] == "llm"
     assert body["words"][0]["mode"] == "command"

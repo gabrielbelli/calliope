@@ -239,6 +239,8 @@ async def test_ha_is_sent_the_bearer_from_its_env_var_and_its_plain_speech_is_sp
 
 async def test_the_llm_gets_the_system_prompt_and_key_and_its_think_block_is_not_spoken(make, fake, monkeypatch):
     monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+    # The date and time go into every model's prompt (tools.now_line).
+    monkeypatch.setattr("app.destinations.tooling.now_line", lambda: "Now it is noon.")
     fake.handlers["llm.test"] = lambda r: httpx.Response(200, json={"choices": [{"message": {
         "role": "assistant", "content": "<think>they want the time</think>\nIt is seven."}}]})
     out = await make(rule("llm", LLM)).handle(NID, "kitchen", "hey_jarvis", ONE_SECOND)
@@ -252,7 +254,7 @@ async def test_the_llm_gets_the_system_prompt_and_key_and_its_think_block_is_not
     # follows the system prompt.
     assert json.loads(sent.content) == {"model": "tiny", "max_tokens": 400, "stream": True,
                                         "messages": [
-        {"role": "system", "content": "Be brief.\n\nAnswer in English, the language the user is speaking."},
+        {"role": "system", "content": "Be brief.\n\nNow it is noon.\n\nAnswer in English, the language the user is speaking."},
         {"role": "user", "content": "what time is it"}]}
 
 

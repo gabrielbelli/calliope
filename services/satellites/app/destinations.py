@@ -63,6 +63,7 @@ token, to a host the action never named.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -77,6 +78,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from . import audio
 from . import language as lang
 from . import secret_store
+from . import tools as tooling
 
 # Upper case only, on purpose: see the module docstring. Real env var names
 # may be lower case, but refusing that costs nothing here and turns "pasted
@@ -532,6 +534,14 @@ class Llm(_Base):
     max_tokens: int = Field(default=400, ge=1, le=8192)
     timeout: float = Field(default=30.0, gt=0, le=120)
     stream: bool = True
+    # Tools the model may call (tools.py): web_search and weather. None by
+    # default; a word turns them on. With none, the request is exactly what it
+    # was, and no server that takes no tools is sent a `tools` field.
+    tools: list[Literal["web_search", "weather"]] = Field(default_factory=list, max_length=2)
+
+    # How many times a turn runs the tools the model asked for before it must
+    # answer: a voice assistant waits for one search, perhaps two, not an agent.
+    TOOL_ROUNDS: ClassVar[int] = 2
 
     # (base_url, model) -> "max_completion_tokens", once that server refused
     # max_tokens for that model. Per process and learned, like HaAssist.devices.
@@ -541,9 +551,11 @@ class Llm(_Base):
         return [self.api_key_env] if self.api_key_env else []
 
     def messages(self, req: Request) -> list[dict]:
-        """The system prompt (with the language to answer in), the
-        conversation so far, and the new turn."""
-        system = "\n\n".join(p for p in (self.system,
+        """The system prompt (with the date and time, what the tools are for
+        when there are any, and the language to answer in), the conversation
+        so far, and the new turn."""
+        system = "\n\n".join(p for p in (self.system, tooling.now_line(),
+                                          tooling.guidance(self.tools) if self.tools else None,
                                           answer_instruction(req.language, req.reply_language)) if p)
         messages = [{"role": "system", "content": system}] if system else []
         for turn in req.history:
@@ -557,8 +569,14 @@ class Llm(_Base):
         """The name this server takes the token limit by, as far as is known."""
         return self.limit_names.get((self.base_url, self.model), "max_tokens")
 
-    def _body(self, req: Request, limit: str, stream: bool) -> dict:
-        body = {"model": self.model, "messages": self.messages(req), limit: self.max_tokens}
+    def _body(self, req: Request, limit: str, stream: bool, messages: list[dict] | None = None,
+              tool_choice: str | None = None) -> dict:
+        body = {"model": self.model, "messages": messages if messages is not None else self.messages(req),
+                limit: self.max_tokens}
+        if self.tools:
+            body["tools"] = [tooling.SPECS[n] for n in self.tools]
+            if tool_choice:
+                body["tool_choice"] = tool_choice
         if stream:
             body["stream"] = True
         return body
@@ -568,7 +586,8 @@ class Llm(_Base):
                 "answering; raise it under More, or choose a model that does not reason first")
 
     @contextlib.asynccontextmanager
-    async def _open(self, client: httpx.AsyncClient, req: Request, stream: bool):
+    async def _open(self, client: httpx.AsyncClient, req: Request, stream: bool,
+                    messages: list[dict] | None = None, tool_choice: str | None = None):
         """POST /chat/completions, as a response under 400. The one retry with
         max_completion_tokens happens here, before the caller reads anything;
         any other refusal is raised in the provider's words."""
@@ -578,7 +597,7 @@ class Llm(_Base):
         while True:
             async with client.stream("POST", f"{self.base_url}/chat/completions", headers=headers,
                                      timeout=self.timeout,
-                                     json=self._body(req, limit, stream)) as r:
+                                     json=self._body(req, limit, stream, messages, tool_choice)) as r:
                 if r.status_code >= 400:
                     raw = await _read_error(r)
                     if limit == "max_tokens" and _wants_completion_tokens(r.status_code, raw):
@@ -604,22 +623,71 @@ class Llm(_Base):
         return text or None
 
     async def call(self, client: httpx.AsyncClient, req: Request) -> str | None:
-        async with self._open(client, req, stream=False) as r:
-            await r.aread()
-        return self._content(_json(r, "the LLM"))
+        text = "".join([p async for p in self.answer(client, req)]).strip()
+        return text or None
 
     async def answer(self, client: httpx.AsyncClient, req: Request) -> AsyncIterator[str]:
-        if not self.stream:
-            text = await self.call(client, req)
-            if text:
-                yield text
-            return
-        async with self._open(client, req, stream=True) as r:
-            if "text/event-stream" not in r.headers.get("content-type", ""):
-                # A server that does not stream (or ignores the flag) answers
-                # with the whole body: the fallback, read as the buffered call.
+        """The answer's text as it comes. With tools, a turn is rounds: the
+        model asks for tools, they run together (tools.run, which never
+        raises), their results go back, and it is asked again; after
+        TOOL_ROUNDS it is asked with tool_choice "none" and must answer. Text
+        a model says before asking ("let me check") is spoken as it comes."""
+        if self.tools:
+            await tooling.prime(client)
+        messages = self.messages(req)
+        for n in range(self.TOOL_ROUNDS + 1):
+            calls: dict[int, dict] = {}
+            said: list[str] = []
+            final = not self.tools or n == self.TOOL_ROUNDS
+            async for piece in self._turn(client, req, messages, "none" if self.tools and final else None,
+                                          calls):
+                said.append(piece)
+                yield piece
+            if not calls or final:
+                return
+            asked = [calls[i] for i in sorted(calls)]
+            for k, c in enumerate(asked):
+                c["id"] = c["id"] or f"call_{n}_{k}"
+            results = await asyncio.gather(*(tooling.run(c["name"], c["arguments"], client, self.tools,
+                                                         req.language) for c in asked))
+            messages.append({"role": "assistant", "content": "".join(said) or None, "tool_calls": [
+                {"id": c["id"], "type": "function",
+                 "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}} for c in asked]})
+            messages.extend({"role": "tool", "tool_call_id": c["id"], "content": res}
+                            for c, res in zip(asked, results))
+
+    @staticmethod
+    def _gather(calls: dict[int, dict], pieces) -> None:
+        """Tool calls as they arrive, whole (one body) or in pieces (a stream):
+        the id and name once, the arguments as a string in parts."""
+        for k, tc in enumerate(pieces or []):
+            if not isinstance(tc, dict):
+                continue
+            slot = calls.setdefault(tc.get("index", k), {"id": "", "name": "", "arguments": ""})
+            fn = tc.get("function") or {}
+            slot["id"] = tc.get("id") or slot["id"]
+            if fn.get("name") and fn["name"] != slot["name"]:
+                slot["name"] += fn["name"]
+            if isinstance(fn.get("arguments"), str):
+                slot["arguments"] += fn["arguments"]
+
+    async def _turn(self, client: httpx.AsyncClient, req: Request, messages: list[dict],
+                    tool_choice: str | None, calls: dict[int, dict]) -> AsyncIterator[str]:
+        """One request: its text as it comes, and the tool calls it asks for
+        gathered into `calls`."""
+        async with self._open(client, req, self.stream, messages, tool_choice) as r:
+            if not self.stream or "text/event-stream" not in r.headers.get("content-type", ""):
+                # One body: asked for, or a server that ignores the flag.
                 await r.aread()
-                text = self._content(_json(r, "the LLM"))
+                data = _json(r, "the LLM")
+                try:
+                    wanted = data["choices"][0]["message"].get("tool_calls")
+                except (KeyError, IndexError, TypeError, AttributeError):
+                    wanted = None
+                if wanted and self.tools:
+                    self._gather(calls, wanted)
+                    return
+                text = self._content(data)
                 if text:
                     yield text
                 return
@@ -644,6 +712,8 @@ class Llm(_Base):
                 except (KeyError, IndexError, TypeError, AttributeError):
                     continue  # a usage chunk
                 finish = choice.get("finish_reason") or finish
+                if isinstance(delta, dict) and delta.get("tool_calls") and self.tools:
+                    self._gather(calls, delta["tool_calls"])
                 piece = _text(delta.get("content")) if isinstance(delta, dict) else ""
                 if piece:
                     out = think.feed(piece)
@@ -654,7 +724,7 @@ class Llm(_Base):
             if rest:
                 spoke = spoke or bool(rest.strip())
                 yield rest
-            if not spoke and finish == "length":
+            if not spoke and not calls and finish == "length":
                 raise DestinationError(self._spent())
 
     @staticmethod
