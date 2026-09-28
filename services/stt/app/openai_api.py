@@ -973,7 +973,11 @@ def _headers(engine,  # noqa: ANN001
 
     Absent when nothing fired, so the header's presence means something.
     """
-    headers = {"x-stt-engine": engine.name}
+    # The engine's family, which decides what a request may send it, and the
+    # id of the one that ran, which differs when a deployment loads two of a
+    # family (parakeet and parakeet-pt-br).
+    headers = {"x-stt-engine": engine.name,
+               "x-stt-model": str(getattr(engine, "id", engine.name))}
     if result is not None and result.repaired:
         headers["x-glossary-repaired"] = ", ".join(
             quote(term, safe=" ") for term in result.repaired)
@@ -1007,15 +1011,17 @@ async def _read(file: UploadFile) -> bytes:
 @router.post("/audio/transcriptions", openapi_extra=_TRANSCRIPTION_SCHEMA)
 async def transcriptions(request: Request,
                          file: UploadFile = File(...)) -> Response:
-    engine = pipeline.engine()
+    pipeline.engine()  # 503 while loading, before anything else is read
     form = await request.form()
 
     _reject_unknown(form, TRANSCRIPTION_FIELDS)
     # Kept rather than discarded, because the run record carries what the
-    # client ASKED for next to what actually ran. This service has one engine
-    # and `model` chooses nothing; a listing that shows `whisper-1` requested
-    # and `parakeet` used is the only place that difference is visible.
+    # client ASKED for next to what actually ran. `model` chooses an engine
+    # only when it names one this deployment loaded (STT_MODELS); anything
+    # else, `whisper-1` included, gets the default, and a listing that shows
+    # `whisper-1` requested and `parakeet` used is where that is visible.
     model_requested = _model(form)
+    engine = pipeline.engine(model_requested)
     response_format = _response_format(form, FORMATS)
     _reject_diarisation(form)
     _reject_languages(form)
@@ -1070,7 +1076,8 @@ async def translations(request: Request,
     would answer a different question in a shape that looks like an answer to
     this one.
     """
-    engine = pipeline.engine()
+    form = await request.form()
+    engine = pipeline.engine(_value(form, "model"))
     if not engine.can_translate:
         raise ApiError(
             400,
@@ -1081,7 +1088,6 @@ async def translations(request: Request,
             "STT_MODEL=whisper, or use /v1/audio/transcriptions.",
             code=CODE_UNSUPPORTED_VALUE, param="model")
 
-    form = await request.form()
     _reject_unknown(form, TRANSLATION_FIELDS)
     model_requested = _model(form)
     response_format = _response_format(form, TRANSLATION_FORMATS)
@@ -1125,7 +1131,7 @@ async def _run(data: bytes, opts: asr.Options, tuning: pipeline.Tuning,
             # working correctly.
             result = await run_in_threadpool(
                 pipeline.run, data, opts, allow_resample=True, tuning=tuning,
-                rules=rules, origin=origin)
+                rules=rules, origin=origin, recogniser=engine)
     except pipeline.Busy as exc:
         raise _busy() from exc
     except HTTPException as exc:
@@ -1151,7 +1157,7 @@ async def _stream_response(data: bytes, opts: asr.Options,
     try:
         stream = await run_in_threadpool(
             pipeline.open_stream, data, opts, allow_resample=True, tuning=tuning,
-            rules=rules)
+            rules=rules, recogniser=engine)
     except HTTPException as exc:
         pipeline.release()
         raise _translate_pipeline_error(exc) from exc

@@ -50,7 +50,10 @@ from . import asr, audio, glossary, profiles, vad
 
 SAMPLE_RATE = 16_000
 
-MODEL = os.getenv("STT_MODEL", "parakeet")
+# The engines to load side by side (asr.ENGINES), the first being the default;
+# unset, the single engine STT_MODEL names, as before.
+MODELS = [m.strip().lower() for m in os.getenv("STT_MODELS", "").split(",") if m.strip()]
+MODEL = MODELS[0] if MODELS else os.getenv("STT_MODEL", "parakeet")
 # Profiles applied when a request selects none. UNSET BY DEFAULT, and that is a
 # deliberate behaviour change: this service used to compile one file at boot and
 # apply it to every transcript, which is both a public image carrying one
@@ -234,7 +237,8 @@ def start() -> None:
     # DEFAULT the route applies rather than bypassing the route.
     hotwords = default.hotwords if HOTWORDS_ENABLED else None
 
-    state["asr"] = asr.build(THREADS, hotwords)
+    state["engines"] = asr.build_all(MODELS, THREADS, hotwords)
+    state["asr"] = next(iter(state["engines"].values()))
 
     if VAD_ENABLED:
         state["vad"] = vad.Vad()
@@ -275,12 +279,24 @@ def default_rules() -> list[tuple[re.Pattern[str], str]]:
     return state.get("rules") or []  # type: ignore[return-value]
 
 
-def engine() -> asr.Parakeet | asr.Whisper:
-    """The loaded recogniser. The /v1 route reads its capability flags to
-    decide between honouring a field and refusing it by name."""
+def engine(model: str | None = None) -> asr.Parakeet | asr.Whisper:
+    """The recogniser a request's `model` names, or the default one when it
+    names none that is loaded (`whisper-1` included). The /v1 route reads its
+    capability flags to decide between honouring a field and refusing it by
+    name."""
     if "asr" not in state:
         raise HTTPException(503, "model still loading")
-    return state["asr"]  # type: ignore[return-value]
+    found = engines().get((model or "").strip().lower())
+    return found if found is not None else state["asr"]  # type: ignore[return-value]
+
+
+def engines() -> dict[str, asr.Parakeet | asr.Whisper]:
+    """Every loaded recogniser by id, the default first. Empty while loading."""
+    loaded = state.get("engines")
+    if loaded is None and "asr" in state:
+        default = state["asr"]
+        loaded = {getattr(default, "id", MODEL): default}
+    return loaded or {}  # type: ignore[return-value]
 
 
 def acquire() -> None:
@@ -573,7 +589,8 @@ def _place_segments(segments: tuple[asr.Segment, ...], speech: vad.Speech,
 def run(data: bytes, opts: asr.Options | None = None, *,
         allow_resample: bool = False, tuning: Tuning | None = None,
         rules: list[tuple[re.Pattern[str], str]] | None = None,
-        origin: Origin | None = None) -> Result:
+        origin: Origin | None = None,
+        recogniser: asr.Parakeet | asr.Whisper | None = None) -> Result:
     """Transcribe one clip. Blocking CPU work — never call this on the loop.
 
     `rules` is this request's compiled glossary, from the profiles it selected.
@@ -591,8 +608,10 @@ def run(data: bytes, opts: asr.Options | None = None, *,
 
     STT_HOTWORDS=0 outranks the request: with biasing switched off, a request
     carrying a vocabulary is transcribed without it.
+
+    `recogniser` is the engine the request chose; None is the default.
     """
-    model = engine()
+    model = recogniser or engine()
     opts = opts or asr.Options()
     tuning = tuning or Tuning()
 
@@ -737,7 +756,7 @@ def run(data: bytes, opts: asr.Options | None = None, *,
         text=text,
         raw=raw,
         repaired=repaired,
-        model=MODEL,
+        model=getattr(model, "id", MODEL),
         audio_seconds=round(audio_seconds, 2),
         speech_seconds=round(speech_seconds, 2),
         compute_seconds=round(compute, 2),
@@ -769,7 +788,8 @@ class Stream:
 
 def open_stream(data: bytes, opts: asr.Options, *, allow_resample: bool = True,
                 tuning: Tuning | None = None,
-                rules: list[tuple[re.Pattern[str], str]] | None = None) -> Stream:
+                rules: list[tuple[re.Pattern[str], str]] | None = None,
+                recogniser: asr.Parakeet | asr.Whisper | None = None) -> Stream:
     """Start a streaming transcription. Decoding and VAD happen up front.
 
     Only the engine that can genuinely emit before it finishes reaches here —
@@ -786,7 +806,7 @@ def open_stream(data: bytes, opts: asr.Options, *, allow_resample: bool = True,
     in the way. Fixing it means moving _windows into this function and turning
     `can_stream` from a flag into a question about clip length.
     """
-    model = engine()
+    model = recogniser or engine()
     tuning = tuning or Tuning()
     if not HOTWORDS_ENABLED and (opts.hotwords or opts.vocabulary or opts.boost):
         opts = replace(opts, hotwords=None, vocabulary=(), boost=False)

@@ -10,7 +10,7 @@ audio
 text
 ```
 
-No CUDA, no torch. One model at a time, chosen by `STT_MODEL`.
+No CUDA, no torch. One model by default, chosen by `STT_MODEL`, or several side by side with `STT_MODELS`; a request picks one with `model`.
 
 ## Which model
 
@@ -489,6 +489,7 @@ transcript is the product.
 | Variable | Default | Notes |
 |---|---|---|
 | `STT_MODEL` | `parakeet` | `parakeet` or `whisper` |
+| `STT_MODELS` | unset | Engines to load side by side, the first the default: `parakeet`, `parakeet-pt-br` (a Brazilian Portuguese fine-tune, 2.4 GB), `whisper`. A request's `model` picks one; any other name gets the default. `/health` lists them under `models`. Overrides `STT_MODEL`, `STT_MODEL_ID` and `STT_QUANTISATION` |
 | `STT_MODEL_ID` | model default | Override the specific checkpoint |
 | `STT_QUANTISATION` | `int8` | Whisper also takes `int8_float32`, `float32` |
 | `STT_LANGUAGE` | unset | Leave unset if you code-switch. See below |

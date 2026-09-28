@@ -41,6 +41,14 @@ NAMES: dict[str, str] = {
     "zh": "chinese",
 }
 
+# Parakeet TDT 0.6B v3's twenty-five European languages, from its model card.
+# It detects which one it hears; these are what it can hear at all.
+PARAKEET: tuple[str, ...] = (
+    "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu",
+    "it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv",
+    "uk",
+)
+
 # What verbose_json reports when the engine that ran detects no language at
 # all. Parakeet v3 takes no language hint and onnx-asr surfaces no language
 # from it, so under the default engine there is nothing to report — and

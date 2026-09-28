@@ -568,3 +568,45 @@ def test_the_vad_timeline_maps_back_to_the_original_clip() -> None:
     # Past the end of the speech reports the end of it, not a time the audio
     # does not reach.
     assert speech.original(99.0) == 3.0
+
+
+# ── several engines in one process (STT_MODELS) ───────────────────────────────
+
+@pytest.fixture
+def both() -> TestClient:
+    """Parakeet the default, Whisper beside it, as STT_MODELS=parakeet,whisper."""
+    default, other = FakeParakeet(), FakeWhisper()
+    default.id, other.id = "parakeet", "whisper"
+    default.languages, other.languages = ("en", "pt"), ("en", "ja", "pt")
+    client = next(_serve(default))
+    pipeline.state["engines"] = {"parakeet": default, "whisper": other}
+    client.other = other  # type: ignore[attr-defined]
+    yield client
+    pipeline.state.clear()
+
+
+def test_model_picks_a_loaded_engine_and_anything_else_gets_the_default(both: TestClient) -> None:
+    chosen = post(both, model="whisper", language="pt")
+    assert chosen.status_code == 200, chosen.text
+    assert (chosen.headers["x-stt-engine"], chosen.headers["x-stt-model"]) == ("whisper", "whisper")
+    assert both.other.seen.language == "pt"  # type: ignore[attr-defined]
+
+    default = post(both)  # model=whisper-1, as every OpenAI client sends
+    assert (default.headers["x-stt-engine"], default.headers["x-stt-model"]) == ("parakeet", "parakeet")
+    # The default still refuses what it cannot honour, whichever name was sent.
+    assert post(both, language="pt").status_code == 400
+
+
+def test_health_lists_every_engine_default_first(both: TestClient) -> None:
+    models = both.get("/health").json()["models"]
+    assert models == [
+        {"id": "parakeet", "family": "parakeet", "default": True, "languages": ["en", "pt"],
+         "accepts_language": False, "accepts_boost": True},
+        {"id": "whisper", "family": "whisper", "default": False, "languages": ["en", "ja", "pt"],
+         "accepts_language": True, "accepts_boost": False},
+    ]
+
+
+def test_an_unknown_engine_in_stt_models_stops_startup() -> None:
+    with pytest.raises(ValueError, match="canary"):
+        asr.build_all(["parakeet", "canary"], threads=1, hotwords=None)

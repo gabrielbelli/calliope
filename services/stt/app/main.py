@@ -53,8 +53,8 @@ async def lifespan(app: FastAPI):
     started = time.monotonic()
     pipeline.start()
 
-    log.info("ready in %.1fs, model=%s, %d threads",
-             time.monotonic() - started, pipeline.MODEL, pipeline.THREADS)
+    log.info("ready in %.1fs, models=%s, %d threads",
+             time.monotonic() - started, ",".join(pipeline.engines()), pipeline.THREADS)
     yield
     pipeline.stop()
 
@@ -82,6 +82,18 @@ def _health_details() -> dict[str, object]:
     return {
         "status": "ok" if loaded else "loading",
         "model": pipeline.MODEL,
+        # EVERY ENGINE THIS PROCESS SERVES, the default first: what a request
+        # may name as `model`, what each can hear, and what it takes. The Home
+        # Assistant integration builds its speech-to-text entities from this.
+        "models": [
+            {"id": engine_id,
+             "family": engine.name,
+             "default": index == 0,
+             "languages": list(getattr(engine, "languages", ()) or ()),
+             "accepts_language": bool(engine.accepts_language),
+             "accepts_boost": bool(getattr(engine, "accepts_boost", False))}
+            for index, (engine_id, engine) in enumerate(pipeline.engines().items())
+        ],
         "model_id": os.getenv("STT_MODEL_ID", ""),
         "accepts_vocabulary": bool(getattr(loaded, "accepts_vocabulary", False)),
         # What the compatibility surface will and will not do on this

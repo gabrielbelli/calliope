@@ -87,6 +87,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import boosting
+from . import languages as _languages
 
 log = logging.getLogger("stt-stack.asr")
 
@@ -94,6 +95,44 @@ SAMPLE_RATE = 16_000
 
 PARAKEET_DEFAULT = "istupakov/parakeet-tdt-0.6b-v3-onnx"
 WHISPER_DEFAULT = "large-v3"
+
+
+@dataclass(frozen=True)
+class EngineSpec:
+    """One engine a deployment can load, by the id a request sends as `model`."""
+
+    family: str                              # "parakeet" or "whisper": the code that runs it
+    model_id: str                            # what onnx-asr or faster-whisper loads
+    quantisation: str | None
+    languages: tuple[str, ...] | None = None  # None: the family's own
+
+
+# THE ENGINES ONE PROCESS CAN SERVE SIDE BY SIDE (STT_MODELS=parakeet,parakeet-pt-br).
+# A request picks one with `model`; the first listed answers every request whose
+# `model` names none of them, which is what `whisper-1` from an unconfigured
+# OpenAI client does. /health lists them, and that list is what the Home
+# Assistant integration offers as speech-to-text engines.
+#
+# Canary 1B v2 is NOT here although onnx-asr loads it and it takes a language:
+# measured on this project's CPU host (28 Sep 2026) it ran at 3.2x realtime
+# against Parakeet's 9.4x, was no more accurate on Brazilian Portuguese
+# commands, and on unclear speech its autoregressive decoder looped ("falei,
+# falei, ...") for 48 s on a 3 s command. A voice assistant cannot wait for that.
+ENGINES: dict[str, EngineSpec] = {
+    "parakeet": EngineSpec("parakeet", PARAKEET_DEFAULT, "int8"),
+    # Brazilian Portuguese fine-tune of the same model (the TAGARELA corpus),
+    # published in ONNX, fp32 only (2.4 GB). Portuguese by construction, which
+    # is the language setting Parakeet v3 itself does not have. Measured on the
+    # CPU host against Parakeet v3 (28 Sep 2026), WER on Brazilian Portuguese:
+    # spoken commands 0.224 vs 0.436, the same through a cheap microphone
+    # 0.195 vs 0.523, CORAA spontaneous speech 0.110 vs 0.219, and 0.129 vs
+    # 0.313 with an English-sounding wake word in front; none heard as
+    # English (Parakeet: up to 9%). Median command 355 ms vs 410 ms. Useless
+    # for English (0.89), so it is offered for Portuguese alone.
+    "parakeet-pt-br": EngineSpec(
+        "parakeet", "alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx", None, ("pt",)),
+    "whisper": EngineSpec("whisper", WHISPER_DEFAULT, "int8"),
+}
 
 # Whisper's own default ladder, kept for every request that does not pin a
 # temperature: it is what retries a low-confidence decode.
@@ -237,7 +276,12 @@ class Parakeet:
     reports_token_logprobs = True
     reports_token_ids = False
 
-    def __init__(self, model_id: str, quantisation: str) -> None:
+    def __init__(self, model_id: str, quantisation: str | None, *,
+                 engine_id: str = "parakeet",
+                 languages: tuple[str, ...] | None = None) -> None:
+        # The id a request names this engine by, and what it can hear.
+        self.id = engine_id
+        self.languages = languages or _languages.PARAKEET
         # Compiled automata, keyed by the exact term tuple that produced them.
         # This is a CACHE OF DERIVED IMMUTABLE DATA and nothing else — no
         # request's state lives on this object, because pipeline.py guards the
@@ -429,9 +473,13 @@ class Whisper:
     reports_token_ids = True
 
     def __init__(self, model_id: str, compute_type: str, threads: int,
-                 language: str | None, hotwords: str | None) -> None:
+                 language: str | None, hotwords: str | None, *,
+                 engine_id: str = "whisper",
+                 languages: tuple[str, ...] | None = None) -> None:
         from faster_whisper import WhisperModel  # noqa: PLC0415
 
+        self.id = engine_id
+        self.languages = languages or tuple(_languages.NAMES)
         self.language = language
         self.hotwords = hotwords
         self._model = WhisperModel(
@@ -563,3 +611,30 @@ def build(threads: int, hotwords: str | None) -> Parakeet | Whisper:
     raise ValueError(
         f"STT_MODEL={choice!r} is not recognised; expected 'parakeet' or 'whisper'"
     )
+
+
+def build_all(ids: list[str], threads: int,
+              hotwords: str | None) -> dict[str, Parakeet | Whisper]:
+    """The engines STT_MODELS names, in its order, keyed by id; the first is
+    the default. With STT_MODELS unset, the one engine STT_MODEL names, built
+    exactly as before (STT_MODEL_ID and STT_QUANTISATION still apply)."""
+    if not ids:
+        model = build(threads, hotwords)
+        return {model.id: model}
+    unknown = [i for i in ids if i not in ENGINES]
+    if unknown:
+        raise ValueError(f"STT_MODELS names {', '.join(unknown)}, which this build does not "
+                         f"know; it knows {', '.join(ENGINES)}")
+    built: dict[str, Parakeet | Whisper] = {}
+    for engine_id in ids:
+        spec = ENGINES[engine_id]
+        if spec.family == "parakeet":
+            model: Parakeet | Whisper = Parakeet(spec.model_id, spec.quantisation,
+                                                 engine_id=engine_id, languages=spec.languages)
+        else:
+            model = Whisper(spec.model_id, compute_type=spec.quantisation or "int8",
+                            threads=threads, language=None, hotwords=hotwords,
+                            engine_id=engine_id, languages=spec.languages)
+        log.info("%s ready: %s", engine_id, spec.model_id)
+        built[engine_id] = model
+    return built
