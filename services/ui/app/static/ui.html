@@ -1351,6 +1351,12 @@ details.sat-row>summary::before{vertical-align:top}
 .sat-line{grid-column:1/-1;font-size:var(--t-label);line-height:1.45;color:var(--dim);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sat-line:empty{display:none}
+/* A FAULT'S LINE WRAPS. On a phone the line holds about 46 characters, and
+   "Update to v0.3.1-4-g1a2b3c4 failed: bad signature" lost the part after
+   the version, which is the reason and is said nowhere else on the row; so
+   did "Not listening for wake words: ...", and an image's signed or
+   unsigned and upload date. Healthy rows keep one line each. */
+.sat[data-state=failed] .sat-line,.fws .sat-line{white-space:normal;overflow-wrap:anywhere}
 .sat-sum .bar-track{grid-column:1/-1;display:block;margin:var(--s1) 0 0}
 /* A span, because nothing but phrasing content may sit in a <summary>; so
    it is made a block, or its width and height do nothing. */

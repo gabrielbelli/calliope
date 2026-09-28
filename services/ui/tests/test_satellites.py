@@ -149,6 +149,14 @@ def test_a_summary_is_a_thumb_high_on_a_phone():
     assert "#tab-satellites details>summary{min-height:44px}" in block
 
 
+def test_a_faults_line_wraps_and_a_healthy_one_stays_one_line():
+    """An update's failure and why a satellite is not listening end in the
+    reason, which an ellipsis cut on a phone and nothing else on the row
+    repeats; so do an image's signed flag and date."""
+    assert ".sat[data-state=failed] .sat-line,.fws .sat-line{white-space:normal;overflow-wrap:anywhere}" in BARE_CSS
+    assert "overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" in BARE_CSS[BARE_CSS.index(".sat-line{"):]
+
+
 def test_a_hub_summary_that_wraps_keeps_the_left_edge():
     """The satellite rows keep their text clear of the chevron with a grid;
     the hub's summaries are a title and a note in plain inline text, and on
