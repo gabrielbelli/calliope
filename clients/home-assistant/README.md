@@ -219,6 +219,10 @@ your pipelines use. Every transcription names that profile. Parakeet boosts
 the terms in its decoder, and Whisper takes them as hotwords. The terms only
 bias recognition: a term never replaces another word.
 
+For Portuguese the profile also carries repair rules for commands the model
+runs together: spoken quickly, "desliga a luz da cama" can come back as
+"desliga-los da cama", which is rewritten to the command after decoding.
+
 The profile is written about 10 seconds after Home Assistant starts, and again
 10 seconds after an area, floor, device, entity or exposure setting changes.
 It is also checked every hour, and written only when it changed. It holds at

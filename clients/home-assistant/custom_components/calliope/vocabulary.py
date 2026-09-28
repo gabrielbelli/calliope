@@ -65,7 +65,7 @@ MAX_TERM_CHARS = 100
 COMMAND_WORDS: dict[str, tuple[str, ...]] = {
     "pt": (
         "liga", "desliga", "acende", "apaga", "abre", "fecha", "aumenta",
-        "diminui", "abaixa", "luzes", "lâmpada", "temperatura", "volume",
+        "diminui", "abaixa", "a luz", "as luzes", "lâmpada", "temperatura", "volume",
         "cortina", "persiana", "ventilador", "ar condicionado", "tomada",
         "alarme", "temporizador",
     ),
@@ -73,6 +73,24 @@ COMMAND_WORDS: dict[str, tuple[str, ...]] = {
         "turn on", "turn off", "switch on", "switch off", "lights", "open",
         "close", "brightness", "temperature", "volume", "curtains", "blinds",
         "timer", "alarm",
+    ),
+}
+
+# Rewrites of what the model writes for a command it ran together, by primary
+# language subtag. Spoken quickly, "desliga a luz da cama" elides "a" into the
+# verb and "luz" comes back as the pronoun ending -los: "desliga-los da cama",
+# which Assist cannot match (seen from the pt-BR fine-tune, 28 Sep 2026). "luz"
+# is too short to boost (the stack skips terms under four characters), so the
+# fix is a repair after decoding. Each left-hand side is two words, which the
+# stack accepts without `force`, and "desliga-los da" is not something anyone
+# asks a voice assistant for.
+REPAIRS: dict[str, tuple[tuple[str, str], ...]] = {
+    "pt": tuple(
+        (f"{verb}{pronoun} {prep}", f"{verb} a luz {prep}")
+        for verb in ("liga", "ligue", "desliga", "desligue", "acende", "acenda",
+                     "apaga", "apague")
+        for pronoun in ("-los", "-lo")
+        for prep in ("da", "do", "de", "na", "no")
     ),
 }
 
@@ -131,6 +149,12 @@ def _exposed_entities(hass: HomeAssistant) -> Iterable[tuple[str, list[str]]]:
 
 
 @callback
+def collect_repairs(hass: HomeAssistant) -> list[tuple[str, str]]:
+    """The repair rules for the languages Assist is set to."""
+    return [rule for lang in _languages(hass) for rule in REPAIRS.get(lang, ())]
+
+
+@callback
 def collect(hass: HomeAssistant) -> list[str]:
     """The terms, in order, cleaned, de-duplicated and capped."""
     raw: list[str] = []
@@ -182,9 +206,14 @@ def clean(terms: Iterable[object]) -> list[str]:
     return out[:MAX_TERMS]
 
 
-def render(terms: list[str]) -> str:
-    """The profile as the stack stores it: a header, then one term a line."""
-    return HEADER + "".join(f"{term}\n" for term in terms)
+def render(terms: list[str], repairs: list[tuple[str, str]] = ()) -> str:
+    """The profile as the stack stores it: a header, one term a line, then
+    one `heard = intended` repair a line."""
+    return (
+        HEADER
+        + "".join(f"{term}\n" for term in terms)
+        + "".join(f"{heard} = {intended}\n" for heard, intended in repairs)
+    )
 
 
 class Vocabulary:
@@ -211,7 +240,7 @@ class Vocabulary:
         """Build the profile and write it when it changed. A failure is
         logged and leaves the last written profile in use."""
         terms = collect(self.hass)
-        text = render(terms)
+        text = render(terms, collect_repairs(self.hass))
         if text == self.written:
             return
         try:

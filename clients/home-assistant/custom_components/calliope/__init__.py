@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 
 from homeassistant.const import CONF_API_KEY, CONF_URL, CONF_VERIFY_SSL, Platform
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
@@ -46,6 +46,10 @@ _LOGGER = logging.getLogger(__name__)
 # (a model added to or taken off the stack) reloads the entry, so Assist's
 # menu follows the stack without anyone touching Home Assistant.
 ENGINE_CHECK = timedelta(minutes=5)
+# How often while the stack is still loading its engines, as it is when Home
+# Assistant and the stack restart together: then the menu fills in within
+# half a minute of the stack being ready rather than up to ENGINE_CHECK later.
+ENGINE_CHECK_LOADING = timedelta(seconds=30)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -99,6 +103,7 @@ def _watch_engines(
     list is only compared once the stack says it has finished loading them:
     one still starting lists none."""
     serving = [e["id"] for e in stt_engines(entry.runtime_data.health)]
+    loading: list[CALLBACK_TYPE] = []
 
     async def _check(_now: datetime) -> None:
         try:
@@ -107,6 +112,8 @@ def _watch_engines(
             return
         if not stt_ready(health):
             return
+        while loading:
+            loading.pop()()
         now_serving = [e["id"] for e in stt_engines(health)]
         if now_serving != serving:
             _LOGGER.info(
@@ -116,7 +123,17 @@ def _watch_engines(
             )
             hass.config_entries.async_schedule_reload(entry.entry_id)
 
-    return async_track_time_interval(hass, _check, ENGINE_CHECK)
+    regular = async_track_time_interval(hass, _check, ENGINE_CHECK)
+    if not stt_ready(entry.runtime_data.health):
+        loading.append(async_track_time_interval(hass, _check, ENGINE_CHECK_LOADING))
+
+    @callback
+    def _stop() -> None:
+        regular()
+        while loading:
+            loading.pop()()
+
+    return _stop
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: CalliopeConfigEntry) -> bool:

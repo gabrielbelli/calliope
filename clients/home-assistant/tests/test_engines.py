@@ -10,7 +10,7 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
-from custom_components.calliope import ENGINE_CHECK
+from custom_components.calliope import ENGINE_CHECK, ENGINE_CHECK_LOADING
 
 from .conftest import until
 from .fake_calliope import FakeCalliope
@@ -78,6 +78,22 @@ async def test_a_new_engine_on_the_stack_appears_without_a_restart(
 
     fake.stt_models, fake.stt_status = [PARAKEET, PT_BR], "ok"
     async_fire_time_changed(hass, dt_util.utcnow() + 2 * ENGINE_CHECK)
+    await until(hass, lambda: hass.states.get("stt.calliope_parakeet_pt_br") is not None)
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+async def test_a_stack_still_loading_at_setup_is_checked_every_30_s(
+    hass: HomeAssistant, fake: FakeCalliope, entry: MockConfigEntry
+) -> None:
+    """Home Assistant and the stack restarting together: the menu fills in
+    within ENGINE_CHECK_LOADING of the stack being ready, not ENGINE_CHECK."""
+    fake.stt_models, fake.stt_status = [], "loading"
+    await _setup(hass, entry)
+    assert hass.states.get("stt.calliope_parakeet_pt_br") is None
+
+    fake.stt_models, fake.stt_status = [PARAKEET, PT_BR], "ok"
+    async_fire_time_changed(hass, dt_util.utcnow() + ENGINE_CHECK_LOADING)
     await until(hass, lambda: hass.states.get("stt.calliope_parakeet_pt_br") is not None)
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()

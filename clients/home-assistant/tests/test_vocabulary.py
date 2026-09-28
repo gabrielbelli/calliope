@@ -52,7 +52,13 @@ async def house(hass: HomeAssistant) -> None:
 
 def _terms(fake: FakeCalliope) -> list[str]:
     text = fake.glossaries[GLOSSARY_PROFILE]
-    return [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+    return [
+        ln for ln in text.splitlines() if ln and not ln.startswith("#") and "=" not in ln
+    ]
+
+
+def _repairs(fake: FakeCalliope) -> list[str]:
+    return [ln for ln in fake.glossaries[GLOSSARY_PROFILE].splitlines() if " = " in ln]
 
 
 async def test_written_at_start(
@@ -67,9 +73,27 @@ async def test_written_at_start(
     assert "Luz escondida" not in terms
     assert "turn on" in terms  # the test instance's language is en
     assert "desliga" not in terms
+    assert _repairs(fake) == []
     runtime = loaded.runtime_data.vocabulary
     assert runtime.available
     assert runtime.terms == len(terms)
+
+
+async def test_portuguese_gets_its_command_repairs(
+    hass: HomeAssistant, house: None, fake: FakeCalliope, entry: MockConfigEntry
+) -> None:
+    """With Portuguese in use, "a luz" run into the verb ("desliga-los da
+    cama", heard from the pt-BR model) is rewritten after decoding; English
+    gets no such rules (test_written_at_start runs in English)."""
+    hass.config.language = "pt-BR"
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await until(hass, lambda: GLOSSARY_PROFILE in fake.glossaries)
+    repairs = _repairs(fake)
+    assert "desliga-los da = desliga a luz da" in repairs
+    assert "ligue-los do = ligue a luz do" in repairs
+    assert "a luz" in _terms(fake) and "desliga" in _terms(fake)
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
 
 
 async def test_stt_asks_for_it(

@@ -300,12 +300,18 @@ class FakeCalliope:
             return envelope(self.glossary_status, "glossary store unavailable")
         text = body["text"]
         lines = [ln.strip() for ln in text.splitlines()]
-        terms = [ln for ln in lines if ln and not ln.startswith("#")]
-        # The stack's own refusals, for what this integration must never send.
-        assert not any("=" in term for term in terms), terms
+        entries = [ln for ln in lines if ln and not ln.startswith("#")]
+        rules = [ln.split("=", 1)[0].strip().lower() for ln in entries if "=" in ln]
+        terms = [ln for ln in entries if "=" not in ln]
+        # The stack's own refusals, for what this integration must never send:
+        # a duplicate, and a single-word left-hand side without `force`.
         assert len({term.lower() for term in terms}) == len(terms), terms
+        assert len(set(rules)) == len(rules), rules
+        assert all(" " in heard for heard in rules), rules
         self.glossaries[name] = text
-        return web.json_response({"name": name, "terms": len(terms)})
+        return web.json_response(
+            {"name": name, "terms": len(entries), "replacements": len(rules)}
+        )
 
     async def _speech(self, request: web.Request) -> web.Response:
         body = await request.json()
