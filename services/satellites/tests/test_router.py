@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import os
+import time
 import wave
 from email.parser import BytesParser
 from email.policy import HTTP
@@ -26,6 +27,7 @@ from voice_common import errors
 
 from app import audio
 from app.destinations import Echo
+from app import router as router_module
 from app.router import Rule, Rules, RuleSet, Router, current, routes
 
 NID = "94b97e7b8be8"
@@ -500,3 +502,61 @@ def test_the_wake_word_is_taken_off_the_front_of_the_transcript_and_nowhere_else
     assert strip_wake_phrase("Hey Jarvis.", "hey_jarvis") == ""
     assert strip_wake_phrase("ask jarvis about it", "hey_jarvis") == "ask jarvis about it"
     assert strip_wake_phrase("turn the lights off", "ptt") == "turn the lights off"
+
+
+# ---- Home Assistant's vocabulary ------------------------------------------------
+
+def stt_with(fake: Fake, *, engine: str | None, profiles: set[str]):
+    """stt.test answering like stt-stack: a transcription naming a glossary
+    profile it does not have is a 400 in its words; the rest name the engine."""
+    def handler(r: httpx.Request) -> httpx.Response:
+        name = multipart(r).get("glossary")
+        if name is not None and name.decode() not in profiles:
+            return httpx.Response(400, json={"error": {
+                "message": f"Unknown glossary profile {name.decode()!r}. This deployment "
+                           "has: none. See GET /glossaries.", "code": "invalid_value"}})
+        return httpx.Response(200, json={"text": fake.stt_text},
+                              headers={"x-stt-engine": engine} if engine else {})
+    fake.handlers["stt.test"] = handler
+
+
+def transcriptions(fake: Fake) -> list[dict[str, bytes]]:
+    return [multipart(r) for r in fake.seen if r.url.path == "/v1/audio/transcriptions"]
+
+
+async def test_home_assistants_names_go_with_every_transcription_and_are_boosted_on_parakeet(make, fake):
+    stt_with(fake, engine="parakeet", profiles={"home-assistant"})
+    router = make()
+    assert await router.transcribe(ONE_SECOND) == "what time is it"
+    await router.transcribe(ONE_SECOND)
+    first, second = transcriptions(fake)
+    # Boost waits for stt-stack to name its engine: Whisper refuses the field.
+    assert first["glossary"] == b"home-assistant" and "boost" not in first
+    assert (second["glossary"], second["boost"]) == (b"home-assistant", b"true")
+    assert fake.hosts() == ["stt.test", "stt.test"]
+
+
+async def test_whisper_takes_home_assistants_names_without_boost(make, fake):
+    stt_with(fake, engine="whisper", profiles={"home-assistant"})
+    router = make()
+    await router.transcribe(ONE_SECOND)
+    await router.transcribe(ONE_SECOND)
+    assert all(sent["glossary"] == b"home-assistant" and "boost" not in sent
+               for sent in transcriptions(fake))
+
+
+async def test_without_the_profile_the_utterance_is_heard_plain_and_the_name_left_off(make, fake, monkeypatch):
+    stt_with(fake, engine="parakeet", profiles=set())
+    router = make()
+    assert await router.transcribe(ONE_SECOND) == "what time is it"
+    await router.transcribe(ONE_SECOND)
+    named, plain, later = transcriptions(fake)
+    assert named["glossary"] == b"home-assistant"
+    assert "glossary" not in plain and "glossary" not in later
+
+    # Named again once GLOSSARY_RETRY_S has passed: the integration may have
+    # written the profile since.
+    clock = time.monotonic() + router_module.GLOSSARY_RETRY_S
+    monkeypatch.setattr(router_module.time, "monotonic", lambda: clock)
+    await router.transcribe(ONE_SECOND)
+    assert transcriptions(fake)[-2]["glossary"] == b"home-assistant"

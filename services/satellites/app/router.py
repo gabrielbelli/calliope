@@ -88,6 +88,14 @@ SPEAKER_RATE = 48000   # what the Korvo plays; Session.spk_rate for others
 MAX_TTS_CHARS = 4096
 # How long to wait for stt-stack's /health when the engine is not known yet.
 ENGINE_PROBE_S = 3.0
+# Home Assistant's own names (areas, exposed entities, their aliases), which
+# the Calliope integration keeps on stt-stack as this glossary profile
+# (clients/home-assistant/custom_components/calliope/vocabulary.py). Every
+# transcription names it; when stt-stack answers that it has no such profile,
+# the utterance is sent again without it and the name is left off for this
+# long.
+HA_GLOSSARY = "home-assistant"
+GLOSSARY_RETRY_S = 600.0
 
 RULE_ID = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
 WAKE_WORD = r"^(\*|[A-Za-z0-9][A-Za-z0-9 _.-]{0,63})$"
@@ -521,6 +529,8 @@ class Router:
         # reaches STT only under Whisper: Parakeet refuses the field (400).
         self.stt_engine: str | None = None
         self._engine_asked = False
+        # When stt-stack last said it has no HA_GLOSSARY.
+        self._glossary_missing: float | None = None
         self._own_client = client is None
         # follow_redirects stays False (httpx's default, stated so it is not
         # changed casually): a redirect would carry a destination's bearer
@@ -621,19 +631,39 @@ class Router:
                          "no language hint is sent", type(e).__name__)
         return self.stt_engine
 
+    def _names_glossary(self) -> bool:
+        """Whether to name HA_GLOSSARY: always, unless stt-stack said it has
+        no such profile within GLOSSARY_RETRY_S."""
+        return (self._glossary_missing is None
+                or time.monotonic() - self._glossary_missing >= GLOSSARY_RETRY_S)
+
     async def transcribe(self, pcm: bytes, hint: str | None = None) -> str:
         """The transcript. `hint` (a wake word's language) is sent only to an
         engine that takes one: Whisper does, and Parakeet refuses the field
-        with a 400 and detects the language itself."""
+        with a 400 and detects the language itself.
+
+        Home Assistant's names go with it as HA_GLOSSARY: hotwords on either
+        engine, and boosted into the decoder once stt-stack has named its
+        engine as Parakeet (Whisper refuses `boost` by name, and asking
+        /health for it would add a request to every turn). A profile
+        stt-stack does not have is a 400; the utterance is then transcribed
+        again without it."""
         if not self.stt_url:
             raise DestinationError("SATELLITES_STT_URL is not set, so nothing can be transcribed")
         pcm = pcm[:len(pcm) & ~1]  # whole samples only
         data = {"model": "whisper-1", "response_format": "json"}
         if hint and await self._engine() == "whisper":
             data["language"] = lang.primary(hint)  # Whisper takes ISO 639-1
-        r = await self.client.post(
-            f"{self.stt_url}/v1/audio/transcriptions", data=data, timeout=self.stt_timeout,
-            files={"file": ("utterance.wav", audio.wav(pcm, MIC_RATE, 1), "audio/wav")})
+        plain = dict(data)
+        if self._names_glossary():
+            data["glossary"] = HA_GLOSSARY
+            if self.stt_engine == "parakeet":
+                data["boost"] = "true"
+        wav = audio.wav(pcm, MIC_RATE, 1)
+        r = await self._post_stt(data, wav)
+        if "glossary" in data and r.status_code == 400 and "Unknown glossary profile" in r.text:
+            self._glossary_missing = time.monotonic()
+            r = await self._post_stt(plain, wav)
         engine = r.headers.get("x-stt-engine")
         if engine:
             self.stt_engine = engine.lower()
@@ -646,6 +676,11 @@ class Router:
         if not isinstance(text, str):
             raise DestinationError("STT answered a \"text\" that is not a string")
         return text.strip()
+
+    async def _post_stt(self, data: dict, wav: bytes) -> httpx.Response:
+        return await self.client.post(
+            f"{self.stt_url}/v1/audio/transcriptions", data=data, timeout=self.stt_timeout,
+            files={"file": ("utterance.wav", wav, "audio/wav")})
 
     async def synthesise(self, text: str, voice: str) -> bytes:
         if not self.tts_url:
