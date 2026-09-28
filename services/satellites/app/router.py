@@ -80,6 +80,7 @@ from voice_common.errors import ApiError
 
 from . import audio
 from . import language as lang
+from . import secret_store
 from .destinations import ENV_NAME, Destination, DestinationError, Echo, HaAssist, Url, _secret
 
 log = logging.getLogger("voice-satellites.router")
@@ -282,11 +283,27 @@ class Actions(Protocol):
 
 
 def env_status(destinations) -> dict[str, bool]:
-    """Each env var the destinations read, and whether it is set. Only ever
-    a boolean: this goes out over GET, and a value, a prefix or even a
-    length would be a start on the secret."""
+    """Each secret the destinations name, and whether it has a value, in the
+    environment or held by the hub (destinations._secret). Only ever a
+    boolean: this goes out over GET, and a value, a prefix or even a length
+    would be a start on the secret."""
     names = sorted({n for d in destinations for n in d.env_vars()})
-    return {n: bool(os.environ.get(n)) for n in names}
+    return {n: _secret(n) is not None for n in names}
+
+
+def secret_sources(names) -> dict[str, str]:
+    """Where each of `names` that has a value gets it: "environment" or "hub"
+    (secret_store.py). A name with no value is left out. Names and a word,
+    never a value, for the same reason as env_status. The environment is
+    named first because it wins."""
+    held = secret_store.current()
+    out = {}
+    for name in sorted(set(names)):
+        if os.environ.get(name):
+            out[name] = "environment"
+        elif held.get(name):
+            out[name] = "hub"
+    return out
 
 
 # ---- rules.json: the routing before wake words said what they do ------------------

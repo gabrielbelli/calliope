@@ -32,12 +32,14 @@ answers a sentence no intent matches with response_type "error" and a spoken
 spoken as before; NotUnderstood carries it so that a wake word with a
 `fallback` can hand the same transcript to a conversation instead.
 
-SECRETS ARE NAMED, NEVER HELD. A destination that needs a credential carries
-the NAME of an environment variable (token_env, api_key_env) and reads the
-value at call time. wake_words.json is written by an API that answers GET with
-every action, so a token stored in it would be one GET away from anyone with
-an API key, and in every backup of the data volume. Two things enforce that
-rather than hope for it:
+SECRETS ARE NAMED IN AN ACTION, AND NEVER HELD IN ONE. A destination that
+needs a credential carries the NAME of a secret (token_env, api_key_env) and
+reads the value at call time (_secret): from the process environment, or else
+from the keys the hub holds in secrets.json (secret_store.py), which the page
+can store a key into and never read one back from. Never from wake_words.json:
+it is written by an API that answers GET with every action, so a token stored
+in it would be one GET away from anyone with an API key. No route answers a
+value. Two things keep a value out of an action rather than hope for it:
 
   * every model forbids unknown fields, so {"token": "..."} pasted into an
     action is a validation error rather than a secret quietly saved;
@@ -74,6 +76,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from . import audio
 from . import language as lang
+from . import secret_store
 
 # Upper case only, on purpose: see the module docstring. Real env var names
 # may be lower case, but refusing that costs nothing here and turns "pasted
@@ -138,10 +141,16 @@ Url = Annotated[str, Field(pattern=HTTP_URL, max_length=500), AfterValidator(_ch
 
 
 def _secret(name: str | None) -> str | None:
-    """The value of a named variable, or None when unset or empty. An empty
-    value is treated as unset because `FOO=` in a compose file is how people
-    blank a variable, and "Bearer " with nothing after it is never right."""
-    return (os.environ.get(name) or None) if name else None
+    """The value of a named secret, or None: the process environment first,
+    then a key the hub holds (secret_store.py). Read on every request, so a
+    key stored or cleared from the page applies to the next one. An empty
+    variable is treated as unset because `FOO=` in a compose file is how
+    people blank a variable, and "Bearer " with nothing after it is never
+    right. This is the one place a name becomes a value: router.env_status
+    reads it too, so "set" means "the action will find a value"."""
+    if not name:
+        return None
+    return os.environ.get(name) or secret_store.current().get(name) or None
 
 
 def _json(r: httpx.Response, who: str) -> dict:

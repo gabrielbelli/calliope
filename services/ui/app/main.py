@@ -217,6 +217,11 @@ PROXIED: tuple[tuple[str, str], ...] = (
     # The Assist pipelines of the Home Assistant a wake word's action names,
     # listed by the hub with that action's token, for the pipeline picker.
     ("POST", "/satellites/ha/pipelines"),
+    # The key box of a language model word: an API key for the hub to hold,
+    # or null to clear it. The value is in the body and never the path,
+    # because this process logs `proxy=<path>` and no body; the hub has no
+    # route that answers a value back.
+    ("PUT", "/satellites/secrets"),
     ("GET", "/satellites/{nid}"),
     ("PATCH", "/satellites/{nid}"),
     ("GET", "/satellites/{nid}/listen"),

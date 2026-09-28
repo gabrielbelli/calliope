@@ -22,6 +22,8 @@ an assistant, and is the one place audio and firmware reach them from.
     GET   /satellites/wake-words       the wake words, which satellites hear each, and
                                        whether its model is ready
     PUT   /satellites/wake-words       replace them; live, no restart
+    PUT   /satellites/secrets          {"name", "value"}: store or clear an API key the
+                                       hub holds (secret_store.py); never read back
     GET   /satellites/{id}
     PATCH /satellites/{id}             name, config and the button mapping
     POST  /satellites/{id}/adopt | forget | identify | reboot | lights | tone | say
@@ -94,15 +96,16 @@ import httpx
 import numpy as np
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 from voice_common import auth, errors, health
 from voice_common import logging as voice_logging
 from voice_common.errors import ApiError
 
-from . import audio, dialogue, earcons, listening, signing, wakeword, wakewords_config
+from . import audio, dialogue, earcons, listening, secret_store, signing, wakeword, wakewords_config
 from . import output as outputs
 from . import language as lang
 from . import router as routing
+from .destinations import ENV_NAME
 from .mqtt import MqttBridge
 from .store import (DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions, reported_config,
                     satellite_config)
@@ -483,12 +486,19 @@ class Voice:
 
     def describe(self) -> dict:
         actions = wakewords_config.WordActions(self.assignment)
+        env = actions.env_vars()
+        held = secret_store.current()
         return {"available": wakewords_config.available(self.model_dir), "words": self.views(),
                 "ptt": self.assignment.ptt.model_dump(mode="json"),
                 "custom": wakewords_config.custom(self.model_dir),
-                # Which secret variables the actions name are set: names and
+                # Which secrets the actions name have a value: names and
                 # booleans only, never a value.
-                "env": actions.env_vars(), "warnings": actions.warnings(lookup_satellite_safe),
+                "env": env,
+                # And where each value lives, "environment" or "hub", for
+                # every name an action reads or the hub holds: what the page's
+                # key box says, and whether it offers Store or Clear.
+                "secrets": routing.secret_sources(set(env) | set(held.names())),
+                "warnings": actions.warnings(lookup_satellite_safe) + secret_warnings(env),
                 "load_error": self.assignment.load_error}
 
     def health(self) -> dict:
@@ -1801,6 +1811,19 @@ def _named_actions() -> list:
             if b is not None and b.action is not None]
 
 
+def secret_warnings(read: dict[str, bool]) -> list[str]:
+    """A sentence for each key the hub holds that nothing reads, and for a
+    secrets.json that did not load. `read` is the names the actions read (a
+    WordActions.env_vars()). A stored key no action names is either left over
+    or waiting for a Save; either way the page should say so rather than
+    leave a key on the volume nobody knows is there."""
+    held = secret_store.current()
+    out = [held.load_error] if held.load_error else []
+    out += [f"a key is stored on the hub as {name}, and no action reads it"
+            for name in held.names() if name not in read]
+    return out
+
+
 def lookup_satellite_safe(ref: str) -> tuple[str, str] | None:
     """lookup_satellite for a Voice that may exist before the hub does."""
     try:
@@ -1828,6 +1851,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     FIRMWARE_KEY = signing.load_public_key()
     EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ear")
     hub = Hub(Store(DATA_DIR))
+    # Before anything that could make a request with a key: the keys the hub
+    # holds, by name, beside the environment's (secret_store.py).
+    held = secret_store.configure(secret_store.SecretStore(DATA_DIR))
+    if held.names():
+        log.info("keys stored on the hub: %s", ", ".join(held.names()))
+    for name in held.names():
+        if os.environ.get(name):
+            log.warning("%s is set in the environment and stored on the hub; the environment's "
+                        "value is the one sent", name)
     # The page learns that a word finished downloading (or failed) from the
     # event stream, rather than by polling GET /satellites/wake-words.
     hub.voice = Voice(MODEL_DIR, FRONTEND, wakewords_config.Assignment.open(DATA_DIR, WAKE_WORDS),
@@ -2118,6 +2150,22 @@ class WakeWordsBody(BaseModel):
     ptt: dict | None = None
 
 
+class SecretBody(BaseModel):
+    """A key for the hub to hold, or None to clear it. Both in the body and
+    never in the path, because the gateway and voice-ui log paths. Refused
+    with a 422 that repeats neither (router.quiet_validation): a value with a
+    space or a control character in it, or over 4096 characters, a name that
+    is not a variable's, and any other field, so a key pasted as the name or
+    beside it is never stored under a name it is not."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=ENV_NAME)
+    # Required, so a body that leaves the value out is a 422 and not a clear.
+    value: Annotated[str, StringConstraints(min_length=1, max_length=4096,
+                                            pattern=secret_store.SECRET_VALUE)] | None
+
+
 def _mqtt_satellite(nid: str) -> None:
     if hub.bridge is not None:
         hub.bridge.publish_satellite(hub.describe(nid))
@@ -2190,6 +2238,29 @@ async def put_wake_words(body: WakeWordsBody) -> dict:
         f"{'every satellite' if w.satellites == ['*'] else w.satellites}"
         for w in words) or "none")
     hub.spawn(hub.voice.reconcile(), name="wake-words")
+    return hub.voice.describe()
+
+
+@app.put("/satellites/secrets")
+async def put_secret(body: SecretBody) -> dict:
+    """Store a key under a name the hub holds, or clear it (value null).
+    Answers the whole wake word view, as a Save does, so the page takes the
+    new `env` and `secrets` in the same turn as its other writes.
+
+    Refused with 409 when the environment already sets that name: the
+    environment wins (destinations._secret), and a stored value it shadows
+    would look stored and never be sent. Clearing is always allowed. The log
+    names the key, never its value."""
+    if body.value is not None and os.environ.get(body.name):
+        raise ApiError(409, f"{body.name} is set in the hub's environment, which wins over a key "
+                            "stored here: change it there, or name the key differently",
+                       code="set_in_environment", param="name")
+    try:
+        secret_store.current().set(body.name, body.value)
+    except OSError as e:
+        raise ApiError(500, f"could not write {secret_store.FILE}: {e.strerror or type(e).__name__}",
+                       type_="server_error") from None
+    log.info("secret %s %s", body.name, "cleared" if body.value is None else "stored on the hub")
     return hub.voice.describe()
 
 

@@ -161,17 +161,24 @@ class Firmware:
     signature: str | None = None
 
 
-def write_atomic(path: Path, data: str) -> None:
+def write_atomic(path: Path, data: str, mode: int | None = None) -> None:
     """Replace `path` with `data`, so that a reader, a crash or a power cut
     finds the old file or the new one and never half of either.
 
     A unique temporary name, so two requests saving at once cannot write into
     the same half-finished file, and fsync before the rename, because a
     rename can reach the disk before the data it points at: after a power cut
-    that is an empty satellites.json, which un-adopts every satellite."""
+    that is an empty satellites.json, which un-adopts every satellite.
+
+    `mode` is set on the temporary file before a byte is written, so the
+    file never exists, under either name, with wider permissions. mkstemp
+    already makes it 0600, but that is its implementation; secrets.json
+    (secret_store.py) states what it relies on."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
+        if mode is not None:
+            os.fchmod(fd, mode)
         with os.fdopen(fd, "w") as f:
             f.write(data)
             f.flush()

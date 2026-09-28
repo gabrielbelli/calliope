@@ -10,11 +10,17 @@ session (test_wakeword.py).
 
 The other three are integrations that must not reach out of a test run from a
 shell that happens to have them set.
+
+The keys the hub holds (secret_store.py) are a module global, set by each
+app start's lifespan. Every test starts with an empty store that writes
+nothing, so a key one test stored is never sent by the next.
 """
 
 from __future__ import annotations
 
 import pytest
+
+from app import secret_store
 
 
 @pytest.fixture(autouse=True)
@@ -22,3 +28,6 @@ def quiet_integrations(monkeypatch):
     monkeypatch.setenv("SATELLITES_WAKE_WORDS", "")
     for name in ("SATELLITES_MQTT_URL", "SATELLITES_FIRMWARE_PUBKEY", "SATELLITES_STT_URL"):
         monkeypatch.delenv(name, raising=False)
+    secret_store.configure(secret_store.SecretStore())
+    yield
+    secret_store.configure(secret_store.SecretStore())

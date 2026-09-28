@@ -1202,6 +1202,10 @@ SATELLITES_PATHS = (
     # Home Assistant's Assist pipelines, for the wake word's pipeline picker:
     # above /satellites/{nid} too, a POST with no twin under that pattern.
     ("POST", "/satellites/ha/pipelines"),
+    # An API key the hub holds for a language model word. The name and the
+    # value travel in the body, never the path, because _log records paths
+    # and never bodies. Above /satellites/{nid} too: PUT has no twin there.
+    ("PUT", "/satellites/secrets"),
     ("GET", "/satellites/{nid}"),
     ("PATCH", "/satellites/{nid}"),
     ("GET", "/satellites/{nid}/listen"),
