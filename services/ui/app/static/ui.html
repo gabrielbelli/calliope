@@ -4072,10 +4072,12 @@ const SAT_COPY = {
   fixLang: "Write the language as a tag, for example de or nl-BE.",
   fixUrl: "Write the address in full, starting with https or http.",
   fixUserinfo: "Leave the user and password out of the address; name a token variable instead.",
+  fixUserinfoKey: "Leave the user and password out of the address; name a key under Key name instead.",
   fixModel: "Name the model to ask, as the provider lists it.",
   fixMaxTokens: "Make the reply limit a whole number from 1 to 8192.",
   fixEnvNeeded: "Name the variable that holds Home Assistant's token.",
   fixEnv: "Write the name of the variable that holds the token, never the token itself.",
+  fixEnvKey: "Write the key's name in capitals, digits and underscores, never the key itself.",
   fixFallback: "{word} is not a conversation word, so it cannot take over.",
   fixFollow: "Keep listening for 1 to 60 seconds.",
   fixCooldown: "Make the cooldown 0 to 600 seconds.",
@@ -5444,14 +5446,17 @@ function wakeProblem(w, words) {
   if (d.type !== "echo") {
     const url = d.type === "llm" ? d.base_url : d.url;
     if (!url || url.length > 500 || !WAKE_URL.test(url)) return SAT_COPY.fixUrl;
-    if (url.split("://")[1].split("/")[0].includes("@")) return SAT_COPY.fixUserinfo;
+    /* In the words of the field beside it: a language model's is Key name. */
+    if (url.split("://")[1].split("/")[0].includes("@")) {
+      return d.type === "llm" ? SAT_COPY.fixUserinfoKey : SAT_COPY.fixUserinfo;
+    }
   }
   if (d.type === "llm" && !d.model) return SAT_COPY.fixModel;
   if (d.type === "llm" && "max_tokens" in d
       && !(Number.isInteger(d.max_tokens) && wakeWithin(d.max_tokens, 1, 8192))) return SAT_COPY.fixMaxTokens;
   const env = d.type === "llm" ? d.api_key_env : d.token_env;
   if (WAKE_HA.includes(d.type) && !env) return SAT_COPY.fixEnvNeeded;
-  if (env && !WAKE_ENV.test(env)) return SAT_COPY.fixEnv;
+  if (env && !WAKE_ENV.test(env)) return d.type === "llm" ? SAT_COPY.fixEnvKey : SAT_COPY.fixEnv;
   if (w.mode === "command" && a.fallback) {
     const to = words.find(x => x.name === a.fallback);
     if (!to || to.mode !== "conversation") return satText("fixFallback", { word: wwLabel(a.fallback) });

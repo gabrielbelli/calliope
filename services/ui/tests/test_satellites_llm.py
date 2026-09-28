@@ -23,6 +23,7 @@ What they prevent:
     sent, or cleared without a question, or pasted into a box that nothing
     can store from, where it stayed;
   * a key box that asked a password manager to make up a password;
+  * a language model word's fixes in Home Assistant's words, about a token;
   * a Test that saves, or that tests the saved action instead of the form.
 """
 
@@ -276,6 +277,27 @@ def test_the_key_box_is_off_when_store_is_and_a_key_left_in_it_is_emptied(tmp_pa
     assert got["saidOnce"] == 1, "an empty box was said to be emptied"
     assert got["back"] == {"value": "", "disabled": False}
     assert got["sent"] == []
+
+
+def test_a_language_model_words_fixes_say_key_where_home_assistants_say_token(tmp_path):
+    """The field reads Key name on a language model word; a pasted key or an
+    address with a user and password there was answered in Home Assistant's
+    words, about a token."""
+    got = run(tmp_path, LLM_HUB + f"""
+      await satellitesRefresh(); await settle();
+      wakeEdit("hey_jarvis", w => wakeField(w, "d.env", "{KEY}"));
+      const pasted = problemOf("hey_jarvis");
+      wakeEdit("hey_jarvis", w => {{ wakeField(w, "d.env", "SATELLITES_LLM_API_KEY");
+                                     wakeField(w, "d.base_url", "https://me:pw@llm.example.com/v1"); }});
+      const userinfo = problemOf("hey_jarvis");
+      console.log(JSON.stringify({{ pasted, userinfo }}));
+    """)
+    assert got["pasted"] == ("Write the key's name in capitals, digits and underscores, never the "
+                             "key itself.")
+    assert got["userinfo"] == ("Leave the user and password out of the address; name a key under "
+                               "Key name instead.")
+    for said in got.values():
+        assert "token" not in said and "variable" not in said, said
 
 
 def test_clearing_a_key_asks_first_and_sends_null(tmp_path):
