@@ -206,6 +206,21 @@ A stack running Whisper (`STT_MODEL=whisper`) is read from
 `GET /health` at setup. The entity is then `stt.calliope_whisper`, offers
 Whisper's languages, and sends the language as a hint.
 
+**Vocabulary.** The integration keeps a glossary profile named
+`home-assistant` on the stack. It holds the names of your floors and areas,
+the names of the entities exposed to Assist, the aliases of all three, and a
+short list of command words ("liga", "apaga", "turn on"…) for the languages
+your pipelines use. Every transcription names that profile. Parakeet boosts
+the terms in its decoder, and Whisper takes them as hotwords. The terms only
+bias recognition: a term never replaces another word.
+
+The profile is written about 10 seconds after Home Assistant starts, and again
+10 seconds after an area, floor, device, entity or exposure setting changes.
+It is also checked every hour, and written only when it changed. It holds at
+most 200 terms (the stack's per-request boost limit), taken in the order
+above. The satellite hub asks for the same profile when it transcribes a
+command itself.
+
 **Text-to-speech.** The languages and voices come from `GET /voices` at setup.
 A Kokoro voice name starts with its language (`pf_dora` is Brazilian
 Portuguese). The default voice for English (UK) is `bm_george`, for English
@@ -262,7 +277,6 @@ pipeline with both engines, the actions, and diagnostics.
 
 - An Assist satellite entity. The hub runs its own wake words, endpointing and
   routing, so a satellite is not an Assist satellite in Home Assistant's sense.
-- Glossary profiles for speech-to-text. The engine is called without one.
 - A satellite renamed on the hub keeps its old name in Home Assistant until it
   is renamed there too.
 

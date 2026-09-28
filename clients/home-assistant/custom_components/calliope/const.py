@@ -15,6 +15,11 @@ EXAMPLE_URL: Final = "https://calliope.example.com"
 # "kind" (see KIND_* below).
 EVENT_CALLIOPE: Final = "calliope_event"
 
+# The glossary profile this integration keeps on the stack's speech-to-text:
+# Home Assistant's own names (vocabulary.py). The hub asks for it by this name
+# too, so the two must not drift.
+GLOSSARY_PROFILE: Final = "home-assistant"
+
 # What happened, as the event entity's event_type, a device trigger's type
 # and the "kind" of a calliope_event. One vocabulary for all three.
 KIND_WAKE_WORD: Final = "wake_word"

@@ -129,6 +129,9 @@ class FakeCalliope:
         self.stt_model = "parakeet"
         self.health_body: dict[str, Any] | None = None
         self.transcript = "turn on the kitchen lights"
+        # Glossary profiles by name, as PUT /glossaries/{name} stored them.
+        self.glossaries: dict[str, str] = {}
+        self.glossary_status: int | None = None  # answer PUT with this
         self.ptt_route = False
         self.events_status: int | None = None  # answer /satellites/events with this
         self.requests: list[tuple[str, str, Any]] = []
@@ -149,6 +152,7 @@ class FakeCalliope:
         r.add_get("/voices", self._voices)
         r.add_post("/v1/audio/transcriptions", self._transcribe)
         r.add_post("/v1/audio/speech", self._speech)
+        r.add_put("/glossaries/{name}", self._put_glossary)
         r.add_get("/satellites", self._list)
         r.add_get("/satellites/events", self._events)
         r.add_get("/satellites/wake-words", self._wake_words)
@@ -246,6 +250,21 @@ class FakeCalliope:
             k: (v if isinstance(v, str) else v.file.read()) for k, v in form.items()
         }
         self.requests.append(("POST", "/v1/audio/transcriptions", fields))
+        name = fields.get("glossary")
+        if name and name not in self.glossaries:
+            return envelope(
+                400,
+                f"Unknown glossary profile {name!r}. This deployment has: "
+                f"{', '.join(self.glossaries) or 'none'}. See GET /glossaries.",
+                "invalid_value",
+            )
+        if "boost" in fields and self.stt_model == "whisper":
+            return envelope(
+                400,
+                "Unsupported parameter: 'boost' is not supported by the "
+                "'whisper' engine",
+                "unsupported_parameter",
+            )
         if "language" in fields and self.stt_model == "parakeet":
             return envelope(
                 400,
@@ -256,6 +275,21 @@ class FakeCalliope:
         return web.json_response(
             {"text": self.transcript}, headers={"x-stt-engine": self.stt_model}
         )
+
+    async def _put_glossary(self, request: web.Request) -> web.Response:
+        name = request.match_info["name"]
+        body = await request.json()
+        self.requests.append(("PUT", f"/glossaries/{name}", body))
+        if self.glossary_status is not None:
+            return envelope(self.glossary_status, "glossary store unavailable")
+        text = body["text"]
+        lines = [ln.strip() for ln in text.splitlines()]
+        terms = [ln for ln in lines if ln and not ln.startswith("#")]
+        # The stack's own refusals, for what this integration must never send.
+        assert not any("=" in term for term in terms), terms
+        assert len({term.lower() for term in terms}) == len(terms), terms
+        self.glossaries[name] = text
+        return web.json_response({"name": name, "terms": len(terms)})
 
     async def _speech(self, request: web.Request) -> web.Response:
         body = await request.json()

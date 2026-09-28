@@ -36,6 +36,7 @@ from .const import (
     QUIET_HUB_EVENTS,
     SETTING_KEYS,
 )
+from .vocabulary import Vocabulary
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class CalliopeRuntime:
     coordinator: CalliopeCoordinator
     health: dict[str, Any]
     voices: list[str] = field(default_factory=list)
+    vocabulary: Vocabulary | None = None
 
 
 def signal_voice(entry_id: str, satellite_id: str) -> str:

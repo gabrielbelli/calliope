@@ -15,8 +15,8 @@ from homeassistant.components import stt
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .api import CalliopeError, wav_bytes
-from .const import PARAKEET_LANGUAGES, WHISPER_LANGUAGES
+from .api import CalliopeApiError, CalliopeError, wav_bytes
+from .const import GLOSSARY_PROFILE, PARAKEET_LANGUAGES, WHISPER_LANGUAGES
 from .coordinator import CalliopeConfigEntry
 from .entity import service_device_info
 
@@ -52,6 +52,7 @@ class CalliopeSpeechToText(stt.SpeechToTextEntity):
     def __init__(self, entry: CalliopeConfigEntry) -> None:
         """Decide the languages from the engine the stack runs."""
         self._client = entry.runtime_data.client
+        self._vocabulary = entry.runtime_data.vocabulary
         self._engine = stt_engine(entry.runtime_data.health)
         self._attr_translation_key = self._engine
         self._attr_unique_id = f"{entry.entry_id}_stt"
@@ -100,13 +101,39 @@ class CalliopeSpeechToText(stt.SpeechToTextEntity):
         language = None
         if self._engine == "whisper" and metadata.language:
             language = metadata.language.split("-")[0].lower()
+        vocabulary = self._vocabulary
+        glossary = GLOSSARY_PROFILE if vocabulary and vocabulary.available else None
         try:
-            text = await self._client.transcribe(
-                wav,
-                model="whisper-1" if self._engine == "whisper" else "parakeet",
-                language=language,
-            )
+            text = await self._transcribe(wav, language, glossary)
+            if text is None and vocabulary is not None:
+                # The stack no longer has the profile (its volume was reset):
+                # this utterance is heard without it, and it is written again.
+                vocabulary.async_lost()
+                text = await self._transcribe(wav, language, None)
         except CalliopeError as err:
             _LOGGER.error("Calliope could not transcribe: %s", err)
             return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
-        return stt.SpeechResult(text.strip(), stt.SpeechResultState.SUCCESS)
+        return stt.SpeechResult((text or "").strip(), stt.SpeechResultState.SUCCESS)
+
+    async def _transcribe(
+        self, wav: bytes, language: str | None, glossary: str | None
+    ) -> str | None:
+        """The transcript, with Home Assistant's vocabulary when the stack has
+        it: boosted into Parakeet's decoder, and as hotwords on Whisper, which
+        has no boost switch. None when the stack refused the profile's name."""
+        try:
+            return await self._client.transcribe(
+                wav,
+                model="whisper-1" if self._engine == "whisper" else "parakeet",
+                language=language,
+                glossary=glossary,
+                boost=glossary is not None and self._engine == "parakeet",
+            )
+        except CalliopeApiError as err:
+            # The stack's own words for a profile it does not have; its code
+            # is the generic invalid_value.
+            if glossary and err.status == 400 and err.message.startswith(
+                "Unknown glossary profile"
+            ):
+                return None
+            raise

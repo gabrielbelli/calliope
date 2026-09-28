@@ -147,19 +147,37 @@ class CalliopeClient:
         return await self._request("GET", "/voices")
 
     async def transcribe(
-        self, wav: bytes, *, model: str = "parakeet", language: str | None = None
+        self,
+        wav: bytes,
+        *,
+        model: str = "parakeet",
+        language: str | None = None,
+        glossary: str | None = None,
+        boost: bool = False,
     ) -> str:
-        """POST /v1/audio/transcriptions with a WAV; the transcript's text."""
+        """POST /v1/audio/transcriptions with a WAV; the transcript's text.
+
+        `glossary` names a profile on the stack; `boost` also sends its terms
+        into Parakeet's decoder, which Whisper refuses by name."""
         form = aiohttp.FormData()
         form.add_field("file", wav, filename="speech.wav", content_type="audio/wav")
         form.add_field("model", model)
         form.add_field("response_format", "json")
         if language:
             form.add_field("language", language)
+        if glossary:
+            form.add_field("glossary", glossary)
+        if boost:
+            form.add_field("boost", "true")
         result = await self._request(
             "POST", "/v1/audio/transcriptions", data=form, timeout=AUDIO_TIMEOUT
         )
         return str((result or {}).get("text") or "")
+
+    async def put_glossary(self, name: str, text: str) -> None:
+        """PUT /glossaries/{name}: create or replace a profile. The stack
+        writes nothing if any line is refused, and says which."""
+        await self._request("PUT", f"/glossaries/{name}", json_body={"text": text})
 
     async def speech_pcm(
         self, text: str, voice: str, speed: float | None = None

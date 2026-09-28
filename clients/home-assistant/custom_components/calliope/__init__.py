@@ -20,6 +20,7 @@ from .coordinator import (
 )
 from .entity import service_device_info
 from .services import async_setup_services
+from .vocabulary import Vocabulary
 
 PLATFORMS = [
     Platform.BINARY_SENSOR,
@@ -58,7 +59,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: CalliopeConfigEntry) -> 
 
     coordinator = CalliopeCoordinator(hass, entry, client)
     entry.runtime_data = CalliopeRuntime(
-        client=client, coordinator=coordinator, health=health, voices=voices
+        client=client,
+        coordinator=coordinator,
+        health=health,
+        voices=voices,
+        vocabulary=Vocabulary(hass, client),
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -68,6 +73,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: CalliopeConfigEntry) -> 
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     coordinator.async_start()
+    for unsub in entry.runtime_data.vocabulary.async_start():
+        entry.async_on_unload(unsub)
     return True
 
 
