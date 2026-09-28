@@ -411,15 +411,22 @@ def test_a_firmware_image_is_uploaded_only_with_its_version_and_the_form_is_empt
       await firmwareUpload();
       const blank = { uploads: uploads.length, notes: notes.slice() };
       $("fwversion").value = "v0.3.1-4-g1a2b3c4";
+      $("fwmodel").value = " ";
       await firmwareUpload();
-      console.log(JSON.stringify({ blank, uploads, left: [$("fwfile").value, $("fwversion").value,
-                                                          $("fwsig").value] }));
+      const nomodel = { uploads: uploads.length, note: notes[notes.length - 1] };
+      $("fwmodel").value = "esp32-korvo-v1.1";
+      await firmwareUpload();
+      console.log(JSON.stringify({ blank, nomodel, uploads, left: [$("fwfile").value, $("fwversion").value,
+                                                                   $("fwsig").value] }));
     """)
     assert got["blank"]["uploads"] == 0, "an image went up with a version made up from its file name"
     # The build, where the version is stamped. Device shows the one each
     # satellite runs NOW, and an image labelled with it was never offered.
     assert got["blank"]["notes"] == [["warn", "Type the version its build stamped: git describe "
                                               "--always --dirty --tags, run where it was built."]], got
+    # Nor with no model, which no satellite reports, so it is never offered.
+    assert got["nomodel"] == {"uploads": 0, "note": ["warn", "Type the model the satellites report, "
+                                                             "as each one's Device shows it."]}, got
     assert got["uploads"] == ["/satellites/firmware?model=esp32-korvo-v1.1&version=v0.3.1-4-g1a2b3c4"], got
     assert got["left"] == ["", "", ""], "the last image's version waits in the box for the next one"
 
@@ -524,4 +531,20 @@ def test_a_word_the_hub_left_with_no_satellite_does_not_hold_every_save(tmp_path
     assert got["other"] == {"off": False, "said": "Unsaved changes."}, got
     assert got["emptied"] == {"off": True, "said": "Pick at least one satellite for hey jarvis, "
                                                    "or choose Every satellite."}, got
+
+
+def test_rename_with_an_empty_name_says_so_and_sends_nothing(tmp_path):
+    """Clearing the Name and pressing Rename did nothing and said nothing: a
+    button that did not work."""
+    got = run(tmp_path, """
+      const patches = [];
+      const real = json;
+      json = async (path, o) => ((o && o.method === "PATCH") ? (patches.push(path), {}) : real(path, o));
+      const field = { value: "  ", focus() { this.focused = true; } };
+      const li = { _n: hub.satellites[0], dataset: { id: "aaaaaaaaaaaa" },
+                   querySelector: sel => sel === ".sat-rename input" ? field : stand() };
+      await satelliteAct(li, "rename", stand());
+      console.log(JSON.stringify({ patches, focused: !!field.focused }));
+    """)
+    assert got == {"patches": [], "focused": True}, got
 

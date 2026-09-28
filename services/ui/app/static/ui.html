@@ -2598,10 +2598,10 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
                     <input type="file" id="fwfile" accept=".bin,application/octet-stream"></div>
                   <div><label for="fwversion">Version</label>
                     <input type="text" id="fwversion" maxlength="64" placeholder="e.g. v0.3.1-4-g1a2b3c4"
-                           spellcheck="false" autocomplete="off"></div>
+                           spellcheck="false" autocomplete="off" required></div>
                   <div><label for="fwmodel">Model</label>
                     <input type="text" id="fwmodel" maxlength="64" value="esp32-korvo-v1.1"
-                           spellcheck="false" autocomplete="off"></div>
+                           spellcheck="false" autocomplete="off" required></div>
                 </div>
                 <!-- A satellite built with a signing key installs only signed
                      images, and refuses an unsigned one at the end of the
@@ -4068,6 +4068,7 @@ const SAT_COPY = {
   updAvail: "{v} is available for this model.",
   updSkipped: "Not started: {why}.",
   sayEmpty: "Type something for it to say first.",
+  renameEmpty: "Type a name first.",
   blinking: "Blinking white for five seconds.",
   recording: "Recording five seconds…",
   channels: "Four channels: the speaker loopback, then the three microphones.",
@@ -4121,6 +4122,7 @@ const SAT_COPY = {
      image labelled with that is one every satellite already "runs", so it
      was never offered and Update every satellite greyed for good. */
   fwVersion: "Type the version its build stamped: git describe --always --dirty --tags, run where it was built.",
+  fwModel: "Type the model the satellites report, as each one's Device shows it.",
   routeEmpty: "Type something to send to the word's action.",
   evLost: "Not receiving activity from the hub; it reconnects when the hub answers.",
   sumEvLost: "not connected",
@@ -5253,8 +5255,10 @@ async function satelliteAct(li, act, button) {
   }
   const text = act === "say" ? q(".sat-sayform input").value.trim() : "";
   if (act === "say" && !text) { satSaid(host, SAT_COPY.sayEmpty); return; }
+  /* An empty name is said, as an empty Say is: pressed, it was a button
+     that did nothing. */
   const renamed = act === "rename" ? q(".sat-rename input").value.trim() : "";
-  if (act === "rename" && !renamed) return;
+  if (act === "rename" && !renamed) { satSaid(host, SAT_COPY.renameEmpty); q(".sat-rename input").focus(); return; }
   const img = li._img;
   if (act === "update" && !img) return;
   const ask = act === "reboot" ? satText("askReboot", { name })
@@ -7461,7 +7465,11 @@ async function firmwareUpload() {
   if (!file) { note(host, "warn", SAT_COPY.fwChoose); return; }
   const version = $("fwversion").value.trim();
   if (!version) { note(host, "warn", SAT_COPY.fwVersion); $("fwversion").focus(); return; }
+  /* Nor is a model: the hub takes an empty one, and an image whose model no
+     satellite reports is never offered to any, with "No satellite of this
+     model is online" as the only clue. */
   const model = $("fwmodel").value.trim();
+  if (!model) { note(host, "warn", SAT_COPY.fwModel); $("fwmodel").focus(); return; }
   const sig = $("fwsig").value.trim();
   const done = busy($("fwupload"), "Uploading…");
   try {
