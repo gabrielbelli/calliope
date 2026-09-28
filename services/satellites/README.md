@@ -89,7 +89,7 @@ name.
 | `WS /nodes/ws` | The same handler, under the feature's name until 2026-09-25. A board in the field runs firmware that connects here, and its next firmware arrives over this socket, so the old path stays until no board reports firmware from before the rename ([ADR 0013](../../docs/adr/0013-satellites-one-door.md#renamed)). The gateway relays both. |
 | `GET /satellites` | Every satellite seen since the hub started, adopted or not, with its listening state, earcons and `wake_words` (the names assigned to it) |
 | `GET /satellites/events` | Server-sent events: buttons, wake words, routing, conversations and their turns, triggers, status, updates, satellites coming and going, a wake word's model becoming ready, a volume set with the satellite's own buttons (`volume`), speaker or jack (`output`) |
-| `GET /satellites/wake-words` | `{"available", "words", "ptt", "custom", "env", "warnings", "load_error"}`: the names the hub can load, each word's whole entry with its `state` and `error`, push-to-talk's entry, and which secret variables the actions name are set. [Wake words](#wake-words). |
+| `GET /satellites/wake-words` | `{"available", "words", "ptt", "custom", "env", "secrets", "warnings", "load_error"}`: the names the hub can load, each word's whole entry with its `state` and `error`, push-to-talk's entry, which secrets the actions name have a value, and where each value lives. [Wake words](#wake-words). |
 | `PUT /satellites/wake-words` | `{"words": [...], "ptt": {...}}`: replace them all, live. A field an entry leaves out keeps its saved value. A bad set is a 422 and the old one stays. |
 | `POST /satellites/wake-words/models?name=` | A custom wake word: the `.onnx` as the raw body, checked to be an openWakeWord classifier (input `[batch, 16, 96]`, under 5 MB) before it is written. Then offered in `available` and assigned like a built-in. |
 | `DELETE /satellites/wake-words/models/{name}` | Only a custom model, and only once no wake word uses it (409 otherwise). |
@@ -113,7 +113,7 @@ name.
 | `POST /satellites/ha/pipelines` | `{"url", "token_env"}`: Home Assistant's Assist pipelines and its preferred one, asked with the token that variable holds, for an `ha_assist` word's picker. 409 `token_missing` when it holds none. |
 | `POST /satellites/llm/models` | `{"base_url", "api_key_env"}`: `{"models": [...]}`, the ids a language model server lists at `GET {base_url}/models`, asked with that key, for an `llm` word's picker. 502 in the server's own words, 504 after 10 s. |
 | `POST /satellites/llm/test` | An `llm` destination, saved or not: one short question through the same path a turn takes, with no TTS. `{"model", "reply", "first_token_ms", "total_ms", "token_limit"}`, or 502 in the provider's words, or 504 after 25 s. |
-| `PUT /satellites/secrets` | `{"name": "OPENAI_API_KEY", "value": "..."}`: store an API key on the hub under that name, or clear it with `"value": null`. Answers the wake word view. No route reads a value back. 409 `set_in_environment` when the environment already sets the name. |
+| `PUT /satellites/secrets` | `{"name": "OPENAI_API_KEY", "value": "..."}`: store an API key on the hub under that name, or clear it with `"value": null`. Answers the wake word view. No route reads a value back. 409 `set_in_environment` when the environment already sets the name. [Keys](#keys). |
 | `GET /satellites/firmware` | Uploaded images |
 | `POST /satellites/firmware?model=&version=&signature=` | The `.bin` as the raw body. It must start with the ESP32 image magic (0xE9) and fit a 4 MB slot. `signature` is base64 or base64url DER ECDSA. |
 | `DELETE /satellites/firmware/{sha256}` | |
@@ -273,8 +273,9 @@ The Satellites tab edits the same entries through `GET` and `PUT
    "silence_ms": 800},
   {"name": "hey_jarvis", "threshold": 0.5, "satellites": ["*"],
    "mode": "conversation", "language": "en",
-   "action": {"destination": {"type": "llm", "base_url": "http://ollama:11434/v1",
-                              "model": "llama3.2", "system": "Be brief."},
+   "action": {"destination": {"type": "llm", "base_url": "https://api.openai.com/v1",
+                              "model": "<a model id the provider lists>",
+                              "api_key_env": "OPENAI_API_KEY", "system": "Be brief."},
               "reply_to": "same"},
    "conversation": {"follow_up_s": 8, "silence_ms": 600, "end_phrases": null}},
   {"name": "lumos", "threshold": 0.7, "satellites": ["94b97e7b8be8"],
@@ -298,22 +299,45 @@ The Satellites tab edits the same entries through `GET` and `PUT
 The file's `ptt` block is push-to-talk's own entry, without a name, threshold
 or satellites. It cannot be a trigger.
 
-**Destinations.** A destination that needs a credential names an environment
-variable and never holds the value. Unknown fields are refused, a variable
-name must look like one (so a pasted token is a 422), and a URL with a user
-and password is refused. `GET /satellites/wake-words` says in `env` which
-named variables are set, as booleans.
+**Destinations.** A destination that needs a credential names it and never
+holds it: `token_env` or `api_key_env` is the name of a secret, whose value
+the hub reads on every request from its environment or from the keys it holds
+([Keys](#keys)). Unknown fields are refused, a name must look like a
+variable's (so a pasted token is a 422), and a URL with a user and password is
+refused. `GET /satellites/wake-words` says in `env` which named secrets have a
+value, as booleans, and in `secrets` where each value lives.
 
 | `type` | Fields | |
 |---|---|---|
 | `ha_conversation` | `url`, `token_env` (`SATELLITES_HA_TOKEN`), `agent_id`, `timeout` (15) | Home Assistant's `POST /api/conversation/process`, with the language that was spoken |
 | `ha_assist` | `url`, `token_env`, `pipeline` (an Assist pipeline id, picked by name on the page; unset, HA's preferred one), `timeout` | An Assist pipeline over HA's websocket API, **set up in Home Assistant**: it hears the command with its own speech-to-text, understands it with the satellite's own HA device (so "the lights" are that room's), and speaks the reply with its own text-to-speech and voice, in its own language. The word's language and voice are not read. A pipeline with no speech-to-text or text-to-speech leaves that part to Calliope's own. |
-| `llm` | `base_url`, `model`, `system`, `api_key_env` (`SATELLITES_LLM_API_KEY`), `max_tokens` (400), `timeout` (30), `stream` (true) | Any OpenAI-compatible `/chat/completions`, streamed, with the conversation so far |
+| `llm` | `base_url`, `model`, `system`, `api_key_env` (`SATELLITES_LLM_API_KEY`), `max_tokens` (400), `timeout` (30), `stream` (true) | Any OpenAI-compatible `POST /chat/completions`, hosted or your own ([providers](#language-model-providers)), streamed, with the conversation so far. It sends `model`, `messages`, the token limit and `stream`, and no `temperature`. The limit goes as `max_tokens`; a server that refuses that and asks for `max_completion_tokens` (OpenAI's reasoning and GPT-5-class models) is asked again once with that name, and the name is kept per model until the hub restarts. A `base_url` with `/chat/completions` on the end is saved without it. Only the answer's text is spoken, never reasoning (`reasoning_content`, `reasoning`, a `<think>` block, a "thinking" part), and a model that spent its whole `max_tokens` thinking is an error that says so. A refusal is shown in the provider's words, with any key in it hidden. |
 | `webhook` | `url`, `token_env`, `timeout` (15) | POST `{satellite, satellite_id, wake_word, mode, text, language, audio_seconds, history}`; a JSON `reply` string is spoken |
 | `echo` | | Says back what it heard |
 
 Both Home Assistant destinations keep HA's `conversation_id` for as long as a
 conversation lasts, so HA keeps its own context between turns.
+
+#### Language model providers
+
+Any server that answers OpenAI's `POST /chat/completions` works. The
+Satellites tab's Provider list fills in these base URLs, and a model is picked
+from the ids the server lists at `GET {base_url}/models` or typed.
+
+| Provider | `base_url` | |
+|---|---|---|
+| OpenAI | `https://api.openai.com/v1` | |
+| Anthropic | `https://api.anthropic.com/v1` | Its OpenAI compatibility layer. Its `/models` may want its own `x-api-key` header, so the list can be empty: type the id. |
+| OpenRouter | `https://openrouter.ai/api/v1` | Ids are `vendor/model`, several hundred of them: type to narrow the list. |
+| Groq | `https://api.groq.com/openai/v1` | |
+| Mistral | `https://api.mistral.ai/v1` | |
+| DeepSeek | `https://api.deepseek.com` | |
+| Your own | e.g. `http://llm.example.com:8080/v1` | llama.cpp's server, vLLM, Ollama's `/v1`. Usually no key: set `api_key_env` to `null`, or leave the variable it names unset. The address is the hub's view of the network, so `localhost` is the hub's own container. |
+
+The list shows every id the server returns, including models that cannot
+chat (embeddings, speech). The Satellites tab's Test asks the form as it
+stands one short question through `POST /satellites/llm/test` and shows how
+long the first words and the whole reply took.
 
 **A save merges by name.** A field an entry leaves out keeps what was saved
 for that name, so a client that knows only `name`, `threshold` and
@@ -374,6 +398,33 @@ names each one left behind. The hub writes the file as version 2 and leaves
 `rules.json` where it is, untouched. A `rules.json` that does not load
 migrates nothing, and those words route nowhere, as before, until they are
 given an action.
+
+### Keys
+
+An action names its key (`api_key_env`, `token_env`) and never holds it. The
+hub reads the value on every request, from one of two places, so a change
+applies from the next turn with no restart.
+
+1. **The hub's environment**, like any other setting: `OPENAI_API_KEY` in the
+   container's secret settings. The environment wins.
+2. **A key stored on the hub**, from a language model word's API key box on
+   the Satellites tab, or with `PUT /satellites/secrets` and `{"name":
+   "OPENAI_API_KEY", "value": "..."}`; `"value": null` clears it. The hub
+   keeps it in `secrets.json` in `SATELLITES_DATA_DIR`, mode 0600, beside
+   `wake_words.json` and never in it. Clearing the last key removes the file.
+
+No route answers a value, so a stored key is never shown again. `GET
+/satellites/wake-words` says in `secrets` which names have a value and where
+(`"environment"` or `"hub"`), and warns about a stored key that no action
+reads. The name and the value travel in the request body, because the
+gateway and voice-ui log paths. The hub refuses a key under a name the
+environment already sets, with 409 `set_in_environment`, because it would
+never send that value. A 422 says what was wrong and never repeats what was
+sent. The log names a key and never its value.
+
+**The data volume's backups hold every stored key.** Keep a key in the
+environment instead if that is not acceptable.
+[ADR 0015](../../docs/adr/0015-the-hub-may-hold-a-key.md) has the reasoning.
 
 ### Lights
 
@@ -717,7 +768,7 @@ phrase in macOS's default voice peaked at 0.05, and in Samantha and Daniel at
 
 | Variable | Default | |
 |---|---|---|
-| `SATELLITES_DATA_DIR` | `/data` | `satellites.json`, `rules.json`, `wake_words.json`, `firmware/` and `models/`. Mount a volume: losing it un-adopts every satellite. A volume from before the rename holds `nodes.json` instead; the hub reads it once and writes `satellites.json`, and leaves the old file where it is. |
+| `SATELLITES_DATA_DIR` | `/data` | `satellites.json`, `rules.json`, `wake_words.json`, `secrets.json`, `firmware/` and `models/`. Mount a volume: losing it un-adopts every satellite. `secrets.json` holds the API keys stored from the Satellites tab, mode 0600, so the volume's backups hold them too ([Keys](#keys)). A volume from before the rename holds `nodes.json` instead; the hub reads it once and writes `satellites.json`, and leaves the old file where it is. |
 | `SATELLITES_TTS_URL` | unset | tts-stack's base URL, for `say` and every reply. Unset, `say` answers 503 and names this variable. |
 | `SATELLITES_TTS_VOICE` | `bm_george` | |
 | `SATELLITES_STT_URL` | unset | stt-stack's base URL. Unset, wake words are still heard and published, and routing says there is no STT. |
@@ -729,7 +780,7 @@ phrase in macOS's default voice peaked at 0.05, and in Samantha and Daniel at
 | `SATELLITES_MQTT_PREFIX` | `homeassistant` | Home Assistant's discovery prefix |
 | `SATELLITES_MQTT_BASE` | `calliope/satellites` | The hub's own topics; two hubs on one broker need two |
 | `SATELLITES_HA_TOKEN` | unset | The default `token_env` of the `ha_conversation` and `ha_assist` destinations: a long-lived access token |
-| `SATELLITES_LLM_API_KEY` | unset | The default `api_key_env` of an `llm` destination. Unset, no `Authorization` is sent. |
+| `SATELLITES_LLM_API_KEY` | unset | The default `api_key_env` of an `llm` destination. A key can also be stored under this name from the Satellites tab ([Keys](#keys)); set here, it wins. With neither, no `Authorization` is sent. |
 | `SATELLITES_FIRMWARE_PUBKEY` | unset | A PEM public key, or a path to one. Set, uploads must be signed by it. A bad value stops the service at start. |
 | `SATELLITES_API_KEYS` | unset | As on the other backends. Behind the gateway it stays unset. |
 | `SATELLITES_LOG_LEVEL` | `INFO` | Transcripts and replies are logged only at `DEBUG`. |
@@ -759,8 +810,9 @@ The second line is openwakeword on its own: its metadata still asks for
 tflite-runtime, which has no wheel for Python 3.13, so it goes in without
 dependencies and what it imports is pinned in `requirements.txt`.
 
-The device is played by Starlette's test socket, and STT, TTS, webhooks and
-Home Assistant by `httpx.MockTransport` on `*.test` hosts, which never resolve.
+The device is played by Starlette's test socket, and STT, TTS, webhooks,
+language model servers and Home Assistant by `httpx.MockTransport` on `*.test`
+hosts, which never resolve.
 Nothing starts a server and no board is needed. Most pipeline tests stand a
 fake in for the wake word model; the tests that need the real ones fetch them
 from openWakeWord's GitHub release once per run (5.4 MB, or

@@ -919,6 +919,12 @@ services:
       # anyone with an API key. A long-lived access token from your Home
       # Assistant profile page; like the MQTT password, a secret setting.
       # SATELLITES_HA_TOKEN: "<long-lived access token>"
+      # The key for a language model word (any OpenAI-compatible provider),
+      # which names this variable, or another, rather than holding the key.
+      # A key can also be stored from the Satellites tab, into
+      # /data/secrets.json (mode 0600, and in this volume's backups); one set
+      # here wins over it. A secret setting, like the two above.
+      # SATELLITES_LLM_API_KEY: "<key>"
     # 1 CPU and 512 MiB, measured with the image on arm64, satellites played by
     # a script inside the container streaming four channels in real time: the
     # hub's peak resident memory was 228 MiB idle with hey_jarvis loaded, 239

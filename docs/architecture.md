@@ -1395,7 +1395,7 @@ skips the extension if OpenClip is absent.
 ## 10. Decision records
 
 `docs/adr/` holds the decisions, dated, each with what it cost. The sequence
-runs 0001–0010, 0012 and 0013; there is no 0011.
+runs 0001–0010 and 0012–0015; there is no 0011.
 
 | | Status |
 |---|---|
@@ -1411,6 +1411,8 @@ runs 0001–0010, 0012 and 0013; there is no 0011.
 | [0010 — The third engine was measured on the card it was for, and retired](adr/0010-the-third-engine-was-measured-and-retired.md) | accepted |
 | [0012 — One branch: `main` is the branch, a `v*` tag is a release](adr/0012-one-branch.md) | accepted |
 | [0013 — Satellites come in through the one door, and their socket is not behind a key](adr/0013-satellites-one-door.md) | accepted |
+| [0014 — The Korvo is a voice satellite, not a music speaker](adr/0014-voice-satellite-not-a-music-speaker.md) | accepted |
+| [0015 — The satellite hub may hold an API key, by name, and never shows it](adr/0015-the-hub-may-hold-a-key.md) | accepted |
 
 0009 is kept rather than deleted because every engineering fact in it is still
 true; what it got wrong is its own first sentence, that this deployment offers a
