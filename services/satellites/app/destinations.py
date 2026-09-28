@@ -355,6 +355,8 @@ class ThinkFilter:
 MODELS_TIMEOUT_S = 10.0
 MODELS_MAX_BYTES = 8 * 1024 * 1024
 MODELS_MAX = 2000
+# Further pages of a listing that pages (Llm.list_models), at most.
+MODELS_PAGES_MAX = 10
 MODEL_ID_MAX = 120          # Llm.model's own max_length
 # Of a refusal's body: its first sentence is what is shown.
 ERROR_READ_MAX = 64 * 1024
@@ -665,21 +667,44 @@ class Llm(_Base):
         left out; the rest come back unique, sorted without regard to case,
         and at most MODELS_MAX of them (OpenRouter lists several hundred).
         Nothing is filtered by what it looks like: a name-based rule for
-        embedding or speech models would rot, and typing narrows the list."""
+        embedding or speech models would rot, and typing narrows the list.
+
+        A LISTING THAT PAGES IS FOLLOWED. Anthropic's /v1/models answers 20 at
+        a time, with "has_more": true and the "last_id" to go on from; read
+        as one page, the picker offered the first 20 and said that was all
+        there is. So while an answer says has_more and names a last_id, the
+        next page is asked with after_id and limit=1000 (Anthropic's own
+        parameters, and its most), up to MODELS_PAGES_MAX pages more. The
+        first request carries no parameters, so a server that does not page
+        is asked exactly as before and is never sent one it might refuse. A
+        server that answers the same last_id again, having ignored after_id,
+        is not asked a third time. MODELS_MAX_BYTES is for the whole listing,
+        and the router's ceiling for the whole of it too."""
         key = _secret(api_key_env)
         headers = {"Authorization": f"Bearer {key}"} if key else {}
-        async with client.stream("GET", f"{base_url}/models", headers=headers,
-                                 timeout=MODELS_TIMEOUT_S) as r:
-            if r.status_code >= 300:
-                raise DestinationError(_refusal(r.status_code, await _read_error(r), key,
-                                                api_key_env, who="the server"))
-            data, over = await _read_capped(r, MODELS_MAX_BYTES)
-        if over:
-            raise DestinationError(f"the server's model list is over {MODELS_MAX_BYTES >> 20} MiB")
-        body = _parsed(data.decode("utf-8", "replace"))
-        items = body.get("data") if isinstance(body, dict) else body
-        if not isinstance(items, list):
-            raise DestinationError("the server answered /models without a list of models")
+        items: list = []
+        params: dict | None = None
+        read = 0
+        for _ in range(1 + MODELS_PAGES_MAX):
+            async with client.stream("GET", f"{base_url}/models", params=params, headers=headers,
+                                     timeout=MODELS_TIMEOUT_S) as r:
+                if r.status_code >= 300:
+                    raise DestinationError(_refusal(r.status_code, await _read_error(r), key,
+                                                    api_key_env, who="the server"))
+                data, over = await _read_capped(r, MODELS_MAX_BYTES - read)
+            read += len(data)
+            if over:
+                raise DestinationError(f"the server's model list is over {MODELS_MAX_BYTES >> 20} MiB")
+            body = _parsed(data.decode("utf-8", "replace"))
+            page = body.get("data") if isinstance(body, dict) else body
+            if not isinstance(page, list):
+                raise DestinationError("the server answered /models without a list of models")
+            items += page
+            after = body.get("last_id") if isinstance(body, dict) and body.get("has_more") is True \
+                else None
+            if not isinstance(after, str) or not after or (params and params["after_id"] == after):
+                break
+            params = {"limit": 1000, "after_id": after}
         ids = {i for i in ((x.get("id") if isinstance(x, dict) else x) for x in items)
                if isinstance(i, str) and i.strip() and len(i) <= MODEL_ID_MAX}
         return sorted(ids, key=lambda i: (i.casefold(), i))[:MODELS_MAX]

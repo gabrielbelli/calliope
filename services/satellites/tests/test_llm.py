@@ -468,6 +468,51 @@ def test_a_local_server_is_asked_for_its_models_without_a_key(api, fake):
     assert all("authorization" not in q.headers for q in fake.seen)
 
 
+def paged(ids: list[str], size: int = 20):
+    """A server that pages its /models as Anthropic's does: `size` at a time
+    unless asked for up to 1000, from after_id, with has_more and last_id."""
+    def answer(request: httpx.Request) -> httpx.Response:
+        q = request.url.params
+        start = ids.index(q["after_id"]) + 1 if "after_id" in q else 0
+        page = ids[start:start + int(q.get("limit", size))]
+        return httpx.Response(200, json={"data": [{"type": "model", "id": i} for i in page],
+                                         "has_more": start + len(page) < len(ids),
+                                         "first_id": page[0] if page else None,
+                                         "last_id": page[-1] if page else None})
+    return answer
+
+
+def test_a_model_list_that_pages_is_read_to_its_end(api, fake, monkeypatch):
+    """Read as one page, 45 models were 20, and the page said "20 models to
+    pick from" as if that were all."""
+    monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+    ids = [f"model-{n:02}" for n in range(45)]
+    fake.handlers["llm.test"] = paged(ids)
+    r = api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1"})
+    assert r.status_code == 200 and r.json() == {"models": ids}, r.text
+    # The first as a server that does not page is asked; then from its last.
+    assert [str(q.url) for q in fake.seen] == [
+        "http://llm.test/v1/models", "http://llm.test/v1/models?limit=1000&after_id=model-19"]
+    assert all(q.headers["authorization"] == f"Bearer {LLM_KEY}" for q in fake.seen)
+
+
+def test_a_server_that_ignores_after_id_or_never_ends_is_asked_a_bounded_number_of_times(
+        api, fake, monkeypatch):
+    first = paged([f"model-{n:02}" for n in range(45)])
+    fake.handlers["llm.test"] = lambda r: first(httpx.Request("GET", "http://llm.test/v1/models"))
+    r = api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1"})
+    assert r.status_code == 200 and len(r.json()["models"]) == 20 and len(fake.seen) == 2
+
+    fake.seen.clear()
+    endless = iter(range(10 ** 6))
+    fake.handlers["llm.test"] = lambda r: httpx.Response(200, json={
+        "data": [{"id": f"model-{next(endless)}"}], "has_more": True,
+        "last_id": f"cursor-{len(fake.seen)}"})
+    monkeypatch.setattr(destinations, "MODELS_PAGES_MAX", 3)
+    r = api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1"})
+    assert r.status_code == 200 and len(r.json()["models"]) == 4 and len(fake.seen) == 4
+
+
 def test_a_model_list_the_server_refuses_is_a_502_in_its_own_words(api, fake, monkeypatch):
     monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
     fake.handlers["llm.test"] = lambda r: httpx.Response(401, json={"error": {
