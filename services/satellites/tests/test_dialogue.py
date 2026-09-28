@@ -228,6 +228,37 @@ def test_the_reply_voice_speaks_the_language_spoken_or_english_when_kokoro_canno
     assert language.reply_tag(spoken) == answer
 
 
+def test_the_households_main_language_is_the_prior_and_the_reply_it_falls_back_to(monkeypatch):
+    """English was the prior for every household, so a Portuguese one's "sim"
+    stayed English, and a German question in a French home was answered in
+    English."""
+    monkeypatch.setenv("SATELLITES_LANGUAGES", "pt-BR")
+    assert language.detect("sim") == "pt"
+    assert language.detect("ok", prior="en") == "en"  # the conversation's own language still wins
+    monkeypatch.setenv("SATELLITES_LANGUAGES", "fr, en")
+    assert (language.reply_tag("de"), language.voice_for("de", "bm_george")) == ("fr", "ff_siwis")
+    monkeypatch.setenv("SATELLITES_LANGUAGES", "de,en")  # Kokoro has no German voice
+    assert (language.reply_tag("pl"), language.voice_for("pl", "bm_george")) == ("en", "bm_george")
+
+
+def test_a_detected_language_is_sent_on_in_the_households_region(monkeypatch):
+    """Portuguese was sent as pt-BR in every household, so a home in Portugal
+    had its commands matched against Home Assistant's Brazilian sentences."""
+    assert (language.tag("pt"), language.tag("en")) == ("pt-BR", "en")
+    monkeypatch.setenv("SATELLITES_LANGUAGES", "en-GB,PT-pt")
+    assert (language.tag("pt"), language.tag("en"), language.tag("es")) == ("pt-PT", "en-GB", "es")
+    assert language.name(language.tag("pt")) == "European Portuguese"
+
+
+def test_a_household_language_the_hub_cannot_use_is_named_at_start(monkeypatch):
+    monkeypatch.setenv("SATELLITES_LANGUAGES", "ja, en_US, fr")
+    assert language.household() == ("fr",)
+    problems = language.household_problems()
+    assert len(problems) == 2 and "'ja'" in problems[0] and "'en_US'" in problems[1]
+    monkeypatch.setenv("SATELLITES_LANGUAGES", "ja")
+    assert language.household() == ("en",), "nothing usable is the default, not nothing"
+
+
 # ---- one turn --------------------------------------------------------------------------------
 
 
@@ -251,6 +282,17 @@ async def test_home_assistant_is_told_the_language_that_was_detected(fake, monke
     assert json.loads(fake.sent("ha.test")[0].content) == {"text": "apaga a luz da cozinha",
                                                           "language": "pt-BR"}
     assert (out.language, out.voice) == ("pt-BR", "pf_dora")
+
+
+async def test_a_household_in_portugal_is_understood_in_european_portuguese(fake, monkeypatch):
+    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+    monkeypatch.setenv("SATELLITES_LANGUAGES", "pt-PT")
+    fake.handlers["ha.test"] = lambda r: httpx.Response(200, json={"response": {
+        "response_type": "action_done", "speech": {"plain": {"speech": "Feito."}}}})
+    r = router(fake, hey_jarvis={"action": {"destination": HA}})
+    out = await turn(r, "hey_jarvis", "apaga a luz da cozinha")
+    assert json.loads(fake.sent("ha.test")[0].content)["language"] == "pt-PT"
+    assert (out.language, out.reply_language, out.voice) == ("pt-PT", "pt-PT", "pf_dora")
 
 
 async def test_a_hinted_word_uses_its_hint_even_for_words_that_look_english(fake):

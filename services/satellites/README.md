@@ -596,21 +596,31 @@ stt-stack's Parakeet recognises 25 European languages by itself, refuses a
 `language` field with a 400, and does not say which language it heard. A
 word's `language` hint replaces the detection.
 
-The language decides three things. Home Assistant is sent it (Portuguese as
-`pt-BR`). An `llm` is told to answer in it. The reply voice speaks it:
+The language decides three things. Home Assistant is sent it. An `llm` is
+told to answer in it. The reply voice speaks it:
 
 | Spoken | Voice | Answer in |
 |---|---|---|
 | English | `SATELLITES_TTS_VOICE` (`bm_george`) | English |
-| Portuguese | `pf_dora` | Brazilian Portuguese |
+| Portuguese | `pf_dora` | Portuguese: `pt-BR`, unless `SATELLITES_LANGUAGES` names another region |
 | Spanish | `ef_dora` | Spanish |
 | French | `ff_siwis` | French |
 | Italian | `if_sara` | Italian |
-| Any other Parakeet language (German, Polish, ...) | `SATELLITES_TTS_VOICE` | English, and an `llm` is told why |
+| Any other Parakeet language (German, Polish, ...) | the voice of the household's main language, else `SATELLITES_TTS_VOICE` | the household's main language when Kokoro speaks it, else English; an `llm` is told why |
 
 A word's `voice` overrides the table. In a conversation the language follows
 each utterance, and a short one ("ok", "sim") keeps the language already in
 use: another language has to reach a probability of 0.3 and beat it by 0.1.
+The first utterance has no language in use yet, so it is weighed against the
+household's main language.
+
+`SATELLITES_LANGUAGES` names the household's languages as BCP 47 tags, most
+spoken first; unset, it is `en`. The first is the main language above. Each
+tag's region is the one its language is sent on in: with `en-GB,pt-PT`,
+detected English goes to Home Assistant as `en-GB` and Portuguese as `pt-PT`,
+so a command is matched against Home Assistant's European Portuguese
+sentences, not its Brazilian ones. Kokoro's only Portuguese voice is
+Brazilian whatever the tag, which is why `pt-BR` is the default.
 
 The hub asks stt-stack's `/health` once a start, before its first
 transcription, for the engines it serves and what each takes. A hint is sent
@@ -807,6 +817,7 @@ phrase in macOS's default voice peaked at 0.05, and in Samantha and Daniel at
 | `SATELLITES_HOME_LAT`, `SATELLITES_HOME_LON`, `SATELLITES_HOME_NAME` | unset | Home, for the `weather` tool. Unset, Home Assistant's own location is used (`GET /api/config`, through the first Home Assistant action and its token, kept an hour; a failed ask is not repeated for five minutes). |
 | `SATELLITES_TIMEZONE` | Home Assistant's, else `TZ`, else UTC | The zone of the date and time every language model prompt carries, with tools or without. |
 | `SATELLITES_UNITS` | Home Assistant's unit system, else `metric` | `us` or `metric`: the `weather` tool's °F, mph and inches, or °C, km/h and mm. |
+| `SATELLITES_LANGUAGES` | `en` | The household's languages as BCP 47 tags, most spoken first: `fr`, `pt-PT`, `en,pt-BR`. The first is what a new conversation is expected to be in and what an answer falls back to; each tag's region is how its language is sent on ([Language](#language)). A tag for a language the recogniser does not hear is left out, with a warning at start. |
 | `SATELLITES_STT_URL` | unset | stt-stack's base URL. Unset, wake words are still heard and published, and routing says there is no STT. |
 | `SATELLITES_WAKE_WORDS` | `hey_jarvis:0.5` | Read once: the words `wake_words.json` starts with, each for every satellite, on the first start with a volume that has none. Names and thresholds, comma-separated. A name alone gets 0.5. Empty means none; push-to-talk still works. After that, [Wake words](#wake-words). |
 | `SATELLITES_MODEL_DIR` | `$SATELLITES_DATA_DIR/models` | Where wake word models live. The image's own are copied here at start; other built-in names (`alexa`, `hey_mycroft`, `hey_rhasspy`, `weather`) are fetched here once, when a word first names them, and `<name>.onnx` of your own loads by its name. |

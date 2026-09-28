@@ -9,7 +9,8 @@ the listening path set it back and stand fakes in for the models
 session (test_wakeword.py).
 
 The other three are integrations that must not reach out of a test run from a
-shell that happens to have them set.
+shell that happens to have them set. SATELLITES_LANGUAGES goes too, so the
+language tests start from the default household, English only.
 
 The keys the hub holds (secret_store.py) are a module global, set by each
 app start's lifespan. Every test starts with an empty store that writes
@@ -26,7 +27,8 @@ from app import secret_store
 @pytest.fixture(autouse=True)
 def quiet_integrations(monkeypatch):
     monkeypatch.setenv("SATELLITES_WAKE_WORDS", "")
-    for name in ("SATELLITES_MQTT_URL", "SATELLITES_FIRMWARE_PUBKEY", "SATELLITES_STT_URL"):
+    for name in ("SATELLITES_MQTT_URL", "SATELLITES_FIRMWARE_PUBKEY", "SATELLITES_STT_URL",
+                 "SATELLITES_LANGUAGES"):
         monkeypatch.delenv(name, raising=False)
     secret_store.configure(secret_store.SecretStore())
     yield

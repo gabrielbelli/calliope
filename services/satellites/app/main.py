@@ -1919,8 +1919,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # rules.json was read once, above, by Assignment.open's migration.
     routing.configure(routing.Router(wakewords_config.WordActions(hub.voice.assignment),
                                      lookup=lookup_satellite))
-    for problem in legacy_settings(dict(os.environ), _named_actions()):
+    for problem in legacy_settings(dict(os.environ), _named_actions()) + lang.household_problems():
         log.warning("%s", problem)
+    log.info("household languages: %s", ", ".join(lang.household()))
     # py3langid takes 0.4 s to load; paid now, off the event loop, rather than
     # by the first utterance.
     hub.spawn(asyncio.to_thread(lang.detector.load), name="language")

@@ -648,7 +648,7 @@ class Router:
 
     def voice_for(self, behaviour: Behaviour, reply_language: str | None) -> str:
         explicit = behaviour.action.voice if behaviour.action else None
-        return explicit or lang.voice_for(reply_language or lang.DEFAULT, self.voice)
+        return explicit or lang.voice_for(reply_language or lang.main(), self.voice)
 
     async def stage(self, out: Outcome, name: str, timeout: float, work) -> object:
         """Run one external call under a hard ceiling. httpx's own timeout is

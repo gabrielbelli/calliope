@@ -1,7 +1,8 @@
 """Which language an utterance is in, and which voice answers in it.
 
     code = detect("que horas são", prior="en")      -> "pt"
-    tag(code)                                        -> "pt-BR"   (sent on)
+    tag(code)                                        -> "pt-BR"   (sent on; "pt-PT" in a
+                                                                   household that says so)
     reply_tag(code)                                  -> "pt-BR"   (answered in)
     voice_for(code, default="bm_george")             -> "pf_dora"
 
@@ -28,11 +29,20 @@ back. Its misses were "liga a luz" (Romanian) and "e a Roma?"; lingua's
 included "tell me a joke" (Finnish) and "open the garage door" (Dutch).
 
 ONE WORD SAYS LITTLE, SO THE LANGUAGE ALREADY IN USE WINS A CLOSE CALL. The
-prior is the conversation's language so far, or English, which is what the
-household mostly speaks. Another language has to reach MIN_CONFIDENCE and
-beat the prior by PRIOR_MARGIN of probability. "sim" alone is not evidence
-enough to leave English, and in a Portuguese conversation "ok" does not
-switch it to English.
+prior is the conversation's language so far, or else the household's main
+language: the first of SATELLITES_LANGUAGES, English when it is unset.
+Another language has to reach MIN_CONFIDENCE and beat the prior by
+PRIOR_MARGIN of probability. In an English household "sim" alone is not
+evidence enough to leave English, and in a Portuguese conversation "ok" does
+not switch it to English.
+
+THE HOUSEHOLD'S LANGUAGES (SATELLITES_LANGUAGES, BCP 47 tags, most spoken
+first: "en", "fr", "pt-PT", "en,pt-BR"). The first is the prior above, and
+the language an answer falls back to when Kokoro cannot speak the one heard.
+Each one's region is the tag its language is sent on as: Portuguese is
+"pt-PT" in a household that says so, and "pt-BR" (TAGS) in one that does not.
+Home Assistant keeps pt and pt-BR intents apart, so the tag decides which
+sentences a command is matched against.
 
 WHAT KOKORO CAN SAY. tts-stack's voices cover English, Brazilian Portuguese,
 Spanish, French and Italian (the first letter of a voice names its
@@ -40,11 +50,14 @@ phonemiser; services/tts/app/openai_api.py). A language the recogniser
 understands and Kokoro cannot speak, German or Polish, is answered in English
 with the default voice, and an LLM is told so (destinations.answer_instruction):
 a German sentence read by an English voice is worse than an English answer.
+A household whose main language Kokoro speaks is answered in that instead.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import re
 import threading
 
 log = logging.getLogger("voice-satellites.language")
@@ -58,12 +71,17 @@ RECOGNISED = ("bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", 
 # hub's own default voice (SATELLITES_TTS_VOICE), so it is not listed.
 VOICES = {"pt": "pf_dora", "es": "ef_dora", "fr": "ff_siwis", "it": "if_sara"}
 SPOKEN = frozenset({"en", *VOICES})
+# The language of the hub's default voice, and the household's when
+# SATELLITES_LANGUAGES names none.
 DEFAULT = "en"
+ENV = "SATELLITES_LANGUAGES"
 
-# The tag a detected language is sent on as (Home Assistant, the LLM). Kokoro's
-# only Portuguese voices are Brazilian, and so is the household this was built
-# for; HA reads "pt" as European Portuguese.
+# The tag a detected language is sent on as (Home Assistant, the LLM) when the
+# household's languages name no region for it. Kokoro's only Portuguese voices
+# are Brazilian, so a Portuguese answer is spoken with a Brazilian accent
+# whatever the tag; HA reads "pt" as European Portuguese.
 TAGS = {"pt": "pt-BR"}
+_TAG = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*")
 
 NAMES = {"pt-br": "Brazilian Portuguese", "pt-pt": "European Portuguese", "en-gb": "British English",
          "en-us": "American English", "bg": "Bulgarian", "cs": "Czech", "da": "Danish",
@@ -85,24 +103,71 @@ MIN_LETTERS = 3
 
 
 def primary(tag: str | None) -> str:
-    """"pt-BR" -> "pt"."""
-    return (tag or DEFAULT).split("-")[0].lower()
+    """"pt-BR" -> "pt"; None -> the household's main language."""
+    return (tag or household()[0]).split("-")[0].lower()
+
+
+def _canonical(tag: str) -> str:
+    """"PT-br" -> "pt-BR", "zh-hant-tw" -> "zh-Hant-TW"."""
+    first, *rest = tag.split("-")
+    return "-".join([first.lower(), *(p.upper() if len(p) == 2 else p.title() if len(p) == 4
+                                      else p.lower() for p in rest)])
+
+
+def _household() -> tuple[tuple[str, ...], list[str]]:
+    tags, unused = [], []
+    for raw in (os.getenv(ENV) or "").split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        t = _canonical(raw) if _TAG.fullmatch(raw) else None
+        if t is None or t.split("-")[0] not in RECOGNISED:
+            unused.append(raw)
+        elif t not in tags:
+            tags.append(t)
+    return tuple(tags) or (DEFAULT,), unused
+
+
+def household() -> tuple[str, ...]:
+    """The household's languages, most spoken first (SATELLITES_LANGUAGES),
+    else English. A value that is not a tag, or names a language the
+    recogniser cannot hear, is left out (household_problems)."""
+    return _household()[0]
+
+
+def household_problems() -> list[str]:
+    """A sentence for each SATELLITES_LANGUAGES entry the hub leaves out, for
+    the log at start: set and silently ignored, it would look like a household
+    whose language nobody detects."""
+    return [f"{ENV}: {raw!r} is left out: not a language tag, or not one the speech "
+            f"recogniser hears ({', '.join(RECOGNISED)})" for raw in _household()[1]]
+
+
+def main() -> str:
+    """The household's main language, as a code: the prior when nothing
+    else is known."""
+    return primary(household()[0])
 
 
 def name(tag: str | None) -> str:
-    t = (tag or DEFAULT).lower()
+    t = (tag or household()[0]).lower()
     return NAMES.get(t) or NAMES.get(primary(t)) or t
 
 
 def tag(code: str) -> str:
-    """What a detected language is sent on as: "pt" -> "pt-BR"."""
-    return TAGS.get(code, code)
+    """What a detected language is sent on as: the household's own tag for
+    it ("pt" in a "pt-PT" household -> "pt-PT"), else TAGS ("pt" -> "pt-BR"),
+    else the code."""
+    return next((t for t in household() if primary(t) == code), None) or TAGS.get(code, code)
 
 
 def reply_tag(spoken: str) -> str:
     """The language the answer is in: the one spoken, when a voice can say
-    it, else English. Takes a code or a tag and keeps a hint's region."""
-    return spoken if primary(spoken) in SPOKEN else DEFAULT
+    it, else the household's first language a voice can say, else English.
+    Takes a code or a tag and keeps a hint's region."""
+    if primary(spoken) in SPOKEN:
+        return spoken
+    return next((t for t in household() if primary(t) in SPOKEN), DEFAULT)
 
 
 def voice_for(spoken: str, default: str) -> str:
@@ -139,7 +204,7 @@ class _Detector:
         return {code: float(p) for code, p in self._ident.rank(text)}
 
     def detect(self, text: str, prior: str | None = None) -> str:
-        prior = primary(prior) if prior else DEFAULT
+        prior = primary(prior) if prior else main()
         if sum(c.isalpha() for c in text) < MIN_LETTERS:
             return prior
         s = self.scores(text)
