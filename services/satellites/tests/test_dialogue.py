@@ -167,17 +167,51 @@ def test_markdown_meant_for_a_screen_is_not_read_aloud():
         "Bold and code and\na bullet\nHeading"
 
 
-@pytest.mark.parametrize("text", ["thanks", "Thank you!", "ok, that's all", "Goodbye.", "stop",
-                                  "obrigado", "Obrigada, tchau!", "pode parar", "é só isso",
-                                  "e so isso", "muito obrigado"])
-def test_an_ending_phrase_said_on_its_own_ends_the_conversation(text):
-    assert dialogue.is_ending(text)
+@pytest.mark.parametrize("text,languages", [
+    ("thanks", ("en",)), ("Thank you!", ("en",)), ("ok, that's all", ("en",)),
+    ("Goodbye.", ("en",)), ("stop", ("en",)),
+    ("obrigado", ("en", "pt")), ("Obrigada, tchau!", ("en", "pt")), ("pode parar", ("en", "pt")),
+    ("é só isso", ("en", "pt")), ("e so isso", ("en", "pt")), ("muito obrigado", ("en", "pt")),
+    ("muchas gracias, eso es todo", ("en", "es")), ("Merci, c'est tout.", ("en", "fr")),
+    ("ok merci, au revoir", ("en", "fr")), ("va bene, basta così", ("en", "it")),
+    ("grazie mille", ("en", "it")),
+])
+def test_an_ending_phrase_said_on_its_own_ends_the_conversation(text, languages):
+    assert dialogue.is_ending(text, languages=languages)
 
 
-@pytest.mark.parametrize("text", ["thanks, and what about tomorrow?", "stop the music in the kitchen",
-                                  "obrigado, mas e amanhã?", "what's all this", ""])
-def test_a_sentence_that_says_more_than_goodbye_carries_the_conversation_on(text):
-    assert not dialogue.is_ending(text)
+@pytest.mark.parametrize("text,languages", [
+    ("thanks, and what about tomorrow?", ("en",)), ("stop the music in the kitchen", ("en",)),
+    ("obrigado, mas e amanhã?", ("en", "pt")), ("what's all this", ("en",)), ("", ("en",)),
+    ("merci, et demain ?", ("en", "fr")),
+])
+def test_a_sentence_that_says_more_than_goodbye_carries_the_conversation_on(text, languages):
+    assert not dialogue.is_ending(text, languages=languages)
+
+
+def test_a_language_the_conversation_is_not_in_does_not_end_it():
+    """Every conversation ended on the Portuguese phrases, whatever was being
+    spoken, so a Spanish "para" (for) could end one; and a French "merci,
+    c'est tout" ended none."""
+    assert not dialogue.is_ending("obrigado, tchau")
+    assert not dialogue.is_ending("merci, c'est tout", languages=("en", "pt"))
+
+
+def test_a_conversation_ends_in_english_its_households_its_hints_and_its_own_language(monkeypatch):
+    assert dialogue.ending_languages(None, None) == ("en",)
+    assert dialogue.ending_languages("fr", "pt-BR") == ("en", "fr", "pt")
+    monkeypatch.setenv("SATELLITES_LANGUAGES", "it,en")
+    assert dialogue.ending_languages(None, "en") == ("en", "it")
+
+
+def test_a_title_is_known_in_the_language_of_the_answer():
+    def split(text, language):
+        s = dialogue.Sentences(language)
+        return s.feed(text) + s.flush()
+    assert split("Chiedi alla Sig.ra Rossi. Poi a me.", "it") == ["Chiedi alla Sig.ra Rossi.", "Poi a me."]
+    assert split("Pregunte a Ud. mismo. Luego.", "es-ES") == ["Pregunte a Ud. mismo.", "Luego."]
+    # Unknown language: every pack, as before there were packs.
+    assert split("Ask Dott. Rossi. Then me.", None) == ["Ask Dott. Rossi.", "Then me."]
 
 
 def test_memory_keeps_the_last_twenty_turns_and_no_more_than_its_characters():
@@ -282,6 +316,15 @@ async def test_home_assistant_is_told_the_language_that_was_detected(fake, monke
     assert json.loads(fake.sent("ha.test")[0].content) == {"text": "apaga a luz da cozinha",
                                                           "language": "pt-BR"}
     assert (out.language, out.voice) == ("pt-BR", "pf_dora")
+
+
+async def test_a_french_conversation_ends_on_a_french_goodbye(fake):
+    r = router(fake, hey_jarvis={"mode": "conversation", "action": {"destination": {"type": "echo"}}})
+    memory = dialogue.Memory()
+    out = await turn(r, "hey_jarvis", "quelle heure est-il maintenant", memory=memory)
+    assert out.error is None and memory.language == "fr" and not out.ended
+    out = await turn(r, "hey_jarvis", "merci, c'est tout", memory=memory)
+    assert out.ended
 
 
 async def test_a_household_in_portugal_is_understood_in_european_portuguese(fake, monkeypatch):

@@ -66,13 +66,34 @@ MAX_HISTORY_CHARS = 8000
 BATCH_CHARS = 300
 
 # Said on their own (with "ok", "no", "then" and the like around them), these
-# end a conversation. English and Brazilian Portuguese, the household's.
-END_PHRASES = ("that's all", "that is all", "that's it", "stop", "goodbye", "bye", "thanks",
-               "thank you", "never mind", "obrigado", "obrigada", "tchau", "pode parar", "para",
-               "valeu", "é só isso", "só isso", "chega", "até logo")
-FILLERS = frozenset({"ok", "okay", "alright", "right", "great", "cool", "no", "yes", "well",
-                     "then", "so", "very", "much", "oh", "ah", "please", "então", "tá", "ta",
-                     "beleza", "muito", "sim", "não", "por", "favor", "e", "and"})
+# end a conversation. One pack for each language Kokoro speaks, keyed by
+# primary subtag. A conversation ends on English's, its household's
+# languages' (SATELLITES_LANGUAGES), its word's hint's, its own so far and the
+# goodbye's own (ending_languages): a Portuguese "para" is "for" in Spanish,
+# so no pack applies to every conversation but English's. Accents do not
+# matter; each phrase is compared as _words leaves it.
+END_PHRASES = {
+    "en": ("that's all", "that is all", "that's it", "stop", "goodbye", "bye", "thanks",
+           "thank you", "never mind"),
+    "pt": ("obrigado", "obrigada", "tchau", "pode parar", "para", "valeu", "é só isso", "só isso",
+           "chega", "até logo"),
+    "es": ("gracias", "adiós", "hasta luego", "eso es todo", "nada más", "para", "basta", "chao",
+           "déjalo"),
+    "fr": ("merci", "au revoir", "c'est tout", "ça suffit", "arrête", "salut", "à plus",
+           "laisse tomber"),
+    "it": ("grazie", "ciao", "arrivederci", "basta così", "basta", "è tutto", "fermati",
+           "lascia stare", "a dopo"),
+}
+FILLERS = {
+    "en": frozenset({"ok", "okay", "alright", "right", "great", "cool", "no", "yes", "well",
+                     "then", "so", "very", "much", "oh", "ah", "please", "and"}),
+    "pt": frozenset({"então", "tá", "ta", "beleza", "muito", "sim", "não", "por", "favor", "e"}),
+    "es": frozenset({"vale", "bueno", "sí", "muchas", "muy", "pues", "entonces", "por", "favor",
+                     "y"}),
+    "fr": frozenset({"d'accord", "bon", "oui", "non", "beaucoup", "alors", "bien", "s'il", "te",
+                     "vous", "plaît", "et"}),
+    "it": frozenset({"va", "bene", "sì", "mille", "allora", "per", "favore", "e", "così"}),
+}
 
 
 # ---- ending phrases ------------------------------------------------------------
@@ -84,13 +105,28 @@ def _words(text: str) -> list[str]:
     return re.findall(r"[\w']+", text)
 
 
-def is_ending(text: str, phrases: tuple[str, ...] | list[str] = END_PHRASES) -> bool:
+def ending_languages(*tags: str | None) -> tuple[str, ...]:
+    """The packs a conversation ends in, as primary subtags: English, the
+    household's languages, and each of `tags` that is set (the word's hint,
+    the conversation's language so far, the language the goodbye was
+    detected in)."""
+    codes = ["en", *(lang.primary(t) for t in lang.household()),
+             *(lang.primary(t) for t in tags if t)]
+    return tuple(dict.fromkeys(codes))
+
+
+def is_ending(text: str, phrases: tuple[str, ...] | list[str] | None = None,
+              languages: tuple[str, ...] | list[str] = ("en",)) -> bool:
     """True when `text` is nothing but ending phrases and filler: "thanks",
-    "ok, that's all", "obrigado, tchau". A sentence that says anything else
-    ("thanks, and what about tomorrow?") carries on."""
+    "ok, that's all", "obrigado, tchau" (with "pt" among `languages`). A
+    sentence that says anything else ("thanks, and what about tomorrow?")
+    carries on. `phrases` replaces the languages' own ending phrases (a
+    word's end_phrases); their filler still counts."""
+    if phrases is None:
+        phrases = [p for code in languages for p in END_PHRASES.get(code, ())]
     words = _words(text)
     wanted = sorted({tuple(_words(p)) for p in phrases if _words(p)}, key=len, reverse=True)
-    fillers = {w for f in FILLERS for w in _words(f)}
+    fillers = {w for code in languages for f in FILLERS.get(code, ()) for w in _words(f)}
     i, found = 0, False
     while i < len(words):
         for p in wanted:
@@ -108,11 +144,31 @@ def is_ending(text: str, phrases: tuple[str, ...] | list[str] = END_PHRASES) -> 
 # ---- sentences --------------------------------------------------------------------
 
 
-# Words a full stop follows without ending the sentence. English and
-# Portuguese titles and the Latin ones people write in both.
-ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "dra", "prof", "profa", "sr", "sra", "srta",
-                           "st", "jr", "vs", "etc", "e.g", "i.e", "eg", "ie", "no", "nº", "av",
-                           "p.ex", "approx", "min", "max"})
+# Words a full stop follows without ending the sentence: titles and the like,
+# by the primary subtag of the language the answer is in, and the Latin ones
+# people write in all of them ("*"). An answer in a language with no pack
+# here uses English's; one whose language is not known uses every pack.
+ABBREVIATIONS = {
+    "*": frozenset({"etc", "e.g", "i.e", "eg", "ie", "vs", "cf"}),
+    "en": frozenset({"mr", "mrs", "ms", "dr", "prof", "st", "jr", "no", "approx", "min", "max"}),
+    "pt": frozenset({"sr", "sra", "srta", "dr", "dra", "prof", "profa", "av", "nº", "p.ex",
+                     "min", "máx"}),
+    "es": frozenset({"sr", "sra", "srta", "dr", "dra", "prof", "profa", "ud", "uds", "av", "nº",
+                     "p.ej", "pág", "máx", "mín"}),
+    "fr": frozenset({"mme", "mlle", "dr", "pr", "st", "ste", "av", "p.ex", "env", "min", "max"}),
+    "it": frozenset({"sig", "sig.ra", "sig.na", "dott", "dott.ssa", "prof", "avv", "ing", "p.es",
+                     "ecc", "min", "max"}),
+}
+
+
+def abbreviations(language: str | None) -> frozenset[str]:
+    """The words a full stop follows mid-sentence in an answer in `language`."""
+    if not language:
+        return frozenset().union(*ABBREVIATIONS.values())
+    code = lang.primary(language)
+    return ABBREVIATIONS["*"] | ABBREVIATIONS.get(code, ABBREVIATIONS["en"])
+
+
 _END = re.compile(r"[.!?…]+[\"'”’)\]]*(?=\s)|\n+")
 
 
@@ -136,8 +192,9 @@ class Sentences:
 
     MAX_CHARS = 250
 
-    def __init__(self) -> None:
+    def __init__(self, language: str | None = None) -> None:
         self.buf = ""
+        self.abbreviations = abbreviations(language)
 
     def _is_end(self, m: re.Match) -> bool:
         if m.group().startswith("\n"):
@@ -149,7 +206,7 @@ class Sentences:
         if word is None:
             return True
         w = word.group(1).casefold()
-        if w in ABBREVIATIONS or (len(w) == 1 and w.isalpha()):
+        if w in self.abbreviations or (len(w) == 1 and w.isalpha()):
             return False
         line = before[before.rfind("\n") + 1:]
         if w.isdigit() and line.strip() == w:
@@ -310,8 +367,13 @@ async def run_turn(router: Router, route: Route | None, *, satellite_id: str, sa
             out.error = "stt: nothing was heard (the transcript is empty)"
             return out
         if behaviour.mode == "conversation" and memory is not None:
-            phrases = behaviour.conversation.end_phrases
-            if is_ending(said, END_PHRASES if phrases is None else phrases):
+            # The goodbye's own language counts too: a bilingual household
+            # says "obrigado, tchau" to end a conversation held in English.
+            if not lang.detector.loaded:
+                await asyncio.to_thread(lang.detector.load)
+            heard = lang.detect(said, prior=memory.language)
+            if is_ending(said, behaviour.conversation.end_phrases,
+                         ending_languages(behaviour.language, memory.language, heard)):
                 out.ended = True
                 return out
         if on_transcript is not None:
@@ -400,7 +462,7 @@ async def _answer(router: Router, route: Route, out: Outcome, sink: Sink, *, mem
 
     async def produce(b, req: Request) -> None:
         dest = b.action.destination
-        splitter = Sentences()
+        splitter = Sentences(req.reply_language)
         t = time.monotonic()
         try:
             async with asyncio.timeout(getattr(dest, "timeout", 5.0)):

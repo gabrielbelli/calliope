@@ -297,7 +297,7 @@ The Satellites tab edits the same entries through `GET` and `PUT
 | `language` | Unset (or `"auto"`): read from each transcript. A BCP 47 tag such as `pt-BR` is a hint: the word is always spoken in that language, and detection is skipped. |
 | `action` | Command and conversation only; a trigger has none. `destination` (below), `reply_to` (`same`, `none`, or another satellite's id or name), `voice` (a Kokoro voice; unset, the voice of the language), and for a command `fallback`: the name of a conversation word that takes over when this destination fails or does not understand. |
 | `silence_ms` | The pause that ends the command after the wake word. 800. |
-| `conversation` | `follow_up_s` (8): how long the satellite listens for the next turn after a reply. `silence_ms` (600): the pause that ends a follow-up turn. `end_phrases` (unset: English and Brazilian Portuguese defaults; `[]` for none). |
+| `conversation` | `follow_up_s` (8): how long the satellite listens for the next turn after a reply. `silence_ms` (600): the pause that ends a follow-up turn. `end_phrases` (unset: the usual ones in English and in the conversation's languages, [below](#conversations); `[]` for none). |
 | `trigger` | `feedback`: `earcon` (the satellite's `done` and a flash of the ring) or `none`. `cooldown_s` (3). `ends_conversation` (false). |
 
 The file's `ptt` block is push-to-talk's own entry, without a name, threshold
@@ -566,9 +566,13 @@ A conversation ends on:
 
 - **silence** for `follow_up_s`;
 - **an ending phrase** said on its own: "that's all", "stop", "goodbye",
-  "thanks", "obrigado", "tchau", "pode parar" and a few more, with filler
-  around them ("ok, thanks"). "Thanks, and what about tomorrow?" carries on.
-  The hub plays `done` and asks the assistant nothing;
+  "thanks" and a few more, with filler around them ("ok, thanks"). "Thanks,
+  and what about tomorrow?" carries on. The hub plays `done` and asks the
+  assistant nothing. Each language Kokoro speaks has its own ("obrigado,
+  tchau", "gracias", "merci, c'est tout", "basta così"); a conversation ends
+  on English's and on those of `SATELLITES_LANGUAGES`, of the word's
+  `language` hint, of the language the conversation is in so far and of the
+  one the goodbye is said in. A word's `end_phrases` replaces them;
 - **an error** from STT, the assistant or TTS;
 - **the stop button**, the privacy mute, the microphone turned off, forgetting
   the satellite, or another wake word;

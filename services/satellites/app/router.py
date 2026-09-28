@@ -179,8 +179,9 @@ class ConversationSettings(BaseModel):
     # The pause that ends a follow-up turn. Shorter than the first command's:
     # someone mid-conversation starts talking at once, and each turn waits it.
     silence_ms: int = Field(default=600, ge=200, le=3000)
-    # Said on their own, these end the conversation. None: dialogue.END_PHRASES
-    # (English and Brazilian Portuguese); [] turns them off.
+    # Said on their own, these end the conversation. None: dialogue.END_PHRASES,
+    # the packs of English and of the languages the conversation may be in
+    # (dialogue.ending_languages); [] turns them off.
     end_phrases: list[EndPhrase] | None = Field(default=None, max_length=64)
 
 
