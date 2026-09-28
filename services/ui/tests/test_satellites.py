@@ -314,6 +314,10 @@ def test_every_satellite_slider_says_what_it_is():
     assert '<label for="${u}-t">Threshold</label>' in WORD
     # And its value in words, which "60" alone is not.
     assert 'input.setAttribute("aria-valuetext"' in function("satLevelSay")
+    # Its track does not move as the value grows: "10 of 12" is 8ch, twice
+    # the shared floor, so a satellite's outputs are pinned at that.
+    assert "`${v} of ${steps}`" in function("satLevelSay")
+    assert ".sats .slider output{min-width:8ch}" in BARE_CSS
 
 
 def test_what_needs_the_satellite_is_greyed_with_its_reason_and_never_hidden():

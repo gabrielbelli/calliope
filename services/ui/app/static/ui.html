@@ -1431,6 +1431,14 @@ details.sat-row>.body>.ww-listen,details.sat-row>.body>.ww-does{margin-top:var(-
   padding:0 .625rem;margin-right:var(--s2);cursor:pointer}
 #fwfile:hover::file-selector-button,#wwfile:hover::file-selector-button{border-color:var(--dim)}
 #tab-satellites audio{display:block;width:100%;height:2rem}
+/* THE PIN HOLDS "12 OF 12". The shared 4ch floor under .slider output is
+   there so a track never changes width with its own value, and the volume
+   in steps broke it: "9 of 12" to "10 of 12" shrank the track by 1ch
+   mid-drag, and it ended 3 to 4ch short of Mic gain's and Light
+   brightness's beside it. At the widest any of the three can say, all
+   three tracks are one length and none moves. Not the wake words': a
+   threshold says 0.50. */
+.sats .slider output{min-width:8ch}
 /* When pressed | when released, one row per button: the press/release pair
    is read across, and the words are short enough for a phone. */
 .sat-btns{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,1fr);
