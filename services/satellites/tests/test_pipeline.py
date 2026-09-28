@@ -159,6 +159,8 @@ class Services:
         return await out if asyncio.iscoroutine(out) else out
 
     async def stt(self, request):
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
         while self.stt_gate is not None and not self.stt_gate.is_set():
             await asyncio.sleep(0.01)
         return httpx.Response(200, json={"text": self.transcript})
@@ -167,7 +169,9 @@ class Services:
         return httpx.Response(200, content=np.full(TTS_SAMPLES, 1000, "<i2").tobytes())
 
     def hosts(self) -> list[str]:
-        return [r.url.host for r in self.seen]
+        """The services asked, in order; stt-stack's /health, which the hub
+        asks once a start, is not one."""
+        return [r.url.host for r in self.seen if r.url.path != "/health"]
 
 
 class Satellite:

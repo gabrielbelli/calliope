@@ -70,10 +70,12 @@ class Fake:
         return await result if inspect.isawaitable(result) else result
 
     def hosts(self) -> list[str]:
-        return [r.url.host for r in self.seen]
+        """The services asked, in order; stt-stack's /health, which the hub
+        asks once a start, is not one."""
+        return [r.url.host for r in self.seen if r.url.path != "/health"]
 
     def sent(self, host: str) -> httpx.Request:
-        return next(r for r in self.seen if r.url.host == host)
+        return next(r for r in self.seen if r.url.host == host and r.url.path != "/health")
 
 
 def rule(id: str, destination: dict | None = None, **kw) -> Rule:
@@ -524,22 +526,45 @@ def test_the_wake_word_is_taken_off_the_front_of_the_transcript_and_nowhere_else
 
 # ---- Home Assistant's vocabulary ------------------------------------------------
 
-def stt_with(fake: Fake, *, engine: str | None, profiles: set[str], spellable: bool = True):
-    """stt.test answering like stt-stack: a transcription naming a glossary
-    profile it does not have is a 400 in its words, and so is `boost` when
-    `spellable` is False (a term with a character the model has no piece
-    for); the rest name the engine."""
+PARAKEET = {"id": "parakeet", "family": "parakeet", "default": True, "languages": ["en", "pt"],
+            "accepts_language": False, "accepts_boost": True}
+PT_BR = {"id": "parakeet-pt-br", "family": "parakeet", "default": False, "languages": ["pt"],
+         "accepts_language": False, "accepts_boost": True}
+WHISPER = {"id": "whisper", "family": "whisper", "default": True, "languages": ["en", "pt"],
+           "accepts_language": True, "accepts_boost": False}
+
+
+def stt_with(fake: Fake, *, engine: str | None, profiles: set[str], spellable: bool = True,
+             hotwords: bool = True, models: list[dict] | None = None, listed: bool = True):
+    """stt.test answering like stt-stack. /health lists its engines (`models`,
+    or the one `engine`), whether biasing is on and, when `listed`, its
+    glossary profiles. A transcription naming a profile it does not have is
+    a 400 in its words, and so is `boost` when `spellable` is False (a term
+    with a character the model has no piece for) or `hotwords` is off; the
+    rest name the engine."""
+    one = {"parakeet": PARAKEET, "whisper": WHISPER}.get(engine or "")
+
     def handler(r: httpx.Request) -> httpx.Response:
+        if r.url.path == "/health":
+            return httpx.Response(200, json={
+                "status": "ok", "model": engine, "hotwords": hotwords,
+                "models": models if models is not None else [one] if one else []}
+                | ({"glossaries": sorted(profiles)} if listed else {}))
         parts = multipart(r)
         name = parts.get("glossary")
         if name is not None and name.decode() not in profiles:
             return httpx.Response(400, json={"error": {
                 "message": f"Unknown glossary profile {name.decode()!r}. This deployment "
                            "has: none. See GET /glossaries.", "code": "invalid_value"}})
+        if "boost" in parts and not hotwords:
+            return httpx.Response(400, json={"error": {
+                "message": "Unsupported parameter: 'boost' cannot be honoured: this deployment "
+                           "has STT_HOTWORDS=0.", "code": "unsupported_parameter",
+                "param": "boost"}})
         if "boost" in parts and not spellable:
             return httpx.Response(400, json={"error": {
-                "message": "'boost' cannot be honoured for 1 term(s): 'Gabriel\u2019s Bedroom' "
-                           "at '\u2019'.", "code": "invalid_value", "param": "boost"}})
+                "message": "'boost' cannot be honoured for 1 term(s): 'Guest’s Bedroom' "
+                           "at '’'.", "code": "invalid_value", "param": "boost"}})
         return httpx.Response(200, json={"text": fake.stt_text},
                               headers={"x-stt-engine": engine} if engine else {})
     fake.handlers["stt.test"] = handler
@@ -549,29 +574,60 @@ def transcriptions(fake: Fake) -> list[dict[str, bytes]]:
     return [multipart(r) for r in fake.seen if r.url.path == "/v1/audio/transcriptions"]
 
 
-async def test_home_assistants_names_go_with_every_transcription_and_are_boosted_on_parakeet(make, fake):
+def health_asked(fake: Fake) -> int:
+    return len([r for r in fake.seen if r.url.path == "/health"])
+
+
+async def test_home_assistants_names_are_boosted_on_parakeet_from_the_first_command(make, fake):
+    """Boost waited for an answer's x-stt-engine, so the first command after
+    a start went without it. /health is asked once a start instead."""
     stt_with(fake, engine="parakeet", profiles={"home-assistant"})
     router = make()
     assert await router.transcribe(ONE_SECOND) == "what time is it"
     await router.transcribe(ONE_SECOND)
-    first, second = transcriptions(fake)
-    # Boost waits for stt-stack to name its engine: Whisper refuses the field.
-    assert first["glossary"] == b"home-assistant" and "boost" not in first
-    assert (second["glossary"], second["boost"]) == (b"home-assistant", b"true")
-    assert fake.hosts() == ["stt.test", "stt.test"]
+    assert all((sent["glossary"], sent["boost"]) == (b"home-assistant", b"true")
+               for sent in transcriptions(fake))
+    assert health_asked(fake) == 1 and fake.hosts() == ["stt.test", "stt.test"]
 
 
-async def test_whisper_takes_home_assistants_names_without_boost(make, fake):
+async def test_whisper_is_not_sent_home_assistants_names(make, fake):
+    """Whisper cannot boost and takes a glossary's terms as hotwords, and
+    stt-stack measured terms absent from the audio raising its WER by 28%:
+    every room named on every command is mostly absent terms."""
     stt_with(fake, engine="whisper", profiles={"home-assistant"})
     router = make()
     await router.transcribe(ONE_SECOND)
     await router.transcribe(ONE_SECOND)
-    assert all(sent["glossary"] == b"home-assistant" and "boost" not in sent
-               for sent in transcriptions(fake))
+    assert all("glossary" not in sent and "boost" not in sent for sent in transcriptions(fake))
 
 
-async def test_without_the_profile_the_utterance_is_heard_plain_and_the_name_left_off(make, fake, monkeypatch):
-    stt_with(fake, engine="parakeet", profiles=set())
+async def test_a_profile_the_stack_does_not_list_is_not_named(make, fake, monkeypatch, caplog):
+    """A hub without the integration named the profile on its first command
+    and every 10 minutes: a refused upload, a second one and a WARNING that
+    read as a fault. /health's list says so without a request, and it is
+    looked at again once GLOSSARY_RETRY_S has passed."""
+    profiles: set[str] = set()
+    stt_with(fake, engine="parakeet", profiles=profiles)
+    router = make()
+    with caplog.at_level("INFO", logger="voice-satellites.router"):
+        assert await router.transcribe(ONE_SECOND) == "what time is it"
+        await router.transcribe(ONE_SECOND)
+    assert all("glossary" not in sent for sent in transcriptions(fake))
+    assert len(transcriptions(fake)) == 2 and health_asked(fake) == 1
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+    profiles.add("home-assistant")  # the integration wrote it since
+    clock = time.monotonic() + router_module.GLOSSARY_RETRY_S
+    monkeypatch.setattr(router_module.time, "monotonic", lambda: clock)
+    await router.transcribe(ONE_SECOND)
+    assert transcriptions(fake)[-1]["glossary"] == b"home-assistant"
+    assert health_asked(fake) == 2
+
+
+async def test_without_the_profile_on_an_older_stack_the_name_is_left_off(make, fake, monkeypatch):
+    """A stack whose /health lists no profiles: the name goes, the refusal
+    is heard again plain, and the name is left off for GLOSSARY_RETRY_S."""
+    stt_with(fake, engine="parakeet", profiles=set(), listed=False)
     router = make()
     assert await router.transcribe(ONE_SECOND) == "what time is it"
     await router.transcribe(ONE_SECOND)
@@ -579,20 +635,48 @@ async def test_without_the_profile_the_utterance_is_heard_plain_and_the_name_lef
     assert named["glossary"] == b"home-assistant"
     assert "glossary" not in plain and "glossary" not in later
 
-    # Named again once GLOSSARY_RETRY_S has passed: the integration may have
-    # written the profile since.
     clock = time.monotonic() + router_module.GLOSSARY_RETRY_S
     monkeypatch.setattr(router_module.time, "monotonic", lambda: clock)
     await router.transcribe(ONE_SECOND)
     assert transcriptions(fake)[-2]["glossary"] == b"home-assistant"
 
 
-async def test_a_refused_boost_is_heard_without_the_vocabulary(make, fake):
+async def test_a_refused_boost_keeps_the_names_and_their_repairs(make, fake):
+    """A refused boost cost the whole vocabulary, repairs included, for ten
+    minutes at a time, although stt-stack says repair still applies without
+    boost. The names now go without the boost."""
     stt_with(fake, engine="parakeet", profiles={"home-assistant"}, spellable=False)
     router = make()
-    await router.transcribe(ONE_SECOND)                   # learns the engine
     assert await router.transcribe(ONE_SECOND) == "what time is it"
     await router.transcribe(ONE_SECOND)
-    _, boosted, plain, later = transcriptions(fake)
-    assert boosted["boost"] == b"true"
-    assert all("glossary" not in sent and "boost" not in sent for sent in (plain, later))
+    boosted, kept, later = transcriptions(fake)
+    assert all(s["glossary"] == b"home-assistant" for s in (boosted, kept, later))
+    assert boosted["boost"] == b"true" and "boost" not in kept and "boost" not in later
+
+
+async def test_a_stack_with_biasing_off_is_never_sent_boost(make, fake):
+    """STT_HOTWORDS=0: /health says so, and the names go without boost, so
+    nothing is refused."""
+    stt_with(fake, engine="parakeet", profiles={"home-assistant"}, hotwords=False)
+    router = make()
+    await router.transcribe(ONE_SECOND)
+    await router.transcribe(ONE_SECOND)
+    sent = transcriptions(fake)
+    assert len(sent) == 2
+    assert all(s["glossary"] == b"home-assistant" and "boost" not in s for s in sent)
+
+
+async def test_a_word_in_the_language_of_a_fine_tune_is_heard_by_it(make, fake):
+    """STT_MODELS=parakeet,parakeet-pt-br: the fine-tune was reachable only
+    through Home Assistant's Assist. A word whose hint is Portuguese, the one
+    language the fine-tune was loaded for, now asks for it by id; anything
+    else goes to the default."""
+    stt_with(fake, engine="parakeet", profiles={"home-assistant"}, models=[PARAKEET, PT_BR])
+    router = make()
+    await router.transcribe(ONE_SECOND, "pt-BR")
+    await router.transcribe(ONE_SECOND, "en")
+    await router.transcribe(ONE_SECOND)
+    pt, en, none = transcriptions(fake)
+    assert pt["model"] == b"parakeet-pt-br" and "language" not in pt
+    assert en["model"] == b"whisper-1" and none["model"] == b"whisper-1"
+    assert pt["boost"] == b"true"

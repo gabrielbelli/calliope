@@ -283,8 +283,12 @@ async def test_no_request_to_stt_carries_a_language_when_the_word_has_no_hint(fa
     fake.stt_engine = "whisper"
     r = router(fake, hey_jarvis={"action": {"destination": {"type": "echo"}}})
     await turn(r, "hey_jarvis", audio=ONE_SECOND)
-    assert "language" not in multipart(fake.sent("stt.test", "/v1/audio/transcriptions")[0])
-    assert fake.sent("stt.test", "/health") == []
+    await turn(r, "hey_jarvis", audio=ONE_SECOND)
+    assert all("language" not in multipart(sent)
+               for sent in fake.sent("stt.test", "/v1/audio/transcriptions"))
+    # Asked once a start, hint or none: what the engines take decides the
+    # first command too (boost, the vocabulary).
+    assert len(fake.sent("stt.test", "/health")) == 1
 
 
 async def test_an_llm_is_told_to_answer_in_english_when_kokoro_cannot_speak_the_language(fake):
@@ -616,7 +620,8 @@ async def test_a_pipeline_that_does_not_hear_or_speak_leaves_that_to_calliope(fa
     out = await turn(r, "alexa", audio=np.zeros(16000, "<i2").tobytes())
     assert kinds(sockets[0]) == ["auth", "assist_pipeline/pipeline/get"]
     assert out.transcript == "apaga a luz da sala" and out.error is None
-    assert len(fake.sent("stt.test")) == 1 and len(fake.sent("tts.test")) == 1
+    assert len(fake.sent("stt.test", "/v1/audio/transcriptions")) == 1
+    assert len(fake.sent("tts.test")) == 1
     assert made["rest"].asked == []
     assert out.language == "pt-BR" and out.voice == "pf_dora"
 

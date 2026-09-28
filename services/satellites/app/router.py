@@ -98,14 +98,15 @@ SPEAKER_RATE = 48000   # what the Korvo plays; Session.spk_rate for others
 # tts-stack refuses input over its schema's 4096 characters with a 400, so a
 # long LLM answer is cut at a sentence end below that rather than lost whole.
 MAX_TTS_CHARS = 4096
-# How long to wait for stt-stack's /health when the engine is not known yet.
+# How long to wait for stt-stack's /health, asked before the first
+# transcription of a start (Router._stt_health).
 ENGINE_PROBE_S = 3.0
 # Home Assistant's own names (areas, exposed entities, their aliases), which
 # the Calliope integration keeps on stt-stack as this glossary profile
-# (clients/home-assistant/custom_components/calliope/vocabulary.py). Every
-# transcription names it; when stt-stack refuses it (no such profile, or a term
-# its model cannot spell for `boost`), the utterance is sent again without it
-# and the name is left off for this long.
+# (clients/home-assistant/custom_components/calliope/vocabulary.py). Named to
+# an engine that boosts (Parakeet) while stt-stack lists it; when it refuses
+# the profile, the utterance is sent again without it and the name is left off
+# for this long, and when it refuses `boost`, the names go without the boost.
 HA_GLOSSARY = "home-assistant"
 GLOSSARY_RETRY_S = 600.0
 
@@ -544,6 +545,17 @@ def clip(text: str, limit: int = MAX_TTS_CHARS) -> str:
     return cut[:end + 1] if end > limit // 2 else cut
 
 
+def _refuses_boost(r: httpx.Response) -> bool:
+    """Whether stt-stack's 400 is about `boost` (its envelope's param, or its
+    words): a term the model cannot spell, or biasing switched off."""
+    try:
+        err = r.json().get("error") or {}
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(err, dict) and (err.get("param") == "boost"
+                                      or "'boost'" in str(err.get("message") or ""))
+
+
 class Router:
     def __init__(self, rules: Actions, *, stt_url: str | None = None, tts_url: str | None = None,
                  voice: str | None = None, client: httpx.AsyncClient | None = None,
@@ -558,14 +570,21 @@ class Router:
         self.voice = voice or env("SATELLITES_TTS_VOICE") or "bm_george"
         self.lookup = lookup
         self.stt_timeout, self.tts_timeout = stt_timeout, tts_timeout
-        # Which engine stt-stack runs ("parakeet" or "whisper"), from the
-        # x-stt-engine header every /v1 answer carries, or its /health when a
-        # hint is to be sent before any answer has been seen. A language hint
-        # reaches STT only under Whisper: Parakeet refuses the field (400).
+        # Which engine family stt-stack runs by default ("parakeet" or
+        # "whisper"), from its /health and the x-stt-engine header every /v1
+        # answer carries. A language hint reaches STT only under an engine
+        # that takes one: Parakeet refuses the field (400).
         self.stt_engine: str | None = None
-        self._engine_asked = False
-        # When stt-stack last refused HA_GLOSSARY.
+        # stt-stack's /health, as far as transcribing needs it: its engines
+        # (id, family, languages, what each takes), whether decode-time
+        # biasing is on (`hotwords`), and the glossary profiles it has. None
+        # until asked; asked once per start, and again when the vocabulary is
+        # looked for again.
+        self._stt: dict | None = None
+        # When stt-stack last refused HA_GLOSSARY, or listed it as absent, and
+        # when it last refused `boost`.
         self._glossary_missing: float | None = None
+        self._boost_refused: float | None = None
         self._own_client = client is None
         # follow_redirects stays False (httpx's default, stated so it is not
         # changed casually): a redirect would carry a destination's bearer
@@ -651,63 +670,130 @@ class Router:
             out.timings_ms[name] = round(out.timings_ms.get(name, 0.0)
                                          + (time.monotonic() - t) * 1000, 1)
 
-    async def _engine(self) -> str | None:
-        """The STT engine, asked of /health once when no answer has named it
-        yet. None when that fails: then no hint is sent, which every engine
-        takes."""
-        if self.stt_engine is None and self.stt_url and not self._engine_asked:
-            # Once per start: every transcription answer names the engine too.
-            self._engine_asked = True
-            try:
-                r = await self.client.get(f"{self.stt_url}/health", timeout=ENGINE_PROBE_S)
-                model = r.json().get("model") if r.status_code == 200 else None
-                if isinstance(model, str) and model:
-                    self.stt_engine = model.lower()
-            except (httpx.HTTPError, ValueError, AttributeError) as e:
-                log.info("routing: could not ask stt-stack which engine it runs (%s); "
-                         "no language hint is sent", type(e).__name__)
-        return self.stt_engine
+    async def _stt_health(self) -> dict:
+        """stt-stack's /health, asked once per start and remembered (and again
+        when the vocabulary is looked for again, _names_glossary). A stack
+        that does not answer, or answers without a `models` list, leaves the
+        engine to be learnt from the first answer's x-stt-engine."""
+        if self._stt is not None:
+            return self._stt
+        self._stt = {"engines": [], "hotwords": None, "glossaries": None}
+        if not self.stt_url:
+            return self._stt
+        try:
+            r = await self.client.get(f"{self.stt_url}/health", timeout=ENGINE_PROBE_S)
+            body = r.json() if r.status_code == 200 else {}
+            if not isinstance(body, dict):
+                body = {}
+        except (httpx.HTTPError, ValueError) as e:
+            log.info("routing: could not ask stt-stack which engines it runs (%s); the first "
+                     "answer will say", type(e).__name__)
+            return self._stt
+        models = body.get("models")
+        engines = [m for m in (models if isinstance(models, list) else [])
+                   if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
+        model = body.get("model")
+        if not engines and isinstance(model, str) and model:
+            # A stack from before the list: its one engine, by family.
+            family = "whisper" if model.lower().startswith("whisper") else model.lower()
+            engines = [{"id": None, "family": family, "default": True, "languages": [],
+                        "accepts_language": family == "whisper",
+                        "accepts_boost": family == "parakeet"}]
+        glossaries = body.get("glossaries")
+        self._stt = {"engines": engines,
+                     "hotwords": body.get("hotwords") if isinstance(body.get("hotwords"), bool)
+                     else None,
+                     "glossaries": glossaries if isinstance(glossaries, list) else None}
+        default = next((e for e in engines if e.get("default")), engines[0] if engines else None)
+        if default is not None and isinstance(default.get("family"), str):
+            self.stt_engine = default["family"].lower()
+        return self._stt
+
+    def _engine_for(self, hint: str | None) -> dict | None:
+        """The engine a command goes to. An engine the stack loaded for the
+        word's language alone (STT_MODELS=parakeet,parakeet-pt-br: the pt-BR
+        fine-tune, for a word whose hint is pt) is asked for by its id;
+        anything else goes to the default. None when the stack has not said."""
+        engines = (self._stt or {}).get("engines") or []
+        if hint:
+            primary = lang.primary(hint)
+            own = next((e for e in engines if not e.get("default") and e.get("id")
+                        and e.get("languages") == [primary]), None)
+            if own is not None:
+                return own
+        return next((e for e in engines if e.get("default")), engines[0] if engines else None)
 
     def _names_glossary(self) -> bool:
-        """Whether to name HA_GLOSSARY: always, unless stt-stack refused it
-        within GLOSSARY_RETRY_S."""
-        return (self._glossary_missing is None
-                or time.monotonic() - self._glossary_missing >= GLOSSARY_RETRY_S)
+        """Whether to name HA_GLOSSARY: unless stt-stack refused it, or listed
+        it as absent, within GLOSSARY_RETRY_S. Once that has passed, /health
+        is asked again: the integration may have written it since."""
+        if self._glossary_missing is None:
+            return True
+        if time.monotonic() - self._glossary_missing < GLOSSARY_RETRY_S:
+            return False
+        self._glossary_missing = None
+        self._stt = None
+        return True
 
     async def transcribe(self, pcm: bytes, hint: str | None = None) -> str:
         """The transcript. `hint` (a wake word's language) is sent only to an
         engine that takes one: Whisper does, and Parakeet refuses the field
-        with a 400 and detects the language itself.
+        with a 400 and detects the language itself. A word whose language an
+        engine was loaded for alone goes to that engine (_engine_for).
 
-        Home Assistant's names go with it as HA_GLOSSARY: hotwords on either
-        engine, and boosted into the decoder once stt-stack has named its
-        engine as Parakeet (Whisper refuses `boost` by name, and asking
-        /health for it would add a request to every turn). The vocabulary
-        must never cost a transcription: a 400 on a request that named it
-        (no such profile, or a term the model cannot spell for `boost`) is
-        the vocabulary's, and the utterance is transcribed again without
-        it."""
+        HOME ASSISTANT'S NAMES go with it as HA_GLOSSARY to an engine that
+        boosts (Parakeet), boosted into its decoder unless the stack has
+        decode-time biasing off (/health's `hotwords`). Not to Whisper, which
+        cannot boost and takes them as hotwords: stt-stack measured terms
+        absent from the audio raising Whisper's WER by 28%, and a list of
+        every room is mostly absent terms. Not where the stack does not list
+        the profile (a hub without the integration). The vocabulary must
+        never cost a transcription: a refused `boost` is sent again with the
+        names and without it, and any other 400 on a request that named them
+        (no such profile) is sent again without them."""
         if not self.stt_url:
             raise DestinationError("SATELLITES_STT_URL is not set, so nothing can be transcribed")
         pcm = pcm[:len(pcm) & ~1]  # whole samples only
-        data = {"model": "whisper-1", "response_format": "json"}
-        if hint and await self._engine() == "whisper":
+        names = self._names_glossary()
+        health = await self._stt_health()
+        engine = self._engine_for(hint)
+        family = (engine or {}).get("family") or self.stt_engine
+        takes_language = engine.get("accepts_language") if engine else family == "whisper"
+        boosts = engine.get("accepts_boost") if engine else family == "parakeet"
+        data = {"model": engine["id"] if engine and engine.get("id") and not engine.get("default")
+                else "whisper-1", "response_format": "json"}
+        if hint and takes_language:
             data["language"] = lang.primary(hint)  # Whisper takes ISO 639-1
         plain = dict(data)
-        if self._names_glossary():
+        listed = health.get("glossaries")
+        if names and boosts and listed is not None and HA_GLOSSARY not in listed:
+            log.info("routing: stt-stack has no %s vocabulary (the Home Assistant integration "
+                     "writes it); looked for again in %.0f min", HA_GLOSSARY, GLOSSARY_RETRY_S / 60)
+            self._glossary_missing = time.monotonic()
+            names = False
+        if names and boosts:
             data["glossary"] = HA_GLOSSARY
-            if self.stt_engine == "parakeet":
+            if health.get("hotwords") is not False and (
+                    self._boost_refused is None
+                    or time.monotonic() - self._boost_refused >= GLOSSARY_RETRY_S):
                 data["boost"] = "true"
         wav = audio.wav(pcm, MIC_RATE, 1)
         r = await self._post_stt(data, wav)
+        if "boost" in data and r.status_code == 400 and _refuses_boost(r):
+            log.warning("routing: stt-stack refused to boost the %s vocabulary, so its names go "
+                        "without the boost for %.0f min: %s", HA_GLOSSARY, GLOSSARY_RETRY_S / 60,
+                        r.text[:300].strip())
+            self._boost_refused = time.monotonic()
+            del data["boost"]
+            r = await self._post_stt(data, wav)
         if "glossary" in data and r.status_code == 400:
             log.warning("routing: stt-stack refused the %s vocabulary, transcribing without it "
                         "for %.0f min: %s", HA_GLOSSARY, GLOSSARY_RETRY_S / 60, r.text[:300].strip())
             self._glossary_missing = time.monotonic()
             r = await self._post_stt(plain, wav)
-        engine = r.headers.get("x-stt-engine")
-        if engine:
-            self.stt_engine = engine.lower()
+        answered = r.headers.get("x-stt-engine")
+        if answered and (engine is None or engine.get("default")):
+            self.stt_engine = answered.lower()
         if r.status_code != 200:
             raise DestinationError(f"STT answered {r.status_code}: {r.text[:200].strip()}")
         try:

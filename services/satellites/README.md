@@ -612,10 +612,22 @@ A word's `voice` overrides the table. In a conversation the language follows
 each utterance, and a short one ("ok", "sim") keeps the language already in
 use: another language has to reach a probability of 0.3 and beat it by 0.1.
 
-A hint is sent on to STT only when the engine takes one. The hub learns the
-engine from the `x-stt-engine` header of every transcription, or asks
-`/health` once before the first hinted request. Whisper gets the hint;
-Parakeet never does.
+The hub asks stt-stack's `/health` once a start, before its first
+transcription, for the engines it serves and what each takes. A hint is sent
+on to STT only when the engine takes one: Whisper gets it; Parakeet never
+does. A word whose hint is the one language an engine was loaded for goes to
+that engine by its id (with `STT_MODELS=parakeet,parakeet-pt-br`, a `pt` word
+is heard by the pt-BR fine-tune); anything else goes to the stack's default.
+
+Home Assistant's names (the `home-assistant` glossary profile, which the
+Calliope integration keeps on the stack) go with every transcription to an
+engine that boosts, Parakeet, boosted unless the stack has biasing off
+(`hotwords` false in its `/health`). Whisper is not sent them: it takes a
+glossary's terms as hotwords, and stt-stack measured terms absent from the
+audio raising its word error rate by 28%. The profile is not named while the
+stack does not list it, which is a hub without the integration; the list is
+looked at again every 10 minutes. A refused `boost` sends the names again
+without it, so the repairs still apply.
 
 The detector is py3langid 0.4.0, restricted to Parakeet's languages. On 96
 short commands and questions in eight languages it got 94 right, against 90
@@ -722,10 +734,12 @@ routing is saved with the wake words. `POST /satellites/routing/test` takes
 STT, and plays nothing.
 
 Destination URLs are not filtered for private addresses, on purpose: Home
-Assistant on the LAN is the main target, and whoever can save a wake word can
-already reflash every satellite. Redirects are not followed, over HTTP or over
-Home Assistant's websocket. Every external call has a hard time limit: STT 30
-s, TTS 30 s, the destination its own `timeout`.
+Assistant on the LAN is the main target. Whoever can save a wake word can
+send the credentials an action names to an address of their choosing, so the
+trust boundary is who holds a key (behind the gateway, every client key). The
+hub's own settings are never sent ([Wake words](#wake-words)). Redirects are
+not followed, over HTTP or over Home Assistant's websocket. Every external call
+has a hard time limit: STT 30 s, TTS 30 s, the destination its own `timeout`.
 
 ## Home Assistant over MQTT
 

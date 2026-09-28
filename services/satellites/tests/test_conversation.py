@@ -91,6 +91,8 @@ class Fakes(Services):
                           "speech": {"plain": {"speech": "Done."}}}
 
     async def stt(self, request):
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
         while self.stt_gate is not None and not self.stt_gate.is_set():
             await asyncio.sleep(0.01)
         text = self.transcripts.popleft() if self.transcripts else self.transcript
