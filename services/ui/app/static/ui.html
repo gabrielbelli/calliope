@@ -699,6 +699,21 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
 .seg button{border:none;border-radius:0;background:var(--bg);
   padding:.375rem .875rem}
 .seg button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink)}
+/* THE RING IS DRAWN INSIDE THE SEGMENT, as the dock's is. The shared ring
+   stands 2px outside its button, and .seg{overflow:hidden} clipped it to a
+   sliver in the next segment: Command, the first control a new word focuses,
+   showed no ring at all. On the pressed segment the ring would be the fill's
+   own --accent, so it takes the fill's ink instead. */
+.seg button:focus-visible{outline-offset:-3px}
+.seg button[aria-pressed=true]:focus-visible{outline-color:var(--accent-ink)}
+/* OFF MEANS OFF, PRESSED OR NOT. The pressed rule outranks button:disabled
+   and .seg button above comes after it, so a word marked for removal kept an
+   --accent Command and Every satellite, the loudest objects on a row that is
+   otherwise grey and struck through. The chosen one stays readable as chosen
+   by an edge, not a fill. */
+.seg button:disabled{background:var(--sunk)}
+.seg button[aria-pressed=true]:disabled{background:var(--sunk);color:var(--ink);
+  box-shadow:inset 0 0 0 1px var(--dim)}
 /* WHERE THE SURFACE CANNOT BE SEEN, A PILL COMES BACK. Under forced colours
    a gradient stroke and an SVG fill are painted over by the system palette,
    so the selected tab would be distinguished by the risen icon alone -- and
@@ -1428,6 +1443,9 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
 /* Struck through AND said in words beside it (Removed when you save), so the
    staged removal never depends on the line alone. */
 .ww[data-removed] .sat-name{color:var(--dim);text-decoration:line-through}
+/* The Mode and Satellites legends grey with the labels, which the .grid2 and
+   .row rules do not reach. */
+.ww[data-removed] fieldset>legend{opacity:.55}
 /* A language model word's key and Test, under its fields: the key box and its
    buttons on one line, as Say is on a satellite, its state under it, then
    Test and what the model said. */

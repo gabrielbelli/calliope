@@ -150,6 +150,24 @@ def test_a_summary_is_a_thumb_high_on_a_phone():
     assert "#tab-satellites details>summary{min-height:44px}" in block
 
 
+def test_a_segmented_button_shows_its_focus_ring_and_greys_when_off():
+    """The shared ring stands 2px outside a button, and .seg{overflow:hidden}
+    cut it off: Command, which Add focuses, and Every satellite showed no
+    ring. It is drawn inside, in the fill's ink on the pressed one. And a
+    word marked for removal kept its pressed segments in the full accent,
+    because the pressed rule outranks button:disabled."""
+    assert ".seg{display:inline-flex;border:1px solid var(--line);" in BARE_CSS
+    assert "overflow:hidden}" in BARE_CSS[BARE_CSS.index(".seg{display:inline-flex"):][:120]
+    assert ".seg button:focus-visible{outline-offset:-3px}" in BARE_CSS
+    assert ".seg button[aria-pressed=true]:focus-visible{outline-color:var(--accent-ink)}" in BARE_CSS
+    assert ".seg button:disabled{background:var(--sunk)}" in BARE_CSS
+    assert ".seg button[aria-pressed=true]:disabled{background:var(--sunk);color:var(--ink);" in BARE_CSS
+    # After the rules they correct, since they tie on specificity or lose.
+    assert (BARE_CSS.index(".seg button:disabled{") > BARE_CSS.index(".seg button{border:none")
+            > BARE_CSS.index("button:disabled{cursor:not-allowed"))
+    assert ".ww[data-removed] fieldset>legend{opacity:.55}" in BARE_CSS
+
+
 # ------------------------------------------------------------ the rows --
 
 
