@@ -1461,6 +1461,7 @@ fieldset.ww-sats,fieldset.ww-mode,fieldset.sat-fs{border:0;padding:0;margin:0;mi
 fieldset.ww-sats>legend,fieldset.ww-mode>legend{padding:0;margin-bottom:var(--s1);font-size:var(--t-label);
   line-height:1.45;color:var(--dim);letter-spacing:.005em}
 fieldset.sat-fs>legend{margin-bottom:var(--s1)}
+fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
 .ww-pick{display:flex;flex-wrap:wrap;column-gap:var(--s4)}
 /* Struck through AND said in words beside it (Removed when you save), so the
    staged removal never depends on the line alone. */
@@ -2555,25 +2556,39 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
               <div id="fwfail" aria-live="polite"></div>
               <ul class="fws" id="fwlist" role="list"></ul>
               <div class="hint" id="fwnone" hidden>No images yet: upload a .bin built for your satellites.</div>
+              <!-- TWO ROWS, as Custom models is. Every field was .tight, so
+                   each kept an input's own width of about 170px: the four did
+                   not share a line, Signature and Upload wrapped ragged, and
+                   a signature of some 90 characters could not be read back in
+                   its box. The file, Version and Model share the first line;
+                   the signature has the second to itself, and Upload ends
+                   the form. VERSION IS REQUIRED AND TYPED AS THE BUILD SAYS
+                   IT: the page calls a satellite current only when the label
+                   matches what it reports (satImageFor), and the git describe
+                   version is what it reports. -->
               <fieldset class="sat-fs">
                 <legend>Upload an image</legend>
                 <div class="row">
                   <div class="tight"><label for="fwfile">Image (.bin)</label>
                     <input type="file" id="fwfile" accept=".bin,application/octet-stream"></div>
-                  <div class="tight"><label for="fwversion">Version</label>
-                    <input type="text" id="fwversion" maxlength="64" placeholder="e.g. v0.3.1"></div>
-                  <div class="tight"><label for="fwmodel">Model</label>
-                    <input type="text" id="fwmodel" maxlength="64" value="esp32-korvo-v1.1"></div>
-                  <!-- A satellite built with a signing key installs only signed
-                       images, and refuses an unsigned one at the end of the
-                       transfer. The signature is made on the developer's
-                       machine (clients/korvo-satellite/scripts), never here:
-                       the page only carries it. -->
-                  <div class="tight"><label for="fwsig">Signature</label>
-                    <input type="text" id="fwsig" maxlength="200" placeholder="unsigned" spellcheck="false"
-                           autocomplete="off"></div>
+                  <div><label for="fwversion">Version</label>
+                    <input type="text" id="fwversion" maxlength="64" placeholder="e.g. v0.3.1-4-g1a2b3c4"
+                           spellcheck="false" autocomplete="off"></div>
+                  <div><label for="fwmodel">Model</label>
+                    <input type="text" id="fwmodel" maxlength="64" value="esp32-korvo-v1.1"
+                           spellcheck="false" autocomplete="off"></div>
+                </div>
+                <!-- A satellite built with a signing key installs only signed
+                     images, and refuses an unsigned one at the end of the
+                     transfer. The signature is made on the developer's
+                     machine (clients/korvo-satellite/scripts), never here:
+                     the page only carries it. -->
+                <div class="row">
+                  <div class="grow"><label for="fwsig">Signature</label>
+                    <input type="text" id="fwsig" maxlength="200" spellcheck="false" autocomplete="off"></div>
                   <button class="primary small tight" id="fwupload" type="button">Upload</button>
                 </div>
+                <div class="hint">Version is matched against what each satellite reports, so copy it from the build exactly.</div>
                 <div class="hint">A satellite built with a signing key refuses an image with no Signature.</div>
               </fieldset>
               <div id="fwnote" aria-live="polite"></div>
@@ -4068,6 +4083,7 @@ const SAT_COPY = {
   fwSkipped: "Skipped {name}: {why}.",
   fwUploaded: "Uploaded {v}.",
   fwChoose: "Choose a .bin first.",
+  fwVersion: "Type the version exactly as the build reports it; Device shows it under Firmware.",
   routeEmpty: "Type something to send to the word's action.",
   evLost: "Not receiving activity from the hub; it reconnects when the hub answers.",
   sumEvLost: "not connected",
@@ -6973,10 +6989,18 @@ async function firmwareAct(fw, act, button) {
 
 $("fwmodel").addEventListener("input", () => { $("fwmodel").dataset.touched = "1"; });
 
-$("fwupload").addEventListener("click", async () => {
-  const file = $("fwfile").files[0], host = $("fwnote");
+/* A VERSION IS NEVER GUESSED. A blank one used to be the file's name, and
+   PlatformIO names every image firmware.bin, so the label was "firmware";
+   and it stayed in its box after an upload, so the next image went up with
+   the last one's version. Either way the label matched nothing a satellite
+   reports, so a satellite that had just installed it was offered the same
+   update again, indefinitely, and the Firmware summary kept counting it.
+   All three fields are emptied once the hub has the image. */
+async function firmwareUpload() {
+  const file = $("fwfile").files && $("fwfile").files[0], host = $("fwnote");
   if (!file) { note(host, "warn", SAT_COPY.fwChoose); return; }
-  const version = $("fwversion").value.trim() || file.name.replace(/\.bin$/, "");
+  const version = $("fwversion").value.trim();
+  if (!version) { note(host, "warn", SAT_COPY.fwVersion); $("fwversion").focus(); return; }
   const model = $("fwmodel").value.trim();
   const sig = $("fwsig").value.trim();
   const done = busy($("fwupload"), "Uploading…");
@@ -6985,11 +7009,12 @@ $("fwupload").addEventListener("click", async () => {
       + (sig ? `&signature=${encodeURIComponent(sig)}` : ""),
       { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
     satSaid(host, satText("fwUploaded", { v: version }));
-    $("fwfile").value = $("fwsig").value = "";
+    $("fwfile").value = $("fwsig").value = $("fwversion").value = "";
     satellitesRefresh();
   } catch (e) { note(host, "bad", e.message); }
   finally { done(); }
-});
+}
+$("fwupload").addEventListener("click", firmwareUpload);
 
 /* ================================================================ events == */
 /* THE EVENT LOG IS A STREAM, NOT A POLL: a button press is gone by the next

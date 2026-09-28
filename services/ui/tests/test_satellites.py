@@ -996,6 +996,21 @@ def test_a_satellite_that_has_gone_is_a_word_a_reason_and_forget():
     assert "named.hidden = !n.online;" in function("satelliteUpdate")
 
 
+def test_the_firmware_upload_is_two_rows_and_its_signature_has_the_width():
+    """Every field was .tight, so each kept an input's own 170px: Signature
+    and Upload wrapped ragged, and a 90-character signature could not be
+    read back. Its placeholder, "unsigned", also read as a typed value."""
+    form = PANEL[PANEL.index("<legend>Upload an image</legend>"):PANEL.index("</fieldset>",
+                                                                              PANEL.index("Upload an image"))]
+    assert form.count('<div class="row">') == 2
+    assert '<div class="grow"><label for="fwsig">Signature</label>' in form
+    assert 'placeholder="unsigned"' not in form
+    assert 'placeholder="e.g. v0.3.1-4-g1a2b3c4"' in form
+    assert '<div class="tight"><label for="fwversion">' not in form
+    assert "fieldset.sat-fs>.row+.row{margin-top:var(--s3)}" in BARE_CSS
+    assert '$("fwupload").addEventListener("click", firmwareUpload);' in CODE
+
+
 def test_firmware_is_rebuilt_only_when_the_list_changes():
     render = function("firmwareRender")
     assert "if (box.dataset.sig !== sig)" in render

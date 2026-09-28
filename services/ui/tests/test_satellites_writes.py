@@ -365,3 +365,31 @@ def test_one_missed_poll_keeps_the_tab_and_says_so_until_the_hub_is_back(tmp_pat
     assert got["notes"].count(["bad", lost]) == 1, "a standing failure was announced at every poll"
     assert got["back"], got
     assert got["cleared"] == "", got
+
+
+def test_a_firmware_image_is_uploaded_only_with_its_version_and_the_form_is_emptied(tmp_path):
+    """A blank Version became the file's name, "firmware" for every PlatformIO
+    build, and a Version left in its box went up with the next image. The
+    label matched nothing a satellite reports, so one that had just installed
+    the image was offered it again for ever."""
+    got = run(tmp_path, """
+      const uploads = [];
+      const real = json;
+      json = async (path, o) => path.startsWith("/satellites/firmware?") ? (uploads.push(path), null)
+                                                                          : real(path, o);
+      $("fwfile").files = [{ name: "firmware.bin" }];
+      $("fwversion").value = "  ";
+      $("fwmodel").value = "esp32-korvo-v1.1";
+      $("fwsig").value = "";
+      await firmwareUpload();
+      const blank = { uploads: uploads.length, notes: notes.slice() };
+      $("fwversion").value = "v0.3.1-4-g1a2b3c4";
+      await firmwareUpload();
+      console.log(JSON.stringify({ blank, uploads, left: [$("fwfile").value, $("fwversion").value,
+                                                          $("fwsig").value] }));
+    """)
+    assert got["blank"]["uploads"] == 0, "an image went up with a version made up from its file name"
+    assert got["blank"]["notes"] == [["warn", "Type the version exactly as the build reports it; "
+                                              "Device shows it under Firmware."]], got
+    assert got["uploads"] == ["/satellites/firmware?model=esp32-korvo-v1.1&version=v0.3.1-4-g1a2b3c4"], got
+    assert got["left"] == ["", "", ""], "the last image's version waits in the box for the next one"
