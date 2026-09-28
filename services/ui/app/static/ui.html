@@ -4375,6 +4375,15 @@ function satellitesRender(list) {
       /* Back, so a broken-off update is behind it. */
       SATELLITES.otaFailed.delete(n.id);
     }
+    /* A RESTART IS OVER ONCE THE SATELLITE HAS GONE AND COME BACK. It was
+       remembered for its whole two minutes, so one that was back after ten
+       seconds and then really dropped (unplugged, the Wi-Fi gone) still read
+       Restarting, "It comes back on its own", and was not counted offline.
+       Not on the first poll that finds it online: a Reboot's answer comes
+       before the satellite has left, and that poll can be before it too. */
+    const back = SATELLITES.restarting.get(n.id);
+    if (back && !n.online) back.gone = true;
+    else if (back && back.gone) SATELLITES.restarting.delete(n.id);
     let li = SATELLITES.rows.get(n.id);
     if (!li) {
       li = satelliteRow(n);
@@ -7186,6 +7195,11 @@ function satellitesListen() {
       SATELLITES.restarting.set(ev.satellite, { v: ev.version || (ota && ota.version), at: Date.now() });
       SATELLITES.otaFailed.delete(ev.satellite);
     }
+    /* Gone, for satellitesRender's end of a restart, even when no poll saw
+       it offline: the tab shut polls nothing, and the stream stays open. */
+    if (ev.type === "offline" && SATELLITES.restarting.has(ev.satellite)) {
+      SATELLITES.restarting.get(ev.satellite).gone = true;
+    }
     /* The hub sends this one without a version when the transfer broke off,
        so the version is the one the row last showed it taking. */
     if (ev.type === "ota" && ev.state === "failed") {
@@ -7231,12 +7245,17 @@ function satellitesListen() {
    PM", so the names did not line up), then who and what. A failure is
    marked, which every line used to look the same as. Only text nodes are
    written into a line that has them, so one rewritten in place is not an
-   addition to the log. */
+   addition to the log. THE TIME IS WRITTEN ONCE, when the line is made: an
+   update's line is rewritten where it sits by each progress report, and
+   taking the report's time put a later time under lines logged after the
+   update started, in a log that is newest first. */
 function satEventLine(li, ev, who, what) {
-  if (!li.querySelector("time")) li.innerHTML = "<time></time><span><b></b> </span>";
-  const when = new Date(ev.at * 1000), time = li.querySelector("time");
-  satSet(time, when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
-  if (isFinite(when)) time.dateTime = when.toISOString();
+  if (!li.querySelector("time")) {
+    li.innerHTML = "<time></time><span><b></b> </span>";
+    const when = new Date(ev.at * 1000), time = li.querySelector("time");
+    satSet(time, when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    if (isFinite(when)) time.dateTime = when.toISOString();
+  }
   const lead = li.querySelector("span");
   satSet(lead.querySelector("b"), who);
   if (lead.childNodes.length > 2) satSet(lead.lastChild, what); else lead.append(what);
@@ -7278,7 +7297,8 @@ function satSettingsSaid(s) {
    "update verified" and "a1b2c3d4e5f6 pending" beside a Buttons grid that
    says When pressed and a row that says Now on v0.3.1. `going` is the
    version the row shows an update taking, since a progress event carries
-   none. */
+   none. A pending satellite is named New satellite (the hub sends it no
+   name), so its line does not say "new" again. */
 const SAT_EDGE_SAID = { press: "pressed", release: "released" };
 function satEventWhat(ev, going) {
   const v = ev.version || going || "new firmware";
@@ -7286,7 +7306,7 @@ function satEventWhat(ev, going) {
     : ev.type === "ota" ? satOtaSaid(ev, v)
     : ev.type === "online" ? `connected${ev.firmware ? `, on ${ev.firmware}` : ""}`
     : ev.type === "offline" ? "went offline"
-    : ev.type === "pending" ? `new, waiting to be adopted (ID ${ev.satellite})`
+    : ev.type === "pending" ? `waiting to be adopted (ID ${ev.satellite})`
     : ev.type === "wake" ? satelliteHeard(ev)
     : ev.type === "routed" || ev.type === "turn" ? satelliteRouted(ev)
     : ev.type === "conversation_started" ? satTalkStarted(ev)

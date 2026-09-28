@@ -160,6 +160,38 @@ def test_an_update_is_one_line_in_activity_and_asks_the_hub_nothing_per_ten_per_
                            "now on v0.3.1", "update to v0.3.1 failed: bad signature"], got
     assert got["button"] == "Vol + released after 820 ms", got
     assert got["online"] == "connected, on v0.3.1" and got["offline"] == "went offline", got
-    assert got["pending"] == "new, waiting to be adopted (ID a1b2c3d4e5f6)", got
+    # Its line is "New satellite waiting to be adopted (ID …)", not "New
+    # satellite new, waiting …".
+    assert got["pending"] == "waiting to be adopted (ID a1b2c3d4e5f6)", got
     # The slider's steps, where Activity said a percent seen nowhere else.
     assert got["volume"] == "volume 7 of 12", got
+
+
+def test_an_update_line_keeps_the_time_it_started_when_progress_rewrites_it(tmp_path):
+    """Progress rewrites an update's line where it sits, and the rewrite took
+    the report's time too. Activity is newest first, so a press logged after
+    the update started sat above a line with a later time than its own."""
+    got = run(tmp_path, """
+      // A line as the page builds one: <time>, then <span><b>who</b> what.
+      function line() {
+        let built = false;
+        const time = { textContent: "", dateTime: "" }, b = { textContent: "" };
+        const span = { childNodes: [b, { textContent: " " }], querySelector: () => b,
+                       get lastChild() { return this.childNodes[this.childNodes.length - 1]; },
+                       append(t) { this.childNodes.push({ textContent: t }); } };
+        return { time, span, classList: { toggle() {} },
+                 set innerHTML(v) { built = true; },
+                 querySelector: sel => built ? (sel === "time" ? time : span) : null };
+      }
+      const li = line();
+      const ev = (at, state, pct) => ({ at, satellite: "aaaaaaaaaaaa", type: "ota", state, pct,
+                                        version: "v0.3.1" });
+      satEventLine(li, ev(1000, "started"), "kitchen", "update to v0.3.1 started");
+      const first = li.time.dateTime;
+      satEventLine(li, ev(1090, "progress", 40), "kitchen", "updating to v0.3.1: 40%");
+      console.log(JSON.stringify({ first, after: li.time.dateTime,
+                                   what: li.span.lastChild.textContent }));
+    """)
+    assert got["first"] == "1970-01-01T00:16:40.000Z", got
+    assert got["after"] == got["first"], "a rewrite moved the line's time past the lines above it"
+    assert got["what"] == "updating to v0.3.1: 40%", got

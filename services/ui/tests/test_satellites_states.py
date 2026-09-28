@@ -116,6 +116,48 @@ def test_a_reboot_pressed_here_is_not_reported_as_offline(tmp_path):
     assert got["later"] == "Offline", got
 
 
+def test_a_restart_is_over_once_the_satellite_has_gone_and_come_back(tmp_path):
+    """A Reboot (or an update's rebooting) is remembered for two minutes, and
+    it was kept for all of them: a satellite back after ten seconds that then
+    really dropped read Restarting, "It comes back on its own", and was not
+    counted offline. It ends when the satellite is seen back after being
+    seen gone, by a poll or by the stream's offline event; a poll that still
+    finds it online just after the press is not the end."""
+    got = run(tmp_path, SAT + """
+      let source = null;
+      globalThis.EventSource = window.EventSource = class { constructor() { source = this; } };
+      const id = "aaaaaaaaaaaa";
+      const real = json;                                // /reboot is the hub's 204
+      json = async (path, o) => path.endsWith("/reboot") ? null : real(path, o);
+      await satellitesRefresh();
+      const li = SATELLITES.rows.get(id);
+      await satelliteAct(li, "reboot", stand());
+      await satellitesRefresh();                        // not gone yet
+      const before = SATELLITES.restarting.has(id);
+      hub.satellites[0].online = false;
+      await satellitesRefresh();
+      const away = satState(SATELLITES.list[0], satMem()).word;
+      hub.satellites[0].online = true;
+      await satellitesRefresh();
+      const back = SATELLITES.restarting.has(id);
+      hub.satellites[0].online = false;                 // unplugged, a minute in
+      await satellitesRefresh();
+      const dropped = satState(SATELLITES.list[0], satMem()).word;
+      // A tab that polled nothing while it was away: the stream said so.
+      hub.satellites[0].online = true;
+      await satellitesRefresh();
+      await satelliteAct(li, "reboot", stand());
+      source.onmessage({ data: JSON.stringify({ at: 1000, satellite: id, type: "offline" }) });
+      await satellitesRefresh();
+      console.log(JSON.stringify({ before, away, back, dropped, streamed: SATELLITES.restarting.has(id) }));
+    """)
+    assert got["before"] is True, "a poll from before the satellite left ended the restart"
+    assert got["away"] == "Restarting", got
+    assert got["back"] is False, "the restart was remembered after the satellite came back"
+    assert got["dropped"] == "Offline", "a satellite that dropped after its reboot read Restarting"
+    assert got["streamed"] is False, got
+
+
 def test_an_update_that_broke_off_is_not_reported_as_offline(tmp_path):
     """The hub keeps an update's state on the connection, and a transfer that
     breaks off ends the connection: the only trace is the `failed` event,
