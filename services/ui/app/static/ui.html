@@ -4241,6 +4241,7 @@ const SAT_COPY = {
   fixPauseFollow: "Pause for 0.2 to 3 seconds before a follow-up ends.",
   fixCooldown: "Make the cooldown 0 to 600 seconds.",
   fixPhrase: "Keep to 64 end phrases, each of 64 characters at most.",
+  fixGone: "Its model is no longer on the hub: upload it again under Custom models, or remove this word.",
   wwFix: "{word} needs a fix before the wake words can be saved.",
   wwUnfinished: "Finish setting up {word} to save the wake words.",
   wwModelChoose: "Choose an .onnx file first.",
@@ -5820,6 +5821,11 @@ function wakeBaseUrl(text) {
    conversation word in it. A word the hub holds no behaviour for (migrated
    from a rules.json that did not load) is left to the hub. */
 function wakeProblem(w, words) {
+  /* A word whose model has gone from the hub (a custom .onnx deleted from
+     the volume) makes the hub refuse the whole list, so every Save and Try
+     again was a 422 that named it only afterwards. */
+  const can = WAKE.server && WAKE.server.available;
+  if (w.name && Array.isArray(can) && !can.includes(w.name)) return SAT_COPY.fixGone;
   if (!w.mode) return "";
   /* Before a trigger's return: its colour is sent and checked too. */
   if (w.colour != null && !WAKE_COLOUR.test(w.colour)) return SAT_COPY.fixColour;
@@ -5870,6 +5876,7 @@ function wakeProblemAt(w, problem) {
   const d = (w.action && w.action.destination) || {}, llm = d.type === "llm";
   const url = llm ? "d.base_url" : "d.url";
   const [f, empty] = {
+    [SAT_COPY.fixGone]: [""],
     [SAT_COPY.fixCooldown]: ["t.cooldown_s"],
     [SAT_COPY.fixLang]: ["tag"],
     [SAT_COPY.fixUrl]: [url, !(llm ? d.base_url : d.url)],
@@ -6812,7 +6819,9 @@ function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
   const failed = !!live && live.state === "error";
   satNoteOnce(q(".ww-error"), "bad", failed
     ? satText("wwBroken", { error: live.error || "no reason given" }) : "");
-  q('[data-ww="retry"]').hidden = !failed;
+  /* Try again sends the saved list, which the hub refuses whole while this
+     word's model is gone. */
+  q('[data-ww="retry"]').hidden = !failed || problem === SAT_COPY.fixGone;
 
   const seg = q(".ww-mode .seg");
   seg.setAttribute("aria-label", `What ${label} does`);

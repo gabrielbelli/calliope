@@ -375,6 +375,29 @@ def test_a_value_the_new_mode_hides_is_never_one_the_hub_would_refuse(tmp_path):
     assert got["ptt"] == 8, got
 
 
+def test_a_word_whose_model_has_gone_from_the_hub_is_named_before_save(tmp_path):
+    """A custom .onnx gone from the volume makes the hub refuse the whole
+    list, so every Save of another word, and Try again, was a 422 that named
+    the word only afterwards. It is named on its row beforehand, with no
+    field to mark, and Save waits until it is removed."""
+    got = run(tmp_path, MODERN + """
+      hub.available = hub.available.filter(n => n !== "hey_jarvis");
+      await satellitesRefresh();
+      const jarvis = () => (WAKE.draft || WAKE.server.words).find(w => w.name === "hey_jarvis");
+      const problem = wakeProblem(jarvis(), WAKE.server.words);
+      const at = wakeProblemAt(jarvis(), problem);
+      wakeAdd("alexa");
+      const held = { off: $("wwsave").disabled, said: $("wwdirty").textContent };
+      wakeRemove("hey_jarvis", stand());
+      console.log(JSON.stringify({ problem, at, held, removed: $("wwsave").disabled }));
+    """)
+    assert got["problem"] == ("Its model is no longer on the hub: upload it again under Custom models, "
+                              "or remove this word."), got
+    assert got["at"] == {"f": "", "empty": False}, got
+    assert got["held"] == {"off": True, "said": "hey jarvis needs a fix before the wake words can be saved."}
+    assert got["removed"] is False, got
+
+
 def test_a_conversation_word_keeps_listening_and_hands_over_to_nobody(tmp_path):
     """A conversation's follow-up and end phrases are sent; a fallback is a
     command's, and switching to conversation takes it off."""
