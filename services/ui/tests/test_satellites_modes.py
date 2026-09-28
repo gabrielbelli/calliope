@@ -294,6 +294,57 @@ def test_more_end_phrases_than_the_hub_takes_are_named_before_save(tmp_path):
     assert got == {"seventy": fix, "sixty_four": "", "long": fix}, got
 
 
+def test_a_value_the_new_mode_hides_is_never_one_the_hub_would_refuse(tmp_path):
+    """Save sends every field in every mode and the hub checks them all, but
+    the page named only what the mode shows. A pause of 5 s typed in Command
+    and then Trigger turned Save on, and the hub answered 422 about a field
+    nobody could see. Each such value goes back to the saved one as its
+    field is hidden, or, on a word never saved, is left to the hub."""
+    got = run(tmp_path, MODERN + """
+      await satellitesRefresh();
+      // The draft, or the hub's copy once an edit is back where it started.
+      const jarvis = () => (WAKE.draft || WAKE.server.words).find(w => w.name === "hey_jarvis");
+      const out = {};
+      const turn = (edit, mode) => {
+        wakeEdit("hey_jarvis", edit);
+        wakeEdit("hey_jarvis", w => wakeSetMode(w, mode, "hey_jarvis"));
+        return { problem: wakeProblem(jarvis(), wakeEffective()), off: $("wwsave").disabled };
+      };
+      out.pause = turn(w => wakeField(w, "silence_ms", "5"), "trigger");
+      out.tag = turn(w => { wakeSetMode(w, "command", "hey_jarvis"); wakeField(w, "tag", "Deutsch"); }, "trigger");
+      out.follow = turn(w => { wakeSetMode(w, "conversation", "hey_jarvis"); wakeField(w, "c.follow_up_s", "");
+                               wakeField(w, "c.silence_ms", "0.1"); }, "command");
+      out.cool = turn(w => { wakeSetMode(w, "trigger", "hey_jarvis"); wakeField(w, "t.cooldown_s", "900"); }, "command");
+      out.clean = WAKE.draft === null;
+      wakeEdit("hey_jarvis", w => { w.threshold = 0.6; });
+      await wakeSave();
+      out.sent = sent("hey_jarvis");
+      // A word never saved has nothing to go back to: left out, the hub's default.
+      wakeAdd("alexa");
+      wakeEdit("alexa", w => wakeField(w, "silence_ms", "5"));
+      wakeEdit("alexa", w => wakeSetMode(w, "trigger", "alexa"));
+      out.fresh = "silence_ms" in WAKE.draft.find(w => w.name === "alexa");
+      // Push-to-talk leaves a conversation as a word does.
+      wakeEdit("ptt", w => wakeSetMode(w, "conversation", "ptt"));
+      wakeEdit("ptt", w => wakeField(w, "c.follow_up_s", "0"));
+      wakeEdit("ptt", w => wakeSetMode(w, "command", "ptt"));
+      out.ptt = WAKE.draftPtt.conversation.follow_up_s;
+      console.log(JSON.stringify(out));
+    """)
+    for case in ("pause", "tag"):
+        assert got[case] == {"problem": "", "off": False}, (case, got[case])
+    # Back to Command with every hidden value put back is no edit at all.
+    for case in ("follow", "cool"):
+        assert got[case] == {"problem": "", "off": True}, (case, got[case])
+    assert got["clean"], got
+    body = got["sent"]
+    assert body["mode"] == "command" and body["silence_ms"] == 800 and body["language"] is None, body
+    assert body["conversation"] == {"follow_up_s": 8, "silence_ms": 600, "end_phrases": None}, body
+    assert body["trigger"]["cooldown_s"] == 3, body
+    assert got["fresh"] is False, got
+    assert got["ptt"] == 8, got
+
+
 def test_a_conversation_word_keeps_listening_and_hands_over_to_nobody(tmp_path):
     """A conversation's follow-up and end phrases are sent; a fallback is a
     command's, and switching to conversation takes it off."""

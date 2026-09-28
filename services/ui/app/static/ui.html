@@ -5663,7 +5663,41 @@ function wakeSetMode(w, mode, name) {
     if (!w.action) w.action = WAKE.stash.get(name || w.name) || wakeNewAction();
     if (mode === "conversation" && w.action.fallback) w.action = { ...w.action, fallback: null };
   }
+  wakeHidden(w, mode, name || w.name);
   w.mode = mode;
+}
+
+/* A VALUE THE NEW MODE HIDES IS NEVER ONE THE HUB WOULD REFUSE. Save sends
+   every field in every mode and the hub checks them all, but wakeProblem
+   names only what the mode shows: a pause of 5 s typed in Command and then
+   Trigger turned Save on, and the hub answered 422 about silence_ms, a field
+   nobody could see. So such a value goes back to the saved one as its field
+   goes out of sight, as Assist drops a Language tag (wakeSetDest), or for a
+   word never saved is left out, which is the hub's default. One that would
+   be taken stays, for a move back. */
+function wakeHidden(w, mode, who) {
+  const saved = who === WAKE_PTT ? WAKE.server && WAKE.server.ptt
+    : ((WAKE.server && WAKE.server.words) || []).find(x => x.name === who);
+  const back = (into, key, from) => {
+    if (from && from[key] !== undefined) into[key] = wakeClone(from[key]); else delete into[key];
+  };
+  const pause = v => wakeWithin(v, WAKE_PAUSE.low, WAKE_PAUSE.high);
+  if (mode === "trigger") {
+    if (w.language && !WAKE_LANG.test(w.language)) w.language = (saved && saved.language) || null;
+    if ("silence_ms" in w && !pause(w.silence_ms)) back(w, "silence_ms", saved);
+  }
+  if (mode !== "conversation" && w.conversation) {
+    const c = { ...w.conversation }, from = saved && saved.conversation;
+    if ("follow_up_s" in c && !wakeWithin(c.follow_up_s, 1, 60)) back(c, "follow_up_s", from);
+    if ("silence_ms" in c && !pause(c.silence_ms)) back(c, "silence_ms", from);
+    if (wakePhrasesBad(c.end_phrases)) back(c, "end_phrases", from);
+    w.conversation = c;
+  }
+  if (mode !== "trigger" && w.trigger && "cooldown_s" in w.trigger && !wakeWithin(w.trigger.cooldown_s, 0, 600)) {
+    const t = { ...w.trigger };
+    back(t, "cooldown_s", saved && saved.trigger);
+    w.trigger = t;
+  }
 }
 
 /* A NEW DESTINATION STARTS FROM ITS OWN FIELDS: the hub refuses a field
