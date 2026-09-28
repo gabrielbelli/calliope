@@ -467,6 +467,25 @@ def test_a_lit_satellite_pulses_again_while_it_waits_for_a_follow_up(client, app
     assert [m["mode"] for m in sat.texts("lights")] == ["pulse", "spin", "off", "pulse", "off"]
 
 
+def test_firmware_that_animates_listening_is_sent_listen_with_the_direction(client, app, events, plug):
+    """Firmware that lists `listen` among its light modes draws the listening
+    ring itself; the hub sends it the mode and the talker's direction (None
+    until there is one) where older firmware gets the pulse."""
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws, light_modes=["off", "solid", "pulse", "spin", "pixels", "listen"])
+        save(client, conversation())
+        sat = plug(ws)
+        sat.send(np.concatenate((floor(0.2), mark("hey_jarvis"), voiced(0.8), floor(1.2, seed=1))))
+        settled(app)
+        sat.send(floor(3.0, seed=40))
+        wait(lambda: of(events, "conversation_ended"), what="the end")
+        wait(lambda: sat.texts("lights")[-1]["mode"] == "off", what="the ring out")
+    lights = sat.texts("lights")
+    assert [m["mode"] for m in lights] == ["listen", "spin", "off", "listen", "off"]
+    listening = [m for m in lights if m["mode"] == "listen"]
+    assert all("direction" in m and m["color"] == [40, 110, 255] for m in listening)
+
+
 def test_a_satellite_that_is_not_adopted_never_gets_a_conversation(client, app, events, services, plug):
     with client.websocket_connect("/satellites/ws") as ws:
         ws.send_json(hello())

@@ -457,16 +457,6 @@ def test_a_dark_satellites_lights_route_is_refused_rather_than_sent(client, plug
     assert satellite.texts("lights") == []
 
 
-def test_the_ring_points_at_the_talker_and_wraps_round():
-    from app.main import ring
-    c = (0, 0, 100)
-    assert int(np.argmax([p[2] for p in ring(0, 12, c)])) == 0
-    assert int(np.argmax([p[2] for p in ring(90, 12, c)])) == 3
-    near_top = [p[2] for p in ring(355, 12, c)]
-    assert int(np.argmax(near_top)) == 0 and near_top[11] > near_top[1] > 0
-    assert all(len(p) == 3 for p in ring(123, 12, c))
-
-
 # ---- one conversation, end to end ----------------------------------------------------
 
 

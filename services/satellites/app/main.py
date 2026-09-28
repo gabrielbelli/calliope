@@ -1249,21 +1249,6 @@ def _save_debug(sid: str, command: "listening.Command") -> None:
         old.unlink(missing_ok=True)
     log.info("satellite %s: debug audio saved as %s-*", sid, stamp)
 
-def ring(direction: float, leds: int, colour: tuple[int, int, int]) -> list[list[int]]:
-    """A pixels frame pointing at `direction`: full at the nearest LED, soft on
-    its neighbours. LED 0 is taken to sit at 0 degrees (towards microphone 1)
-    and to count the same way as the microphones. Neither has been checked on
-    a board, so the pointer may be rotated or mirrored; see listening.py."""
-    pos = direction / 360.0 * leds
-    out = []
-    for i in range(leds):
-        d = abs(i - pos) % leds
-        d = min(d, leds - d)
-        w = max(0.0, 1.0 - d / 2.0) ** 2
-        out.append([round(c * w) for c in colour])
-    return out
-
-
 class Player:
     """dialogue.Sink for a live conversation: each sentence of the reply
     queued on the satellite it is for, as soon as it is synthesised.
@@ -1461,13 +1446,22 @@ class Conversation:
     # -- the satellite's lights, duck and Ear -----------------------------------
 
     async def point(self, direction: float | None, *, force: bool = False) -> None:
-        """The ring, while listening: pointed at the talker, or a soft pulse
-        until there is a direction. Sent only when the pointed LED changes."""
+        """The ring, while listening.
+
+        Firmware that draws the `listen` mode animates it on the board: a
+        breathing glow, and an arc that glides towards the talker. It is sent
+        the direction whenever that moves by half an LED or more.
+
+        Older firmware draws only the frame it is sent. It used to be sent a
+        pointer at the talker, which sat still whenever the talker did and
+        looked like a stalled frame, so it now gets the breathing pulse, once."""
         s = self.s
         leds = s.caps.get("lights") if s is not None else None
         if not self.live or not isinstance(leds, int) or leds <= 0:
             return
-        key = None if direction is None else round(direction / 360.0 * leds) % leds
+        animates = "listen" in (s.caps.get("light_modes") or ())
+        key = (round(direction / 360.0 * leds * 2) % (leds * 2)
+               if animates and direction is not None else None)
         now = time.monotonic()
         # The listener calls this after every batch; until run() has lit the
         # ring for the first time (after the wake earcon), it waits its turn.
@@ -1475,11 +1469,11 @@ class Conversation:
                           or now - self._lit_at < LIGHTS_MIN_S):
             return
         self._lit_key, self._lit_at = key, now
-        if direction is None:
-            msg = {"mode": "pulse", "color": list(LISTEN_COLOUR), "brightness": 48}
+        if animates:
+            msg = {"mode": "listen", "color": list(LISTEN_COLOUR), "brightness": 96,
+                   "direction": None if direction is None else round(direction % 360.0, 1)}
         else:
-            msg = {"mode": "pixels", "brightness": 96,
-                   "pixels": ring(direction, leds, LISTEN_COLOUR)}
+            msg = {"mode": "pulse", "color": list(LISTEN_COLOUR), "brightness": 48}
         await self.hub.send_lights(s, msg)
 
     def _reply_satellite(self) -> Session | None:
