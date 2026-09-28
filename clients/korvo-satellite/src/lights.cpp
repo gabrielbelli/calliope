@@ -3,6 +3,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
 #include <driver/rmt.h>
+#include <esp_timer.h>
 #include <math.h>
 #include <string.h>
 
@@ -33,12 +34,17 @@ static volatile Status status = Status::Booting;
 static volatile bool muted = false;
 static volatile bool dark = false;
 static volatile int brightness_pct = 100;
-static volatile uint32_t identify_until = 0;
 static volatile int ota_pct = -1;
 static volatile int level_lit = 0;
 static volatile int top_led = 0;
 static volatile int ring_dir = 1;
-static volatile uint32_t level_until = 0;
+// The level bar's and identify's deadlines, in esp_timer's 64-bit
+// milliseconds, read and written under mux. millis() wraps after 49.7 days,
+// and a 32-bit deadline then misleads: a stale one reads as weeks ahead, and
+// the level bar hides the mute's red, or identify flashes white, for that long.
+static int64_t level_until = 0;
+static int64_t identify_until = 0;
+static int64_t now_ms() { return esp_timer_get_time() / 1000; }
 
 struct HubLayer {
   Mode mode = Mode::Off;
@@ -103,7 +109,11 @@ static void render(uint32_t t) {
     fill(0, 0, 0);
     return;
   }
-  if ((int32_t)(level_until - t) > 0) {
+  int64_t now = now_ms();
+  portENTER_CRITICAL(&mux);
+  bool level = level_until > now, identify = identify_until > now;
+  portEXIT_CRITICAL(&mux);
+  if (level) {
     fill(3, 3, 3);
     for (int k = 0; k < level_lit; k++)
       strip.setPixelColor(((top_led + ring_dir * k) % LED_COUNT + LED_COUNT) % LED_COUNT, 90, 90, 90);
@@ -118,7 +128,7 @@ static void render(uint32_t t) {
     for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, 0, i < lit ? 60 : 4, 0);
     return;
   }
-  if (t < identify_until) {
+  if (identify) {
     uint8_t v = ((t / 150) % 2) ? 120 : 0;
     fill(v, v, v);
     return;
@@ -231,13 +241,21 @@ void lights_ring(int top, bool upside_down) {
 }
 
 void lights_level(int lit, uint32_t ms) {
+  int64_t until = now_ms() + ms;
   level_lit = lit < 0 ? 0 : lit > LED_COUNT ? LED_COUNT : lit;
-  level_until = millis() + ms;
+  portENTER_CRITICAL(&mux);
+  level_until = until;
+  portEXIT_CRITICAL(&mux);
 }
 void lights_brightness(int percent) { brightness_pct = percent < 1 ? 1 : percent > 100 ? 100 : percent; }
 void lights_status(Status s) { status = s; }
 void lights_muted(bool m) { muted = m; }
-void lights_identify(uint32_t ms) { identify_until = millis() + ms; }
+void lights_identify(uint32_t ms) {
+  int64_t until = now_ms() + ms;
+  portENTER_CRITICAL(&mux);
+  identify_until = until;
+  portEXIT_CRITICAL(&mux);
+}
 void lights_ota(int percent) { ota_pct = percent; }
 
 void lights_hub(Mode mode, uint8_t r, uint8_t g, uint8_t b, uint8_t brightness, const uint8_t *pixels,

@@ -436,11 +436,13 @@ environment instead if that is not acceptable.
 
 ### Lights
 
-While a satellite listens, its ring points at the talker (`pixels`, full on the
-nearest LED, soft on its neighbours), or pulses when there is no direction yet.
-It spins while the router works, goes out when the reply starts, and pulses
-again while a conversation waits for its next turn. LED 0 is assumed to
-sit towards microphone 1, which has not been checked on a board.
+While a satellite listens, its ring breathes in the word's colour and, on
+firmware that draws the `listen` mode itself (`light_modes` in its caps), a
+brighter arc glides towards the talker; older firmware gets a pulse. It spins
+while the router works, goes out when the reply starts, and pulses again while
+a conversation waits for its next turn. LED 0 is assumed to sit towards
+microphone 1, with the LEDs counting the same way round as the microphones.
+Neither has been checked on a board, so the arc may be rotated or mirrored.
 
 **A satellite with `lights_enabled` false is never sent `lights`.** Every
 lights message goes through one function (`Hub.send_lights`) that reads the

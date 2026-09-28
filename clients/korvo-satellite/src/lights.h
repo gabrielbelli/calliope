@@ -15,6 +15,9 @@ enum class Status : uint8_t {
 // Listen: the ring breathes softly and a brighter arc glides towards the
 // talker (direction in degrees, as the hub's direction of arrival; negative
 // until there is one), animated here so it never looks like a stalled frame.
+// LED 0 is taken to sit at 0 degrees (microphone 1), with the LEDs counting
+// the same way round as the microphones. Neither has been checked on a board,
+// so the arc may be rotated or mirrored.
 enum class Mode : uint8_t { Off, Solid, Pulse, Spin, Pixels, Listen };
 
 void lights_begin();
