@@ -1436,7 +1436,10 @@ details.sat-row>.body>.ww-listen,details.sat-row>.body>.ww-does{margin-top:var(-
 .sat-btns{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,1fr);
   gap:var(--s2) var(--s3);align-items:center}
 .sat-btns .hd{font-size:var(--t-label);color:var(--dim)}
-.sat-btns .url{grid-column:2/-1}
+.sat-btns .url,.sat-btns .bnote{grid-column:2/-1}
+.sat-btns .bnote{margin-top:0}
+/* The three hints under the grid are one note, not three paragraphs. */
+.sat-buttons .body>.hint+.hint{margin-top:var(--s1)}
 .sat-btns .url label{margin-bottom:var(--s1)}
 fieldset.ww-sats,fieldset.ww-mode,fieldset.sat-fs{border:0;padding:0;margin:0;min-width:0}
 /* The Satellites legend names a control the way Threshold beside it does, so
@@ -1470,6 +1473,15 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
 @media (max-width:30rem){
   /* 14px back for the controls on a phone; the hairlines still say whose. */
   details.sat-row>.body,.sat-hub>details>.body{padding-left:0}
+  /* EACH BUTTON'S NAME HEADS ITS OWN PAIR. Three columns on a 309px grid
+     left a select 123px, about 84px of text past its chevron, and a select
+     cuts rather than ellipsing (the fence at .row > *:has(> select)): Volume
+     down was at the edge. Two columns under a name give each about 148px,
+     which the longest action fits. */
+  .sat-btns{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .sat-btns>span:first-child{display:none}
+  .sat-btns .bn{grid-column:1/-1;margin-top:var(--s2)}
+  .sat-btns .url,.sat-btns .bnote{grid-column:1/-1}
 }
 </style>
 </head>
@@ -3951,6 +3963,7 @@ const SAT_COPY = {
   devOffline: "Offline, so Reboot, Move and Update wait for it to reconnect.",
   devUpdating: "Reboot, Move and Update wait until this update finishes.",
   btnNoMute: "Keep Mute mic on one button at least, or a muted satellite could never be unmuted.",
+  sideNeeds: "Needs R37 fitted and R50 removed on the board.",
   ringTop: "Move the lit LED with ◀ ▶ until it is at 12 o'clock, then press That's the top.",
   ringWay: "The bar runs from the brightest LED. Which way does it go, as you look at it?",
   ringSaved: "Saved: the volume bar starts at 12 o'clock and fills clockwise.",
@@ -4501,7 +4514,6 @@ function satAdoptedMarkup(u) {
           <div class="hint">Talk listens as if it heard a wake word, and Stop cuts off what it is saying.</div>
           <div class="hint">Mute, volume and lights happen on the device itself, so they work with the hub down.</div>
           <div class="hint">Holding Set 5 s opens Wi-Fi setup and Mode 10 s resets it, whatever they are set to.</div>
-          <div class="hint">Side works once R37 is fitted and R50 removed on the board (firmware README).</div>
           <div class="sat-note" aria-live="polite"></div>
         </div>
       </details>
@@ -4744,9 +4756,13 @@ function satLevelSay(input) {
    "play=ptt set.release=stop", which nobody can guess. The hub replaces the
    whole mapping on PATCH, so every change sends all of it, built from every
    select; "none" is left out, and a webhook carries its address. */
+/* SHORT ENOUGH FOR A PHONE, AND NAMED AS THE ROW NAMES IT. A select cannot
+   ellipsis, so "Night mode (lights on/off)" cut to "Night mode (l" in a
+   123px cell; and the action flips lights_enabled, the Lights switch on the
+   open row, so "Night mode" made a press untick a box of another name. */
 const SAT_ACTIONS = [["none", "Nothing"], ["ptt", "Talk"], ["stop", "Stop"], ["mute", "Mute mic"],
                      ["volume_up", "Volume up"], ["volume_down", "Volume down"],
-                     ["lights", "Night mode (lights on/off)"], ["dimmer", "Dimmer"],
+                     ["lights", "Lights on/off"], ["dimmer", "Dimmer"],
                      ["brighter", "Brighter"], ["webhook", "Webhook"]];
 /* In the order they sit on the board, left to right (the mic board's sheet
    3), then the one on the main board's edge. */
@@ -4806,14 +4822,22 @@ function satWhy(n) {
   return mutes.length ? satText("whyMuted", { buttons: mutes.join(" or ") }) : SAT_COPY.whyMutedAny;
 }
 
+/* A BUTTON DOING WHAT ITS KEY IS PRINTED WITH GOES UNSAID. With the hub's
+   own mapping the closed summary was "Rec mutes, Play talks, Set stops,
+   Vol − turns it down, Vol + turns it up", two or three lines under the
+   chevron on a phone, most of it what the keys already say. Healthy is
+   quiet: only what differs is named, unless that leaves nothing to say. */
+const SAT_NAMESAKE = { rec: "mute", vol_up: "volume_up", vol_down: "volume_down" };
 function satButtonsNote(mapping, keys) {
-  const said = edge => keys.map(key => {
+  const said = (edge, quiet) => keys.map(key => {
     const act = (mapping[key] || {})[edge] || "", b = satButtonName(key);
+    if (quiet && SAT_NAMESAKE[key] === act) return null;
     return SAT_VERBS[act] ? satText(SAT_VERBS[act], { b })
       : act.startsWith("webhook:") ? satText("hooks", { b }) : null;
   }).filter(Boolean);
-  const press = said("press"), release = press.length ? [] : said("release");
-  return [...press, ...release].join(", ") || SAT_COPY.sumBtnNone;
+  /* The presses, or the releases when nothing is on a press. */
+  const edges = quiet => { const press = said("press", quiet); return press.length ? press : said("release", quiet); };
+  return edges(true).join(", ") || edges(false).join(", ") || SAT_COPY.sumBtnNone;
 }
 
 function satButtons(li, n) {
@@ -4858,6 +4882,20 @@ function satButtons(li, n) {
         boxes.push(box);
       }
       grid.append(...boxes);
+      /* THE SIDE BUTTON'S CAVEAT ON ITS OWN ROW. The firmware reports it on
+         every board, and it does nothing until the board is changed; said
+         as the last of four hints under the grid, it was far from the row it
+         qualifies and pointed at a README the page does not link. */
+      if (key === "key1") {
+        const caveat = document.createElement("span");
+        caveat.className = "hint bnote";
+        caveat.id = `${u}-b${i}-note`;
+        caveat.textContent = SAT_COPY.sideNeeds;
+        grid.append(caveat);
+        for (const pick of grid.querySelectorAll(`select[data-btn="${key}"]`)) {
+          pick.setAttribute("aria-describedby", caveat.id);
+        }
+      }
     });
   }
   /* A select somebody changed is theirs until the hub has taken it: a

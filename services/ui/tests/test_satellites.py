@@ -343,6 +343,28 @@ def test_what_needs_the_satellite_is_greyed_with_its_reason_and_never_hidden():
     assert "Forget</button>" in PENDING
 
 
+def test_the_buttons_grid_fits_a_phone_and_names_the_lights_switch():
+    """At three columns a phone left each select about 84px of text, and a
+    select cuts rather than ellipsing: "Night mode (lights on/off)" read
+    "Night mode (l". On a phone each button's name heads its own pair. And
+    the action flips lights_enabled, which the row calls Lights."""
+    actions = dict(re.findall(r'\["(\w+)", "([^"]+)"\]', CODE[CODE.index("const SAT_ACTIONS = ["):][:600]))
+    assert actions["lights"] == "Lights on/off"
+    assert "Night mode" not in CODE
+    for value, label in actions.items():
+        assert len(label) <= 14, f"{value}'s label {label!r} is cut on a phone"
+    block = BARE_CSS[BARE_CSS.rindex("@media (max-width:30rem){"):]
+    block = block[:block.index("\n}")]
+    assert ".sat-btns{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}" in block
+    assert ".sat-btns>span:first-child{display:none}" in block
+    assert ".sat-btns .bn{grid-column:1/-1;" in block
+    # The Side button's caveat is on its own row, not the last of four hints.
+    assert "R37" not in BUTTONS and "firmware README" not in BUTTONS
+    assert 'if (key === "key1")' in function("satButtons")
+    assert "SAT_COPY.sideNeeds" in function("satButtons")
+    assert ".sat-buttons .body>.hint+.hint{margin-top:var(--s1)}" in BARE_CSS
+
+
 def test_the_one_filled_button_on_the_list_is_adopt():
     """Settings apply on change, so an adopted row has no go button; the
     destructive ones are outlined and last."""

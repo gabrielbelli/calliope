@@ -212,6 +212,11 @@ def test_a_button_mapping_is_one_the_hub_accepts(tmp_path):
                                       key1: { press: "lights" }, mode: { press: "dimmer" } },
                                     ["rec", "mode", "vol_up", "key1"]),
         note_none: satButtonsNote({}, ["play", "set"]),
+        note_default: satButtonsNote({ rec: { press: "mute" }, vol_up: { press: "volume_up" },
+                                       vol_down: { press: "volume_down" }, play: { press: "ptt" },
+                                       set: { press: "stop" } },
+                                     ["rec", "mode", "play", "set", "vol_down", "vol_up"]),
+        note_only_namesakes: satButtonsNote({ rec: { press: "mute" } }, ["rec", "play"]),
         keys_six: satButtonKeys(sat({ caps: { buttons: ["vol_up", "vol_down", "set", "play", "mode", "rec"] } })),
         keys_seven: satButtonKeys(sat({ caps: { buttons: ["vol_up", "vol_down", "set", "play", "mode", "rec", "key1"] } })),
         keys_offline: satButtonKeys(sat({ caps: {}, config: { buttons: { custom: { press: "ptt" } } } })) }));
@@ -223,7 +228,10 @@ def test_a_button_mapping_is_one_the_hub_accepts(tmp_path):
         assert "error" in got[refused], (refused, got[refused])
     assert "muted" in got["no_mute"]["error"]
     assert got["note"] == "Play talks, Set stops, Mode calls a webhook", got
-    assert got["note_device"] == "Rec mutes, Mode dims, Vol + turns it up, Side switches the lights", got
+    # A key doing what it is printed with goes unsaid, unless that is all.
+    assert got["note_device"] == "Mode dims, Side switches the lights", got
+    assert got["note_default"] == "Play talks, Set stops", got
+    assert got["note_only_namesakes"] == "Rec mutes", got
     assert got["note_none"] == "nothing mapped", got
     # All of them, none special, in the order they sit on the board.
     assert got["keys_six"] == ["rec", "mode", "play", "set", "vol_down", "vol_up"], got
