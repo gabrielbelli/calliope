@@ -1446,6 +1446,9 @@ fieldset.sat-fs>legend{margin-bottom:var(--s1)}
 /* The Mode and Satellites legends grey with the labels, which the .grid2 and
    .row rules do not reach. */
 .ww[data-removed] fieldset>legend{opacity:.55}
+/* The field a word's fix is about, so the eye finds it as a screen reader
+   does (aria-invalid, described by the fix line). */
+.ww [aria-invalid=true]{border-color:var(--warn)}
 /* A language model word's key and Test, under its fields: the key box and its
    buttons on one line, as Say is on a satellite, its state under it, then
    Test and what the model said. */
@@ -4101,6 +4104,7 @@ const SAT_COPY = {
   fixCooldown: "Make the cooldown 0 to 600 seconds.",
   fixPhrase: "Keep each end phrase to 64 characters.",
   wwFix: "{word} needs a fix before the wake words can be saved.",
+  wwUnfinished: "Finish setting up {word} to save the wake words.",
   wwModelChoose: "Choose an .onnx file first.",
   wwModelBadName: "Name it with letters, digits, _ and - only.",
   wwModelBuiltIn: "That is a built-in wake word's name, so give yours another.",
@@ -4167,12 +4171,13 @@ function satSaid(host, text) {
   host.append(line);
 }
 /* A STANDING CONDITION, WRITTEN ONCE. These hosts announce, and the poll
-   that finds the same failure every 3 s must not announce it every 3 s. */
+   that finds the same failure every 3 s must not announce it every 3 s.
+   "hint" is satSaid's quiet line, for a condition that is not a fault. */
 function satNoteOnce(host, kind, text) {
   const said = text ? `${kind}:${text}` : "";
   if (host.dataset.said === said) return;
   host.dataset.said = said;
-  note(host, kind, text);
+  if (kind === "hint") satSaid(host, text); else note(host, kind, text);
 }
 
 function satellitesOpen() { const p = $("tab-satellites"); return !!p && !p.hidden; }
@@ -5487,13 +5492,42 @@ function wakeProblem(w, words) {
   return "";
 }
 
-/* The first entry in the draft that the hub would refuse, by name. */
-function wakeFirstProblem() {
+/* WHERE A PROBLEM IS, AND WHETHER IT IS ONLY UNFINISHED. `f` is the data-f
+   of the field that fixes it, which is marked aria-invalid; `empty` is a
+   required field not filled in yet, which is a word being set up rather than
+   one somebody got wrong. A new Language model or Webhook action starts with
+   its address and model empty (wakeSetDest), and those used to raise the
+   amber chip and the warning before a single key was pressed. */
+function wakeProblemAt(w, problem) {
+  const d = (w.action && w.action.destination) || {}, llm = d.type === "llm";
+  const url = llm ? "d.base_url" : "d.url";
+  const [f, empty] = {
+    [SAT_COPY.fixCooldown]: ["t.cooldown_s"],
+    [SAT_COPY.fixLang]: ["tag"],
+    [SAT_COPY.fixUrl]: [url, !(llm ? d.base_url : d.url)],
+    [SAT_COPY.fixUserinfo]: [url],
+    [SAT_COPY.fixUserinfoKey]: [url],
+    [SAT_COPY.fixModel]: ["d.model", !d.model],
+    [SAT_COPY.fixMaxTokens]: ["d.max_tokens"],
+    [SAT_COPY.fixEnvNeeded]: ["d.env", true],
+    [SAT_COPY.fixEnv]: ["d.env"],
+    [SAT_COPY.fixEnvKey]: ["d.env"],
+    [SAT_COPY.fixFollow]: ["c.follow_up_s"],
+    [SAT_COPY.fixPhrase]: ["c.end_phrases"],
+  }[problem] || ["a.fallback"];
+  return { f, empty: !!empty };
+}
+
+/* The first entry in the draft that the hub would refuse: its name, and
+   whether it is only unfinished (wakeProblemAt), or null. */
+function wakeFirstBad() {
   const words = wakeEffective();
   const bad = words.find(w => wakeProblem(w, words));
-  if (bad) return wwLabel(bad.name);
-  return WAKE.draftPtt && wakeProblem(WAKE.draftPtt, words) ? "Push-to-talk" : "";
+  if (bad) return { name: wwLabel(bad.name), empty: wakeProblemAt(bad, wakeProblem(bad, words)).empty };
+  const said = WAKE.draftPtt ? wakeProblem(WAKE.draftPtt, words) : "";
+  return said ? { name: "Push-to-talk", empty: wakeProblemAt(WAKE.draftPtt, said).empty } : null;
 }
+function wakeFirstProblem() { const bad = wakeFirstBad(); return bad ? bad.name : ""; }
 
 /* ONE LINE FOR A CLOSED WORD: its mode, who hears it, and what it does. */
 function wakeWhere(w) {
@@ -5957,9 +5991,9 @@ function wakeRender() {
      hear it, or an entry the hub would refuse, named, whose row says why. */
   const dirty = !!WAKE.draft;
   const nobody = dirty && wakeEffective().some(w => !w.satellites.length);
-  const fix = dirty ? wakeFirstProblem() : "";
+  const bad = dirty ? wakeFirstBad() : null, fix = bad ? bad.name : "";
   if ($("wwsave").getAttribute("aria-busy") !== "true") $("wwsave").disabled = !dirty || nobody || !!fix;
-  satSet($("wwdirty"), nobody ? SAT_COPY.wwNone : fix ? satText("wwFix", { word: fix })
+  satSet($("wwdirty"), nobody ? SAT_COPY.wwNone : fix ? satText(bad.empty ? "wwUnfinished" : "wwFix", { word: fix })
     : dirty ? SAT_COPY.wwDirty : SAT_COPY.wwClean);
   satSet($("ww-sum"), wakeSummary(dirty));
   wakeModels();
@@ -6129,7 +6163,7 @@ function wakeRowMarkup(u) {
             <textarea id="${u}-system" data-f="d.system" maxlength="8000"></textarea></div>
         </div>
       </details>
-      <div class="ww-fix"></div>
+      <div class="ww-fix" id="${u}-fix"></div>
       <div class="actions">
         <span class="hint ww-rowhint"></span>
         <button class="small" type="button" data-ww="retry" hidden>Try again</button>
@@ -6180,6 +6214,12 @@ function wakeRow(name) {
       if (b.dataset.ww === "key") wakeKeyStore(d.api_key_env, row, b, d.base_url);
       else wakeKeyForget(d.api_key_env, row, b);
     }
+  });
+  /* A field left says whether what it holds would be refused: while it had
+     the focus it was only being typed (wakeRowUpdate's Incomplete). After
+     the focus has moved, so the next field is not the one read as held. */
+  row.addEventListener("focusout", ev => {
+    if (ev.target.dataset && ev.target.dataset.f) setTimeout(wakeRender);
   });
   /* Enter in the key box stores it, as Store key does: the box is not in a
      form, so nothing else would. */
@@ -6283,9 +6323,15 @@ function wakeRowUpdate(row, w, live, removed, words, ptt) {
   const label = ptt ? "Push-to-talk" : wwLabel(w.name);
   satSet(q(".sat-name"), label);
   /* Ready is plain text, as Online is on a satellite: only a word that is
-     still coming, has failed or would be refused gets a chip. */
+     still coming, has failed or would be refused gets a chip. A word still
+     being filled in is not refused yet: a required field left empty, or the
+     one field at fault while it is being typed in, says Incomplete in dim
+     text and its reason as a plain line, and Save stays off either way. */
   const problem = removed ? "" : wakeProblem(w, words);
-  const [word, kind] = problem ? ["Needs a fix", "warn"] : ptt ? ["Play button", ""]
+  const at = problem ? wakeProblemAt(w, problem) : null;
+  const culprit = at && q(`[data-f="${at.f}"]`);
+  const quiet = !!at && (at.empty || (!!culprit && culprit === document.activeElement));
+  const [word, kind] = problem ? (quiet ? ["Incomplete", ""] : ["Needs a fix", "warn"]) : ptt ? ["Play button", ""]
     : live ? (WAKE_STATE[live.state] || [live.state, ""]) : ["Not saved yet", ""];
   const chip = q(".sat-state");
   satSet(chip, word);
@@ -6361,7 +6407,20 @@ function wakeRowUpdate(row, w, live, removed, words, ptt) {
     wakeValue(q('[data-f="t.feedback"]'), t.feedback || WAKE_SHOWN.feedback);
     wakeValue(q('[data-f="t.cooldown_s"]'), "cooldown_s" in t ? t.cooldown_s : WAKE_SHOWN.cooldown_s);
   }
-  satNoteOnce(q(".ww-fix"), "warn", problem);
+  satNoteOnce(q(".ww-fix"), quiet ? "hint" : "warn", problem);
+  /* The field it is about is marked, and its description is the reason, so
+     a screen reader on that field hears what is wrong with it. */
+  for (const f of row.querySelectorAll("[data-f]")) {
+    const bad = f === culprit;
+    if ((f.getAttribute("aria-invalid") === "true") === bad) continue;
+    if (bad) {
+      f.setAttribute("aria-invalid", "true");
+      f.setAttribute("aria-describedby", q(".ww-fix").id);
+    } else {
+      f.removeAttribute("aria-invalid");
+      f.removeAttribute("aria-describedby");
+    }
+  }
 
   /* A word marked for removal is greyed whole, with the reason on its row. */
   for (const c of row.querySelectorAll(".body input, .body select, .body textarea, .seg button")) {

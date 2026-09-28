@@ -557,12 +557,37 @@ def test_save_is_off_with_its_reason_when_there_is_nothing_to_save():
     with the word named beside Save and the reason on the word's own row."""
     render = function("wakeRender")
     assert "const nobody = dirty && wakeEffective().some(w => !w.satellites.length);" in render
-    assert "const fix = dirty ? wakeFirstProblem() : \"\";" in render
+    assert 'const bad = dirty ? wakeFirstBad() : null, fix = bad ? bad.name : "";' in render
     assert '$("wwsave").disabled = !dirty || nobody || !!fix;' in render
-    assert ('nobody ? SAT_COPY.wwNone : fix ? satText("wwFix", { word: fix })\n'
+    assert ('nobody ? SAT_COPY.wwNone : fix ? satText(bad.empty ? "wwUnfinished" : "wwFix", { word: fix })\n'
             "    : dirty ? SAT_COPY.wwDirty : SAT_COPY.wwClean") in render
-    assert 'satNoteOnce(q(".ww-fix"), "warn", problem);' in function("wakeRowUpdate")
+    assert 'satNoteOnce(q(".ww-fix"), quiet ? "hint" : "warn", problem);' in function("wakeRowUpdate")
     assert "if (wakeFirstProblem()) { wakeRender(); return; }" in function("wakeSave")
+
+
+def test_a_word_being_filled_in_is_incomplete_and_its_field_is_marked():
+    """A new Language model or Webhook action starts with its required
+    fields empty, and the row said Needs a fix in amber, with a warning box
+    several rows from the field, before a key was pressed. Empty, or being
+    typed in, is Incomplete in dim text with the reason as a plain line; a
+    value the hub would refuse is still Needs a fix. Either way the field is
+    aria-invalid and described by the reason, which nothing named before."""
+    update = function("wakeRowUpdate")
+    assert "const at = problem ? wakeProblemAt(w, problem) : null;" in update
+    assert "(at.empty || (!!culprit && culprit === document.activeElement))" in update
+    assert '(quiet ? ["Incomplete", ""] : ["Needs a fix", "warn"])' in update
+    assert 'f.setAttribute("aria-invalid", "true");' in update
+    assert 'f.setAttribute("aria-describedby", q(".ww-fix").id);' in update
+    assert '<div class="ww-fix" id="${u}-fix"></div>' in WORD
+    assert ".ww [aria-invalid=true]{border-color:var(--warn)}" in BARE_CSS
+    # A field left is read again: while it had the focus it was only typed.
+    assert 'row.addEventListener("focusout"' in function("wakeRow")
+    # Every sentence wakeProblem can say has its field, bar the fallback's,
+    # which carries the word's name and is the default.
+    at = function("wakeProblemAt")
+    for key in re.findall(r"SAT_COPY\.(fix\w+)", function("wakeProblem")):
+        assert f"[SAT_COPY.{key}]" in at, f"{key} names no field"
+    assert '|| ["a.fallback"]' in at
 
 
 def test_the_add_list_offers_only_what_the_hub_can_load_and_is_not_listed():

@@ -294,6 +294,35 @@ def test_what_the_hub_would_refuse_is_named_and_save_waits(tmp_path):
     assert ["bad", "422 the threshold is out of range"] in got["notes"], got
 
 
+def test_a_word_being_set_up_is_unfinished_until_a_value_is_wrong(tmp_path):
+    """A new webhook or language model action starts with its address (and
+    model) empty. Save waits either way, but empty is a word being set up,
+    said as such beside Save; a value the hub would refuse is a fix."""
+    got = run(tmp_path, MODERN + """
+      await satellitesRefresh();
+      const out = {};
+      wakeEdit("hey_jarvis", w => wakeField(w, "dest", "webhook"));
+      const jarvis = () => WAKE.draft.find(w => w.name === "hey_jarvis");
+      const at = () => wakeProblemAt(jarvis(), wakeProblem(jarvis(), wakeEffective()));
+      out.empty = at();
+      out.empty_line = $("wwdirty").textContent;
+      out.empty_off = $("wwsave").disabled;
+      wakeEdit("hey_jarvis", w => wakeField(w, "d.url", "hooks.example.com"));
+      out.wrong = at();
+      out.wrong_line = $("wwdirty").textContent;
+      wakeEdit("hey_jarvis", w => { wakeField(w, "dest", "llm");
+                                    wakeField(w, "d.base_url", "https://llm.example.com/v1"); });
+      out.model = at();
+      console.log(JSON.stringify(out));
+    """)
+    assert got["empty"] == {"f": "d.url", "empty": True}, got
+    assert got["empty_line"] == "Finish setting up hey jarvis to save the wake words.", got
+    assert got["empty_off"] is True, got
+    assert got["wrong"] == {"f": "d.url", "empty": False}, got
+    assert got["wrong_line"] == "hey jarvis needs a fix before the wake words can be saved.", got
+    assert got["model"] == {"f": "d.model", "empty": True}, got
+
+
 def test_push_to_talk_is_edited_like_a_word_and_is_never_a_trigger(tmp_path):
     """The PLAY button's behaviour is the hub's `ptt` block: a command or a
     conversation, sent only when it changed."""
