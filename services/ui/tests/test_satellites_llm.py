@@ -376,17 +376,17 @@ def test_a_language_model_word_turns_its_tools_on_and_off_in_the_hubs_order(tmp_
     got = run(tmp_path, LLM_HUB + """
       await satellitesRefresh(); await settle();
       const saved = dest("hey_jarvis").tools;
-      wakeEdit("hey_jarvis", w => wakeField(w, "dest", "echo"));
-      wakeEdit("hey_jarvis", w => wakeField(w, "dest", "llm"));
-      const fresh = dest("hey_jarvis").tools;
-      wakeEdit("hey_jarvis", w => wakeTool(w, "weather", true));
-      wakeEdit("hey_jarvis", w => wakeTool(w, "web_search", true));
-      wakeEdit("hey_jarvis", w => wakeTool(w, "weather", false));
-      wakeEdit("hey_jarvis", w => { wakeField(w, "d.base_url", "https://llm.example.com/v1");
-                                    wakeField(w, "d.model", "gpt-test-mini"); });
+      wakeAdd("alexa");
+      wakeEdit("alexa", w => wakeField(w, "dest", "llm"));
+      const fresh = dest("alexa").tools;
+      wakeEdit("alexa", w => wakeTool(w, "weather", true));
+      wakeEdit("alexa", w => wakeTool(w, "web_search", true));
+      wakeEdit("alexa", w => wakeTool(w, "weather", false));
+      wakeEdit("alexa", w => { wakeField(w, "d.base_url", "https://llm.example.com/v1");
+                               wakeField(w, "d.model", "gpt-test-mini"); });
       await wakeSave();
       console.log(JSON.stringify({ saved: saved === undefined ? "absent" : saved, fresh,
-                                   sent: sent("hey_jarvis").action.destination.tools }));
+                                   sent: sent("alexa").action.destination.tools }));
     """)
     assert got["saved"] == "absent", "a word saved before tools existed was given some"
     assert got["fresh"] == []
@@ -416,3 +416,30 @@ def test_web_search_is_greyed_and_said_on_a_hub_without_searxng(tmp_path):
     assert got["off"] == {"search": True, "weather": False, "hint": (
         "Web search needs SATELLITES_SEARXNG_URL set on the hub; the weather needs nothing.")}, got
     assert got["kept"] is False, "a word that has web search could not take it off"
+
+
+def test_an_action_changed_and_changed_back_keeps_what_it_had(tmp_path):
+    """Webhook and back to Language model came back with the address and
+    the model empty, and the system prompt, the reply limit and the tools,
+    under the closed More, were sent as the hub's defaults. Arrowing through
+    a closed Action select on Windows or Linux is a change per option, so
+    only looking did it. Each destination left is kept per word and type,
+    and one that comes back as it was saved leaves nothing to save."""
+    got = run(tmp_path, LLM_HUB + """
+      hub.words = [llmWord("hey_jarvis", { system: "You are terse.", max_tokens: 900, tools: ["weather"] })];
+      await satellitesRefresh(); await settle();
+      for (const type of ["webhook", "echo", "ha_assist", "llm"]) wakeEdit("hey_jarvis", w => wakeField(w, "dest", type));
+      const back = { draft: WAKE.draft, d: dest("hey_jarvis") };
+      // A webhook address typed, then away and back to it: the address too.
+      wakeEdit("hey_jarvis", w => wakeField(w, "dest", "webhook"));
+      wakeEdit("hey_jarvis", w => wakeField(w, "d.url", "https://hooks.example.com/voice"));
+      wakeEdit("hey_jarvis", w => wakeField(w, "dest", "llm"));
+      wakeEdit("hey_jarvis", w => wakeField(w, "dest", "webhook"));
+      const hook = dest("hey_jarvis").url;
+      console.log(JSON.stringify({ back, hook }));
+    """)
+    assert got["back"]["draft"] is None, "an action changed back to what was saved still read as an edit"
+    d = got["back"]["d"]
+    assert (d["base_url"], d["model"], d["system"], d["max_tokens"], d["tools"]) == (
+        "https://llm.example.com/v1", "gpt-test-mini", "You are terse.", 900, ["weather"]), d
+    assert got["hook"] == "https://hooks.example.com/voice"

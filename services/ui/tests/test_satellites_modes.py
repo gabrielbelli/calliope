@@ -204,6 +204,19 @@ def test_a_pipeline_list_that_failed_is_asked_again_from_its_row(tmp_path):
     assert got["kept"] is False, "a list that loaded was forgotten"
 
 
+def test_home_assistants_two_actions_share_the_address_the_token_and_the_timeout(tmp_path):
+    """Assist to the conversation agent kept the address and the token's
+    name and dropped a saved timeout, so 20 s went back to the default 15."""
+    got = run(tmp_path, MODERN + """
+      await satellitesRefresh();
+      wakeEdit("hey_jarvis", w => wakeField(w, "dest", "ha_conversation"));
+      await wakeSave();
+      console.log(JSON.stringify({ d: sent("hey_jarvis").action.destination }))
+    """)
+    assert got["d"] == {"type": "ha_conversation", "url": "https://ha.local:8123",
+                        "token_env": "SATELLITES_HA_TOKEN", "timeout": 20}, got
+
+
 def test_an_edit_sends_the_rest_of_the_entry_back_as_it_was(tmp_path):
     """A field sent replaces the saved one whole: an action sent without its
     timeout would reset it to the default. Only the field edited changes."""

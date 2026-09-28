@@ -5470,9 +5470,10 @@ function satellitesHealth() {
    one, so the poll that refreshes a word's state from downloading to ready
    cannot put a threshold or an address back. Satellite rows read `server`
    only. `stash` keeps the action a word had before it became a trigger, so
-   Trigger and back is not an address typed twice. */
+   Trigger and back is not an address typed twice, and `dests` each
+   destination a word's Action was moved away from (wakeSetDest). */
 const WAKE = { server: null, draft: null, draftPtt: null, removed: new Set(), failed: null,
-               rows: new Map(), pttRow: null, stash: new Map(),
+               rows: new Map(), pttRow: null, stash: new Map(), dests: new Map(),
                queue: Promise.resolve(), writes: 0, writing: 0, heard: new Map(), broken: "" };
 
 /* The hub's rules, restated so the page can say what is wrong before a Save
@@ -5663,20 +5664,37 @@ function wakeSetMode(w, mode, name) {
 }
 
 /* A NEW DESTINATION STARTS FROM ITS OWN FIELDS: the hub refuses a field
-   another type owns. The two Home Assistant ones share an address and a
-   token, so moving between them keeps both. */
+   another type owns. The two Home Assistant ones share an address, a token
+   and a timeout, so moving between them keeps all three.
+
+   AND ONE LEFT IS KEPT, per word and type, as `stash` keeps a trigger's
+   action: Webhook and back to Language model came back with the address and
+   the model empty, and the system prompt, the reply limit and the tools,
+   which sit under the closed More, were sent as the hub's defaults without
+   a word. Arrowing through a closed Action select fires change for each
+   option on Windows and Linux, so only looking through the list did it. The
+   way back is what this type held when it was left, else the saved
+   destination when it is of this type, else the empty fields below. */
 function wakeSetDest(w, type) {
   const was = (w.action && w.action.destination) || {};
   if (!WAKE_DEST_WORD[type] || was.type === type) return;
-  const d = { type };
+  const who = w.name || WAKE_PTT;
+  if (was.type) WAKE.dests.set(who + "\n" + was.type, was);
+  const saved = wakeSavedDest(who);
+  const back = wakeClone(WAKE.dests.get(who + "\n" + type))
+    || (saved && saved.type === type ? wakeClone(saved) : null);
+  const d = back || { type };
   /* Assist hides Language (its pipeline has one), so a tag the hub would
      refuse is dropped here: kept, it held Save off with a reason whose only
      field was out of sight. A good tag is kept for a move back. */
   if (type === "ha_assist" && w.language && !WAKE_LANG.test(w.language)) w.language = null;
   if (WAKE_HA.includes(type)) {
-    const ha = WAKE_HA.includes(was.type) ? was : wakeAnyHa();
+    const ha = WAKE_HA.includes(was.type) ? was : back || wakeAnyHa();
     d.url = (ha && ha.url) || "";
     d.token_env = (ha && ha.token_env) || "SATELLITES_HA_TOKEN";
+    if (ha === was && was.timeout != null) d.timeout = was.timeout;
+  } else if (back) {
+    /* As it was left. */
   } else if (type === "llm") {
     /* No tools, as the hub's own default: web search needs a SearXNG that
        most hubs do not have, and a server that takes no tools refuses every
