@@ -218,7 +218,8 @@ Whisper's languages, and sends the language as a hint.
 `home-assistant` on the stack. It holds the names of your floors and areas,
 the names of the entities exposed to Assist, the aliases of all three, and a
 short list of command words ("liga", "apaga", "turn on"…) for the languages
-your pipelines use. Every Parakeet transcription names that profile, and
+your pipelines use: Portuguese, English, Spanish, French, German, Italian and
+Dutch. A pipeline in another language gets the names alone. Every Parakeet transcription names that profile, and
 Parakeet boosts the terms in its decoder, unless the stack has biasing off
 (`STT_HOTWORDS=0`). The terms only bias recognition: a term never replaces
 another word. Whisper is not sent the profile: it takes a profile's terms as

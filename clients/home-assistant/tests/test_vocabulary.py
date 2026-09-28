@@ -253,3 +253,14 @@ async def test_the_terms_leave_room_for_the_repairs(hass: HomeAssistant) -> None
     intended = {i for _, i in vocabulary.collect_repairs(hass)}
     assert intended and len(terms) + len(intended) == vocabulary.MAX_TERMS
     assert terms[0] == "Sala 000" and "desliga" not in terms
+
+
+async def test_a_spanish_house_gets_spanish_command_words(hass: HomeAssistant) -> None:
+    """Command words were Portuguese and English only: a Spanish, French,
+    German, Italian or Dutch pipeline got the names and none of the verbs."""
+    for language, word in (("es", "enciende"), ("fr", "allume"), ("de", "einschalten"),
+                           ("it", "accendi"), ("nl", "temperatuur")):
+        hass.config.language = language
+        terms = vocabulary.collect(hass)
+        assert word in terms, language
+        assert "turn on" not in terms and "desliga" not in terms, language

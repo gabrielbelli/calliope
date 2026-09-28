@@ -65,7 +65,8 @@ MAX_TERM_CHARS = 100
 
 # The words commands are made of, by primary language subtag. Home Assistant's
 # own sentences (home-assistant/intents) use these verbs and nouns; the names
-# above are what they act on.
+# above are what they act on. Portuguese, English, Spanish, French, German,
+# Italian and Dutch; a pipeline in any other language gets the names alone.
 COMMAND_WORDS: dict[str, tuple[str, ...]] = {
     "pt": (
         "liga", "desliga", "acende", "apaga", "abre", "fecha", "aumenta",
@@ -77,6 +78,32 @@ COMMAND_WORDS: dict[str, tuple[str, ...]] = {
         "turn on", "turn off", "switch on", "switch off", "lights", "open",
         "close", "brightness", "temperature", "volume", "curtains", "blinds",
         "timer", "alarm",
+    ),
+    "es": (
+        "enciende", "apaga", "abre", "cierra", "sube", "baja", "la luz",
+        "las luces", "temperatura", "volumen", "persiana", "cortina",
+        "ventilador", "aire acondicionado", "enchufe", "alarma", "temporizador",
+    ),
+    "fr": (
+        "allume", "éteins", "ouvre", "ferme", "monte", "baisse", "la lumière",
+        "les lumières", "température", "volume", "volet", "rideau",
+        "ventilateur", "climatisation", "prise", "alarme", "minuteur",
+    ),
+    "de": (
+        "schalte", "einschalten", "ausschalten", "mach an", "mach aus", "öffne",
+        "schließe", "das Licht", "die Lampe", "Temperatur", "Lautstärke",
+        "Rollladen", "Vorhang", "Ventilator", "Klimaanlage", "Steckdose",
+        "Wecker", "Timer",
+    ),
+    "it": (
+        "accendi", "spegni", "apri", "chiudi", "alza", "abbassa", "la luce",
+        "le luci", "temperatura", "volume", "tapparella", "tenda",
+        "ventilatore", "condizionatore", "presa", "sveglia", "timer",
+    ),
+    "nl": (
+        "zet aan", "zet uit", "doe aan", "doe uit", "open", "sluit",
+        "het licht", "de lampen", "temperatuur", "volume", "rolluik",
+        "gordijn", "ventilator", "airco", "stopcontact", "wekker", "timer",
     ),
 }
 
