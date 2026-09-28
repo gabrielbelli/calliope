@@ -647,10 +647,11 @@ def test_save_is_off_with_its_reason_when_there_is_nothing_to_save():
     and when an entry would be refused: the hub's 422, said before the press,
     with the word named beside Save and the reason on the word's own row."""
     render = function("wakeRender")
-    assert "const nobody = dirty && wakeEffective().some(w => !w.satellites.length);" in render
+    assert "const nobody = dirty ? wakeEffective().find(w => !w.satellites.length" in render
     assert 'const bad = dirty ? wakeFirstBad() : null, fix = bad ? bad.name : "";' in render
-    assert '$("wwsave").disabled = !dirty || nobody || !!fix;' in render
-    assert ('nobody ? SAT_COPY.wwNone : fix ? satText(bad.empty ? "wwUnfinished" : "wwFix", { word: fix })\n'
+    assert '$("wwsave").disabled = !dirty || !!nobody || !!fix;' in render
+    assert ('nobody ? satText("wwNone", { word: wwLabel(nobody.name) })\n'
+            '    : fix ? satText(bad.empty ? "wwUnfinished" : "wwFix", { word: fix })\n'
             "    : dirty ? SAT_COPY.wwDirty : SAT_COPY.wwClean") in render
     assert 'satNoteOnce(q(".ww-fix"), quiet ? "hint" : "warn", problem);' in function("wakeRowUpdate")
     assert "if (wakeFirstProblem()) { wakeRender(); return; }" in function("wakeSave")

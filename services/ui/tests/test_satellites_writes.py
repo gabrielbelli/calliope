@@ -506,3 +506,22 @@ def test_update_every_satellite_asks_about_the_ones_it_will_send_and_says_when_t
     assert got["rebooting"] == "Updating 1 satellite now.", got
     assert got["current"] == "Every satellite of this model that is online already runs it.", got
     assert got["offline"] == "No satellite of this model is online.", got
+
+
+def test_a_word_the_hub_left_with_no_satellite_does_not_hold_every_save(tmp_path):
+    """Forget takes a satellite off every word, and a word whose only one it
+    was is kept with none, which the hub takes back. Counted as a word left
+    with nobody, it turned Save off for any edit, a threshold on another word
+    included, with a reason that named no word. Only a word the reader
+    emptied holds Save, and it is named."""
+    got = run(tmp_path, """
+      await satellitesRefresh();
+      wakeEdit("hey_jarvis", w => { w.threshold = 0.65; });  // alexa has none, as the hub left it
+      const other = { off: $("wwsave").disabled, said: $("wwdirty").textContent };
+      wakeEdit("hey_jarvis", w => { w.satellites = []; });
+      console.log(JSON.stringify({ other, emptied: { off: $("wwsave").disabled, said: $("wwdirty").textContent } }));
+    """)
+    assert got["other"] == {"off": False, "said": "Unsaved changes."}, got
+    assert got["emptied"] == {"off": True, "said": "Pick at least one satellite for hey jarvis, "
+                                                   "or choose Every satellite."}, got
+

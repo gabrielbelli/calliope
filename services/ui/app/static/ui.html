@@ -4085,7 +4085,7 @@ const SAT_COPY = {
   lineLoadingMany: "{words} are downloading",
   lineBroken: "{words} failed to download",
   wwAll: "Includes satellites adopted later.",
-  wwNone: "Pick at least one satellite, or choose Every satellite.",
+  wwNone: "Pick at least one satellite for {word}, or choose Every satellite.",
   wwDirty: "Unsaved changes.",
   wwClean: "No changes to save.",
   wwAddWhy: "It downloads when you save, and wakes every satellite until you choose some.",
@@ -6409,12 +6409,18 @@ function wakeRender() {
   satSet($("wwaddwhy"), left.length ? SAT_COPY.wwAddWhy : SAT_COPY.wwExhausted);
 
   /* SAVE IS OFF WITH ITS REASON: nothing changed, a word left with nobody to
-     hear it, or an entry the hub would refuse, named, whose row says why. */
+     hear it, or an entry the hub would refuse, named, whose row says why.
+     Nobody is a word the READER emptied, and it is named. The hub itself
+     leaves a word with no satellite when the one it had is forgotten, and
+     takes that back; counted, it turned every Save off, a threshold on
+     another word included, with a reason that named no word. */
   const dirty = !!WAKE.draft;
-  const nobody = dirty && wakeEffective().some(w => !w.satellites.length);
+  const nobody = dirty ? wakeEffective().find(w => !w.satellites.length
+    && !(live.get(w.name) && !live.get(w.name).satellites.length)) : null;
   const bad = dirty ? wakeFirstBad() : null, fix = bad ? bad.name : "";
-  if ($("wwsave").getAttribute("aria-busy") !== "true") $("wwsave").disabled = !dirty || nobody || !!fix;
-  satSet($("wwdirty"), nobody ? SAT_COPY.wwNone : fix ? satText(bad.empty ? "wwUnfinished" : "wwFix", { word: fix })
+  if ($("wwsave").getAttribute("aria-busy") !== "true") $("wwsave").disabled = !dirty || !!nobody || !!fix;
+  satSet($("wwdirty"), nobody ? satText("wwNone", { word: wwLabel(nobody.name) })
+    : fix ? satText(bad.empty ? "wwUnfinished" : "wwFix", { word: fix })
     : dirty ? SAT_COPY.wwDirty : SAT_COPY.wwClean);
   satSet($("ww-sum"), wakeSummary(dirty));
   wakeModels();
