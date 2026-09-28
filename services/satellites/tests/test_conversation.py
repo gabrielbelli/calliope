@@ -318,8 +318,10 @@ def test_muting_the_satellite_a_reply_plays_on_ends_the_conversation_that_sent_i
         ws2.send_json({"type": "status", "muted": True})
         [ended] = wait(lambda: of(events, "conversation_ended"), timeout=3, what="the end")
         wait(lambda: app.hub.sessions[NID].conversation is None, what="the kitchen to be free")
+        # The conversation can report its end before the flush is out: the
+        # speaker loop may hold the bedroom's socket for a frame.
+        wait(lambda: bedroom.texts("flush"), timeout=3, what="the flush in the bedroom")
     assert ended["satellite"] == NID and ended["reason"] == "muted"
-    assert bedroom.texts("flush")
 
 
 def test_a_conversation_ends_when_the_satellite_stops_sending_audio(client, app, events, plug,
