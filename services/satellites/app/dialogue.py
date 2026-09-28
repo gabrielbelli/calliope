@@ -27,7 +27,9 @@ the satellite was already speaking while the destination was still writing.
 HANDOVER. A command whose destination fails, or does not understand
 (destinations.NotUnderstood), and whose action names a `fallback` wake word,
 hands the same transcript to that word's conversation before anything has
-been spoken, and on_handover lets main.py start the conversation. Once any of
+been spoken, and on_handover lets main.py start the conversation and answers
+its Memory: the handed-over turn writes into that one (Home Assistant's
+conversation_id, the language), so the next turn carries it on. Once any of
 the answer has arrived, a failure is just an error: part of it may have been
 heard.
 
@@ -260,7 +262,7 @@ async def run_turn(router: Router, route: Route | None, *, satellite_id: str, sa
                    wake_word: str, sink: Sink, audio: bytes | None = None, text: str | None = None,
                    memory: Memory | None = None, out: Outcome | None = None,
                    speech_end: float | None = None,
-                   on_handover: Callable[[Route], None] | None = None,
+                   on_handover: Callable[[Route], Memory | None] | None = None,
                    on_transcript: Callable[[Outcome], None] | None = None) -> Outcome:
     """One utterance through to its reply. Never raises, except
     CancelledError: a barge-in cancels the task, and `out` (the caller's own)
@@ -383,7 +385,7 @@ def _voice(router: Router, route: Route, out: Outcome, pipeline: Pipeline | None
 async def _answer(router: Router, route: Route, out: Outcome, sink: Sink, *, memory: Memory | None,
                   satellite_id: str, satellite_name: str, wake_word: str, said: str,
                   audio_seconds: float, speech_end: float,
-                  on_handover: Callable[[Route], None] | None,
+                  on_handover: Callable[[Route], Memory | None] | None,
                   pipeline: Pipeline | None = None) -> None:
     behaviour = route.behaviour
     queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -489,9 +491,11 @@ async def _answer(router: Router, route: Route, out: Outcome, sink: Sink, *, mem
             # A fresh conversation, in the fallback word's own language hint
             # (if it has one) and voice; the transcript is the same.
             out.handed_over_to = target.id
-            if on_handover is not None:
-                on_handover(target)
-            fresh = memory if memory is not None else Memory()
+            # The conversation's own memory when main.py started one: written
+            # into a throw-away, the next turn went to Home Assistant without
+            # this one's conversation_id, and without its language.
+            given = on_handover(target) if on_handover is not None else None
+            fresh = given if given is not None else memory if memory is not None else Memory()
             if target.behaviour.language:
                 out.language, out.language_source = target.behaviour.language, "hint"
                 out.reply_language = lang.reply_tag(out.language)

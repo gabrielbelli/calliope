@@ -439,6 +439,43 @@ def test_a_command_home_assistant_did_not_understand_becomes_a_conversation(
     assert of(events, "routed") == []
 
 
+def test_a_conversation_handed_over_to_home_assistant_keeps_its_conversation_id(
+        client, app, events, services, plug, monkeypatch):
+    """A command Home Assistant did not understand hands over to a
+    conversation word on Home Assistant too. The handed-over turn used to
+    write Home Assistant's conversation_id, and its language, into a memory
+    nobody kept, so the second turn started a new conversation there."""
+    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+    answers = [
+        {"conversation_id": "01CMD", "response": {"response_type": "error",
+                                                  "data": {"code": "no_intent_match"},
+                                                  "speech": {"plain": {"speech": "Sorry"}}}},
+        {"conversation_id": "01CONV", "response": {"response_type": "action_done",
+                                                   "speech": {"plain": {"speech": "First."}}}},
+        {"conversation_id": "01CONV", "response": {"response_type": "action_done",
+                                                   "speech": {"plain": {"speech": "Second."}}}}]
+    services.handlers["ha.test"] = lambda request: httpx.Response(200, json=answers.pop(0))
+    services.transcripts.extend(["turn on the lamp please", "and the other one"])
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        save(client, {"name": "alexa", "mode": "command",
+                      "action": {"destination": HA, "fallback": "hey_jarvis"}},
+             {"name": "hey_jarvis", "mode": "conversation", "action": {"destination": HA},
+              "conversation": {"follow_up_s": 2.0}})
+        sat = plug(ws)
+        sat.send(np.concatenate((floor(0.2), mark("alexa"), voiced(0.8), floor(1.2, seed=1))))
+        conv = settled(app)
+        language = conv.memory.language
+        say(sat)
+        wait(lambda: len(of(events, "turn")) == 2, what="the second turn")
+    bodies = [json.loads(r.content) for r in services.sent("ha.test")]
+    assert [b["text"] for b in bodies] == ["turn on the lamp please", "turn on the lamp please",
+                                           "and the other one"]
+    assert "conversation_id" not in bodies[1], "the handed-over turn is a new conversation there"
+    assert bodies[2].get("conversation_id") == "01CONV"
+    assert language == of(events, "turn")[0]["language"] and language is not None
+
+
 def test_the_first_audio_reaches_the_satellite_before_a_slow_llm_has_finished(
         client, app, events, services, plug):
     services.llm_delay = 0.5
