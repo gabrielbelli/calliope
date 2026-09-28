@@ -4182,6 +4182,9 @@ const SAT_COPY = {
   pipePreferredNamed: "Home Assistant's preferred ({name})",
   pipeGone: "{id} (not in Home Assistant)",
   pipeAsk: "Fill in the address and token variable to list the pipelines set up in Home Assistant.",
+  pipeWait: "List pipelines sends the token in {var} to {name}.",
+  pipeList: "List pipelines",
+  pipeAgain: "Ask again",
   pipeLoading: "Asking Home Assistant for its pipelines…",
   pipeFailed: "Could not list the pipelines: {message}",
   pipeSays: "Hears with {hears}, speaks with {speaks}.",
@@ -5852,28 +5855,49 @@ function wakeVoices() {
    again when its row is opened. The token never reaches the page: the hub
    reads the variable the action names. */
 const WAKE_PIPES = new Map();
-/* Per row, the address and token it last asked with, and the wait before it
-   asks for a new one. Beside the row, not on it: a row is rebuilt only when
-   its word leaves the list, and this goes with it. */
+/* Per row, the address and token pair it shows, so opening a row or Ask
+   again can find a failed entry. Beside the row, not on it: a row is rebuilt
+   only when its word leaves the list, and this goes with it. */
 const WAKE_PIPE_ROWS = new WeakMap();
+/* The pairs the reader committed (left the address or the token's name, or
+   pressed Enter) or asked for with List pipelines, for the page's life
+   (wakePipesFree). */
+const WAKE_PIPES_ASKED = new Set();
 function wakePipesKey(d) { return JSON.stringify([d.url || "", d.token_env || ""]); }
 function wakePipesAskable(d) {
   return !!d.url && WAKE_URL.test(d.url) && !!d.token_env && WAKE_ENV.test(d.token_env);
 }
 
-/* Asked at once the first time a row paints, and 600 ms after the last
-   keystroke in its address or token variable, so typing is not a request a
-   letter. */
-function wakePipesWant(row, d) {
+/* WHETHER THE LIST MAY BE ASKED WITHOUT A PRESS. Asking sends the token the
+   name holds to the address, so a render asks by itself only where that
+   sends it nowhere new: a pair a saved word already uses, which its every
+   turn sends the token to; or a pair the reader committed or asked for
+   (WAKE_PIPES_ASKED). A pair copied from another word's unsaved draft waits
+   for List pipelines. */
+function wakePipesFree(d) {
   const key = wakePipesKey(d);
-  const was = WAKE_PIPE_ROWS.get(row);
-  if (was && was.key === key) return;
-  if (was) clearTimeout(was.timer);
-  const mine = { key, timer: null };
-  WAKE_PIPE_ROWS.set(row, mine);
-  if (WAKE_PIPES.has(key) || !wakePipesAskable(d)) return;
-  const { url, token_env } = d;
-  mine.timer = setTimeout(() => wakePipesFetch(url, token_env), was ? 600 : 0);
+  if (WAKE_PIPES_ASKED.has(key)) return true;
+  const saved = [...((WAKE.server && WAKE.server.words) || []), WAKE.server && WAKE.server.ptt];
+  return saved.some(x => x && x.action && x.action.destination
+    && WAKE_HA.includes(x.action.destination.type) && wakePipesKey(x.action.destination) === key);
+}
+
+/* ASKED ONLY FOR A COMMITTED ADDRESS, as a language model's models are
+   (wakeModelsWant): never while the address or the token's name has the
+   focus. It used to be asked 600 ms after the last keystroke, and a pause
+   halfway through an address sent the token to whatever host the half-typed
+   one named; a domain cut short can be another domain that resolves. */
+function wakePipesWant(row, d, typing) {
+  const key = wakePipesKey(d);
+  WAKE_PIPE_ROWS.set(row, key);
+  if (typing || WAKE_PIPES.has(key) || !wakePipesAskable(d) || !wakePipesFree(d)) return;
+  wakePipesFetch(d.url, d.token_env);
+}
+
+/* The reader's say-so for the pair an Assist word now holds: its address or
+   token's name was committed, or List pipelines pressed. */
+function wakePipesCommit(d) {
+  if (d && d.type === "ha_assist" && wakePipesAskable(d)) WAKE_PIPES_ASKED.add(wakePipesKey(d));
 }
 
 /* A LIST THAT FAILED IS FORGOTTEN, so the row asks again: when the row is
@@ -5882,20 +5906,20 @@ function wakePipesWant(row, d) {
    page's life, so the only retry was closing the word and opening it again,
    which nothing said. True when there was one to forget. */
 function wakePipesForget(row) {
-  const mine = WAKE_PIPE_ROWS.get(row);
-  const entry = mine && WAKE_PIPES.get(mine.key);
+  const key = WAKE_PIPE_ROWS.get(row);
+  const entry = key && WAKE_PIPES.get(key);
   if (!entry || entry.state !== "failed") return false;
-  WAKE_PIPES.delete(mine.key);
-  WAKE_PIPE_ROWS.delete(row);
+  WAKE_PIPES.delete(key);
   return true;
 }
 
+/* The entry is made at once, so the render that asked paints it as loading;
+   the answer repaints. */
 async function wakePipesFetch(url, token_env) {
   const key = wakePipesKey({ url, token_env });
   if (WAKE_PIPES.has(key)) return;
   const entry = { state: "loading" };
   WAKE_PIPES.set(key, entry);
-  wakeRender();
   try {
     const r = await json("/satellites/ha/pipelines", { method: "POST", headers: JSON_BODY,
                                                         body: JSON.stringify({ url, token_env }) });
@@ -5926,9 +5950,14 @@ function wakePipeOptions(d, entry) {
 
 /* One line under the select: why there is no list, or how the chosen
    pipeline (or the preferred one) hears and speaks. Engines are named
-   without their stt. or tts. domain, which says nothing here. */
-function wakePipeHint(d, entry) {
-  if (!entry) return wakePipesAskable(d) ? SAT_COPY.pipeLoading : SAT_COPY.pipeAsk;
+   without their stt. or tts. domain, which says nothing here. `waiting`:
+   what List pipelines would send, and where. */
+function wakePipeHint(d, entry, waiting) {
+  if (waiting) {
+    const host = String(d.url || "").split("://").pop().split("/")[0];
+    return satText("pipeWait", { var: d.token_env, name: host });
+  }
+  if (!entry) return SAT_COPY.pipeAsk;
   if (entry.state === "loading") return SAT_COPY.pipeLoading;
   if (entry.state === "failed") return satText("pipeFailed", { message: entry.error });
   const p = entry.pipelines.find(x => x.id === (d.pipeline || entry.preferred));
@@ -6507,8 +6536,9 @@ function wakeRow(name) {
     else if (b.dataset.ww === "retry") wakeRetry(b);
     else if (b.dataset.ww === "llmtest") wakeLlmTry(name, row, b);
     else if (b.dataset.ww === "pipes") {
-      /* Ask again hides itself as the list loads; the picker it fills takes
-         the focus. */
+      /* Ask again, or List pipelines, hides itself as the list loads; the
+         picker it fills takes the focus. */
+      wakePipesCommit(wakeDest(name));
       wakePipesForget(row);
       wakeRender();
       row.querySelector('[data-f="d.pipeline"]').focus();
@@ -6559,12 +6589,13 @@ function wakeRow(name) {
         w.satellites = w.satellites.filter(s => s !== id && s !== "*");
         if (t.checked) w.satellites.push(id);
       });
-    } else if (t.dataset.f === "d.base_url" || t.dataset.f === "d.env") {
+    } else if (t.dataset.f === "d.base_url" || t.dataset.f === "d.url" || t.dataset.f === "d.env") {
       /* The address or the key's name is committed (the box was left, or
-         Enter): the moment a language model's models are asked, and not a
-         keystroke sooner. */
+         Enter): the moment a language model's models, or Home Assistant's
+         pipelines, are asked, and not a keystroke sooner. */
       const d = wakeDest(name);
       if (d && d.type === "llm") wakeModelsWant(d, false, wakeSavedDest(name));
+      wakePipesCommit(d);
       wakeRender();
     } else if (t.dataset.f && t.tagName === "SELECT") {
       /* Other is a choice with nothing to save until a tag is typed, so the
@@ -6815,12 +6846,15 @@ function wakeActionUpdate(row, w, words) {
   if (llm) wakeLlmUpdate(row, w, words); else WAKE_MODEL_ROWS.delete(row);
   if (d.type !== "ha_assist") WAKE_PIPE_ROWS.delete(row);
   else {
-    wakePipesWant(row, d);
+    wakePipesWant(row, d, [q('[data-f="d.url"]'), q('[data-f="d.env"]')].includes(document.activeElement));
     const entry = WAKE_PIPES.get(wakePipesKey(d));
+    const waiting = !entry && wakePipesAskable(d) && !wakePipesFree(d);
     satFillSelect(q('[data-f="d.pipeline"]'), wakePipeOptions(d, entry));
     wakeValue(q('[data-f="d.pipeline"]'), d.pipeline || "");
-    satSet(q(".ww-pipehint"), wakePipeHint(d, entry));
-    q('[data-ww="pipes"]').hidden = !entry || entry.state !== "failed";
+    satSet(q(".ww-pipehint"), wakePipeHint(d, entry, waiting));
+    const ask = q('[data-ww="pipes"]');
+    ask.hidden = !waiting && (!entry || entry.state !== "failed");
+    satSet(ask, waiting ? SAT_COPY.pipeList : SAT_COPY.pipeAgain);
   }
 
   /* The words it can hand over to: the conversation words in the set it

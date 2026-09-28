@@ -107,10 +107,12 @@ def test_the_assist_pipeline_is_chosen_from_home_assistants_own_list(tmp_path):
     assert got["asked"] == 1, "a repaint asked Home Assistant again"
 
 
-def test_a_pipeline_list_that_failed_says_why_and_a_new_address_is_asked_once_typed(tmp_path):
+def test_a_pipeline_list_that_failed_says_why_and_a_new_address_is_asked_once_committed(tmp_path):
     """The hub's sentence is shown as it is (it never carries the token), the
     saved choice stays as it was, and an address typed letter by letter is
-    one request, after the typing stops."""
+    never asked for, however long the reader pauses: asking sends the token
+    to the address, and a pause after "https://ha.example.co" sent it to
+    that host. Committed (the field left, or Enter), it is one request."""
     got = run(tmp_path, MODERN + """
       const sleep = ms => new Promise(r => setTimeout(r, ms));
       hub.words[0].action.destination.pipeline = "01alexa";
@@ -121,12 +123,17 @@ def test_a_pipeline_list_that_failed_says_why_and_a_new_address_is_asked_once_ty
       const entry = () => WAKE_PIPES.get(wakePipesKey(d()));
       const out = { failed: wakePipeHint(d(), entry()), kept: wakePipeOptions(d(), entry()) };
       hub.pipesFail = "";
-      for (const url of ["https://h", "https://ha.oth", "https://ha.other:8123"]) {
+      for (const url of ["https://h", "https://ha.example.co", "https://ha.example.com"]) {
         wakeEdit("hey_jarvis", w => wakeField(w, "d.url", url));
-        await sleep(100);
+        await sleep(700);
       }
       out.typing = hub.pipeCalls.length;
-      await sleep(700);
+      out.waiting = wakePipeHint(d(), entry(), true);
+      wakePipesCommit(d());
+      wakeRender();
+      await sleep(30);
+      wakeRender();
+      await sleep(30);
       out.asked = hub.pipeCalls.map(c => c.url);
       out.ask = wakePipeHint({ type: "ha_assist", url: "https://ha.local:8123", token_env: "" }, undefined);
       console.log(JSON.stringify(out));
@@ -135,8 +142,39 @@ def test_a_pipeline_list_that_failed_says_why_and_a_new_address_is_asked_once_ty
                              "502 Home Assistant refused the token in SATELLITES_HA_TOKEN")
     assert got["kept"] == [["", "Home Assistant's preferred"], ["01alexa", "01alexa"]]
     assert got["typing"] == 1, "a request went out while the address was still being typed"
-    assert got["asked"] == ["https://ha.local:8123", "https://ha.other:8123"]
+    assert got["waiting"] == "List pipelines sends the token in SATELLITES_HA_TOKEN to ha.example.com."
+    assert got["asked"] == ["https://ha.local:8123", "https://ha.example.com"]
     assert got["ask"] == "Fill in the address and token variable to list the pipelines set up in Home Assistant."
+
+
+def test_a_pipeline_list_is_never_asked_while_its_address_has_the_focus(tmp_path):
+    """Even a pair the reader asked for before waits while the address is
+    being typed: the render that follows each keystroke asks nothing."""
+    got = run(tmp_path, MODERN + """
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      await satellitesRefresh();
+      await sleep(30);
+      const row = WAKE.rows.get("hey_jarvis");
+      // The stand-ins hand out a new element a call; the row keeps one per
+      // selector here, so the address field can hold the focus.
+      const els = new Map(), find = row.querySelector;
+      row.querySelector = sel => { if (!els.has(sel)) els.set(sel, find(sel)); return els.get(sel); };
+      const d = () => (WAKE.draft || WAKE.server.words).find(w => w.name === "hey_jarvis").action.destination;
+      wakeEdit("hey_jarvis", w => wakeField(w, "d.url", "https://ha.example.com"));
+      wakePipesCommit(d());
+      WAKE_PIPES.delete(wakePipesKey(d()));
+      document.activeElement = row.querySelector('[data-f="d.url"]');
+      wakeRender();
+      await sleep(30);
+      const out = { typing: hub.pipeCalls.length };
+      document.activeElement = null;
+      wakeRender();
+      await sleep(30);
+      out.left = hub.pipeCalls.map(c => c.url);
+      console.log(JSON.stringify(out));
+    """)
+    assert got["typing"] == 1, "asked while the address had the focus"
+    assert got["left"] == ["https://ha.local:8123", "https://ha.example.com"]
 
 
 def test_a_pipeline_list_that_failed_is_asked_again_from_its_row(tmp_path):

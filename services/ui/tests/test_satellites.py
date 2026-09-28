@@ -571,7 +571,8 @@ def test_an_assist_word_takes_its_pipeline_from_a_list_and_its_voice_from_home_a
     assert 'b.dataset.ww === "pipes"' in function("wakeRow")
     assert "let again = wakePipesForget(row);" in function("wakeRow")
     update = function("wakeActionUpdate")
-    assert "q('[data-ww=\"pipes\"]').hidden = !entry || entry.state !== \"failed\";" in update
+    assert "ask.hidden = !waiting && (!entry || entry.state !== \"failed\");" in update
+    assert "satSet(ask, waiting ? SAT_COPY.pipeList : SAT_COPY.pipeAgain);" in update
     assert 'row.querySelectorAll("[data-nodest]")' in update
     assert 'q(".ww-tag").hidden = !other || q(".ww-lang").hidden;' in update
     assert CODE.count('json("/satellites/ha/pipelines", { method: "POST"') == 1
@@ -883,12 +884,14 @@ def test_the_language_model_fields_name_no_one_server():
 
 
 def test_the_model_list_is_asked_only_for_an_address_nobody_is_typing():
-    """The pipeline picker asks 600 ms after the last keystroke, which would
-    send a key to a half-typed host that happens to resolve. The model list
-    is asked on a row's first paint, a provider picked, or a committed field,
-    and never while the Base URL or the key's name has the focus. Whether it
-    is asked without a press at all is wakeModelsFree's, which every caller
-    reaches with the word's saved destination (test_satellites_llm.py)."""
+    """Asking 600 ms after the last keystroke, as the pipeline picker once
+    did, sends a key to a half-typed host that happens to resolve. The model
+    list is asked on a row's first paint, a provider picked, or a committed
+    field, and never while the Base URL or the key's name has the focus.
+    Whether it is asked without a press at all is wakeModelsFree's, which
+    every caller reaches with the word's saved destination
+    (test_satellites_llm.py). The pipeline picker follows the same rule
+    (test_satellites_modes.py)."""
     want = function("wakeModelsWant")
     assert "setTimeout" not in want and "typing ||" in want and "!wakeModelsFree(d, saved)" in want
     update = function("wakeLlmUpdate")
@@ -897,7 +900,10 @@ def test_the_model_list_is_asked_only_for_an_address_nobody_is_typing():
     assert "const saved = wakeSavedDest(w.name || WAKE_PTT);" in update
     assert "q('[data-ww=\"models\"]').hidden = !waiting;" in update
     row = function("wakeRow")
-    assert 't.dataset.f === "d.base_url" || t.dataset.f === "d.env"' in row
+    assert 't.dataset.f === "d.base_url" || t.dataset.f === "d.url" || t.dataset.f === "d.env"' in row
+    assert "wakePipesCommit(d);" in row
+    pipes = function("wakePipesWant")
+    assert "setTimeout" not in pipes and "typing ||" in pipes and "!wakePipesFree(d)" in pipes
     assert "wakeModelsWant(d, false, wakeSavedDest(name));" in row
     assert 'b.dataset.ww === "models"' in row and "wakeModelsList(d);" in row
     assert ('<button class="small tight ww-modelsgo" type="button" data-ww="models" hidden>'
