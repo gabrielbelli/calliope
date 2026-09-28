@@ -93,7 +93,7 @@ def test_a_rebooting_update_is_not_reported_as_offline(tmp_path):
 
 def test_a_reboot_pressed_here_is_not_reported_as_offline(tmp_path):
     """The hub answers /reboot at once and remembers nothing, so ten seconds
-    after a Reboot the owner had just confirmed, the row went amber Offline
+    after a Reboot that had just been confirmed, the row went amber Offline
     and the health line said "1 offline". The page remembers the press."""
     got = run(tmp_path, SAT + """
       const li = { dataset: { id: "aaaaaaaaaaaa" }, _n: sat({}), querySelector: () => stand() };
@@ -308,7 +308,7 @@ def test_a_button_mapping_is_one_the_hub_accepts(tmp_path):
 
 def test_a_muted_satellite_names_the_button_that_unmutes_it(tmp_path):
     """Mute can be on any button since buttons became freely mapped, and Rec
-    can be set to something else. The row sent the owner to Rec whatever it
+    can be set to something else. The row sent people to Rec whatever it
     now does, and a press on the device is the only way out of a mute."""
     got = run(tmp_path, SAT + """
       const muted = buttons => sat({ status: { muted: true }, config: { buttons } });

@@ -3,11 +3,10 @@ settings folded under its row, and the hub's settings (wake words, activity,
 firmware) as three quiet disclosures at the foot. Routing was a fourth until
 the hub moved it onto each wake word (2026-09-25).
 
-The owner's words were "the main page should list and manage the satellites,
-the satellite specific settings should be a collapsible on the satellite",
-"wake words should be multiple and you choose the satellite that will have
-that wake words", and "settings like firmware etc dont need to be present on
-the main menu, can be hidden under sub menus so its less overwhelming".
+The tab lists and manages the satellites. Each satellite's own settings
+collapse under its row; there are several wake words, and each one chooses
+the satellites that hear it; and what is set once or rarely (firmware,
+addresses) sits in folded sections, so the page is not overwhelming.
 
 Static, for the reason test_interface.py gives: what these assert is a property
 of the bytes in ui.html -- which controls sit in which disclosure, what a poll
@@ -96,7 +95,7 @@ OPEN_ROW = BODY[:BODY.index('<details class="sub')]
 def test_the_satellites_tab_is_one_card():
     """It was five cards at one weight, which read as a settings dump. The
     list and the hub's disclosures are one card now, the hub sections at the
-    foot of it, and the owner's "firmware etc." last of all. Routing is not
+    foot of it, and firmware last of all. Routing is not
     one of them any more: a wake word says what it does, and the hub answers
     PUT /satellites/routing 409."""
     assert PANEL.count('class="card"') == 1, "the tab is a stack of cards again"
@@ -124,9 +123,9 @@ def test_the_satellites_panel_has_no_tab_strip_of_its_own():
 
 
 def test_a_satellite_row_is_a_hairline_not_a_box():
-    """Every satellite was a bordered box inside the bordered card: the
-    nesting the owner rejected on the Jobs tab. Rows are divided by hairlines,
-    and the old box rule is gone."""
+    """Every satellite was a bordered box inside the bordered card, the
+    nesting the Jobs tab already dropped. Rows are divided by hairlines, and
+    the old box rule is gone."""
     assert ".satellite{" not in BARE_CSS and ".satellite " not in BARE_CSS
     rows = BARE_CSS[BARE_CSS.index(".sats>li,.wws>li,.fws>li{"):]
     assert "border-top:1px solid var(--line)" in rows[:rows.index("}")]
@@ -204,9 +203,9 @@ def test_a_satellites_own_settings_are_folded_under_it_and_start_closed():
 
 def test_the_satellite_summary_carries_no_device_facts_and_nothing_pressable():
     """Closed, a row is a name, one state word and one line. Firmware, the
-    address and the signal are the "firmware etc." the owner asked to have off
-    the main view; and a summary is a button, so nothing pressable may sit
-    inside it."""
+    address and the signal are set once or rarely read, so they stay off the
+    main view; and a summary is a button, so nothing pressable may sit inside
+    it."""
     for fact in ("firmware", "address", "rssi", "facts", "dBm"):
         assert fact not in SUMMARY, f"{fact} is on the closed row"
     for control in ("<button", "<input", "<select", "<a "):
@@ -859,8 +858,8 @@ def test_the_key_box_asks_no_password_manager_for_a_generated_password():
 
 
 def test_the_language_model_fields_name_no_one_server():
-    """The owner's words: "openai compatible APIs, not this ollama example".
-    No placeholder or generated sentence names one server's address or one
+    """A language model word takes any OpenAI-compatible API, so no
+    placeholder or generated sentence names one server's address or one
     model; the Base URL's example is a hosted provider's, and the hint beside
     it names self-hosted servers only as some among several."""
     placeholders = re.findall(r'placeholder="([^"]*)"', WORD)

@@ -1295,10 +1295,10 @@ details>summary:active{opacity:.72}
 /* ONE CARD, ONE LIST. The tab was five cards -- the satellites, then Wake
    words, Routing, Firmware and Events at the same weight -- and each satellite
    opened onto fifteen controls, firmware and addresses included, so the page
-   read as a settings dump rather than as the house's satellites. The owner's
-   words: "the main page should list and manage the satellites, the satellite
-   specific settings should be a collapsible on the satellite", and "settings
-   like firmware etc dont need to be present on the main menu".
+   read as a settings dump rather than as the house's satellites. The tab's
+   job is to list and manage the satellites: each satellite's own settings
+   collapse under its row, and what is set once or rarely (firmware,
+   addresses) sits last, out of the way.
 
    So: one list of hairline rows, each a native <details> that closes to a
    name, one state word and one dim line. Opened, it holds what changes weekly
@@ -2470,13 +2470,10 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
           <!-- A WAKE WORD IS A WHOLE BEHAVIOUR, AND THIS IS ITS ONE EDITOR
                (GET and PUT /satellites/wake-words). Each word says which
                satellites hear it and what it does: its mode, a language hint
-               and its action. The owner's words were "you add a new wake
-               word, choose whether it will hint the language, and choose what
-               mode the wake word will be, whether it will be conversation or
-               command, and the action". Routing used to be a rules.json
-               editor of its own; the hub keeps it on the word now and answers
-               PUT /satellites/routing 409, so that disclosure is gone and only
-               its Try box is left, folded in here.
+               and its action, all chosen where the word is added. Routing
+               used to be a rules.json editor of its own; the hub keeps it on
+               the word now and answers PUT /satellites/routing 409, so that
+               disclosure is gone and only its Try box is left, folded in here.
                Closed, a word is one line (its mode, its satellites and what
                it does); opened, only the fields its mode and its action use
                are shown, and the rare ones wait under More. "Every satellite"
@@ -2569,8 +2566,8 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
             </div>
           </details>
 
-          <!-- Last, because it is the thing the owner asked to have out of the
-               way. Per-satellite progress shows on the satellite's own row. -->
+          <!-- Last, because it is set once and rarely looked at again.
+               Per-satellite progress shows on the satellite's own row. -->
           <details id="sat-firmware">
             <summary>Firmware<span class="sum-note" id="fw-sum"></span></summary>
             <div class="body">
@@ -4481,7 +4478,7 @@ function satState(n, mem) {
       satText("lineUpdating", { v }), "updating", pct === null ? 0 : pct / 100);
   }
   /* A Reboot pressed here is remembered the same way (`reboot`), or the
-     press the owner had just confirmed read, ten seconds later, as an amber
+     press that had just been confirmed read, ten seconds later, as an amber
      Offline and "1 offline" beside the heading. */
   const back = mem.restarting && mem.restarting.get(n.id);
   if ((n.online && ota.state === "rebooting")
@@ -4590,9 +4587,9 @@ function satPendingMarkup(u) {
    pressable, because a summary is a button. Open: what people change weekly.
    One more level: Try it (each one makes a noise or lights the ring), Buttons
    (set once) and Device, which holds the firmware, the address and every
-   consequential action; the "firmware etc." the owner asked to have out of
-   the main view. Stop is kept with the other sounds: it cuts off what the
-   satellite is saying, the same thing its own Set button does. */
+   consequential action, out of the main view because they are set once.
+   Stop is kept with the other sounds: it cuts off what the satellite is
+   saying, the same thing its own Set button does. */
 function satAdoptedMarkup(u) {
   return `
   <details class="sat-row">
@@ -7213,7 +7210,7 @@ function satCommonModel() {
 async function firmwareAct(fw, act, button) {
   const host = $("fwnote");
   /* THE QUESTION COUNTS WHAT IS SENT. Only the satellites that are due get
-     the image, and "Update every satellite to v?" told the owner all three
+     the image, and "Update every satellite to v?" said all three
      would reboot when one would; one is named, as its own Update names it.
      confirm() holds the page, so no poll changes the list between the
      question and the requests. */
@@ -7302,8 +7299,8 @@ $("fwupload").addEventListener("click", firmwareUpload);
    gets a non-200 answer (the UI's proxy answers 503 while the hub is down)
    closes it for good. Nothing looked, so after a hub restart Activity went
    silent until a reload: rows stopped lighting Listening, Last heard stopped
-   arriving, and the empty log still said to press a button, which sent the
-   owner to hardware that was working. A closed stream is let go, so the next
+   arriving, and the empty log still said to press a button, which sent
+   people to hardware that was working. A closed stream is let go, so the next
    poll that reaches the hub opens another (satellitesRefresh calls this),
    and Activity says it is not connected until one opens. */
 function satellitesListen() {

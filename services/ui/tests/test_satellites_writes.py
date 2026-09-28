@@ -461,7 +461,7 @@ def test_update_every_satellite_updates_only_the_ones_it_would_change(tmp_path):
 
 def test_update_every_satellite_asks_about_the_ones_it_will_send_and_says_when_they_are_busy(tmp_path):
     """The question said "every satellite" when only the due ones are sent
-    the image, so with one of three due the owner was told all three would
+    the image, so with one of three due the question said all three would
     reboot. And a satellite taking an update is not due, so on the poll after
     a press the greyed button said every one "already runs it" beside rows
     that said Updating 40%."""
