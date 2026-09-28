@@ -91,6 +91,31 @@ def test_a_rebooting_update_is_not_reported_as_offline(tmp_path):
     assert got["online_rebooting"] == "Restarting", got
 
 
+def test_a_reboot_pressed_here_is_not_reported_as_offline(tmp_path):
+    """The hub answers /reboot at once and remembers nothing, so ten seconds
+    after a Reboot the owner had just confirmed, the row went amber Offline
+    and the health line said "1 offline". The page remembers the press."""
+    got = run(tmp_path, SAT + """
+      const li = { dataset: { id: "aaaaaaaaaaaa" }, _n: sat({}), querySelector: () => stand() };
+      const real = json;                                // /reboot is the hub's 204
+      json = async (path, o) => path.endsWith("/reboot") ? null : real(path, o);
+      await satelliteAct(li, "reboot", stand());
+      const off = sat({ online: false });
+      SATELLITES.list = [off];
+      satellitesHealth();
+      console.log(JSON.stringify({ asked, remembered: SATELLITES.restarting.get("aaaaaaaaaaaa"),
+        state: pick(satState(off, satMem())), health: $("sathealth").textContent,
+        later: satState(off, mem({ restarting: new Map([["aaaaaaaaaaaa",
+          { v: null, reboot: true, at: 1000000 - 130000 }]]) })).word }));
+    """)
+    assert got["asked"] == ["Reboot Kitchen? It is back in about ten seconds."], got
+    assert got["remembered"]["reboot"] is True and got["remembered"]["v"] is None, got
+    assert got["state"]["word"] == "Restarting", got
+    assert got["state"]["line"] == "Rebooting. It comes back on its own.", "a reboot read as new firmware"
+    assert got["health"] == "", "a reboot is counted as offline"
+    assert got["later"] == "Offline", got
+
+
 def test_an_update_that_broke_off_is_not_reported_as_offline(tmp_path):
     """The hub keeps an update's state on the connection, and a transfer that
     breaks off ends the connection: the only trace is the `failed` event,

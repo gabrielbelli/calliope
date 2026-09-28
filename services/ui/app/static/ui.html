@@ -4005,6 +4005,8 @@ const SAT_COPY = {
   lineGone: "Now offline · ID {id}",
   lineUpdating: "Updating to {v}. It reboots when the transfer ends.",
   lineRestarting: "Installing {v}. It comes back on its own.",
+  lineRebooting: "Rebooting. It comes back on its own.",
+  rebootSent: "{name} is rebooting; it is back in about ten seconds.",
   lineFailed: "Update to {v} failed: {error}",
   lineOffline: "Last seen {clock}",
   lineNotListening: "Not listening for wake words: {error}",
@@ -4365,11 +4367,14 @@ function satState(n, mem) {
     return say("updating", pct === null ? "Updating" : `Updating ${pct}%`, "running",
       satText("lineUpdating", { v }), "updating", pct === null ? 0 : pct / 100);
   }
+  /* A Reboot pressed here is remembered the same way (`reboot`), or the
+     press the owner had just confirmed read, ten seconds later, as an amber
+     Offline and "1 offline" beside the heading. */
   const back = mem.restarting && mem.restarting.get(n.id);
   if ((n.online && ota.state === "rebooting")
       || (!n.online && back && mem.now - back.at < 120000)) {
-    return say("restarting", "Restarting", "running",
-      satText("lineRestarting", { v: (back && back.v) || v }), "updating");
+    return say("restarting", "Restarting", "running", !n.online && back.reboot ? SAT_COPY.lineRebooting
+      : satText("lineRestarting", { v: (back && back.v) || v }), "updating");
   }
   /* An update that broke off mid-transfer ends the session it was on, and the
      hub's record of it with it, so without the remembered `failed` event it
@@ -5172,7 +5177,11 @@ async function satelliteAct(li, act, button) {
       field.focus({ preventScroll: true });
       satSaid(host, satText("renamed", { old: name, new: satName(r) }));
     } else if (act === "reboot") {
+      /* The hub answers at once and the satellite drops off seconds later:
+         remembered, so the row reads Restarting and not Offline. */
       await json(`/satellites/${id}/reboot`, { method: "POST" });
+      SATELLITES.restarting.set(id, { at: Date.now(), v: null, reboot: true });
+      satSaid(host, satText("rebootSent", { name }));
     } else if (act === "movego") {
       /* The other hub sees it as new and waiting, with nothing carried over,
          and this one keeps its record until somebody forgets it here. */
