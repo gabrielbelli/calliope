@@ -4091,10 +4091,15 @@ const SAT_COPY = {
   fwSkipped: "Skipped {name}: {why}.",
   fwNoneStarted: "No satellite started the update.",
   fwNoneDue: "Every satellite of this model that is online already runs it.",
+  fwNoneBusy: "Updating {n} now.",
   fwNoneOnline: "No satellite of this model is online.",
   fwUploaded: "Uploaded {v}.",
   fwChoose: "Choose a .bin first.",
-  fwVersion: "Type the version exactly as the build reports it; Device shows it under Firmware.",
+  /* The build stamps it (scripts/version.py), so that is where it is read.
+     It pointed at Device, which shows the version a satellite runs NOW: an
+     image labelled with that is one every satellite already "runs", so it
+     was never offered and Update every satellite greyed for good. */
+  fwVersion: "Type the version its build stamped: git describe --always --dirty --tags, run where it was built.",
   routeEmpty: "Type something to send to the word's action.",
   evLost: "Not receiving activity from the hub; it reconnects when the hub answers.",
   sumEvLost: "not connected",
@@ -4105,8 +4110,11 @@ const SAT_COPY = {
   askForget: "Forget {name}? It stops streaming and waits to be adopted again.",
   askMove: "Move {name} to {url}? It reboots and waits to be adopted by that hub.",
   askUpdate: "Update {name} to {v}? It reboots when the transfer ends.",
-  askUpdateAll: "Update every satellite to {v}? Each one reboots when its transfer ends.",
-  askRollback: "Roll back every satellite to {v}, an older image? Each one reboots when its transfer ends.",
+  /* {n} is how many are due ("3 satellites"), since only those are sent
+     it; one is named, as askUpdate names it. */
+  askUpdateAll: "Update {n} to {v}? Each one reboots when its transfer ends.",
+  askRollback: "Roll back {n} to {v}, an older image? Each one reboots when its transfer ends.",
+  askRollbackOne: "Roll back {name} to {v}, an older image? It reboots when the transfer ends.",
   askDelete: "Delete firmware {v}? Satellites already on it keep it.",
   sumLoadFailed: "did not load",
   sumWwDirty: "unsaved changes",
@@ -6917,8 +6925,7 @@ function firmwareRender() {
     if (!go) continue;
     const due = firmwareDue(row._fw);
     if (go.getAttribute("aria-busy") !== "true") go.disabled = !due.length;
-    const online = SATELLITES.list.some(n => n.adopted && n.online && n.model === row._fw.model);
-    satSet(row.querySelector(".fw-why"), due.length ? "" : online ? SAT_COPY.fwNoneDue : SAT_COPY.fwNoneOnline);
+    satSet(row.querySelector(".fw-why"), due.length ? "" : firmwareIdle(row._fw));
   }
   satSet($("fw-sum"), firmwareSummary());
   /* The model the house runs, unless somebody has typed one. */
@@ -6983,6 +6990,17 @@ function firmwareDue(fw) {
     && satFirmware(n) !== fw.version && !satGoingTo(n));
 }
 
+/* WHY NONE IS DUE. A satellite taking an update is not due, so right after
+   a press every one it started left nothing due, and the reason read
+   "already runs it" beside rows that said Updating 40%. Updates under way
+   are the reason first, rebooting ones (offline, remembered) included. */
+function firmwareIdle(fw) {
+  const mine = SATELLITES.list.filter(n => n.adopted && n.model === fw.model);
+  const taking = mine.filter(n => satGoingTo(n)).length;
+  return taking ? satText("fwNoneBusy", { n: satCount(taking, "satellite", "satellites") })
+    : mine.some(n => n.online) ? SAT_COPY.fwNoneDue : SAT_COPY.fwNoneOnline;
+}
+
 function satCommonModel() {
   const count = new Map();
   for (const n of SATELLITES.list) if (n.adopted && n.model) count.set(n.model, (count.get(n.model) || 0) + 1);
@@ -6993,8 +7011,17 @@ function satCommonModel() {
 
 async function firmwareAct(fw, act, button) {
   const host = $("fwnote");
-  const ask = act === "all" ? "askUpdateAll" : act === "back" ? "askRollback" : "askDelete";
-  if (!confirm(satText(ask, { v: fw.version }))) return;
+  /* THE QUESTION COUNTS WHAT IS SENT. Only the satellites that are due get
+     the image, and "Update every satellite to v?" told the owner all three
+     would reboot when one would; one is named, as its own Update names it.
+     confirm() holds the page, so no poll changes the list between the
+     question and the requests. */
+  const due = act === "delete" ? [] : firmwareDue(fw);
+  const say = { v: fw.version, n: satCount(due.length, "satellite", "satellites"),
+                name: due.length === 1 ? satName(due[0]) : "" };
+  const ask = act === "all" ? (say.name ? "askUpdate" : "askUpdateAll")
+    : act === "back" ? (say.name ? "askRollbackOne" : "askRollback") : "askDelete";
+  if (!confirm(satText(ask, say))) return;
   const done = busy(button, act === "all" ? "Updating…" : act === "back" ? "Rolling back…" : "Deleting…");
   try {
     if (act === "all" || act === "back") {
@@ -7003,7 +7030,7 @@ async function firmwareAct(fw, act, button) {
          fails, is named, as the per-satellite Update names its own. */
       let started = 0;
       const skipped = [];
-      for (const n of firmwareDue(fw)) {
+      for (const n of due) {
         try {
           const r = await json("/satellites/ota", { method: "POST", headers: JSON_BODY,
             body: JSON.stringify({ satellite: n.id, sha256: fw.sha256 }) });

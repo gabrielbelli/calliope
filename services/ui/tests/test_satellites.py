@@ -425,9 +425,9 @@ def test_every_consequential_action_asks_first_and_nothing_prompts():
         assert f'satText("{key}"' in act[:ask], f"{key} is not asked"
     assert ask < act.index("busy(button") < act.index("await json(`/satellites/${id}/set-hub`")
     fw = function("firmwareAct")
-    assert ('const ask = act === "all" ? "askUpdateAll" : act === "back" ? "askRollback" : "askDelete";'
-            in fw)
-    assert "if (!confirm(satText(ask, { v: fw.version }))) return;" in fw
+    assert ('const ask = act === "all" ? (say.name ? "askUpdate" : "askUpdateAll")\n'
+            '    : act === "back" ? (say.name ? "askRollbackOne" : "askRollback") : "askDelete";') in fw
+    assert "if (!confirm(satText(ask, say))) return;" in fw
     assert fw.index("confirm(") < fw.index("await json(")
     assert "prompt(" not in CODE
 
@@ -1000,7 +1000,8 @@ def test_update_every_satellite_is_on_the_newest_image_only():
     assert "n.adopted && n.online && n.model === fw.model" in due
     assert "satFirmware(n) !== fw.version && !satGoingTo(n)" in due
     act = function("firmwareAct")
-    assert 'satellite: "all"' not in act and "for (const n of firmwareDue(fw))" in act
+    assert 'satellite: "all"' not in act and "for (const n of due)" in act
+    assert 'const due = act === "delete" ? [] : firmwareDue(fw);' in act
     assert "JSON.stringify({ satellite: n.id, sha256: fw.sha256 })" in act
 
 

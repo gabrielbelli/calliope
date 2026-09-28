@@ -389,8 +389,10 @@ def test_a_firmware_image_is_uploaded_only_with_its_version_and_the_form_is_empt
                                                           $("fwsig").value] }));
     """)
     assert got["blank"]["uploads"] == 0, "an image went up with a version made up from its file name"
-    assert got["blank"]["notes"] == [["warn", "Type the version exactly as the build reports it; "
-                                              "Device shows it under Firmware."]], got
+    # The build, where the version is stamped. Device shows the one each
+    # satellite runs NOW, and an image labelled with it was never offered.
+    assert got["blank"]["notes"] == [["warn", "Type the version its build stamped: git describe "
+                                              "--always --dirty --tags, run where it was built."]], got
     assert got["uploads"] == ["/satellites/firmware?model=esp32-korvo-v1.1&version=v0.3.1-4-g1a2b3c4"], got
     assert got["left"] == ["", "", ""], "the last image's version waits in the box for the next one"
 
@@ -428,3 +430,52 @@ def test_update_every_satellite_updates_only_the_ones_it_would_change(tmp_path):
     assert got["sent"] == ["b2", "c3"], "a satellite already on the image, or offline, was sent it"
     assert got["after_none"] == 2, "an image no satellite needs was sent anyway"
     assert got["notes"] == [["warn", "Updating 1 satellite. Skipped hall: already updating."]], got
+
+
+def test_update_every_satellite_asks_about_the_ones_it_will_send_and_says_when_they_are_busy(tmp_path):
+    """The question said "every satellite" when only the due ones are sent
+    the image, so with one of three due the owner was told all three would
+    reboot. And a satellite taking an update is not due, so on the poll after
+    a press the greyed button said every one "already runs it" beside rows
+    that said Updating 40%."""
+    got = run(tmp_path, """
+      await satellitesRefresh();
+      const sat = (id, name, over) => ({ id, name, adopted: true, online: true, model: "m1",
+                                          firmware: "v1", ...over });
+      const fw = { sha256: "f".repeat(64), version: "v2", model: "m1" };
+      const old = { sha256: "e".repeat(64), version: "v0", model: "m1" };
+      confirming = false;
+      SATELLITES.list = [sat("a1", "kitchen", { firmware: "v2" }), sat("b2", "bedroom")];
+      await firmwareAct(fw, "all", stand());
+      SATELLITES.list = [sat("a1", "kitchen", { firmware: "v0" }), sat("b2", "bedroom")];
+      await firmwareAct(old, "back", stand());
+      SATELLITES.list = [sat("a1", "kitchen"), sat("b2", "bedroom"), sat("c3", "hall", { online: false })];
+      await firmwareAct(fw, "all", stand());
+      await firmwareAct(old, "back", stand());
+      const why = () => firmwareDue(fw).length ? "" : firmwareIdle(fw);
+      // Pressed: both online ones are mid-transfer; the hall is offline.
+      SATELLITES.list = [sat("a1", "kitchen", { ota: { state: "progress", pct: 40, version: "v2" } }),
+                         sat("b2", "bedroom", { ota: { state: "started", version: "v2" } }),
+                         sat("c3", "hall", { online: false })];
+      const busy = why();
+      // One rebooting into it (offline, remembered), the other already on it.
+      SATELLITES.restarting.set("a1", { v: "v2", at: Date.now() });
+      SATELLITES.list = [sat("a1", "kitchen", { online: false }), sat("b2", "bedroom", { firmware: "v2" })];
+      const rebooting = why();
+      SATELLITES.restarting.clear();
+      SATELLITES.list = [sat("a1", "kitchen", { firmware: "v2" }), sat("b2", "bedroom", { firmware: "v2" })];
+      const current = why();
+      SATELLITES.list = [sat("a1", "kitchen", { online: false })];
+      const offline = why();
+      console.log(JSON.stringify({ asked, busy, rebooting, current, offline }));
+    """)
+    assert got["asked"] == [
+        "Update bedroom to v2? It reboots when the transfer ends.",
+        "Roll back bedroom to v0, an older image? It reboots when the transfer ends.",
+        "Update 2 satellites to v2? Each one reboots when its transfer ends.",
+        "Roll back 2 satellites to v0, an older image? Each one reboots when its transfer ends.",
+    ], got
+    assert got["busy"] == "Updating 2 satellites now.", "an update under way read as already current"
+    assert got["rebooting"] == "Updating 1 satellite now.", got
+    assert got["current"] == "Every satellite of this model that is online already runs it.", got
+    assert got["offline"] == "No satellite of this model is online.", got
