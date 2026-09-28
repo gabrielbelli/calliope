@@ -4508,6 +4508,7 @@ function satAdoptedMarkup(u) {
         <label class="checkline tight"><input type="checkbox" data-cfg="mic_enabled"> Microphone</label>
         <label class="checkline tight"><input type="checkbox" data-cfg="lights_enabled"> Lights</label>
       </div>
+      <div class="sat-note" aria-live="polite"></div>
       <p class="sat-listens"><button class="link" type="button" data-act="wakewords">Change wake words</button></p>
       <details class="sub sat-try">
         <summary>Try it</summary>
@@ -4545,10 +4546,10 @@ function satAdoptedMarkup(u) {
           <div class="sat-btns" role="group" aria-label="Button actions">
             <span></span><span class="hd" aria-hidden="true">When pressed</span><span class="hd" aria-hidden="true">When released</span>
           </div>
+          <div class="sat-note" aria-live="polite"></div>
           <div class="hint">Talk listens as if it heard a wake word, and Stop cuts off what it is saying.</div>
           <div class="hint">Mute, volume and lights happen on the device itself, so they work with the hub down.</div>
           <div class="hint">Holding Set 5 s opens Wi-Fi setup and Mode 10 s resets it, whatever they are set to.</div>
-          <div class="sat-note" aria-live="polite"></div>
         </div>
       </details>
       <details class="sub sat-device">
@@ -4610,7 +4611,6 @@ function satAdoptedMarkup(u) {
           <div class="sat-note" aria-live="polite"></div>
         </div>
       </details>
-      <div class="sat-note" aria-live="polite"></div>
     </div>
   </details>`;
 }
@@ -4678,9 +4678,12 @@ function satelliteBuild(li, n) {
   li.innerHTML = n.adopted ? satAdoptedMarkup(u) : satPendingMarkup(u);
 }
 
-/* Where an action's result is written: the note at the foot of the section
-   the button is in, so Listen 5 s answers inside Try it and not a screen
-   away under Device. */
+/* Where an action's result is written: the note of the section the button
+   is in, so Listen 5 s answers inside Try it and not a screen away under
+   Device. The row's own note sits under the switches and the Buttons one
+   under the grid, beside the controls whose failures they carry: at the
+   foot of the row, a refused Volume was reported below three disclosures,
+   while the slider kept the value that was not saved. */
 function satNoteFor(li, from) {
   const scope = (from && from.closest && from.closest(".body")) || li;
   return scope.querySelector(":scope > .sat-note")

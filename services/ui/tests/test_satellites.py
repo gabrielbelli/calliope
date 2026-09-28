@@ -374,6 +374,18 @@ def test_the_buttons_grid_fits_a_phone_and_names_the_lights_switch():
     assert ".sat-buttons .body>.hint+.hint{margin-top:var(--s1)}" in BARE_CSS
 
 
+def test_a_failed_setting_is_reported_beside_the_control():
+    """A refused Volume, Speaker or Lights went to the row's note, which sat
+    after Try it, Buttons and Device, a screen away on a phone with Device
+    open; and a refused button mapping under four hints below the grid."""
+    note = '<div class="sat-note" aria-live="polite"></div>'
+    assert OPEN_ROW.count(note) == 1, "the row's own note is not above its disclosures"
+    assert OPEN_ROW.index('class="row sat-switches"') < OPEN_ROW.index(note)
+    assert BUTTONS.index(note) < BUTTONS.index('<div class="hint">')
+    assert BODY.count(note) == 4, "a section lost its note, or has two"
+    assert 'scope.querySelector(":scope > .sat-note")' in function("satNoteFor")
+
+
 def test_the_one_filled_button_on_the_list_is_adopt():
     """Settings apply on change, so an adopted row has no go button; the
     destructive ones are outlined and last."""
