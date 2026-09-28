@@ -42,7 +42,9 @@ in its thread:
 
 Barge-in by voice needs the front-end: without echo cancellation there is no
 telling the satellite's own voice from the talker's, so with
-SATELLITES_FRONTEND=0, or one channel, only a wake word interrupts.
+SATELLITES_FRONTEND=0, or one channel, only a wake word interrupts. Nor with a
+loopback that never shows the reply playing: a plug in the Korvo's jack cuts
+it, and the reply then comes from an amplifier the canceller cannot hear.
 
 WITHOUT THE FRONT-END (SATELLITES_FRONTEND=0) the mono stream is the first
 microphone, raw: the channel after the loopback reference.
@@ -134,6 +136,10 @@ BARGE_PREROLL_S = 0.6
 # to, so the reply's last syllable and the room's echo of it are not taken for
 # the talker's next turn: without the front-end nothing else removes them.
 FOLLOW_UP_GUARD_S = 0.25
+# The same after a reply whose loopback never showed it playing (below): the
+# loopback cannot say when the reply has left the room, so the guard is time
+# alone, long enough for the satellite's buffer and an amplifier behind it.
+FOLLOW_UP_DEAD_REF_S = 0.6
 # The loopback is the satellite playing when it is louder than this (the
 # Korvo's idle loopback measured -89 dBFS; frontend.FAR_END_DBFS).
 LOOPBACK_DBFS = -60.0
@@ -202,6 +208,15 @@ class Ear:
         self._guard = 0           # samples of quiet loopback a follow-up still waits for
         self._turn_settings: tuple[int, float] | None = None
         self._barge = BargeInDetector()
+        # The loopback has shown the reply playing since watch(voice=True).
+        # A plug in the Korvo's jack cuts it (the jack's switch contacts feed
+        # the amplifier and the loopback, and output.py tells the same way):
+        # the reply then plays from another amplifier the canceller cannot
+        # hear, and the microphones' copy of it would read as the talker. So
+        # voice barge-in arms only once the reference is alive, and a reply
+        # it never came alive for can be interrupted by a wake word alone, as
+        # without the front-end.
+        self._ref_alive = False
         self._loop_floor = rate * 0.02 * (32768.0 * 10 ** (LOOPBACK_DBFS / 20)) ** 2
 
     # ---- called from the event loop, between process() calls ------------------
@@ -235,6 +250,7 @@ class Ear:
         only reports it."""
         if voice and not self._voice:
             self._barge.reset()
+            self._ref_alive = False
         self._voice, self._capture = voice, capture
 
     def unwatch(self) -> None:
@@ -298,7 +314,8 @@ class Ear:
         if follow is not None and self.state in ("busy", "idle"):
             self.state = "listening"
             self.endpointer = self._turn(follow)
-            self._guard = int(FOLLOW_UP_GUARD_S * self.rate) if self.channels > 1 else 0
+            guard_s = FOLLOW_UP_GUARD_S if self._ref_alive else FOLLOW_UP_DEAD_REF_S
+            self._guard = int(guard_s * self.rate) if self.channels > 1 else 0
         interruptible = self.interruptible
         voice, capture = self._voice and self.frontend is not None, self._capture
 
@@ -327,8 +344,13 @@ class Ear:
                     self.endpointer.preroll(before)
                 self._endpoint(mono[len(mono) - after:], events)
         elif voice and self.state == "busy":
-            k = self._barge.feed(self.frontend.blocks)
+            blocks, skip = self.frontend.blocks, 0
+            if not self._ref_alive:
+                skip = next((i for i, (_, far, _) in enumerate(blocks) if far), len(blocks))
+                self._ref_alive = skip < len(blocks)
+            k = self._barge.feed(blocks[skip:])
             if k is not None:
+                k += skip
                 cut = min(len(mono), (k + 1) * self.frontend.hop)
                 self._voice = False  # once per reply
                 events.append(BargeIn(round((start + cut) / self.rate, 3), capture is not None))

@@ -714,6 +714,52 @@ def wav_samples(request: httpx.Request) -> np.ndarray:
 
 
 @pytest.mark.parametrize("mode", ["conversation", "command"])
+def test_with_the_jack_in_its_own_voice_is_not_taken_for_an_interruption(
+        client, app, events, services, plug, monkeypatch, mode):
+    """A PLUG IN THE JACK CUTS THE LOOPBACK. The reply plays from the amplifier
+    on the aux cable, the microphones hear it loud, and the loopback stays
+    silent, so the canceller has nothing to cancel with. That copy of its own
+    voice used to count as the talker: it stopped the reply, was transcribed,
+    sent to Home Assistant, answered, and heard again, every three seconds.
+    Voice barge-in now waits for the loopback to show the reply playing, which
+    it never does here."""
+    monkeypatch.setattr(app.hub.voice, "frontend", True)
+    reply = speechlike(6, seed=1) * dbfs(-20)
+    services.tts_audio.append(np.frombuffer(audio.resample(
+        np.clip(reply, -32768, 32767).astype("<i2").tobytes(), 16000, 24000), "<i2"))
+    services.transcripts.extend(["tell me a long story", "its own voice, heard again"])
+    services.answers.extend([["Once upon a time there was a very long story."], ["again"]])
+    interrupted = threading.Event()
+
+    def note(item):
+        if isinstance(item, dict) and item.get("type") == "flush":
+            interrupted.set()
+    quiet = korvo(np.zeros(int(1.0 * RATE)))
+    user = speechlike(1.6, seed=31) * dbfs(-30)
+    command = np.concatenate((korvo(np.zeros(len(user)), user), quiet))
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        save(client, {"name": "hey_jarvis"}, ptt={"mode": mode, "action": {"destination": LLM}})
+        sat = plug(ws, answer=note)
+        sat.send_frames(frames(quiet))
+        ws.send_json({"type": "button", "button": "play", "action": "press"})
+        sat.send_frames(frames(command, 100))
+        wait(lambda: len(sat.speaker()) >= 5, what="the reply to start")
+        s = app.hub.sessions[NID]
+        # Five seconds of its own voice, loud on the microphones and absent
+        # from the loopback, as through the aux cable.
+        own = korvo(reply[:5 * RATE], clip_db=-6.0)
+        own[:, 0] = 0
+        start = s.ear.samples
+        sat.send_frames(frames(own, 1000))
+        wait(lambda: s.ear.samples >= start + len(own) - 2 * FRAME, what="the listener")
+        time.sleep(0.3)
+    assert not interrupted.is_set(), "its own voice from the aux amplifier stopped the reply"
+    assert len(services.sent("stt.test", "/v1/audio/transcriptions")) == 1, \
+        "its own voice was transcribed as the next turn"
+
+
+@pytest.mark.parametrize("mode", ["conversation", "command"])
 def test_speech_over_the_reply_stops_it_and_its_own_voice_does_not(
         client, app, events, services, plug, monkeypatch, mode):
     """THE SATELLITE MUST NOT INTERRUPT ITSELF, AND MUST LET A PERSON DO SO.
