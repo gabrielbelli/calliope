@@ -525,3 +525,28 @@ def test_replacing_a_key_other_words_send_asks_first(tmp_path):
     assert got["asked"] == ["Replace the key stored as SATELLITES_LLM_API_KEY? alexa will send the new one too."] * 2
     assert got["sent"] == 2 and got["emptied"] == "", got
 
+
+def test_an_address_is_kept_as_the_hub_keeps_it_and_a_model_it_does_not_list_is_said(tmp_path):
+    """The hub strips a trailing slash, the page did not: Provider read
+    Other until a Save, and the word's own saved address waited behind List
+    models. And a provider picked kept the last one's model, so its list
+    looked empty and the first turn failed; that is said, not emptied."""
+    got = run(tmp_path, LLM_HUB + """
+      await satellitesRefresh(); await settle();
+      wakeEdit("hey_jarvis", w => wakeField(w, "d.base_url", "https://api.openai.com/v1/"));
+      const base = dest("hey_jarvis").base_url, preset = wakePreset(base);
+      wakeEdit("hey_jarvis", w => wakeField(w, "d.base_url", "https://"));
+      const half = dest("hey_jarvis").base_url;
+      wakeEdit("hey_jarvis", w => { wakeField(w, "dest", "webhook"); wakeField(w, "d.url", "https://hooks.example.com/voice/"); });
+      const hook = dest("hey_jarvis").url;
+      const ready = { state: "ready", models: ["gpt-test-mini", "vendor/test-large"] };
+      const d = { base_url: "https://llm.example.com/v1", model: "vendor/old-model" };
+      console.log(JSON.stringify({ base, preset, half, hook, listed: wakeModelsHint({ ...d, model: "gpt-test-mini" }, ready),
+                                   other: wakeModelsHint(d, ready) }));
+    """)
+    assert got["base"] == got["preset"] == "https://api.openai.com/v1", got
+    assert got["half"] == "https://", "a half-typed address was cut to something else"
+    assert got["hook"] == "https://hooks.example.com/voice", got
+    assert got["listed"] == "2 models to pick from; type to narrow the list."
+    assert got["other"] == "vendor/old-model is not one llm.example.com lists; clear Model to see its list.", got
+

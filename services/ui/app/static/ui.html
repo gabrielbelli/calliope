@@ -4205,6 +4205,7 @@ const SAT_COPY = {
   modelsEmpty: "{name} lists no models, so type the id.",
   modelsFailed: "Could not list the models, so type the id: {message}",
   modelsList: "List models",
+  modelsNotListed: "{model} is not one {name} lists; clear Model to see its list.",
   /* The key box. The page never holds a key to show: these are said from
      WAKE.server.secrets, a name and where its value lives. */
   keyHub: "A key is stored on the hub as {var}.",
@@ -5792,7 +5793,8 @@ function wakeField(w, key, raw) {
     }
     const needed = ["url", "base_url", "model"].includes(field)
       || (field === "token_env" && WAKE_HA.includes(d.type));
-    d[field] = (field === "base_url" ? wakeBaseUrl(text) : text) || (needed ? "" : null);
+    d[field] = (field === "base_url" ? wakeBaseUrl(text) : field === "url" ? wakeUrl(text) : text)
+      || (needed ? "" : null);
   } else if (kind === "a" && w.action) {
     w.action = { ...w.action, [name]: text || (name === "reply_to" ? "same" : null) };
   } else if (kind === "c") {
@@ -5811,12 +5813,21 @@ function wakePhrasesBad(list) {
   return !!list && (list.length > WAKE_PHRASES.most || list.some(p => p.length > WAKE_PHRASES.longest));
 }
 
-/* A base URL pasted as a provider's whole endpoint (its curl example's), cut
-   back to the base as the hub cuts it (destinations._trim_endpoint), so the
-   form shows the address that will be saved. */
-function wakeBaseUrl(text) {
-  const cut = text.replace(/\/+chat\/completions\/?$/, "");
+/* AN ADDRESS AS THE HUB KEEPS IT, without a trailing slash
+   (destinations._check_url), so the form holds what will be saved. With
+   "https://api.openai.com/v1/" Provider read Other until a Save, and the
+   models were held behind List models for the word's own saved address,
+   which differed from it by the slash. A half-typed "https://" is kept as
+   typed: cut, it is not an address at all. */
+function wakeUrl(text) {
+  const cut = text.replace(/\/+$/, "");
   return WAKE_URL.test(cut) ? cut : text;
+}
+/* A base URL pasted as a provider's whole endpoint (its curl example's), cut
+   back to the base as the hub cuts it (destinations._trim_endpoint). */
+function wakeBaseUrl(text) {
+  const bare = wakeUrl(text), cut = bare.replace(/\/+chat\/completions$/, "");
+  return WAKE_URL.test(cut) ? cut : bare;
 }
 
 /* THE FIRST THING THE HUB WOULD REFUSE IN ONE ENTRY, as a sentence, or "".
@@ -6218,6 +6229,12 @@ function wakeModelsHint(d, entry, waiting) {
   if (entry.state === "loading") return satText("modelsLoading", { name: host });
   if (entry.state === "failed") return satText("modelsFailed", { message: entry.error });
   if (!entry.models.length) return satText("modelsEmpty", { name: host });
+  /* A provider picked keeps the model typed for the last one, and the list
+     is narrowed by the field's value, so it looked empty beside "N to pick
+     from", and the first turn failed with "model not found". Said, not
+     emptied: arrowing through a closed Provider select is a change per
+     option, and would have wiped the model for good. */
+  if (d.model && !entry.models.includes(d.model)) return satText("modelsNotListed", { model: d.model, name: host });
   return satText("modelsReady", { n: satCount(entry.models.length, "model", "models") });
 }
 
