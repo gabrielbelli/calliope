@@ -97,6 +97,7 @@ from typing import AsyncIterator, NamedTuple
 
 import httpx
 from websockets.asyncio.client import connect as ws_connect
+from websockets.exceptions import InvalidHandshake
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import Response, StreamingResponse
 from starlette.datastructures import MutableHeaders
@@ -1273,7 +1274,12 @@ async def satellites_socket(client: WebSocket) -> None:
             # The device pings this socket and uvicorn answers; the hop to
             # voice-satellites is a container on the same network.
             ping_interval=None)
-    except (OSError, TimeoutError) as exc:
+    except (OSError, TimeoutError, InvalidHandshake) as exc:
+        # InvalidHandshake: the hub answered, but not with a socket (a 404
+        # from a wrong GATEWAY_SATELLITES_URL, a proxy, a hub restarting that
+        # dropped the handshake). It is no OSError, and it escaped as a
+        # traceback while the device saw 1006; "try again later" is the same
+        # answer as a hub that is not there.
         log.warning("satellites: cannot reach %s for %s: %s", target, peer, exc)
         await client.close(code=1013)
         return
@@ -1302,8 +1308,11 @@ async def satellites_socket(client: WebSocket) -> None:
         for t in tasks:
             t.cancel()
         await upstream.close()
+        # The hub's own close code goes on to the device: 1008 (a bad token,
+        # or a connection refused its place) and 1012 (replaced by a newer
+        # one) reached it as a plain 1000.
         try:
-            await client.close()
+            await client.close(code=upstream.close_code or 1000)
         except RuntimeError:
             pass  # already closed by the device
 
@@ -1481,14 +1490,16 @@ async def health() -> Response:
     Each container keeps its own healthcheck pointed at its own localhost
     /health for exactly the same reason.
     """
-    stt, tts, long = await asyncio.gather(_probe(STT), _probe(TTS), _probe(LONG))
-    backends = {"stt": stt, "tts": tts, "tts_long": long}
+    # All at once, the hub with them: asked after the other three, a slow hub
+    # and a slow backend took twice the one probe's worst case.
+    probes = {"stt": STT, "tts": TTS, "tts_long": LONG}
     # The hub is optional; configured, it counts like any other backend.
     if SATELLITES.url:
-        backends["satellites"] = await _probe(SATELLITES)
-    # `ok` only if all three answered. A backend that answered 200 while still
-    # loading its model is still `ok` here — it answered, and its own body
-    # says "loading" for anyone reading past the first field.
+        probes["satellites"] = SATELLITES
+    backends = dict(zip(probes, await asyncio.gather(*(_probe(b) for b in probes.values()))))
+    # `ok` only if every backend answered. A backend that answered 200 while
+    # still loading its model is still `ok` here — it answered, and its own
+    # body says "loading" for anyone reading past the first field.
     everything = all(b["reachable"] for b in backends.values())
     return Response(
         content=json.dumps({"status": "ok" if everything else "degraded",

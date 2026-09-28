@@ -1874,7 +1874,8 @@ def test_a_board_on_firmware_from_before_the_rename_is_still_relayed_to_the_hub(
 
     async def no_hub(target, **_):
         # Refused rather than faked end to end: what is under test is where
-        # each path is relayed to, and the relay itself is unchanged.
+        # each path is relayed to; the relay itself is
+        # test_the_relay_carries_frames_both_ways_and_the_hubs_close_code.
         dialled.append(target)
         raise OSError("no hub in a unit test")
 
@@ -1886,6 +1887,120 @@ def test_a_board_on_firmware_from_before_the_rename_is_still_relayed_to_the_hub(
                     ws.receive_text()
             assert closed.value.code == 1013, path
     assert dialled == ["ws://satellites.test/satellites/ws"] * 2
+
+
+def test_health_asks_the_hub_alongside_the_other_backends(monkeypatch):
+    """The hub was probed after the other three had answered, so a slow hub
+    and a slow backend took twice one probe's worst case (about 14 s against
+    7) on the endpoint the container healthcheck waits on."""
+    import asyncio
+
+    from starlette.testclient import TestClient
+
+    main = reload_gateway(monkeypatch)
+    out, most = [0], [0]
+
+    async def probe(backend):
+        out[0] += 1
+        most[0] = max(most[0], out[0])
+        await asyncio.sleep(0.05)
+        out[0] -= 1
+        return {"reachable": True}
+    monkeypatch.setattr(main, "_probe", probe)
+    with TestClient(main.app) as client:
+        body = client.get("/health").json()
+    assert set(body["backends"]) == {"stt", "tts", "tts_long", "satellites"}
+    assert most[0] == 4, "the probes were not asked together"
+
+
+@pytest.mark.parametrize("failure", ["404", "dropped"])
+def test_a_hub_that_answers_but_not_with_a_socket_is_try_again_later(monkeypatch, failure):
+    """A 404 (a wrong GATEWAY_SATELLITES_URL, a proxy, an old hub) or a hub
+    dropping the handshake as it restarts is no OSError: it escaped as a
+    traceback, and the device saw 1006 instead of 1013."""
+    from starlette.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidMessage, InvalidStatus
+    from websockets.http11 import Response as WsResponse
+
+    main = reload_gateway(monkeypatch)
+
+    async def refused(target, **_):
+        if failure == "404":
+            raise InvalidStatus(WsResponse(404, "Not Found", Headers()))
+        raise InvalidMessage("did not receive a valid HTTP response")
+    monkeypatch.setattr(main, "ws_connect", refused)
+    with TestClient(main.app) as client:
+        with client.websocket_connect("/satellites/ws") as ws:
+            with pytest.raises(WebSocketDisconnect) as closed:
+                ws.receive_text()
+    assert closed.value.code == 1013
+
+
+def test_the_relay_carries_frames_both_ways_and_the_hubs_close_code(monkeypatch):
+    """The relay, end to end, against a hub on a local port: a binary and a
+    text frame each way, the device's leaving closing the hub's side, and the
+    hub's close code reaching the device (1008 and 1012 arrived as 1000)."""
+    import asyncio
+    import threading
+
+    from starlette.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+    from websockets.asyncio.server import serve
+
+    closed_upstream: list[bool] = []
+    ready = threading.Event()
+    port: list[int] = []
+
+    async def hub(conn):
+        try:
+            async for msg in conn:
+                if isinstance(msg, bytes):
+                    await conn.send(msg[::-1])
+                elif msg == "refuse":
+                    await conn.close(1008, "bad token")
+                else:
+                    await conn.send(msg.upper())
+        finally:
+            closed_upstream.append(True)
+
+    loop = asyncio.new_event_loop()
+
+    async def run() -> None:
+        async with serve(hub, "127.0.0.1", 0) as server:
+            port.append(server.sockets[0].getsockname()[1])
+            ready.set()
+            await asyncio.Future()
+    task = loop.create_task(run())
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        assert ready.wait(5)
+        main = reload_gateway(monkeypatch)
+        monkeypatch.setattr(main, "SATELLITES",
+                            main.SATELLITES._replace(url=f"http://127.0.0.1:{port[0]}"))
+        with TestClient(main.app) as client:
+            with client.websocket_connect("/satellites/ws") as ws:
+                ws.send_bytes(b"\x01\x02\x03")
+                assert ws.receive_bytes() == b"\x03\x02\x01"
+                ws.send_text("hello")
+                assert ws.receive_text() == "HELLO"
+            for _ in range(100):
+                if closed_upstream:
+                    break
+                threading.Event().wait(0.02)
+            assert closed_upstream, "the device left and the hub's side stayed open"
+
+            with client.websocket_connect("/nodes/ws") as ws:
+                ws.send_text("refuse")
+                with pytest.raises(WebSocketDisconnect) as refused:
+                    ws.receive_text()
+            assert refused.value.code == 1008
+    finally:
+        loop.call_soon_threadsafe(task.cancel)
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(5)
 
 
 @pytest.mark.parametrize("method,path", [
