@@ -5631,8 +5631,9 @@ function wakeModelsAskable(d) {
 /* ASKED ONLY FOR A COMMITTED ADDRESS, never while the Base URL or the key's
    name is being typed: on a row's first paint, a provider picked, and the
    change event of either field. Not the pipeline picker's pause after the
-   last keystroke: a pause while typing https://api.groq.com would send the
-   key to https://api.groq.co, another domain, which may well resolve. */
+   last keystroke: a pause halfway through a provider's address would send
+   the key to whatever host the half-typed one names, and a domain cut short
+   can be another domain that resolves. */
 function wakeModelsWant(d, typing) {
   if (typing || WAKE_MODELS.has(wakeModelsKey(d.base_url, d.api_key_env)) || !wakeModelsAskable(d)) return;
   wakeModelsFetch(d.base_url, d.api_key_env);

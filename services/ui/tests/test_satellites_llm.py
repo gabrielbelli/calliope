@@ -84,7 +84,7 @@ def test_the_models_are_asked_once_per_address_and_key_name_and_a_failure_leaves
       wakeEdit("hey_jarvis", w => wakeField(w, "d.env", "OPENROUTER_API_KEY")); await settle();
       const afterName = hub.modelCalls.length;
       // Typing: nothing is asked, whatever the address looks like so far.
-      wakeModelsWant({ base_url: "https://api.half.example.co", api_key_env: null }, true);
+      wakeModelsWant({ base_url: "https://llm.exam", api_key_env: null }, true);
       const whileTyping = hub.modelCalls.length;
       hub.modelsFail = "the server answered 404: 404 page not found";
       wakeEdit("hey_jarvis", w => wakeField(w, "d.base_url", "https://other.example.com/v1")); await settle();
