@@ -1084,3 +1084,30 @@ def test_speech_over_the_reply_stops_it_and_its_own_voice_does_not(
     began = (before + onset + int(np.flatnonzero(talker)[0])) / RATE  # speechlike opens quiet
     print(f"\nbarge-in ({mode}): the talker's first syllable at {began:.2f} s of the stream, "
           f"detected at {detected[0]:.2f} s, {(detected[0] - began) * 1000:.0f} ms later")
+
+
+async def test_a_reply_to_a_satellite_at_another_rate_is_waited_for_its_whole_length(
+        app, monkeypatch):
+    """The wait for a reply to finish read the clips' bytes as 48 kHz after
+    they had been resampled to the satellite's rate: at 16 kHz a 20 s reply
+    was given 20/3 + 5 s, and the turn ended while it still played."""
+    from types import SimpleNamespace
+
+    target = SimpleNamespace(spk_rate=16000, adopted=True, speaker=asyncio.Queue(),
+                             play_until=0.0)
+    hub = SimpleNamespace(sessions={NID: target}, speaker_allowed=lambda s: True)
+
+    async def before_first_audio(s):
+        pass
+    conv = SimpleNamespace(hub=hub, s=target, note=None, before_first_audio=before_first_audio)
+    player = app.Player(conv, SimpleNamespace(reply_to=NID))
+    second = np.zeros(48000, "<i2").tobytes()
+    for _ in range(20):
+        assert await player.play(second, "a sentence")
+    waited = []
+
+    async def wait_for(future, timeout):
+        waited.append(timeout)
+    monkeypatch.setattr(app.asyncio, "wait_for", wait_for)
+    await player.finish()
+    assert waited == [pytest.approx(20 + app.PLAYBACK_SLACK_S)]

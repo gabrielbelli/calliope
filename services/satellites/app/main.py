@@ -1300,6 +1300,10 @@ class Player:
         self.conv, self.hub, self.out = conv, conv.hub, out
         self.clips: list[Clip] = []
         self.began = False
+        # How long the clips play, counted before each is resampled to the
+        # satellite's rate: their bytes at that rate, read as 48 kHz, made a
+        # 16 kHz satellite's reply a third as long as it is.
+        self.seconds = 0.0
 
     def session(self) -> Session | None:
         target = self.out.reply_to
@@ -1325,6 +1329,7 @@ class Player:
             if not self.hub.speaker_allowed(target):
                 self.conv.note = f"{self.out.reply_to} has its speaker off"
                 return False
+        self.seconds += len(pcm48k) / 2 / routing.SPEAKER_RATE
         if target.spk_rate != routing.SPEAKER_RATE:
             pcm48k = audio.resample(pcm48k, routing.SPEAKER_RATE, target.spk_rate)
         clip = Clip(pcm48k, text)
@@ -1337,9 +1342,9 @@ class Player:
         what it buffered."""
         if not self.clips:
             return
-        seconds = sum(len(c.pcm) for c in self.clips) / 2 / routing.SPEAKER_RATE
         try:
-            await asyncio.wait_for(asyncio.shield(self.clips[-1].done), seconds + PLAYBACK_SLACK_S)
+            await asyncio.wait_for(asyncio.shield(self.clips[-1].done),
+                                   self.seconds + PLAYBACK_SLACK_S)
         except TimeoutError:
             return
         target = self.session()
