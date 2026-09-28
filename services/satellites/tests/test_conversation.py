@@ -777,6 +777,12 @@ def test_secrets_are_named_by_their_variable_and_never_returned(client, app, mon
         assert SECRET not in text
 
 
+def test_the_wake_word_list_says_which_tools_the_hub_can_run(client, monkeypatch):
+    monkeypatch.delenv("SATELLITES_SEARXNG_URL", raising=False)
+    assert client.get("/satellites/wake-words").json()["tools"] == {"web_search": False,
+                                                                    "weather": True}
+
+
 def test_rules_json_is_no_longer_written_behind_the_hub(client):
     r = client.put("/satellites/routing", json={"rules": [{"id": "x", "destination": {"type": "echo"}}]})
     assert r.status_code == 409 and r.json()["error"]["code"] == "routing_per_wake_word"

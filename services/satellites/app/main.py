@@ -107,6 +107,7 @@ from . import audio, dialogue, earcons, listening, secret_store, signing, wakewo
 from . import output as outputs
 from . import language as lang
 from . import router as routing
+from . import tools as tooling
 from .destinations import EnvName
 from .mqtt import MqttBridge
 from .store import (DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions, reported_config,
@@ -507,6 +508,9 @@ class Voice:
                 # every name an action reads or the hub holds: what the page's
                 # key box says, and whether it offers Store or Clear.
                 "secrets": routing.secret_sources(set(env) | set(held.names())),
+                # Which of a language model's tools work on this hub: web
+                # search only with SATELLITES_SEARXNG_URL.
+                "tools": tooling.available(),
                 "warnings": actions.warnings(lookup_satellite_safe) + secret_warnings(env),
                 "load_error": self.assignment.load_error}
 

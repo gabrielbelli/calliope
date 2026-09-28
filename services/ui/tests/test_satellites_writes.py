@@ -134,10 +134,13 @@ const hub = {
   secretCalls: [],
   secrets: undefined,
   environment: [],
+  // Which tools the hub can run (GET /satellites/wake-words' `tools`),
+  // undefined for a hub from before it said.
+  tools: undefined,
 };
 const answer = () => JSON.parse(JSON.stringify({ available: hub.available, words: hub.words,
                                                  ptt: hub.ptt, custom: hub.custom, env: hub.env,
-                                                 secrets: hub.secrets,
+                                                 secrets: hub.secrets, tools: hub.tools,
                                                  warnings: hub.warnings, load_error: null }));
 let held = [];
 function release() { for (const r of held) r(); held = []; }

@@ -87,6 +87,13 @@ _home: dict | None = None
 _home_at: float | None = None  # when Home Assistant was last asked, answered or not
 
 
+def available() -> dict[str, bool]:
+    """Whether each tool can work on this hub, for the page to say before a
+    word is saved with one: web search needs SATELLITES_SEARXNG_URL; the
+    weather needs nothing."""
+    return {"web_search": bool(os.getenv("SATELLITES_SEARXNG_URL", "").strip()), "weather": True}
+
+
 def guidance(names) -> str:
     """What a model with tools is told about them, beside its own prompt."""
     have = ", ".join(n for n in NAMES if n in names)

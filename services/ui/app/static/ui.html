@@ -4198,6 +4198,8 @@ const SAT_COPY = {
      action's key (POST /satellites/llm/models), and asked for only once the
      address is committed, and by itself only where the key would go there
      anyway (wakeModelsFree). The id can always be typed. */
+  toolsHint: "Used only when a question needs them; a search adds about a second.",
+  toolsNoSearch: "Web search needs SATELLITES_SEARXNG_URL set on the hub; the weather needs nothing.",
   modelsAsk: "Its models are listed to pick from once the base URL is filled in.",
   modelsWait: "List models sends the key in {var} to {name}; check the key is for it.",
   modelsLoading: "Asking {name} for its models…",
@@ -5679,8 +5681,11 @@ function wakeSetDest(w, type) {
     d.url = (ha && ha.url) || "";
     d.token_env = (ha && ha.token_env) || "SATELLITES_HA_TOKEN";
   } else if (type === "llm") {
+    /* No tools, as the hub's own default: web search needs a SearXNG that
+       most hubs do not have, and a server that takes no tools refuses every
+       request that names them. They are ticked on purpose. */
     Object.assign(d, { base_url: "", model: "", api_key_env: "SATELLITES_LLM_API_KEY",
-                       tools: [...WAKE_TOOLS] });
+                       tools: [] });
   } else if (type === "webhook") d.url = "";
   w.action = { ...(w.action || { reply_to: "same" }), destination: d };
 }
@@ -6483,7 +6488,7 @@ function wakeRowMarkup(u) {
           <legend>Tools</legend>
           <label class="checkline tight"><input type="checkbox" data-tool="web_search"> Web search</label>
           <label class="checkline tight"><input type="checkbox" data-tool="weather"> Weather</label>
-          <div class="hint">Used only when a question needs them; a search adds about a second.</div>
+          <div class="hint ww-toolhint"></div>
         </fieldset>
         <div class="actions">
           <button class="small" type="button" data-ww="llmtest">Test</button>
@@ -6943,8 +6948,14 @@ function wakeActionUpdate(row, w, words) {
 function wakeLlmUpdate(row, w, words) {
   const q = sel => row.querySelector(sel);
   const d = w.action.destination;
-  for (const box of row.querySelectorAll("[data-tool]"))
+  /* A tool this hub cannot run is greyed, and said, unless the word has
+     it already, so it can still be taken off. */
+  const can = (WAKE.server && WAKE.server.tools) || {};
+  for (const box of row.querySelectorAll("[data-tool]")) {
     if (box !== document.activeElement) box.checked = (d.tools || []).includes(box.dataset.tool);
+    box.disabled = can[box.dataset.tool] === false && !box.checked;
+  }
+  satSet(q(".ww-toolhint"), can.web_search === false ? SAT_COPY.toolsNoSearch : SAT_COPY.toolsHint);
   satFillSelect(q('[data-f="preset"]'), LLM_PRESETS);
   wakeValue(q('[data-f="preset"]'), wakePreset(d.base_url));
   const key = wakeModelsKey(d.base_url, d.api_key_env);

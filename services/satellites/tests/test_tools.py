@@ -268,3 +268,9 @@ async def test_what_a_one_body_answer_says_beside_its_tool_calls_is_spoken(fake,
         return one_body("Norris won.")
     fake.handlers["llm.test"] = model
     assert await said(SEARCHING | {"stream": False}, client) == "Let me check. Norris won."
+
+
+def test_the_page_is_told_which_tools_this_hub_can_run(monkeypatch):
+    assert tools.available() == {"web_search": True, "weather": True}
+    monkeypatch.delenv("SATELLITES_SEARXNG_URL")
+    assert tools.available() == {"web_search": False, "weather": True}

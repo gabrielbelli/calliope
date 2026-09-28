@@ -370,15 +370,16 @@ def test_a_reply_limit_is_a_whole_number_or_left_to_the_hub(tmp_path):
 
 
 def test_a_language_model_word_turns_its_tools_on_and_off_in_the_hubs_order(tmp_path):
-    """A new language model word starts with web search and weather; a box
-    unticked takes one off, and the list goes to the hub in its own order."""
+    """A new language model word starts with no tools, as the hub's default
+    does; a box ticked puts one on, and the list goes to the hub in its own
+    order."""
     got = run(tmp_path, LLM_HUB + """
       await satellitesRefresh(); await settle();
       const saved = dest("hey_jarvis").tools;
       wakeEdit("hey_jarvis", w => wakeField(w, "dest", "echo"));
       wakeEdit("hey_jarvis", w => wakeField(w, "dest", "llm"));
       const fresh = dest("hey_jarvis").tools;
-      wakeEdit("hey_jarvis", w => wakeTool(w, "web_search", false));
+      wakeEdit("hey_jarvis", w => wakeTool(w, "weather", true));
       wakeEdit("hey_jarvis", w => wakeTool(w, "web_search", true));
       wakeEdit("hey_jarvis", w => wakeTool(w, "weather", false));
       wakeEdit("hey_jarvis", w => { wakeField(w, "d.base_url", "https://llm.example.com/v1");
@@ -388,5 +389,30 @@ def test_a_language_model_word_turns_its_tools_on_and_off_in_the_hubs_order(tmp_
                                    sent: sent("hey_jarvis").action.destination.tools }));
     """)
     assert got["saved"] == "absent", "a word saved before tools existed was given some"
-    assert got["fresh"] == ["web_search", "weather"]
+    assert got["fresh"] == []
     assert got["sent"] == ["web_search"]
+
+
+def test_web_search_is_greyed_and_said_on_a_hub_without_searxng(tmp_path):
+    """Most hubs have no SATELLITES_SEARXNG_URL. The model was still offered
+    web search, called it for news-like questions, and was told it was not
+    set up, a whole round for nothing. The hub says which tools work; the
+    box is greyed, unless the word has it already, and the line says why."""
+    got = run(tmp_path, LLM_HUB + """
+      hub.tools = { web_search: false, weather: true };
+      await satellitesRefresh(); await settle();
+      const row = WAKE.rows.get("hey_jarvis");
+      const els = new Map(), find = row.querySelector;
+      row.querySelector = sel => { if (!els.has(sel)) els.set(sel, find(sel)); return els.get(sel); };
+      const search = { dataset: { tool: "web_search" }, checked: false, disabled: false };
+      const weather = { dataset: { tool: "weather" }, checked: false, disabled: false };
+      row.querySelectorAll = sel => sel === "[data-tool]" ? [search, weather] : [];
+      wakeRender();
+      const off = { search: search.disabled, weather: weather.disabled,
+                    hint: row.querySelector(".ww-toolhint").textContent };
+      wakeEdit("hey_jarvis", w => wakeTool(w, "web_search", true));
+      console.log(JSON.stringify({ off, kept: search.disabled }));
+    """)
+    assert got["off"] == {"search": True, "weather": False, "hint": (
+        "Web search needs SATELLITES_SEARXNG_URL set on the hub; the weather needs nothing.")}, got
+    assert got["kept"] is False, "a word that has web search could not take it off"
