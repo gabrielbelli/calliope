@@ -937,7 +937,8 @@ def test_the_model_list_is_asked_only_for_an_address_nobody_is_typing():
     assert ("wakeModelsWant(d, [q('[data-f=\"d.base_url\"]'), q('[data-f=\"d.env\"]')]"
             ".includes(document.activeElement), saved);") in update
     assert "const saved = wakeSavedDest(w.name || WAKE_PTT);" in update
-    assert "q('[data-ww=\"models\"]').hidden = !waiting;" in update
+    # Shown to ask for the first time, or again after a failure.
+    assert "go.hidden = !waiting && !failed;" in update
     row = function("wakeRow")
     assert 't.dataset.f === "d.base_url" || t.dataset.f === "d.url" || t.dataset.f === "d.env"' in row
     assert "wakePipesCommit(d);" in row

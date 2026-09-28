@@ -4204,6 +4204,7 @@ const SAT_COPY = {
   modelsReady: "{n} to pick from; type to narrow the list.",
   modelsEmpty: "{name} lists no models, so type the id.",
   modelsFailed: "Could not list the models, so type the id: {message}",
+  modelsList: "List models",
   /* The key box. The page never holds a key to show: these are said from
      WAKE.server.secrets, a name and where its value lives. */
   keyHub: "A key is stored on the hub as {var}.",
@@ -7085,7 +7086,15 @@ function wakeLlmUpdate(row, w, words) {
   const waiting = wakeModelsWaiting(d, saved);
   satFillList(q("datalist"), entry && entry.state === "ready" ? entry.models : []);
   satSet(q(".ww-modelhint"), wakeModelsHint(d, entry, waiting));
-  q('[data-ww="models"]').hidden = !waiting;
+  /* A LIST THAT FAILED CAN BE ASKED AGAIN FROM THE ROW, as a pipeline list
+     can: after "Could not list the models" (a server of your own not
+     started yet, a wrong port) the row offered nothing, and the only retry
+     was to shut the word and open it again, which nothing said.
+     wakeModelsList forgets the failure and asks. */
+  const failed = !!entry && entry.state === "failed";
+  const go = q('[data-ww="models"]');
+  go.hidden = !waiting && !failed;
+  satSet(go, failed ? SAT_COPY.pipeAgain : SAT_COPY.modelsList);
   /* A hub from before keys could be stored reports no `secrets`: no box. */
   q(".ww-keybox").hidden = !WAKE.server || !WAKE.server.secrets;
   /* Push-to-talk's behaviour has no name of its own. */

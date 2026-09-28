@@ -475,3 +475,25 @@ def test_test_is_greyed_only_by_its_destination_and_its_result_goes_when_the_for
     assert got["said"] == got["kept"] == "Answered in 1.3 s, the first words in 0.4 s: Hello there.", got
     assert got["changed"] == "", "a result stayed under a form it did not test"
 
+
+def test_a_model_list_that_failed_can_be_asked_again_from_its_row(tmp_path):
+    """After "Could not list the models" the row offered no control, and the
+    only retry was to shut the word and open it again, which nothing said.
+    Ask again shows beside the reason, and a press asks once more."""
+    got = run(tmp_path, LLM_HUB + """
+      hub.modelsFail = "the server answered 502: connection refused";
+      await satellitesRefresh(); await settle();
+      const row = WAKE.rows.get("hey_jarvis");
+      const els = new Map(), find = row.querySelector;
+      row.querySelector = sel => { if (!els.has(sel)) els.set(sel, find(sel)); return els.get(sel); };
+      wakeRender();
+      const go = row.querySelector('[data-ww="models"]');
+      const failed = { hidden: go.hidden, text: go.textContent };
+      hub.modelsFail = "";
+      wakeModelsList(dest("hey_jarvis")); await settle();
+      console.log(JSON.stringify({ failed, asked: hub.modelCalls.length, hidden: go.hidden,
+                                   state: WAKE_MODELS.get(wakeModelsKey("https://llm.example.com/v1", "SATELLITES_LLM_API_KEY")).state }));
+    """)
+    assert got["failed"] == {"hidden": False, "text": "Ask again"}, got
+    assert (got["asked"], got["state"], got["hidden"]) == (2, "ready", True), got
+
