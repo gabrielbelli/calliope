@@ -16,8 +16,8 @@ import pytest
 from fastapi.testclient import TestClient
 from voice_common.conformance import assert_four_field_envelope
 
-MAC = "94:B9:7E:7B:8B:E8"
-NID = "94b97e7b8be8"
+MAC = "02:00:00:00:00:01"
+NID = "020000000001"
 MODEL = "esp32-korvo-v1.1"
 
 

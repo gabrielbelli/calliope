@@ -136,7 +136,7 @@ class LateMarker:
 
 
 def test_a_late_detector_does_not_cost_the_command_its_first_words():
-    """Measured on orko: "hey jarvis, what time is it" in one breath reached
+    """Measured on the development server: "hey jarvis, what time is it" in one breath reached
     Parakeet as silence, because openWakeWord fires ~0.8 s after the word and
     the command used to start at the frame that fired."""
     ear = Ear(channels=1, frontend=False, wake=LateMarker())

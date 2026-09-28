@@ -232,8 +232,8 @@ def test_clean() -> None:
     ) == ["Luz da cama", "a b test", "Sala"]
     # Typographic punctuation as ASCII, symbols gone: the model spells neither.
     assert vocabulary.clean(
-        ["Gabriel\u2019s Bedroom", "\U0001f4a1 Lamp", "Sala \u2013 TV"]
-    ) == ["Gabriel's Bedroom", "Lamp", "Sala - TV"]
+        ["Guest\u2019s Bedroom", "\U0001f4a1 Lamp", "Sala \u2013 TV"]
+    ) == ["Guest's Bedroom", "Lamp", "Sala - TV"]
     many = vocabulary.clean(f"lamp {n:03d}" for n in range(300))
     assert len(many) == vocabulary.MAX_TERMS
     assert many[-1] == f"lamp {vocabulary.MAX_TERMS - 1:03d}"

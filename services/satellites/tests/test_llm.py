@@ -43,7 +43,7 @@ from app.destinations import Llm, Request
 from app.router import Rules, RuleSet, Router, current, quiet_validation, routes
 from test_router import Fake, rule
 
-NID = "94b97e7b8be8"
+NID = "020000000001"
 # Ends in WXYZ, which is what a provider's masked echo of it would end in.
 LLM_KEY = "sk-test-do-not-leak-0123456789WXYZ"
 LLM = {"type": "llm", "base_url": "http://llm.test/v1", "model": "tiny"}

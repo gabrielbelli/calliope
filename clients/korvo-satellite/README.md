@@ -32,11 +32,16 @@ pio run -e usb -t upload
 4. Adopt it on the **Satellites** tab.
 
 Release builds connect over TLS only and verify the gateway's certificate
-against ISRG Root X1. A development build with a plain `ws://` hub is made
-with `DEV_HUB`:
+against ISRG Root X1 or X2, Let's Encrypt's roots. **The hub's certificate
+must chain to one of them.** One from any other CA (ZeroSSL, Google Trust
+Services, an internal CA, a self-signed one) fails the TLS handshake, and the
+satellite stays in Connecting, spinning blue, with nothing else to say why.
+For such a hub, replace the roots in `src/ca.h` with your CA's and build the
+firmware yourself. A development build with a plain `ws://` hub is made with
+`DEV_HUB`:
 
 ```bash
-PLATFORMIO_BUILD_FLAGS='-DDEV_HUB=\"ws://192.168.1.177:8003\"' pio run -e usb -t upload
+PLATFORMIO_BUILD_FLAGS='-DDEV_HUB=\"ws://192.0.2.10:8003\"' pio run -e usb -t upload
 ```
 
 ## Updates, over the air

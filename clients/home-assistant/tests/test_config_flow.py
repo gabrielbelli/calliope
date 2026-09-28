@@ -99,7 +99,7 @@ async def test_invalid_url(hass: HomeAssistant) -> None:
     """No scheme, no request."""
     result = await _start(hass)
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_URL: "orko:30080", CONF_VERIFY_SSL: True}
+        result["flow_id"], {CONF_URL: "calliope.test:30080", CONF_VERIFY_SSL: True}
     )
     assert result["errors"] == {"base": "invalid_url"}
 

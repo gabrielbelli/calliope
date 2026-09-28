@@ -515,7 +515,7 @@ def test_onnx_runtime_is_told_not_to_report_to_microsoft_before_it_loads():
 
 
 def test_a_pause_after_the_wake_word_does_not_end_the_command_before_it_starts():
-    """Measured live on orko: "hey jarvis", a pause, then the question. The
+    """Measured live on the development server: "hey jarvis", a pause, then the question. The
     rewound tail of "jarvis" used to start the command, the pause then ended
     it 0.8 s later, and Parakeet got a 0.92 s clip of "Jarvis" -- an empty
     transcript once the wake word was stripped. The question was never
@@ -562,7 +562,7 @@ def test_the_wake_word_then_a_pause_then_the_question_records_the_question():
     """The case the preroll alone did not fix: the detector fired while the
     word was still sounding, so the word counted as speech running across the
     detection point, and the pause after it ended the command -- measured
-    against orko's Parakeet as "Hey Jarvis." and nothing else."""
+    against the server's Parakeet as "Hey Jarvis." and nothing else."""
     word = voiced(0.5)
     question = voiced(1.2, level=5000)
     # The word runs across the detection point and ends 0.1 s after it.

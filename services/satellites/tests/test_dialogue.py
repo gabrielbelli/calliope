@@ -25,7 +25,7 @@ from app import dialogue, language
 from app import router as routing
 from app.destinations import HaAssist, ThinkFilter
 
-NID = "94b97e7b8be8"
+NID = "020000000001"
 SECRET = "eyJhbGciOiJIUzI1NiJ9.c2VjcmV0LWhhLXRva2Vu.do-not-leak"
 ONE_SECOND = b"\x00\x00" * 16000
 LLM = {"type": "llm", "base_url": "http://llm.test/v1", "model": "tiny", "system": "Be brief."}

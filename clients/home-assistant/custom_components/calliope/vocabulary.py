@@ -99,7 +99,7 @@ REPAIRS: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 # Typographic punctuation Home Assistant's frontend and phones insert, as the
-# ASCII the model's vocabulary spells. "Gabriel’s Bedroom" had no token
+# ASCII the model's vocabulary spells. "Guest’s Bedroom" had no token
 # sequence for '’', and the stack refused every boosted request naming it.
 TYPOGRAPHIC = str.maketrans({
     "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u2032": "'",

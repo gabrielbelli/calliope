@@ -10,12 +10,12 @@ one does once it is heard.
                 "silence_ms": 800,
                 "conversation": {"follow_up_s": 8, "silence_ms": 600, "end_phrases": null},
                 "trigger": {"feedback": "earcon", "cooldown_s": 3, "ends_conversation": false}},
-               {"name": "lumos", "threshold": 0.7, "satellites": ["94b97e7b8be8"],
+               {"name": "lumos", "threshold": 0.7, "satellites": ["020000000001"],
                 "mode": "trigger", "action": null, ...}],
      "ptt": {"mode": "command", "language": null, "action": {...}, ...}}
 
     a = Assignment.open(data_dir, os.environ["SATELLITES_WAKE_WORDS"])
-    a.effective("94b97e7b8be8") -> ["hey_jarvis", "lumos"]
+    a.effective("020000000001") -> ["hey_jarvis", "lumos"]
     a.replace(*check(body, available=available(model_dir), known=ids, saved=a))
 
 A WAKE WORD IS THE UNIT OF CONFIGURATION. Its entry says which model, how

@@ -30,8 +30,8 @@ from app.destinations import Echo
 from app import router as router_module
 from app.router import Rule, Rules, RuleSet, Router, current, quiet_validation, routes
 
-NID = "94b97e7b8be8"
-MAC = "94:B9:7E:7B:8B:E8"
+NID = "020000000001"
+MAC = "02:00:00:00:00:01"
 SECRET = "eyJhbGciOiJIUzI1NiJ9.c2VjcmV0LWhhLXRva2Vu.do-not-leak"
 LLM_KEY = "sk-test-do-not-leak-0123456789"
 TTS_SAMPLES = 2400  # 100 ms at Kokoro's 24 kHz
@@ -515,7 +515,7 @@ def test_the_wake_word_is_taken_off_the_front_of_the_transcript_and_nowhere_else
     from app.router import strip_wake_phrase
     assert strip_wake_phrase("Hey Jarvis, what time is it?", "hey_jarvis") == "what time is it?"
     assert strip_wake_phrase("Jarvis what time is it", "hey_jarvis") == "what time is it"
-    # Measured on orko: Parakeet's rendering of the rewound tail of the word.
+    # Measured on the development server: Parakeet's rendering of the rewound tail of the word.
     assert strip_wake_phrase("Harvis, what time is it?", "hey_jarvis") == "what time is it?"
     assert strip_wake_phrase("What time is it?", "hey_jarvis") == "What time is it?"
     # The wake word and nothing after it is no command at all.

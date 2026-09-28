@@ -34,10 +34,10 @@ from app import listening, signing, wakeword, wakewords_config
 from app import router as routing
 from app.wakeword import Detection
 
-MAC = "94:B9:7E:7B:8B:E8"
-NID = "94b97e7b8be8"
-MAC2 = "94:B9:7E:00:00:02"
-NID2 = "94b97e000002"
+MAC = "02:00:00:00:00:01"
+NID = "020000000001"
+MAC2 = "02:00:00:00:00:02"
+NID2 = "020000000002"
 MODEL = "esp32-korvo-v1.1"
 RATE = 16000
 FRAME = 320  # the satellite's 20 ms

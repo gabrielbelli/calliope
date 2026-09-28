@@ -144,7 +144,7 @@ def strip_wake_phrase(text: str, wake_word: str) -> str:
     """"Jarvis, what time is it" -> "what time is it". The listener rewinds
     by the detector's latency so the command is not lost, and the price is
     that the tail of the wake word can lead the transcript -- and misheard:
-    Parakeet on orko returned "Harvis, what time is it?" for the en_us fixture.
+    Parakeet on the development server returned "Harvis, what time is it?" for the en_us fixture.
     So a LEADING run of words that each resemble the wake word's own words, in
     order, is removed (difflib ratio >= 0.6: "harvis" is 0.83 of "jarvis").
     A command that merely mentions the name further in is left alone."""

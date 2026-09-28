@@ -223,7 +223,7 @@ class WakeWords:
     # word. openWakeWord scores a sliding window and crosses its threshold
     # about 0.8 s after "jarvis" ends on both fixtures; 0.9 s leaves a margin.
     # listening.Ear rewinds by this much, or "hey jarvis, what time is it" said
-    # in one breath loses its command to the latency -- measured on orko, where
+    # in one breath loses its command to the latency -- measured on the development server, where
     # the first live injection reached Parakeet as silence.
     latency_s = 0.9
 
@@ -464,7 +464,7 @@ class Endpointer:
     WAKE_TAIL = 15       # frames: 300 ms
     # How long, after the wake word, a person may pause before the command.
     # 4 s, as long as a command may take to start at all (start_timeout_s):
-    # the second live try on orko waited 2.5 s and heard nothing more.
+    # the second live try on the server waited 2.5 s and heard nothing more.
     REOPEN_S = 4.0
 
     def preroll(self, pcm: np.ndarray) -> None:
@@ -474,7 +474,7 @@ class Endpointer:
         why. It holds the tail of the wake word, so feeding it through feed()
         counted "jarvis" as the command's first speech; the pause people leave
         after a wake word then read as the command's end, 0.8 s later, and the
-        words that followed were never recorded. Measured on orko: "hey
+        words that followed were never recorded. Measured on the server: "hey
         jarvis", a pause, a question -- a 0.92 s command that Parakeet heard as
         "Jarvis", and an empty transcript once the wake word was stripped.
 
@@ -535,7 +535,7 @@ class Endpointer:
                 # itself; a person who waits for the chime has not started the
                 # command yet. Hold that audio (it may carry a command said in
                 # the same breath) and wait REOPEN_S for more. Measured on
-                # orko: without this, "hey jarvis", a pause, "what time is it"
+                # the server: without this, "hey jarvis", a pause, "what time is it"
                 # reached Parakeet as "Jarvis" and nothing else.
                 self._held = self.audio
                 self._start, self._last_speech = None, -1

@@ -1,6 +1,8 @@
-// Trust anchors for wss://. The gateway on orko serves a Let's Encrypt
-// wildcard (YR1 -> Root YR, cross-signed by ISRG Root X1). X2 is the ECDSA
-// root, for when the chain moves to it. Exported from the macOS system roots.
+// Trust anchors for wss://: ISRG Root X1 and X2, Let's Encrypt's roots (a
+// wildcard chains YR1 -> Root YR, cross-signed by X1; X2 is the ECDSA root,
+// for when the chain moves to it). Exported from the macOS system roots. A hub
+// whose certificate chains to any other CA fails TLS and the satellite stays
+// in Connecting: replace these with that CA's root for a build of your own.
 #pragma once
 static const char CA_BUNDLE[] =
     "-----BEGIN CERTIFICATE-----\n"

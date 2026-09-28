@@ -23,7 +23,7 @@ from app import mqtt
 from app.main import Hub
 from app.store import Store
 
-NID = "94b97e7b8be8"
+NID = "020000000001"
 MODEL = "esp32-korvo-v1.1"
 BUTTONS = ["vol_up", "vol_down", "set", "play", "mode", "rec"]
 URL = "mqtt://hub:s3cret@broker.test:1883"  # .test never resolves; the fake never dials
@@ -416,7 +416,7 @@ async def test_a_failing_command_does_not_stop_the_bridge(hub, broker, bridge):
     async def on_command(nid, change):
         seen.append(change)
         if len(seen) == 1:
-            raise RuntimeError("satellite 94b97e7b8be8 is not connected")
+            raise RuntimeError("satellite 020000000001 is not connected")
 
     bridge.on_command = on_command
     broker.send(f"{ROOT}/set/mic_enabled", b"OFF")

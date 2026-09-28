@@ -16,7 +16,7 @@ from typing import Any
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-KITCHEN_ID = "94b97e7b8be8"
+KITCHEN_ID = "020000000001"
 BEDROOM_ID = "0a1b2c3d4e5f"
 PENDING_ID = "aabbccddeeff"
 

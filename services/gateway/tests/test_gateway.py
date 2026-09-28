@@ -1844,7 +1844,7 @@ async def test_the_wake_word_routes_reach_the_hub_and_are_not_taken_for_a_satell
     only work by accident. Both have to arrive at the hub on their own path,
     the PUT with its body intact."""
     hub = MockBackend("voice-satellites")
-    body = {"words": [{"name": "alexa", "threshold": 0.6, "satellites": ["94b97e7b8be8"]}]}
+    body = {"words": [{"name": "alexa", "threshold": 0.6, "satellites": ["020000000001"]}]}
     async with gateway(monkeypatch, satellites=hub) as (client, _):
         got = await client.get("/satellites/wake-words")
         put = await client.put("/satellites/wake-words", json=body)

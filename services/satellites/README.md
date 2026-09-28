@@ -23,19 +23,19 @@ out of `GATEWAY_API_KEYS`, is
 
 ## Status
 
-Measured on orko (25 Sep 2026) with the first board, an ESP32-Korvo, adopted
+Measured on the development server (25 Sep 2026) with the first board, an ESP32-Korvo, adopted
 over `wss://` to the gateway, or to a proxy in front of it (`wss://calliope.example.com`):
 
 - **Working on the board:** adoption (keeping the satellite's own settings),
   config, lights off, a four-channel stream with no dropped frames, and live
-  listening: front-end plus wake word at a real-time factor of 0.09 on orko's
-  Xeon, 24 % of one core, 215 MiB.
+  listening: front-end plus wake word at a real-time factor of 0.09 on the
+  server's Xeon, 24 % of one core, 215 MiB.
 - **Signed updates, on the board:** a signed 1.17 MB release image installed in
   20 s, including through the Satellites tab's route. The hub will not send an
   unsigned image to a satellite that advertises a key. With the hub bypassed,
   an image signed by another key was refused by the satellite itself
   (`bad signature`), and the satellite stayed on its image.
-- **The listening path on orko, from recorded clips (`/inject`):** "hey jarvis,
+- **The listening path on the server, from recorded clips (`/inject`):** "hey jarvis,
   what time is it" is detected (score 0.995), transcribed by Parakeet as "What
   time is it?", routed by the default echo action, and answered by Kokoro
   (1.3 s). "The weather is fine today" is ignored.
@@ -43,7 +43,7 @@ over `wss://` to the gateway, or to a proxy in front of it (`wss://calliope.exam
   have not played on the board yet; its speaker is off.
 - **Built and tested against fakes only (25 Sep 2026):** conversation and
   trigger words, follow-ups, barge-in, streamed replies and the language of
-  each utterance. None of it has run on the board or against orko's services.
+  each utterance. None of it has run on the board or against the server's services.
 
 ## Adoption
 
@@ -282,7 +282,7 @@ The Satellites tab edits the same entries through `GET` and `PUT
                               "api_key_env": "OPENAI_API_KEY", "system": "Be brief."},
               "reply_to": "same"},
    "conversation": {"follow_up_s": 8, "silence_ms": 600, "end_phrases": null}},
-  {"name": "lumos", "threshold": 0.7, "satellites": ["94b97e7b8be8"],
+  {"name": "lumos", "threshold": 0.7, "satellites": ["020000000001"],
    "mode": "trigger",
    "trigger": {"feedback": "earcon", "cooldown_s": 3, "ends_conversation": false}}],
  "ptt": {"mode": "command", "action": {"destination": {"type": "echo"}}}}

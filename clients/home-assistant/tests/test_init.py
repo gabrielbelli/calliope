@@ -30,7 +30,7 @@ async def test_setup_exposes_adopted_satellites_only(
     kitchen = devices.async_get_device(identifiers={(DOMAIN, KITCHEN_ID)})
     assert kitchen.name == "kitchen"
     assert kitchen.via_device_id == service.id
-    assert kitchen.connections == {(dr.CONNECTION_NETWORK_MAC, "94:b9:7e:7b:8b:e8")}
+    assert kitchen.connections == {(dr.CONNECTION_NETWORK_MAC, "02:00:00:00:00:01")}
     entities = er.async_entries_for_device(er.async_get(hass), kitchen.id)
     assert sorted(e.entity_id for e in entities) == [
         "binary_sensor.kitchen_online",
