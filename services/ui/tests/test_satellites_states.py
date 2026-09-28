@@ -346,3 +346,47 @@ def test_the_health_line_counts_faults_and_not_choices(tmp_path):
     assert got["busy"] == ("2 offline · 1 update failed · alexa failed to download · "
                            "wake words did not load"), got
     assert got["calm"] == "", "the health line says something when all is well"
+
+
+def test_two_ring_presses_at_once_leave_one_idle_timer_and_draw_in_turn(tmp_path):
+    """The idle cancel was cleared before the draw and set after it, so two
+    presses whose draws overlapped each cleared the same old timer and each
+    set one. The first, which nothing could clear any more, cancelled a
+    later set-up when it ran. And the draws went out together, in either
+    order."""
+    got = run(tmp_path, r"""
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      const idle = new Set(), realSet = setTimeout, realClear = clearTimeout;
+      globalThis.setTimeout = (fn, ms, ...rest) => {
+        const t = realSet(fn, ms, ...rest);
+        if (ms === RING_IDLE_MS) idle.add(t);
+        return t;
+      };
+      globalThis.clearTimeout = t => { idle.delete(t); return realClear(t); };
+      const lights = [];
+      let out = 0, most = 0;
+      const real = json;
+      json = async (path, options) => {
+        const method = (options && options.method) || "GET";
+        if (method === "POST" && path === "/satellites/aaaaaaaaaaaa/lights") {
+          const b = JSON.parse(options.body);
+          out++; most = Math.max(most, out);
+          lights.push(b.mode === "pixels" ? b.pixels.findIndex(p => p[0] === 255) : b.mode);
+          await sleep(15);
+          out--;
+          return null;
+        }
+        return real(path, options);
+      };
+      await satellitesRefresh();
+      const li = SATELLITES.rows.get("aaaaaaaaaaaa");
+      const b = stand();
+      await satRingSetup(li, "ring", b);
+      await Promise.all([satRingSetup(li, "ring-next", b), satRingSetup(li, "ring-next", b)]);
+      const during = idle.size;
+      await satRingSetup(li, "ring-cancel", b);
+      console.log(JSON.stringify({ during, after: idle.size, most, lights }));
+    """)
+    assert got["during"] == 1 and got["after"] == 0, got
+    assert got["most"] == 1, "two lights requests were out at once"
+    assert got["lights"][-1] == "off" and got["lights"][-2] == 2, got

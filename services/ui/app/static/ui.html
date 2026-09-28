@@ -5386,25 +5386,41 @@ async function satRingSetup(li, act, button) {
       const done = { ring_top: li._ring.led, ring_upside_down: act === "ring-ccw" };
       li._ring = null;
       satRingShow(li, null);
-      await json(`/satellites/${li.dataset.id}/lights`, { method: "POST", headers: JSON_BODY,
-        body: JSON.stringify({ mode: "off" }) });
+      await satRingSend(li, () => json(`/satellites/${li.dataset.id}/lights`, {
+        method: "POST", headers: JSON_BODY, body: JSON.stringify({ mode: "off" }) }));
       if (await satellitePatch(li, done, host)) satSaid(host, SAT_COPY.ringSaved);
       return;
     } else if (act === "ring-cancel") {
       li._ring = null;
       satRingShow(li, null);
-      await json(`/satellites/${li.dataset.id}/lights`, { method: "POST", headers: JSON_BODY,
-        body: JSON.stringify({ mode: "off" }) });
+      await satRingSend(li, () => json(`/satellites/${li.dataset.id}/lights`, {
+        method: "POST", headers: JSON_BODY, body: JSON.stringify({ mode: "off" }) }));
       return;
     }
     satRingShow(li, li._ring.step);
-    await satRingDraw(li);
+    /* Set before the draw, so each row has one: set after it, two presses
+       whose draws overlapped each cleared the same old timer and each set
+       one, and the first, which nothing could clear any more, cancelled a
+       later set-up two minutes on. */
     li._ringIdle = setTimeout(() => satRingSetup(li, "ring-cancel", button), RING_IDLE_MS);
+    await satRingSend(li, () => li._ring && satRingDraw(li));
   } catch (e) {
     li._ring = null;
     satRingShow(li, null);
     note(host, "bad", e.message);
   }
+}
+
+/* THE RING'S SENDS GO IN TURN, per row: two presses at once were two
+   concurrent POSTs that could reach the hub in either order, and the ring
+   showed the older LED. Each draw reads the set-up when its turn comes, so
+   it draws the latest, or nothing once it was finished or cancelled; the
+   ring goes off after every draw before it. */
+const SAT_RING_SENDS = new WeakMap();
+function satRingSend(li, work) {
+  const turn = (SAT_RING_SENDS.get(li) || Promise.resolve()).catch(() => {}).then(work);
+  SAT_RING_SENDS.set(li, turn);
+  return turn;
 }
 
 /* The row goes at once, and focus goes to the row that took its place, so a
