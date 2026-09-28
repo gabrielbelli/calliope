@@ -183,7 +183,10 @@ The integration adds the stack's engines to Home Assistant: one
 speech-to-text entity for each engine the stack serves (`GET /health`,
 `backends.stt.health.models`), and Kokoro for text-to-speech. It checks the
 list every 5 minutes and reloads itself when it changes, so a model added to
-the stack appears in Assist's menu without a restart.
+the stack appears in Assist's menu without a restart. Each entity stays with
+its engine: a new order in `STT_MODELS`, or a new default, does not move an
+entity id to another engine, so an assistant keeps the engine it was set up
+with.
 
 | Entity | Engine | Languages |
 |---|---|---|

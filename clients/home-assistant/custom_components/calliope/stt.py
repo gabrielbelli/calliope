@@ -22,7 +22,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .api import CalliopeApiError, CalliopeError, wav_bytes
-from .const import GLOSSARY_PROFILE, PARAKEET_LANGUAGES, WHISPER_LANGUAGES
+from .const import CONF_LEGACY_STT, GLOSSARY_PROFILE, PARAKEET_LANGUAGES, WHISPER_LANGUAGES
 from .coordinator import CalliopeConfigEntry
 from .entity import service_device_info
 
@@ -84,10 +84,27 @@ async def async_setup_entry(
     entry: CalliopeConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """One speech-to-text entity per engine the stack serves."""
+    """One speech-to-text entity per engine the stack serves.
+
+    Each is keyed on its engine's id, except the engine that held the one
+    entity's id before there were several, which keeps it: a pipeline that
+    picked stt.calliope_parakeet still finds the same engine. Which one that
+    is was the stack's default, and is kept in the entry once the stack has
+    loaded its engines. Keyed on the default flag itself, reordering
+    STT_MODELS moved the old entity to another engine, and Assist pipelines,
+    which store the entity id, switched engines without a word."""
+    health = entry.runtime_data.health
+    engines = stt_engines(health)
+    legacy = entry.data.get(CONF_LEGACY_STT)
+    if legacy is None:
+        legacy = next((e["id"] for e in engines if e.get("default")), engines[0]["id"])
+        if stt_ready(health):
+            hass.config_entries.async_update_entry(
+                entry, data={**entry.data, CONF_LEGACY_STT: legacy}
+            )
     async_add_entities(
-        CalliopeSpeechToText(entry, engine)
-        for engine in stt_engines(entry.runtime_data.health)
+        CalliopeSpeechToText(entry, engine, legacy=engine["id"] == legacy)
+        for engine in engines
     )
 
 
@@ -96,7 +113,9 @@ class CalliopeSpeechToText(stt.SpeechToTextEntity):
 
     _attr_has_entity_name = True
 
-    def __init__(self, entry: CalliopeConfigEntry, engine: dict) -> None:
+    def __init__(
+        self, entry: CalliopeConfigEntry, engine: dict, *, legacy: bool = False
+    ) -> None:
         """The engine's id, family, languages and what it takes."""
         self._client = entry.runtime_data.client
         self._vocabulary = entry.runtime_data.vocabulary
@@ -110,10 +129,9 @@ class CalliopeSpeechToText(stt.SpeechToTextEntity):
             if isinstance(languages, list) and languages
             else (WHISPER_LANGUAGES if self._engine == "whisper" else PARAKEET_LANGUAGES)
         )
-        if engine.get("default"):
-            # The default keeps the id every entity had before there were
-            # several, so a pipeline that picked stt.calliope_parakeet still
-            # finds it.
+        if legacy:
+            # The id the one entity had before there were several
+            # (async_setup_entry).
             self._attr_unique_id = f"{entry.entry_id}_stt"
         else:
             self._attr_unique_id = f"{entry.entry_id}_stt_{self._model}"

@@ -19,7 +19,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import CalliopeAuthError, CalliopeClient, CalliopeError
-from .const import DOMAIN, EXAMPLE_URL
+from .const import CONF_LEGACY_STT, DOMAIN, EXAMPLE_URL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -141,8 +141,12 @@ class CalliopeOptionsFlow(OptionsFlow):
         if user_input is not None:
             data = _normalise(user_input)
             if (error := await _validate(self.hass, data)) is None:
+                # The engine that keeps the first entity's id stays with it.
+                kept = {
+                    k: v for k, v in self.config_entry.data.items() if k == CONF_LEGACY_STT
+                }
                 self.hass.config_entries.async_update_entry(
-                    self.config_entry, data=data
+                    self.config_entry, data=data | kept
                 )
                 self.hass.config_entries.async_schedule_reload(
                     self.config_entry.entry_id

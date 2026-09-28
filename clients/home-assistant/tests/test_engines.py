@@ -97,3 +97,23 @@ async def test_a_stack_still_loading_at_setup_is_checked_every_30_s(
     await until(hass, lambda: hass.states.get("stt.calliope_parakeet_pt_br") is not None)
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
+
+
+async def test_a_new_default_on_the_stack_does_not_move_an_entity_to_another_engine(
+    hass: HomeAssistant, fake: FakeCalliope, entry: MockConfigEntry
+) -> None:
+    """The first entity's id went to whichever engine the stack listed first,
+    so STT_MODELS reordered moved stt.calliope_parakeet to the pt-BR
+    fine-tune, and every English pipeline that used it with it."""
+    fake.stt_models = [PARAKEET, PT_BR]
+    await _setup(hass, entry)
+    fake.stt_models = [PT_BR | {"default": True}, PARAKEET | {"default": False}]
+    async_fire_time_changed(hass, dt_util.utcnow() + ENGINE_CHECK)
+    await hass.async_block_till_done()
+    await until(hass, lambda: hass.states.get("stt.calliope_parakeet") is not None)
+    await hass.async_block_till_done()
+    assert _entity(hass, "stt.calliope_parakeet")._model == "parakeet"
+    assert _entity(hass, "stt.calliope_parakeet_pt_br")._model == "parakeet-pt-br"
+    assert hass.states.get("stt.calliope_parakeet_2") is None
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()

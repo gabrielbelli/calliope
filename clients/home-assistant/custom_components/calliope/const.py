@@ -20,6 +20,11 @@ EVENT_CALLIOPE: Final = "calliope_event"
 # too, so the two must not drift.
 GLOSSARY_PROFILE: Final = "home-assistant"
 
+# In the entry's data: the speech-to-text engine that holds the unique id the
+# one entity had before there were several ("{entry_id}_stt"), decided once, so
+# a new default on the stack does not move stt.calliope_parakeet to it.
+CONF_LEGACY_STT: Final = "stt_legacy_engine"
+
 # What happened, as the event entity's event_type, a device trigger's type
 # and the "kind" of a calliope_event. One vocabulary for all three.
 KIND_WAKE_WORD: Final = "wake_word"

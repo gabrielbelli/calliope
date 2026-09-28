@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.calliope.const import DOMAIN, EXAMPLE_URL
+from custom_components.calliope.const import CONF_LEGACY_STT, DOMAIN, EXAMPLE_URL
 
 from .fake_calliope import FakeCalliope
 
@@ -119,7 +119,8 @@ async def test_already_configured(
 async def test_options_flow_changes_the_key(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:
-    """The key is validated, saved to the entry and the entry reloads."""
+    """The key is validated, saved to the entry and the entry reloads. The
+    speech-to-text engine that keeps the first entity's id stays with it."""
     fake.api_key = "sk-new"
     result = await hass.config_entries.options.async_init(loaded.entry_id)
     assert result["type"] is FlowResultType.FORM
@@ -138,6 +139,7 @@ async def test_options_flow_changes_the_key(
         CONF_URL: fake.url,
         CONF_API_KEY: "sk-new",
         CONF_VERIFY_SSL: False,
+        CONF_LEGACY_STT: "parakeet",
     }
     assert loaded.state is config_entries.ConfigEntryState.LOADED
 
