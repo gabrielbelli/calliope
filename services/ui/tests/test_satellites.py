@@ -729,6 +729,19 @@ def test_a_removed_word_offers_no_list_to_ask_for_and_a_list_asked_for_keeps_the
     assert "row.querySelector('[data-f=\"d.pipeline\"]').focus();" in row
 
 
+def test_the_ring_colour_is_every_modes_and_its_reset_keeps_the_focus():
+    """A trigger flashes the colour, so the picker is written for every mode
+    and not with the action's fields; a word with no mode yet has none, so
+    picking one cannot be what gives it an echo action. Use the default
+    hides itself, so the picker it reset takes the focus."""
+    assert '<div class="grid2 ww-colour" data-when="command conversation trigger">' in WORD
+    update = function("wakeRowUpdate")
+    assert "wakeValue(q('[data-f=\"colour\"]'), w.colour || WAKE_SHOWN.colour);" in update
+    assert "data-f=\"colour\"" not in function("wakeActionUpdate")
+    assert ("wakeEdit(name, w => { w.colour = null; });\n"
+            "      row.querySelector('[data-f=\"colour\"]').focus();") in function("wakeRow")
+
+
 def test_the_add_list_offers_only_what_the_hub_can_load_and_is_not_listed():
     render = function("wakeRender")
     assert "(WAKE.server.available || []).filter(a => !keep.has(a))" in render

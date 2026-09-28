@@ -279,6 +279,36 @@ def test_a_word_takes_its_own_ring_colour_and_can_go_back_to_the_default(tmp_pat
     assert got["cleared"]["colour"] is None
 
 
+def test_a_trigger_words_ring_colour_is_shown_checked_and_can_go_back_to_the_default(tmp_path):
+    """A trigger flashes its colour when heard, but the picker and Use the
+    default were written with the action's fields, which a trigger has none
+    of: its picker kept the browser's black and the button never showed.
+    And a trigger's colour was not checked before the hub saw it."""
+    got = run(tmp_path, MODERN + """
+      hub.words.push({ name: "lumos", threshold: 0.7, satellites: ["*"], mode: "trigger", language: null,
+                       action: null, silence_ms: 800, colour: "#ff4400",
+                       conversation: { follow_up_s: 8, silence_ms: 600, end_phrases: null },
+                       trigger: { feedback: "earcon", cooldown_s: 3, ends_conversation: false },
+                       state: "ready", error: null });
+      await satellitesRefresh();
+      const row = WAKE.rows.get("lumos");
+      const els = new Map(), find = row.querySelector;
+      row.querySelector = sel => { if (!els.has(sel)) els.set(sel, find(sel)); return els.get(sel); };
+      wakeRender();
+      const shown = { picker: row.querySelector('[data-f="colour"]').value,
+                      reset: !row.querySelector('[data-ww="colourdefault"]').hidden };
+      wakeEdit("lumos", w => wakeField(w, "colour", "red"));
+      const bad = wakeProblem(WAKE.draft.find(w => w.name === "lumos"), wakeEffective());
+      wakeEdit("lumos", w => { w.colour = null; });
+      const reset = { picker: row.querySelector('[data-f="colour"]').value,
+                      hidden: row.querySelector('[data-ww="colourdefault"]').hidden };
+      console.log(JSON.stringify({ shown, bad, reset }));
+    """)
+    assert got["shown"] == {"picker": "#ff4400", "reset": True}, got
+    assert got["bad"] == "Pick the ring colour with the colour picker.", got
+    assert got["reset"] == {"picker": "#286eff", "hidden": True}, got
+
+
 def test_more_end_phrases_than_the_hub_takes_are_named_before_save(tmp_path):
     """The box takes 2000 characters and the hub 64 phrases: seventy short
     ones passed the page and came back as a 422."""

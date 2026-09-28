@@ -5821,6 +5821,8 @@ function wakeBaseUrl(text) {
    from a rules.json that did not load) is left to the hub. */
 function wakeProblem(w, words) {
   if (!w.mode) return "";
+  /* Before a trigger's return: its colour is sent and checked too. */
+  if (w.colour != null && !WAKE_COLOUR.test(w.colour)) return SAT_COPY.fixColour;
   if (w.mode === "trigger") {
     const t = w.trigger || {};
     return "cooldown_s" in t && !wakeWithin(t.cooldown_s, 0, 600) ? SAT_COPY.fixCooldown : "";
@@ -5848,7 +5850,6 @@ function wakeProblem(w, words) {
   }
   if (w.mode !== "trigger" && "silence_ms" in w && !wakeWithin(w.silence_ms, WAKE_PAUSE.low, WAKE_PAUSE.high))
     return SAT_COPY.fixPause;
-  if (w.colour != null && !WAKE_COLOUR.test(w.colour)) return SAT_COPY.fixColour;
   if (w.mode === "conversation") {
     const c = w.conversation || {};
     if ("follow_up_s" in c && !wakeWithin(c.follow_up_s, 1, 60)) return SAT_COPY.fixFollow;
@@ -6573,7 +6574,7 @@ function wakeRowMarkup(u) {
         <div data-when="conversation"><label for="${u}-fpause">Pause that ends a follow-up, seconds</label>
           <input type="number" id="${u}-fpause" data-f="c.silence_ms" min="0.2" max="3" step="0.1"></div>
       </div>
-      <div class="grid2 ww-colour">
+      <div class="grid2 ww-colour" data-when="command conversation trigger">
         <div><label for="${u}-colour">Ring colour</label>
           <div class="row"><input type="color" id="${u}-colour" data-f="colour">
             <button class="small tight" type="button" data-ww="colourdefault" hidden>Use the default</button></div>
@@ -6642,7 +6643,13 @@ function wakeRow(name) {
     if (b.dataset.mode) wakeEdit(name, w => wakeSetMode(w, b.dataset.mode, name));
     else if (b.dataset.scope) wakeScope(name, b.dataset.scope);
     else if (b.dataset.ww === "remove") wakeRemove(name, b);
-    else if (b.dataset.ww === "colourdefault") wakeEdit(name, w => { w.colour = null; });
+    else if (b.dataset.ww === "colourdefault") {
+      /* It hides itself, and the focus went with it to the page: the picker
+         it reset takes it, as Clear key hands it to its box. The render has
+         written the default into the picker by then. */
+      wakeEdit(name, w => { w.colour = null; });
+      row.querySelector('[data-f="colour"]').focus();
+    }
     else if (b.dataset.ww === "retry") wakeRetry(b);
     else if (b.dataset.ww === "llmtest") wakeLlmTry(name, row, b);
     else if (b.dataset.ww === "pipes") {
@@ -6865,6 +6872,12 @@ function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
     }
   }
 
+  /* THE RING COLOUR IS EVERY MODE'S: a trigger flashes it when heard. It was
+     written with the action's fields, which a trigger has none of, so on a
+     trigger the picker kept the browser's black while the dot by the name
+     was blue, and Use the default never showed. */
+  wakeValue(q('[data-f="colour"]'), w.colour || WAKE_SHOWN.colour);
+  q('[data-ww="colourdefault"]').hidden = !w.colour;
   if (w.action && (w.mode === "command" || w.mode === "conversation")) wakeActionUpdate(row, w, words);
   if (w.mode === "trigger") {
     const t = w.trigger || {};
@@ -6982,8 +6995,6 @@ function wakeActionUpdate(row, w, words) {
   q('[data-f="a.fallback"]').toggleAttribute("data-off", !talk.length && !a.fallback);
   const c = w.conversation || {};
   wakeValue(q('[data-f="c.follow_up_s"]'), "follow_up_s" in c ? c.follow_up_s : WAKE_SHOWN.follow_up_s);
-  wakeValue(q('[data-f="colour"]'), w.colour || WAKE_SHOWN.colour);
-  q('[data-ww="colourdefault"]').hidden = !w.colour;
   const seconds = ms => (typeof ms === "number" && isFinite(ms) ? ms / 1000 : null);
   wakeValue(q('[data-f="silence_ms"]'), seconds("silence_ms" in w ? w.silence_ms : WAKE_SHOWN.silence_ms));
   wakeValue(q('[data-f="c.silence_ms"]'),
