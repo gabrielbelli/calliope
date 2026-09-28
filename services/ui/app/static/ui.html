@@ -4060,6 +4060,7 @@ const SAT_COPY = {
   keyCleared: "The key stored as {var} is cleared.",
   keyEmpty: "Paste the key first.",
   keyBad: "A key has no spaces or line breaks; check what was pasted.",
+  keyNotKept: "The pasted key was emptied: no key can be stored under this name.",
   askKeyClear: "Clear the key stored as {var}? Every action that names it stops sending it.",
   /* Test: the form as it stands, asked one short question by the hub. */
   testOk: "Answered in {s} s, the first words in {first} s: {reply}",
@@ -5768,6 +5769,19 @@ function wakeKeyPut(name, value) {
 }
 function wakeKeyClear(name) { return wakeKeyPut(name, null); }
 
+/* THE BOX IS OFF WHEN STORE IS: a name the environment sets, no name, or
+   one that is not a name (wakeKeyState). Left on, it took a paste that
+   nothing could store, since Enter clicks a disabled Store and that does
+   nothing, and the key stayed in the box with no word said. A key pasted
+   before Store went off (the name was changed after) is emptied, with a
+   note, as Store empties the box before its request goes. */
+function wakeKeyBox(box, out, canStore) {
+  box.disabled = !canStore;
+  if (canStore || !String(box.value)) return;
+  box.value = "";
+  note(out, "bad", SAT_COPY.keyNotKept);
+}
+
 /* Store key, or Enter in the box. The box is emptied before the request
    goes, so a request that fails leaves no copy in the page to find. A key
    stored while `base_url` is in the form is that address's: its models may
@@ -5944,7 +5958,15 @@ function wakeSummary(dirty) {
    mode decides which of the rest there is. data-when names the modes a part
    belongs to, and the others are hidden rather than greyed: they do not
    apply, which is not the same as unavailable. The rare fields wait under
-   More. No hole but `u`: the name is written as text. */
+   More. No hole but `u`: the name is written as text.
+
+   THE API KEY BOX IS NOT A SITE PASSWORD. It was autocomplete="new-password",
+   the hint that asks a browser to suggest a generated one: Chrome's password
+   manager, 1Password and Bitwarden offered a strong password on focus, and
+   one click on it filled the box with a random string that Store would keep
+   as the provider's key, so every turn answered 401. So autocomplete is off,
+   and data-1p-ignore, data-lpignore, data-bwignore and data-form-type="other"
+   are each a password manager's own word for leaving a field alone. */
 function wakeRowMarkup(u) {
   return `
   <details class="sat-row">
@@ -6032,8 +6054,9 @@ function wakeRowMarkup(u) {
         <div class="ww-keybox">
           <div class="row">
             <div class="grow"><label for="${u}-key">API key</label>
-              <input type="password" id="${u}-key" maxlength="4096" autocomplete="new-password"
-                     spellcheck="false" autocapitalize="off" placeholder="Paste it to store it on the hub"></div>
+              <input type="password" id="${u}-key" maxlength="4096" autocomplete="off" data-1p-ignore
+                     data-lpignore="true" data-bwignore data-form-type="other" spellcheck="false"
+                     autocapitalize="off" placeholder="Paste it to store it on the hub"></div>
             <button class="small tight" type="button" data-ww="key">Store key</button>
             <button class="small tight danger" type="button" data-ww="keyclear" hidden>Clear key</button>
           </div>
@@ -6427,6 +6450,7 @@ function wakeLlmUpdate(row, w, words) {
     store.disabled = !keys.canStore;
     satSet(store, keys.canClear ? "Replace key" : "Store key");
   }
+  wakeKeyBox(q('input[type="password"]'), q(".ww-keynote"), keys.canStore);
   q('[data-ww="keyclear"]').hidden = !keys.canClear;
   const test = q('[data-ww="llmtest"]');
   if (test.getAttribute("aria-busy") !== "true") test.disabled = !!wakeProblem(w, words);

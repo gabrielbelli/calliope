@@ -20,7 +20,9 @@ What they prevent:
   * a key kept anywhere on the page after it is stored: in the draft, a Save,
     a note or the browser's storage;
   * a key stored under a name the environment sets, where it would never be
-    sent, or cleared without a question;
+    sent, or cleared without a question, or pasted into a box that nothing
+    can store from, where it stayed;
+  * a key box that asked a password manager to make up a password;
   * a Test that saves, or that tests the saved action instead of the form.
 """
 
@@ -244,6 +246,36 @@ def test_a_key_the_environment_sets_cannot_be_replaced_from_the_page(tmp_path):
     assert got["emptied"] == ""
     assert got["noName"] == {"hint": "Name the key to send one; with no name, no key is sent.",
                              "canStore": False, "canClear": False}
+
+
+def test_the_key_box_is_off_when_store_is_and_a_key_left_in_it_is_emptied(tmp_path):
+    """Store was off for a name the environment sets, or none, while the box
+    still took a paste; Enter clicked the disabled Store, which did nothing,
+    and the key stayed in the box with no word said."""
+    got = run(tmp_path, LLM_HUB + f"""
+      hub.secrets = {{ SATELLITES_LLM_API_KEY: "environment" }};
+      hub.env = {{ SATELLITES_LLM_API_KEY: true }};
+      await satellitesRefresh(); await settle();
+      const env = wakeKeyState("SATELLITES_LLM_API_KEY", "hey_jarvis").canStore;
+      const noName = wakeKeyState(null).canStore;
+      const pasted = {{ value: "{KEY}", disabled: false }};
+      wakeKeyBox(pasted, stand(), env);
+      const empty = {{ value: "", disabled: false }};
+      wakeKeyBox(empty, stand(), noName);
+      const saidOnce = notes.length;
+      // Once Store can take a key again, so can the box.
+      const back = {{ value: "", disabled: true }};
+      wakeKeyBox(back, stand(), wakeKeyState("OPENROUTER_API_KEY", "hey_jarvis").canStore);
+      console.log(JSON.stringify({{ env, noName, pasted, empty, saidOnce, back, notes,
+                                   sent: hub.secretCalls }}));
+    """)
+    assert got["env"] is False and got["noName"] is False
+    assert got["pasted"] == {"value": "", "disabled": True}, "a key stayed in a box nothing can store"
+    assert got["empty"] == {"value": "", "disabled": True}
+    assert got["notes"] == [["bad", "The pasted key was emptied: no key can be stored under this name."]]
+    assert got["saidOnce"] == 1, "an empty box was said to be emptied"
+    assert got["back"] == {"value": "", "disabled": False}
+    assert got["sent"] == []
 
 
 def test_clearing_a_key_asks_first_and_sends_null(tmp_path):

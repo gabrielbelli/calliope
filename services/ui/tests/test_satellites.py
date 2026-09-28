@@ -599,13 +599,15 @@ def test_every_wake_word_request_is_one_the_gateway_fence_can_read():
 def test_the_key_box_is_write_only():
     """The page stores a key and is never given one back. The box has no
     data-f, so the row's input handler never copies it into the draft or a
-    Save; a browser is told not to fill it with a saved password; and the
-    box is emptied before the request goes, so a failed one leaves no copy."""
+    Save; a browser and a password manager are told it is not a password to
+    fill or to make up; and the box is emptied before the request goes, so a
+    failed one leaves no copy."""
     box = WORD[WORD.index('id="${u}-key"') - 30:]
     box = box[:box.index(">") + 1]
     assert '<input type="password" id="${u}-key"' in box
-    assert 'autocomplete="new-password"' in box and 'spellcheck="false"' in box
-    assert "data-f" not in box, "the key box feeds the draft"
+    assert 'spellcheck="false"' in box
+    # The attribute itself: data-form-type is Dashlane's, read as formType.
+    assert not re.search(r"\sdata-f=", box), "the key box feeds the draft"
     assert 'maxlength="4096"' in box
     store = function("wakeKeyStore")
     assert store.index('box.value = "";') < store.index("await "), \
@@ -617,6 +619,22 @@ def test_the_key_box_is_write_only():
     # Clearing asks first, and nothing asks by prompt().
     forget = function("wakeKeyForget")
     assert forget.index('confirm(satText("askKeyClear"') < forget.index("await ")
+
+
+def test_the_key_box_asks_no_password_manager_for_a_generated_password():
+    """autocomplete="new-password" is the hint for password generation:
+    Chrome's password manager, 1Password and Bitwarden offered a strong
+    password on focus, and one click stored a random string as the
+    provider's key, so every turn answered 401. Each manager's own opt-out
+    is on the box too."""
+    box = WORD[WORD.index('id="${u}-key"') - 30:]
+    box = box[:box.index(">") + 1]
+    assert "new-password" not in box and 'autocomplete="off"' in box
+    for word in ("data-1p-ignore", 'data-lpignore="true"', "data-bwignore", 'data-form-type="other"'):
+        assert word in box, f"the key box is missing {word}"
+    # Store and the box go off together (test_satellites_llm.py drives it).
+    assert ("wakeKeyBox(q('input[type=\"password\"]'), q(\".ww-keynote\"), keys.canStore);"
+            in function("wakeLlmUpdate"))
 
 
 def test_the_language_model_fields_name_no_one_server():
