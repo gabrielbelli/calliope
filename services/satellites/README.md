@@ -303,7 +303,7 @@ named variables are set, as booleans.
 | `type` | Fields | |
 |---|---|---|
 | `ha_conversation` | `url`, `token_env` (`SATELLITES_HA_TOKEN`), `agent_id`, `timeout` (15) | Home Assistant's `POST /api/conversation/process`, with the language that was spoken |
-| `ha_assist` | `url`, `token_env`, `pipeline` (an Assist pipeline id; unset, HA's preferred one), `timeout` | An Assist pipeline over HA's websocket API, run at its intent stage with the satellite's own HA device (so "the lights" are that room's). The reply is read by Kokoro. |
+| `ha_assist` | `url`, `token_env`, `pipeline` (an Assist pipeline id, picked by name on the page; unset, HA's preferred one), `timeout` | An Assist pipeline over HA's websocket API, **set up in Home Assistant**: it hears the command with its own speech-to-text, understands it with the satellite's own HA device (so "the lights" are that room's), and speaks the reply with its own text-to-speech and voice, in its own language. The word's language and voice are not read. A pipeline with no speech-to-text or text-to-speech leaves that part to Calliope's own. |
 | `llm` | `base_url`, `model`, `system`, `api_key_env` (`SATELLITES_LLM_API_KEY`), `max_tokens` (400), `timeout` (30), `stream` (true) | Any OpenAI-compatible `/chat/completions`, streamed, with the conversation so far |
 | `webhook` | `url`, `token_env`, `timeout` (15) | POST `{satellite, satellite_id, wake_word, mode, text, language, audio_seconds, history}`; a JSON `reply` string is spoken |
 | `echo` | | Says back what it heard |

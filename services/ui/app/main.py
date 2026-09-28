@@ -214,6 +214,9 @@ PROXIED: tuple[tuple[str, str], ...] = (
     ("PUT", "/satellites/wake-words"),
     ("POST", "/satellites/wake-words/models"),
     ("DELETE", "/satellites/wake-words/models/{name}"),
+    # The Assist pipelines of the Home Assistant a wake word's action names,
+    # listed by the hub with that action's token, for the pipeline picker.
+    ("POST", "/satellites/ha/pipelines"),
     ("GET", "/satellites/{nid}"),
     ("PATCH", "/satellites/{nid}"),
     ("GET", "/satellites/{nid}/listen"),

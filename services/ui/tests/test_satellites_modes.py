@@ -76,6 +76,69 @@ def test_a_command_word_is_saved_with_its_home_assistant_action(tmp_path):
     assert got["keys"] == ["words"], "push-to-talk was sent although nobody changed it"
 
 
+def test_the_assist_pipeline_is_chosen_from_home_assistants_own_list(tmp_path):
+    """Home Assistant is asked once for an address and token variable, the
+    preferred pipeline comes first by name, the line under the select says
+    how the chosen one hears and speaks, and a saved id Home Assistant no
+    longer has stays choosable, said as such."""
+    got = run(tmp_path, MODERN + """
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      await satellitesRefresh();
+      await sleep(30);
+      const d = () => (WAKE.draft || WAKE.server.words).find(w => w.name === "hey_jarvis").action.destination;
+      const entry = () => WAKE_PIPES.get(wakePipesKey(d()));
+      const out = { calls: hub.pipeCalls.slice(), options: wakePipeOptions(d(), entry()),
+                    preferred: wakePipeHint(d(), entry()) };
+      wakeEdit("hey_jarvis", w => wakeField(w, "d.pipeline", "01alexa"));
+      out.chosen = wakePipeHint(d(), entry());
+      wakeEdit("hey_jarvis", w => wakeField(w, "d.pipeline", "01gone"));
+      out.gone = wakePipeOptions(d(), entry());
+      await satellitesRefresh();
+      await sleep(30);
+      out.asked = hub.pipeCalls.length;
+      console.log(JSON.stringify(out));
+    """)
+    assert got["calls"] == [{"url": "https://ha.local:8123", "token_env": "SATELLITES_HA_TOKEN"}]
+    assert got["options"] == [["", "Home Assistant's preferred (Home Assistant Cloud)"],
+                              ["01cloud", "Home Assistant Cloud"], ["01alexa", "Alexa"]]
+    assert got["preferred"] == "Hears with home_assistant_cloud (en-GB), speaks with piper."
+    assert got["chosen"] == "Hears with calliope_parakeet (pt), speaks with calliope_kokoro as pf_dora."
+    assert got["gone"][-1] == ["01gone", "01gone (not in Home Assistant)"]
+    assert got["asked"] == 1, "a repaint asked Home Assistant again"
+
+
+def test_a_pipeline_list_that_failed_says_why_and_a_new_address_is_asked_once_typed(tmp_path):
+    """The hub's sentence is shown as it is (it never carries the token), the
+    saved choice stays as it was, and an address typed letter by letter is
+    one request, after the typing stops."""
+    got = run(tmp_path, MODERN + """
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+      hub.words[0].action.destination.pipeline = "01alexa";
+      hub.pipesFail = "502 Home Assistant refused the token in SATELLITES_HA_TOKEN";
+      await satellitesRefresh();
+      await sleep(30);
+      const d = () => (WAKE.draft || WAKE.server.words).find(w => w.name === "hey_jarvis").action.destination;
+      const entry = () => WAKE_PIPES.get(wakePipesKey(d()));
+      const out = { failed: wakePipeHint(d(), entry()), kept: wakePipeOptions(d(), entry()) };
+      hub.pipesFail = "";
+      for (const url of ["https://h", "https://ha.oth", "https://ha.other:8123"]) {
+        wakeEdit("hey_jarvis", w => wakeField(w, "d.url", url));
+        await sleep(100);
+      }
+      out.typing = hub.pipeCalls.length;
+      await sleep(700);
+      out.asked = hub.pipeCalls.map(c => c.url);
+      out.ask = wakePipeHint({ type: "ha_assist", url: "https://ha.local:8123", token_env: "" }, undefined);
+      console.log(JSON.stringify(out));
+    """)
+    assert got["failed"] == ("Could not list the pipelines: "
+                             "502 Home Assistant refused the token in SATELLITES_HA_TOKEN")
+    assert got["kept"] == [["", "Home Assistant's preferred"], ["01alexa", "01alexa"]]
+    assert got["typing"] == 1, "a request went out while the address was still being typed"
+    assert got["asked"] == ["https://ha.local:8123", "https://ha.other:8123"]
+    assert got["ask"] == "Fill in the address and token variable to list Home Assistant's pipelines."
+
+
 def test_an_edit_sends_the_rest_of_the_entry_back_as_it_was(tmp_path):
     """A field sent replaces the saved one whole: an action sent without its
     timeout would reset it to the default. Only the field edited changes."""

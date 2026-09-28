@@ -4021,6 +4021,16 @@ const SAT_COPY = {
   moreReply: "replies on {name}",
   moreSilent: "replies nowhere",
   moreVoice: "voice {v}",
+  /* Home Assistant's Assist pipelines, listed by the hub with the action's
+     own token (POST /satellites/ha/pipelines). */
+  pipePreferred: "Home Assistant's preferred",
+  pipePreferredNamed: "Home Assistant's preferred ({name})",
+  pipeGone: "{id} (not in Home Assistant)",
+  pipeAsk: "Fill in the address and token variable to list Home Assistant's pipelines.",
+  pipeLoading: "Asking Home Assistant for its pipelines…",
+  pipeFailed: "Could not list the pipelines: {message}",
+  pipeSays: "Hears with {hears}, speaks with {speaks}.",
+  pipeNoEngine: "Calliope's own",
   /* WHAT THE HUB WOULD REFUSE, SAID BEFORE IT IS SENT. Each is checked as
      router.Behaviour and destinations.py check it, so a Save that the page
      lets through is one the hub takes. */
@@ -5412,14 +5422,14 @@ function wakeLine(w, ptt) {
 }
 /* More's note: what it holds that is not the default, so closed it still
    says whether anything in it was changed. */
-function wakeMoreNote(a) {
+function wakeMoreNote(a, voiced) {
   const said = [];
   if (a.reply_to === "none") said.push(SAT_COPY.moreSilent);
   else if (a.reply_to && a.reply_to !== "same") {
     const n = SATELLITES.list.find(x => x.id === a.reply_to);
     said.push(satText("moreReply", { name: n ? satName(n) : a.reply_to }));
   }
-  if (a.voice) said.push(satText("moreVoice", { v: a.voice }));
+  if (a.voice && voiced !== false) said.push(satText("moreVoice", { v: a.voice }));
   return said.join(", ");
 }
 function wakeEnvHint(name) {
@@ -5432,6 +5442,88 @@ function wakeEnvHint(name) {
 function wakeVoices() {
   const kokoro = (typeof VOICES !== "undefined" && VOICES && VOICES.kokoro) || {};
   return [...new Set(Object.values(kokoro).filter(Array.isArray).flat())].sort();
+}
+
+/* HOME ASSISTANT'S PIPELINES, ONCE PER ADDRESS AND TOKEN VARIABLE for the
+   page's life: every Assist word on one Home Assistant costs one request, and
+   a poll repaints from here without asking again. An entry is loading, ready
+   ({ preferred, pipelines }) or failed ({ error }); a failed one is asked
+   again when its row is opened. The token never reaches the page: the hub
+   reads the variable the action names. */
+const WAKE_PIPES = new Map();
+/* Per row, the address and token it last asked with, and the wait before it
+   asks for a new one. Beside the row, not on it: a row is rebuilt only when
+   its word leaves the list, and this goes with it. */
+const WAKE_PIPE_ROWS = new WeakMap();
+function wakePipesKey(d) { return JSON.stringify([d.url || "", d.token_env || ""]); }
+function wakePipesAskable(d) {
+  return !!d.url && WAKE_URL.test(d.url) && !!d.token_env && WAKE_ENV.test(d.token_env);
+}
+
+/* Asked at once the first time a row paints, and 600 ms after the last
+   keystroke in its address or token variable, so typing is not a request a
+   letter. */
+function wakePipesWant(row, d) {
+  const key = wakePipesKey(d);
+  const was = WAKE_PIPE_ROWS.get(row);
+  if (was && was.key === key) return;
+  if (was) clearTimeout(was.timer);
+  const mine = { key, timer: null };
+  WAKE_PIPE_ROWS.set(row, mine);
+  if (WAKE_PIPES.has(key) || !wakePipesAskable(d)) return;
+  const { url, token_env } = d;
+  mine.timer = setTimeout(() => wakePipesFetch(url, token_env), was ? 600 : 0);
+}
+
+async function wakePipesFetch(url, token_env) {
+  const key = wakePipesKey({ url, token_env });
+  if (WAKE_PIPES.has(key)) return;
+  const entry = { state: "loading" };
+  WAKE_PIPES.set(key, entry);
+  wakeRender();
+  try {
+    const r = await json("/satellites/ha/pipelines", { method: "POST", headers: JSON_BODY,
+                                                        body: JSON.stringify({ url, token_env }) });
+    Object.assign(entry, { state: "ready", preferred: (r && r.preferred) || "",
+                           pipelines: (r && Array.isArray(r.pipelines)) ? r.pipelines : [] });
+  } catch (e) {
+    Object.assign(entry, { state: "failed", error: e.message });
+  }
+  wakeRender();
+}
+
+/* The select's options: the preferred pipeline first, by name once known,
+   then each by name. A saved id Home Assistant no longer lists stays, said as
+   such, so it can be changed rather than sent back unseen; while the list is
+   loading or failed it stays as it is. */
+function wakePipeOptions(d, entry) {
+  const ready = !!entry && entry.state === "ready";
+  const list = ready ? entry.pipelines : [];
+  const preferred = ready ? list.find(p => p.id === entry.preferred) : null;
+  const options = [["", preferred ? satText("pipePreferredNamed", { name: preferred.name || preferred.id })
+                                  : SAT_COPY.pipePreferred],
+                   ...list.map(p => [p.id, p.name || p.id])];
+  if (d.pipeline && !options.some(([value]) => value === d.pipeline)) {
+    options.push([d.pipeline, ready ? satText("pipeGone", { id: d.pipeline }) : d.pipeline]);
+  }
+  return options;
+}
+
+/* One line under the select: why there is no list, or how the chosen
+   pipeline (or the preferred one) hears and speaks. Engines are named
+   without their stt. or tts. domain, which says nothing here. */
+function wakePipeHint(d, entry) {
+  if (!entry) return wakePipesAskable(d) ? SAT_COPY.pipeLoading : SAT_COPY.pipeAsk;
+  if (entry.state === "loading") return SAT_COPY.pipeLoading;
+  if (entry.state === "failed") return satText("pipeFailed", { message: entry.error });
+  const p = entry.pipelines.find(x => x.id === (d.pipeline || entry.preferred));
+  if (!p) return "";
+  const bare = id => String(id).replace(/^(stt|tts)\./, "");
+  const hears = p.stt_engine ? bare(p.stt_engine) + (p.stt_language ? ` (${p.stt_language})` : "")
+    : SAT_COPY.pipeNoEngine;
+  const speaks = p.tts_engine ? bare(p.tts_engine) + (p.tts_voice ? ` as ${p.tts_voice}` : "")
+    : SAT_COPY.pipeNoEngine;
+  return satText("pipeSays", { hears, speaks });
 }
 
 /* ---- the list -------------------------------------------------------------- */
@@ -5561,7 +5653,7 @@ function wakeRowMarkup(u) {
         </fieldset>
       </div>
       <div class="grid2" data-when="command conversation">
-        <div><label for="${u}-lang">Language</label>
+        <div class="ww-lang" data-nodest="ha_assist"><label for="${u}-lang">Language</label>
           <select id="${u}-lang" data-f="lang">
             <option value="">Auto (detect)</option>
             <option value="en">English</option>
@@ -5597,6 +5689,10 @@ function wakeRowMarkup(u) {
           <input type="text" id="${u}-env" data-f="d.env" maxlength="64" placeholder="e.g. SATELLITES_HA_TOKEN"
                  spellcheck="false" autocomplete="off" autocapitalize="characters">
           <div class="hint ww-envhint"></div></div>
+        <div data-dest="ha_assist"><label for="${u}-pipe">Assist pipeline</label>
+          <select id="${u}-pipe" data-f="d.pipeline"></select>
+          <div class="hint ww-pipehint"></div>
+          <div class="hint">It hears, understands and speaks as set in Home Assistant.</div></div>
       </div>
       <div class="grid2" data-when="command conversation">
         <div data-when="command"><label for="${u}-fb">If not understood, continue as a conversation with</label>
@@ -5619,10 +5715,7 @@ function wakeRowMarkup(u) {
         <div class="body">
           <div class="grid2">
             <div><label for="${u}-reply">Reply on</label><select id="${u}-reply" data-f="a.reply_to"></select></div>
-            <div><label for="${u}-voice">Voice</label><select id="${u}-voice" data-f="a.voice"></select></div>
-            <div data-dest="ha_assist"><label for="${u}-pipe">Assist pipeline</label>
-              <input type="text" id="${u}-pipe" data-f="d.pipeline" maxlength="120"
-                     placeholder="the preferred one" spellcheck="false" autocomplete="off"></div>
+            <div data-nodest="ha_assist"><label for="${u}-voice">Voice</label><select id="${u}-voice" data-f="a.voice"></select></div>
             <div data-dest="ha_conversation"><label for="${u}-agent">Conversation agent</label>
               <input type="text" id="${u}-agent" data-f="d.agent_id" maxlength="120"
                      placeholder="e.g. conversation.openai" spellcheck="false" autocomplete="off"></div>
@@ -5651,6 +5744,17 @@ function wakeRow(name) {
   row.dataset.name = name;
   const u = "wake" + (++SATELLITES.seq);
   row.innerHTML = wakeRowMarkup(u);
+  /* A list that failed is asked for again when its row is opened: the fix
+     (a token set, Home Assistant back) happens elsewhere. toggle does not
+     bubble, so it is heard on the disclosure itself. */
+  row.querySelector("details.sat-row").addEventListener("toggle", ev => {
+    const mine = WAKE_PIPE_ROWS.get(row);
+    const entry = mine && WAKE_PIPES.get(mine.key);
+    if (!ev.target.open || !entry || entry.state !== "failed") return;
+    WAKE_PIPES.delete(mine.key);
+    WAKE_PIPE_ROWS.delete(row);
+    wakeRender();
+  });
   row.addEventListener("click", ev => {
     const b = ev.target.closest("button");
     if (!b || b.disabled) return;
@@ -5845,20 +5949,34 @@ function wakeActionUpdate(row, w, words) {
   const a = w.action, d = a.destination || { type: "echo" };
   const other = !!row._other || !!(w.language && !WAKE_LANGS.includes(w.language));
   wakeValue(q('[data-f="lang"]'), other ? "other" : w.language || "");
-  q(".ww-tag").hidden = !other;
   wakeValue(q('[data-f="tag"]'), other ? w.language : "");
   wakeValue(q('[data-f="dest"]'), d.type);
   q(".ww-dest").hidden = d.type === "echo";
   for (const part of row.querySelectorAll("[data-dest]")) {
     part.hidden = !part.dataset.dest.split(" ").includes(d.type);
   }
+  /* data-nodest is the other way round: what a type decides for itself.
+     Home Assistant's pipeline has its own language and voice, so Assist
+     hides both; what the word held is kept, and the hub reads neither. */
+  for (const part of row.querySelectorAll("[data-nodest]")) {
+    part.hidden = part.dataset.nodest.split(" ").includes(d.type);
+  }
+  q(".ww-tag").hidden = !other || q(".ww-lang").hidden;
   const env = d.type === "llm" ? d.api_key_env : d.token_env;
   for (const [key, value] of [["d.url", d.url], ["d.base_url", d.base_url], ["d.model", d.model],
-                              ["d.env", env], ["d.pipeline", d.pipeline], ["d.agent_id", d.agent_id],
+                              ["d.env", env], ["d.agent_id", d.agent_id],
                               ["d.system", d.system]]) {
     wakeValue(q(`[data-f="${key}"]`), value);
   }
   satSet(q(".ww-envhint"), wakeEnvHint(env));
+  if (d.type !== "ha_assist") WAKE_PIPE_ROWS.delete(row);
+  else {
+    wakePipesWant(row, d);
+    const entry = WAKE_PIPES.get(wakePipesKey(d));
+    satFillSelect(q('[data-f="d.pipeline"]'), wakePipeOptions(d, entry));
+    wakeValue(q('[data-f="d.pipeline"]'), d.pipeline || "");
+    satSet(q(".ww-pipehint"), wakePipeHint(d, entry));
+  }
 
   /* The words it can hand over to: the conversation words in the set it
      would be saved with. With none, the only choice is nobody, and why. */
@@ -5883,7 +6001,7 @@ function wakeActionUpdate(row, w, words) {
   if (a.voice && !voices.includes(a.voice)) said.push([a.voice, a.voice]);
   satFillSelect(q('[data-f="a.voice"]'), said);
   wakeValue(q('[data-f="a.voice"]'), a.voice || "");
-  satSet(q(".ww-more .sum-note"), wakeMoreNote(a));
+  satSet(q(".ww-more .sum-note"), wakeMoreNote(a, !q('[data-f="a.voice"]').parentElement.hidden));
 }
 
 $("wwaddgo").addEventListener("click", () => {

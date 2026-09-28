@@ -44,13 +44,14 @@ import time
 import unicodedata
 from collections import deque
 import logging
-from typing import Callable, Protocol
+from typing import Awaitable, Callable, Protocol
 
 import httpx
 
 from . import language as lang
-from .destinations import DestinationError, NotUnderstood, Request, Turn
-from .router import Failed, Outcome, Route, Router, clip, strip_wake_phrase
+from .destinations import DestinationError, HaAssist, NotUnderstood, Pipeline, Request, Turn
+from .router import (MIC_RATE, SPEAKER_RATE, Failed, Outcome, Route, Router, clip,
+                     strip_wake_phrase)
 
 log = logging.getLogger("voice-satellites.router")
 
@@ -282,12 +283,24 @@ async def run_turn(router: Router, route: Route | None, *, satellite_id: str, sa
         if behaviour.action is None:
             out.error = f"{route.id!r} is a trigger word: it has no action, only its event"
             return out
+        # An ha_assist word's Home Assistant pipeline hears it, and its
+        # settings (language, voice) are the ones this turn goes by.
+        dest = behaviour.action.destination
+        ha = dest if isinstance(dest, HaAssist) else None
+        pipeline: Pipeline | None = None
         if audio is not None:
-            said = await router.stage(out, "stt", router.stt_timeout,
-                                      router.transcribe(audio, behaviour.language))
+            said = None
+            if ha is not None:
+                said, pipeline = await router.stage(out, "stt", router.stt_timeout,
+                                                    ha.transcribe(audio, MIC_RATE))
+            if said is None:
+                said = await router.stage(out, "stt", router.stt_timeout,
+                                          router.transcribe(audio, behaviour.language))
             out.timeline_ms["stt_done"] = _ms(speech_end)
         else:
             said = text or ""
+            if ha is not None:
+                pipeline = await router.stage(out, "pipeline", ha.timeout, ha.speech())
         said = strip_wake_phrase(said, wake_word)
         out.transcript = said
         if not said.strip():
@@ -300,11 +313,14 @@ async def run_turn(router: Router, route: Route | None, *, satellite_id: str, sa
                 return out
         if on_transcript is not None:
             on_transcript(out)
-        await _language(out, behaviour, said, memory)
+        if pipeline is not None and pipeline.language:
+            _pipeline_language(out, pipeline, memory)
+        else:
+            await _language(out, behaviour, said, memory)
         await _answer(router, route, out, sink, memory=memory, satellite_id=satellite_id,
                       satellite_name=satellite_name, wake_word=wake_word, said=said,
                       audio_seconds=len(audio) / 2 / 16000 if audio else 0.0,
-                      speech_end=speech_end, on_handover=on_handover)
+                      speech_end=speech_end, on_handover=on_handover, pipeline=pipeline)
     except Failed as e:
         out.error = str(e)
     except asyncio.CancelledError:
@@ -338,10 +354,36 @@ async def _language(out: Outcome, behaviour, said: str, memory: Memory | None) -
         memory.language = spoken
 
 
+def _pipeline_language(out: Outcome, pipeline: Pipeline, memory: Memory | None) -> None:
+    """The language of an ha_assist word is its Home Assistant pipeline's:
+    what its agent understands, and what its voice speaks."""
+    out.language, out.language_source = pipeline.language, "pipeline"
+    out.reply_language = pipeline.tts_language or lang.reply_tag(pipeline.language)
+    if memory is not None:
+        memory.language = pipeline.language
+
+
+Speak = Callable[[str], Awaitable[bytes]]
+
+
+def _voice(router: Router, route: Route, out: Outcome, pipeline: Pipeline | None) -> Speak:
+    """How a reply is spoken, with out.voice named after it: by the Home
+    Assistant pipeline of an ha_assist word, when it has a text-to-speech,
+    else by Calliope's own voice. A fallback word that takes over speaks in
+    its own."""
+    dest = route.behaviour.action.destination if route.behaviour.action else None
+    if pipeline is not None and pipeline.tts_engine and isinstance(dest, HaAssist):
+        out.voice = pipeline.voice
+        return lambda words: dest.synthesise(router.client, clip(words), pipeline, SPEAKER_RATE)
+    voice = out.voice = router.voice_for(route.behaviour, out.reply_language)
+    return lambda words: router.synthesise(words, voice)
+
+
 async def _answer(router: Router, route: Route, out: Outcome, sink: Sink, *, memory: Memory | None,
                   satellite_id: str, satellite_name: str, wake_word: str, said: str,
                   audio_seconds: float, speech_end: float,
-                  on_handover: Callable[[Route], None] | None) -> None:
+                  on_handover: Callable[[Route], None] | None,
+                  pipeline: Pipeline | None = None) -> None:
     behaviour = route.behaviour
     queue: asyncio.Queue[str | None] = asyncio.Queue()
     produced: list[str] = []
@@ -382,7 +424,7 @@ async def _answer(router: Router, route: Route, out: Outcome, sink: Sink, *, mem
             await queue.put(sentence)
         out.timeline_ms["answer_done"] = _ms(speech_end)
 
-    async def speak(voice: str) -> None:
+    async def speak(voice: Speak) -> None:
         first = True
         while True:
             sentence = await queue.get()
@@ -397,7 +439,7 @@ async def _answer(router: Router, route: Route, out: Outcome, sink: Sink, *, mem
                 batch.append(nxt)
             first = False
             words = clip(" ".join(batch))
-            pcm = await router.stage(out, "tts", router.tts_timeout, router.synthesise(words, voice))
+            pcm = await router.stage(out, "tts", router.tts_timeout, voice(words))
             if await sink.play(pcm, words):
                 out.audio_bytes += len(pcm)
                 out.timeline_ms.setdefault("first_audio", _ms(speech_end))
@@ -407,13 +449,13 @@ async def _answer(router: Router, route: Route, out: Outcome, sink: Sink, *, mem
     async def run(r: Route, mem: Memory | None) -> None:
         b = r.behaviour
         out.reply_to = router.target(b, satellite_id)
-        out.voice = router.voice_for(b, out.reply_language) if out.reply_to else None
+        out.voice = None
         speaking = out.reply_to is not None
         req = request(b, mem)
         if not speaking:
             await produce(b, req)
             return
-        speaker = asyncio.create_task(speak(out.voice))
+        speaker = asyncio.create_task(speak(_voice(router, r, out, pipeline)))
         try:
             await produce(b, req)
             await queue.put(None)
@@ -436,7 +478,8 @@ async def _answer(router: Router, route: Route, out: Outcome, sink: Sink, *, mem
                 if isinstance(e, _Declined) and e.speech:
                     # No one to hand over to: what the destination said about
                     # not understanding is its answer, as it always was.
-                    await _say(router, out, sink, e.speech, route, satellite_id, speech_end)
+                    await _say(router, out, sink, e.speech, route, satellite_id, speech_end,
+                               pipeline)
                     return
                 raise Failed(str(e)) from None
             # A fresh conversation, in the fallback word's own language hint
@@ -469,13 +512,13 @@ class _Declined(Failed):
 
 
 async def _say(router: Router, out: Outcome, sink: Sink, text: str, route: Route,
-               satellite_id: str, speech_end: float) -> None:
+               satellite_id: str, speech_end: float, pipeline: Pipeline | None = None) -> None:
     out.reply_text = text
     out.reply_to = router.target(route.behaviour, satellite_id)
     if out.reply_to is None:
         return
-    out.voice = router.voice_for(route.behaviour, out.reply_language)
-    pcm = await router.stage(out, "tts", router.tts_timeout, router.synthesise(text, out.voice))
+    voice = _voice(router, route, out, pipeline)
+    pcm = await router.stage(out, "tts", router.tts_timeout, voice(text))
     if await sink.play(pcm, text):
         out.audio_bytes += len(pcm)
         out.timeline_ms.setdefault("first_audio", _ms(speech_end))

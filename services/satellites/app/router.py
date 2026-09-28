@@ -42,6 +42,8 @@ PUT /satellites/routing answers 409 there, naming the route that replaced it.
                                    vars are set (never their values), the STT
                                    and TTS URLs and engine, warnings
     PUT  /satellites/routing       409 behind the hub: see PUT /satellites/wake-words
+    POST /satellites/ha/pipelines  {"url","token_env"}: Home Assistant's Assist
+                                   pipelines, for the page's picker
     POST /satellites/routing/test  {"satellite","wake_word","text"}: skips STT,
                                    runs the word's action and TTS, returns the
                                    Outcome as JSON and plays nothing
@@ -74,7 +76,7 @@ from voice_common.errors import ApiError
 
 from . import audio
 from . import language as lang
-from .destinations import Destination, DestinationError, Echo
+from .destinations import ENV_NAME, Destination, DestinationError, Echo, HaAssist, Url, _secret
 
 log = logging.getLogger("voice-satellites.router")
 
@@ -726,6 +728,28 @@ async def put_routing(body: RuleSet, router: CurrentRouter) -> dict:
                        type_="server_error") from None
     log.info("routing: %d rules saved", len(body.rules))
     return router.describe()
+
+
+class PipelinesBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: Url
+    token_env: str = Field(default="SATELLITES_HA_TOKEN", pattern=ENV_NAME)
+
+
+@routes.post("/satellites/ha/pipelines")
+async def ha_pipelines(body: PipelinesBody) -> dict:
+    """Home Assistant's Assist pipelines and its preferred one, asked with
+    the token in `token_env`: what an ha_assist word's picker offers. The
+    token goes where a saved word would send it, so this is no more than
+    saving one allows (destinations.py)."""
+    if _secret(body.token_env) is None:
+        raise ApiError(409, f"{body.token_env} is not set on the hub, so Home Assistant cannot "
+                            "be asked", code="token_missing", param="token_env")
+    try:
+        return await HaAssist(type="ha_assist", url=body.url, token_env=body.token_env).pipelines()
+    except DestinationError as e:
+        raise ApiError(502, str(e), type_="server_error", code="home_assistant") from None
 
 
 @routes.post("/satellites/routing/test")

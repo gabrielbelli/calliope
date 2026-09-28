@@ -107,6 +107,15 @@ const hub = {
   hold: false,
   slow: 0,
   refuse: 0,
+  // Home Assistant's Assist pipelines, as the hub lists them for the picker;
+  // pipesFail, when set, is the hub's 502 sentence instead.
+  pipes: { preferred: "01cloud", pipelines: [
+    { id: "01cloud", name: "Home Assistant Cloud", language: "en", stt_engine: "stt.home_assistant_cloud",
+      stt_language: "en-GB", tts_engine: "tts.piper", tts_language: "en", tts_voice: null },
+    { id: "01alexa", name: "Alexa", language: "pt", stt_engine: "stt.calliope_parakeet",
+      stt_language: "pt", tts_engine: "tts.calliope_kokoro", tts_language: "pt-BR", tts_voice: "pf_dora" }] },
+  pipeCalls: [],
+  pipesFail: "",
 };
 const answer = () => JSON.parse(JSON.stringify({ available: hub.available, words: hub.words,
                                                  ptt: hub.ptt, custom: hub.custom, env: hub.env,
@@ -168,6 +177,12 @@ async function json(path, options) {
     await later();
     return { rule_id: body.wake_word, mode: "command", transcript: body.text, reply_text: "It is four.",
              error: null, timings_ms: { total: 812 }, timeline_ms: {} };
+  }
+  if (method === "POST" && path === "/satellites/ha/pipelines") {
+    hub.pipeCalls.push(JSON.parse(options.body));
+    await later();
+    if (hub.pipesFail) { const e = new Error(hub.pipesFail); e.status = 502; throw e; }
+    return JSON.parse(JSON.stringify(hub.pipes));
   }
   throw new Error("the fake hub has no " + method + " " + path);
 }

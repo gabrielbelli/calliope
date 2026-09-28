@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import struct
 import time
 from email.parser import BytesParser
 from email.policy import HTTP
@@ -387,14 +388,31 @@ async def test_a_destination_that_fails_outright_hands_over_too(fake, monkeypatc
 # ---- Home Assistant Assist pipelines -------------------------------------------------------------
 
 
+PIPELINE = {"id": "01PIPELINE", "name": "Alexa", "language": "pt",
+            "conversation_engine": "conversation.home_assistant", "conversation_language": "pt-BR",
+            "stt_engine": "stt.calliope_parakeet", "stt_language": "pt",
+            "tts_engine": "tts.calliope_kokoro", "tts_language": "pt-BR", "tts_voice": "pf_dora",
+            "wake_word_entity": None, "wake_word_id": None, "prefer_local_intents": True}
+CLOUD = {"id": "01CLOUD", "name": "Home Assistant Cloud", "language": "en",
+         "conversation_engine": "conversation.home_assistant", "conversation_language": "en",
+         "stt_engine": "stt.home_assistant_cloud", "stt_language": "en-US",
+         "tts_engine": "tts.home_assistant_cloud", "tts_language": "en-US", "tts_voice": "JennyNeural"}
+
+
 class FakeHaSocket:
-    """Home Assistant's websocket API as far as HaAssist uses it: auth, then
-    one pipeline run answered with its events."""
+    """Home Assistant's websocket API as far as HaAssist uses it: auth, the
+    pipelines' settings, and one pipeline run answered with its events. An
+    stt run takes binary audio frames, each the handler's byte and PCM, and
+    hears `heard` once the handler's byte comes on its own."""
 
     def __init__(self, speech="The lights are off.", response_type="action_done",
-                 conversation_id="01ASSIST", devices=None):
+                 conversation_id="01ASSIST", devices=None, pipeline=None, heard="apaga a luz",
+                 handler=7):
         self.sent: list[dict] = []
+        self.audio: list[bytes] = []
         self.speech, self.response_type, self.cid = speech, response_type, conversation_id
+        self.pipeline = pipeline if pipeline is not None else PIPELINE
+        self.heard, self.handler, self.stt_run = heard, handler, None
         self.devices = devices if devices is not None else [
             {"id": "ha-device-hub", "identifiers": [["calliope", "entry_01"]]},
             {"id": "ha-device-kitchen", "identifiers": [["calliope", NID]], "area_id": "kitchen"}]
@@ -407,7 +425,20 @@ class FakeHaSocket:
     async def __aexit__(self, *exc):
         return False
 
+    def _event(self, i, kind, data=None):
+        self.outbox.put_nowait({"id": i, "type": "event", "event": {"type": kind, "data": data}})
+
     async def send(self, text):
+        if isinstance(text, bytes):
+            self.audio.append(text)
+            if text == bytes([self.handler]) and self.stt_run is not None:
+                if self.heard:
+                    self._event(self.stt_run, "stt-end", {"stt_output": {"text": self.heard}})
+                else:
+                    self._event(self.stt_run, "error", {"code": "stt-no-text-recognized",
+                                                        "message": "No text recognized"})
+                self._event(self.stt_run, "run-end")
+            return
         msg = json.loads(text)
         self.sent.append(msg)
         if msg["type"] == "auth":
@@ -416,6 +447,25 @@ class FakeHaSocket:
         elif msg["type"] == "config/device_registry/list":
             self.outbox.put_nowait({"id": msg["id"], "type": "result", "success": True,
                                     "result": self.devices})
+        elif msg["type"] == "assist_pipeline/pipeline/get":
+            if msg.get("pipeline_id", self.pipeline["id"]) == self.pipeline["id"]:
+                self.outbox.put_nowait({"id": msg["id"], "type": "result", "success": True,
+                                        "result": self.pipeline})
+            else:
+                self.outbox.put_nowait({"id": msg["id"], "type": "result", "success": False,
+                                        "error": {"code": "not_found", "message":
+                                                  f"Unable to find pipeline_id {msg['pipeline_id']}"}})
+        elif msg["type"] == "assist_pipeline/pipeline/list":
+            self.outbox.put_nowait({"id": msg["id"], "type": "result", "success": True, "result": {
+                "pipelines": [CLOUD, self.pipeline, {"name": "no id"}],
+                "preferred_pipeline": CLOUD["id"]}})
+        elif msg["type"] == "assist_pipeline/run" and msg["start_stage"] == "stt":
+            i = self.stt_run = msg["id"]
+            self.outbox.put_nowait({"id": i, "type": "result", "success": True, "result": None})
+            self._event(i, "run-start", {"pipeline": msg["pipeline"], "language": "pt",
+                                         "runner_data": {"stt_binary_handler_id": self.handler,
+                                                         "timeout": 300}})
+            self._event(i, "stt-start", {"engine": "stt.calliope_parakeet"})
         elif msg["type"] == "assist_pipeline/run":
             i = msg["id"]
             for m in ({"id": i, "type": "result", "success": True, "result": None},
@@ -432,8 +482,36 @@ class FakeHaSocket:
         return json.dumps(await self.outbox.get())
 
 
+def streamed_wav(pcm: bytes, rate: int, channels: int = 1) -> bytes:
+    """A WAV as ffmpeg writes one to a pipe: it cannot seek back, so both
+    sizes say 0xFFFFFFFF."""
+    fmt = struct.pack("<HHIIHH", 1, channels, rate, rate * 2 * channels, 2 * channels, 16)
+    return (b"RIFF" + struct.pack("<I", 0xFFFFFFFF) + b"WAVE" + b"fmt " + struct.pack("<I", 16) + fmt
+            + b"LIST" + struct.pack("<I", 4) + b"INFO" + b"data" + struct.pack("<I", 0xFFFFFFFF) + pcm)
+
+
+class FakeHaRest:
+    """HA's REST API as far as HaAssist speaks through it: tts_get_url, and
+    the tts_proxy path it answers with, which gives a streamed 16 kHz WAV."""
+
+    def __init__(self):
+        self.asked: list[dict] = []
+        self.pcm = np.full(1600, 700, "<i2").tobytes()  # 0.1 s
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tts_get_url":
+            if request.headers.get("authorization") != f"Bearer {SECRET}":
+                return httpx.Response(401, json={"message": "Unauthorized"})
+            self.asked.append(json.loads(request.content))
+            return httpx.Response(200, json={"url": "http://elsewhere.test/api/tts_proxy/t.wav",
+                                             "path": "/api/tts_proxy/t.wav"})
+        if request.url.path == "/api/tts_proxy/t.wav":
+            return httpx.Response(200, content=streamed_wav(self.pcm, 16000))
+        return httpx.Response(404)
+
+
 @pytest.fixture
-def ha_socket(monkeypatch):
+def ha_socket(monkeypatch, fake):
     sockets: list[FakeHaSocket] = []
     made: dict = {}
 
@@ -445,7 +523,13 @@ def ha_socket(monkeypatch):
     monkeypatch.setattr(HaAssist, "connect", staticmethod(connect))
     monkeypatch.setattr(HaAssist, "devices", {})
     monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+    made["rest"] = fake.handlers["ha.test"] = FakeHaRest()
     return sockets, made
+
+
+def kinds(sock: FakeHaSocket) -> list[str]:
+    return [m["type"] if m["type"] != "assist_pipeline/run" else f"run:{m['start_stage']}"
+            for m in sock.sent]
 
 
 ASSIST = {"type": "ha_assist", "url": "https://ha.test:8123", "pipeline": "01PIPELINE"}
@@ -453,6 +537,8 @@ ASSIST = {"type": "ha_assist", "url": "https://ha.test:8123", "pipeline": "01PIP
 
 async def test_an_assist_pipeline_runs_the_transcript_at_its_intent_stage_and_its_speech_is_spoken(
         fake, ha_socket, caplog):
+    """A typed sentence: no audio to hear, so the pipeline's settings are
+    asked for on their own, then the intent stage runs."""
     sockets, made = ha_socket
     r = router(fake, hey_jarvis={"mode": "conversation", "action": {"destination": ASSIST}})
     memory = dialogue.Memory()
@@ -460,22 +546,118 @@ async def test_an_assist_pipeline_runs_the_transcript_at_its_intent_stage_and_it
         out = await turn(r, "hey_jarvis", "turn off the lights", memory=memory)
         out2 = await turn(r, "hey_jarvis", "and the fan", memory=memory)
     assert made["url"] == "https://ha.test:8123"
-    auth, devices, run = sockets[0].sent
+    assert [kinds(s) for s in sockets] == [
+        ["auth", "assist_pipeline/pipeline/get"],
+        ["auth", "config/device_registry/list", "run:intent"],
+        ["auth", "assist_pipeline/pipeline/get"],
+        # The device is not looked up again.
+        ["auth", "run:intent"]]
+    auth, get = sockets[0].sent
     assert auth == {"type": "auth", "access_token": SECRET}
-    assert devices == {"id": 1, "type": "config/device_registry/list"}
+    assert get == {"id": 1, "type": "assist_pipeline/pipeline/get", "pipeline_id": "01PIPELINE"}
+    assert sockets[1].sent[1] == {"id": 1, "type": "config/device_registry/list"}
     # The satellite's own device, so Assist knows which room's lights.
-    assert run == {"id": 2, "type": "assist_pipeline/run", "start_stage": "intent",
-                   "end_stage": "intent", "input": {"text": "turn off the lights"},
-                   "pipeline": "01PIPELINE", "device_id": "ha-device-kitchen"}
-    # HA's conversation_id comes back on the next turn of the same
-    # conversation, and the device is not looked up again.
-    assert [m["type"] for m in sockets[1].sent] == ["auth", "assist_pipeline/run"]
-    assert sockets[1].sent[1]["conversation_id"] == "01ASSIST"
-    assert sockets[1].sent[1]["device_id"] == "ha-device-kitchen"
+    assert sockets[1].sent[2] == {"id": 2, "type": "assist_pipeline/run", "start_stage": "intent",
+                                  "end_stage": "intent", "input": {"text": "turn off the lights"},
+                                  "pipeline": "01PIPELINE", "device_id": "ha-device-kitchen"}
+    # HA's conversation_id comes back on the next turn of the same conversation.
+    assert sockets[3].sent[1]["conversation_id"] == "01ASSIST"
+    assert sockets[3].sent[1]["device_id"] == "ha-device-kitchen"
     assert out.reply_text == "The lights are off." and out2.error is None
-    assert json.loads(fake.sent("tts.test")[0].content)["input"] == "The lights are off."
+    # Spoken by the pipeline's own voice, through Home Assistant.
+    assert made["rest"].asked[0]["message"] == "The lights are off."
+    assert fake.sent("tts.test") == []
     for text in (json.dumps(out.as_json()), caplog.text):
         assert SECRET not in text
+
+
+async def test_an_assist_pipeline_hears_the_command_and_speaks_the_reply_itself(fake, ha_socket, caplog):
+    """HOME ASSISTANT'S PIPELINE IS THE WHOLE SET-UP. It hears the command
+    with its own speech-to-text, in its own language, and the reply is spoken
+    by its own text-to-speech and voice: Calliope's STT and Kokoro are never
+    asked, and the word's own language and voice are not read."""
+    sockets, made = ha_socket
+    r = router(fake, alexa={"language": "en", "action": {"destination": ASSIST, "voice": "bm_george"}})
+    command = np.full(16003, 300, "<i2").tobytes()  # cut to an odd byte count below
+    with caplog.at_level(logging.DEBUG):
+        out = await turn(r, "alexa", audio=command[:-1])
+    hear, act = sockets
+    assert kinds(hear) == ["auth", "assist_pipeline/pipeline/get", "run:stt"]
+    assert hear.sent[2] == {"id": 2, "type": "assist_pipeline/run", "start_stage": "stt",
+                            "end_stage": "stt", "pipeline": "01PIPELINE",
+                            "input": {"sample_rate": 16000, "no_vad": True}}
+    # Every frame is the handler's byte and audio, and its byte alone ends it.
+    assert all(f[:1] == b"\x07" for f in hear.audio) and hear.audio[-1] == b"\x07"
+    assert b"".join(f[1:] for f in hear.audio) == command[:32004]
+    assert act.sent[-1]["input"] == {"text": "apaga a luz"}
+    assert out.transcript == "apaga a luz" and out.error is None
+    assert (out.language, out.reply_language, out.language_source) == ("pt-BR", "pt-BR", "pipeline")
+    assert fake.sent("stt.test") == [] and fake.sent("tts.test") == []
+    [asked] = made["rest"].asked
+    assert asked == {"engine_id": "tts.calliope_kokoro", "message": "The lights are off.",
+                     "language": "pt-BR", "options": {
+                         "voice": "pf_dora", "preferred_format": "wav", "preferred_sample_rate": 48000,
+                         "preferred_sample_channels": 1, "preferred_sample_bytes": 2}}
+    assert out.voice == "pf_dora"
+    # The audio path needs no token, and is fetched from the action's own host.
+    [audio_get] = fake.sent("ha.test", "/api/tts_proxy/t.wav")
+    assert "authorization" not in audio_get.headers and audio_get.url.host == "ha.test"
+    # 0.1 s at 16 kHz, brought to the speaker's 48 kHz.
+    assert len(out.reply_pcm48k) == 2 * 4800
+    for text in (json.dumps(out.as_json()), caplog.text):
+        assert SECRET not in text
+
+
+async def test_a_pipeline_that_does_not_hear_or_speak_leaves_that_to_calliope(fake, ha_socket):
+    sockets, made = ha_socket
+    made["kw"] = {"pipeline": PIPELINE | {"stt_engine": None, "tts_engine": None}}
+    fake.stt_text = "apaga a luz da sala"
+    r = router(fake, alexa={"action": {"destination": ASSIST}})
+    out = await turn(r, "alexa", audio=np.zeros(16000, "<i2").tobytes())
+    assert kinds(sockets[0]) == ["auth", "assist_pipeline/pipeline/get"]
+    assert out.transcript == "apaga a luz da sala" and out.error is None
+    assert len(fake.sent("stt.test")) == 1 and len(fake.sent("tts.test")) == 1
+    assert made["rest"].asked == []
+    assert out.language == "pt-BR" and out.voice == "pf_dora"
+
+
+async def test_nothing_heard_by_the_pipeline_is_nothing_said(fake, ha_socket):
+    sockets, made = ha_socket
+    made["kw"] = {"heard": ""}
+    r = router(fake, alexa={"action": {"destination": ASSIST}})
+    out = await turn(r, "alexa", audio=np.zeros(16000, "<i2").tobytes())
+    assert out.error == "stt: nothing was heard (the transcript is empty)"
+    assert len(sockets) == 1 and made["rest"].asked == []
+
+
+async def test_a_pipeline_home_assistant_does_not_have_is_named(fake, ha_socket):
+    r = router(fake, alexa={"action": {"destination": ASSIST | {"pipeline": "Alexa"}}})
+    out = await turn(r, "alexa", "que horas são")
+    assert out.error == ("pipeline: Home Assistant could not find the pipeline Alexa: "
+                         "Unable to find pipeline_id Alexa")
+
+
+async def test_home_assistants_pipelines_are_listed_for_the_picker(ha_socket):
+    got = await HaAssist(type="ha_assist", url="https://ha.test:8123").pipelines()
+    assert got["preferred"] == "01CLOUD"
+    assert [p["name"] for p in got["pipelines"]] == ["Home Assistant Cloud", "Alexa"]
+    assert got["pipelines"][1] == {
+        "id": "01PIPELINE", "name": "Alexa", "language": "pt-BR",
+        "stt_engine": "stt.calliope_parakeet", "stt_language": "pt",
+        "tts_engine": "tts.calliope_kokoro", "tts_language": "pt-BR", "tts_voice": "pf_dora"}
+
+
+def test_a_wav_written_to_a_pipe_is_read_to_its_end_and_mixed_to_mono():
+    from app import audio
+    left, right = np.full(10, 1000, "<i2"), np.full(10, 3000, "<i2")
+    pcm, rate = audio.pcm_from_wav(streamed_wav(np.stack((left, right), 1).tobytes(), 22050, 2))
+    assert rate == 22050 and np.frombuffer(pcm, "<i2").tolist() == [2000] * 10
+    assert audio.pcm_from_wav(audio.wav(b"\x01\x00" * 5, 16000, 1)) == (b"\x01\x00" * 5, 16000)
+    eight_bit = bytearray(audio.wav(b"\x00" * 4, 8000, 1))
+    eight_bit[34] = 8
+    for bad in (b"not a wav", bytes(eight_bit)):
+        with pytest.raises(ValueError):
+            audio.pcm_from_wav(bad)
 
 
 async def test_a_satellite_home_assistant_has_no_device_for_runs_without_one(fake, ha_socket):
@@ -483,7 +665,7 @@ async def test_a_satellite_home_assistant_has_no_device_for_runs_without_one(fak
     made["kw"] = {"devices": [{"id": "other", "identifiers": [["calliope", "aabbccddeeff"]]}]}
     r = router(fake, hey_jarvis={"action": {"destination": ASSIST}})
     out = await turn(r, "hey_jarvis", "lights off")
-    assert out.error is None and "device_id" not in sockets[0].sent[-1]
+    assert out.error is None and "device_id" not in sockets[1].sent[-1]
 
 
 async def test_an_assist_pipeline_that_did_not_understand_hands_over_like_ha_conversation(

@@ -1199,6 +1199,9 @@ SATELLITES_PATHS = (
     ("PUT", "/satellites/wake-words"),
     ("POST", "/satellites/wake-words/models"),
     ("DELETE", "/satellites/wake-words/models/{name}"),
+    # Home Assistant's Assist pipelines, for the wake word's pipeline picker:
+    # above /satellites/{nid} too, a POST with no twin under that pattern.
+    ("POST", "/satellites/ha/pipelines"),
     ("GET", "/satellites/{nid}"),
     ("PATCH", "/satellites/{nid}"),
     ("GET", "/satellites/{nid}/listen"),

@@ -391,7 +391,8 @@ SAMPLES = {"name": "Kitchen", "old": "Kitchen", "new": "Bedroom", "id": "a1b2c3d
            "list": "Speaker, Microphone and Lights", "message": "503 Service Unavailable",
            "n": "3 satellites", "k": "2 warnings", "score": "0.82", "b": "Vol −",
            "how": "strong", "word": "hey mycroft", "var": "SATELLITES_HA_TOKEN_KITCHEN",
-           "s": "1.3", "output": "Jack (aux)"}
+           "s": "1.3", "output": "Jack (aux)", "hears": "home_assistant_cloud (en-GB)",
+           "speaks": "calliope_kokoro as pf_dora"}
 
 
 def sat_copy() -> dict[str, str]:
@@ -442,6 +443,25 @@ def test_the_wake_word_is_the_one_editor_of_its_satellites():
     assert '<button class="link" type="button" data-act="wakewords">Change wake words</button>' in OPEN_ROW
     assert 'link.setAttribute("aria-label", `Change wake words for ${name}`);' in function("satelliteUpdate")
     assert 'data-scope="all">Every satellite' in WORD and 'data-scope="chosen">Chosen' in WORD
+
+
+def test_an_assist_word_takes_its_pipeline_from_a_list_and_its_voice_from_home_assistant():
+    """An Assist word hears, understands and speaks through a pipeline set up
+    in Home Assistant, so the pipeline is picked from Home Assistant's own list
+    rather than typed as an id, and the language and voice the page would
+    otherwise ask for are hidden: the pipeline has its own."""
+    pick = WORD[WORD.index('data-f="d.pipeline"') - 200:WORD.index('data-f="d.pipeline"') + 40]
+    assert '<select id="${u}-pipe" data-f="d.pipeline"></select>' in pick
+    assert 'data-dest="ha_assist"' in pick
+    assert WORD.count('data-f="d.pipeline"') == 1, "the old typed pipeline field is back"
+    for field in ('data-f="lang"', 'data-f="a.voice"'):
+        owner = WORD[:WORD.index(field)]
+        owner = owner[owner.rindex("<div"):]
+        assert 'data-nodest="ha_assist"' in owner, f"{field} is still asked of an Assist word"
+    update = function("wakeActionUpdate")
+    assert 'row.querySelectorAll("[data-nodest]")' in update
+    assert 'q(".ww-tag").hidden = !other || q(".ww-lang").hidden;' in update
+    assert CODE.count('json("/satellites/ha/pipelines", { method: "POST"') == 1
 
 
 def test_satellite_rows_read_the_saved_words_and_never_the_draft():

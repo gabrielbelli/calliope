@@ -18,6 +18,7 @@ an assistant, and is the one place audio and firmware reach them from.
     GET   /satellites/routing          the rules (router.py)
     PUT   /satellites/routing          replace them
     POST  /satellites/routing/test     a typed sentence through a rule, played nowhere
+    POST  /satellites/ha/pipelines     Home Assistant's Assist pipelines, for the picker
     GET   /satellites/wake-words       the wake words, which satellites hear each, and
                                        whether its model is ready
     PUT   /satellites/wake-words       replace them; live, no restart

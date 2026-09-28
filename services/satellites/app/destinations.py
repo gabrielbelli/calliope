@@ -3,7 +3,8 @@
 Five kinds, told apart by "type" in a wake word's action:
 
     ha_conversation  Home Assistant's REST conversation API
-    ha_assist        a Home Assistant Assist pipeline, over HA's websocket API
+    ha_assist        a Home Assistant Assist pipeline, over HA's websocket API,
+                     which also hears the command and speaks the reply
     llm              any OpenAI-compatible /chat/completions, streamed
     webhook          a JSON POST to a URL of the operator's choosing
     echo             the transcript itself, so a fresh hub can be tested end
@@ -60,16 +61,18 @@ token, to a host the action never named.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Annotated, AsyncIterator, ClassVar, Literal
 
 import httpx
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
+from . import audio
 from . import language as lang
 
 # Upper case only, on purpose: see the module docstring. Real env var names
@@ -469,25 +472,94 @@ async def ha_websocket(url: str, timeout: float):
     return _Direct(_ha_websocket_url(url), open_timeout=timeout, max_size=1 << 20)
 
 
+# The command audio goes to Home Assistant in pieces of this many bytes: well
+# under any websocket frame limit, and few enough frames for a long command.
+STT_CHUNK = 8192
+
+
+@dataclass(frozen=True)
+class Pipeline:
+    """What HaAssist takes from one of Home Assistant's Assist pipelines: the
+    language it understands, and the engines and voice it hears and speaks
+    with. Read from HA on every command, so a pipeline is set up in Home
+    Assistant and nowhere else, and a change there is heard at the next one."""
+
+    id: str
+    name: str
+    language: str | None = None      # BCP 47, what its conversation agent takes
+    stt_engine: str | None = None
+    stt_language: str | None = None
+    tts_engine: str | None = None
+    tts_language: str | None = None
+    tts_voice: str | None = None
+
+    @classmethod
+    def of(cls, raw: object) -> Pipeline:
+        if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) or not raw["id"]:
+            raise DestinationError("Home Assistant described a pipeline without an id")
+
+        def text(key: str) -> str | None:
+            value = raw.get(key)
+            return value if isinstance(value, str) and value else None
+        # "*" is an agent that takes every language (an LLM's): the
+        # pipeline's own language is the one it is spoken to in.
+        spoken = text("conversation_language")
+        return cls(id=raw["id"], name=text("name") or raw["id"],
+                   language=spoken if spoken and spoken != "*" else text("language"),
+                   stt_engine=text("stt_engine"), stt_language=text("stt_language"),
+                   tts_engine=text("tts_engine"), tts_language=text("tts_language"),
+                   tts_voice=text("tts_voice"))
+
+    @property
+    def voice(self) -> str | None:
+        """The reply's voice, as an Outcome names it."""
+        return self.tts_voice or self.tts_engine
+
+    def summary(self) -> dict:
+        return asdict(self)
+
+
 class HaAssist(_Base):
-    """A Home Assistant Assist pipeline, over HA's websocket API: the
-    transcript goes in at the intent stage and the pipeline's spoken
-    response comes back, to be read by Calliope's own voice in the language
-    that was spoken. `pipeline` names one of HA's pipelines by id; unset,
-    HA's preferred one. The conversation_id HA answers with is sent back on
-    every later turn of the same Calliope conversation, so HA keeps its own
-    context ("and the other one").
+    """A Home Assistant Assist pipeline, over HA's websocket API. THE
+    PIPELINE IS SET UP IN HOME ASSISTANT: it hears the command with its own
+    speech-to-text, understands it, and speaks the reply with its own
+    text-to-speech and voice, in its own language. Calliope's language and
+    voice settings are not read for this destination. `pipeline` names one of
+    HA's pipelines by id; unset, HA's preferred one.
 
-        auth_required -> {"type": "auth", "access_token": ...} -> auth_ok
-        {"id": 1, "type": "config/device_registry/list"} -> result (cached)
-        {"id": 2, "type": "assist_pipeline/run", "start_stage": "intent",
-         "end_stage": "intent", "input": {"text": ...}, "pipeline"?,
-         "conversation_id"?, "device_id"?}
-        -> result, then events run-start, intent-start, intent-end, run-end
+    A command is three calls (dialogue.run_turn):
 
-    device_id is the satellite's own device in Home Assistant, which the
-    Calliope integration registers: with it, Assist knows the satellite's
-    area, and "turn on the lights" means that room's.
+    1. transcribe(): the pipeline's settings, then its stt stage alone, fed
+       the command audio the hub has already cut (no_vad: HA's own voice
+       detection would cut it again)
+           {"id": 1, "type": "assist_pipeline/pipeline/get", "pipeline_id"?}
+           {"id": 2, "type": "assist_pipeline/run", "start_stage": "stt",
+            "end_stage": "stt", "pipeline", "input": {"sample_rate", "no_vad"}}
+           -> run-start names a binary handler; each audio frame is that
+              handler's byte and 16-bit mono PCM, and the handler's byte on
+              its own ends it; -> stt-end
+    2. call(): the transcript at the intent stage
+           {"id": 1, "type": "config/device_registry/list"} (cached)
+           {"id": 2, "type": "assist_pipeline/run", "start_stage": "intent",
+            "end_stage": "intent", "input": {"text": ...}, "pipeline"?,
+            "conversation_id"?, "device_id"?} -> intent-end
+    3. synthesise(): each sentence of the reply, over REST
+           POST /api/tts_get_url with the pipeline's engine, language and voice,
+           and a preferred format of WAV at the speaker's rate, which HA
+           converts to (with its ffmpeg) whatever the engine makes; then GET
+           the /api/tts_proxy/ path it answers, which needs no token.
+
+    Each call opens its own connection and authenticates: auth_required ->
+    {"type": "auth", "access_token": ...} -> auth_ok. A typed sentence
+    (POST /satellites/routing/test) has no audio, and asks speech() for the
+    settings instead of transcribe(). A pipeline with no speech-to-text or no
+    text-to-speech leaves that part to Calliope's own.
+
+    The conversation_id HA answers with is sent back on every later turn of
+    the same Calliope conversation, so HA keeps its own context ("and the
+    other one"). device_id is the satellite's own device in Home Assistant,
+    which the Calliope integration registers: with it, Assist knows the
+    satellite's area, and "turn on the lights" means that room's.
 
     An intent that HA did not understand (response_type "error") is
     NotUnderstood, as for ha_conversation, so a `fallback` can take over."""
@@ -511,16 +583,18 @@ class HaAssist(_Base):
     def env_vars(self) -> list[str]:
         return [self.token_env]
 
-    async def call(self, client: httpx.AsyncClient, req: Request) -> str | None:
+    def _token(self) -> str:
         token = _secret(self.token_env)
         if token is None:
             raise DestinationError(f"{self.token_env} is not set, so there is no token for Home Assistant")
-        run: dict = {"id": 2, "type": "assist_pipeline/run", "start_stage": "intent",
-                     "end_stage": "intent", "input": {"text": req.text}}
-        if self.pipeline:
-            run["pipeline"] = self.pipeline
-        if req.state.get("ha_assist_conversation_id"):
-            run["conversation_id"] = req.state["ha_assist_conversation_id"]
+        return token
+
+    @contextlib.asynccontextmanager
+    async def _session(self):
+        """A connection to HA's websocket API, authenticated. Whatever goes
+        wrong on it, here or in the caller's block, comes out as a
+        DestinationError that names the host at most, never the token."""
+        token = self._token()
         from websockets.exceptions import WebSocketException
 
         try:
@@ -534,18 +608,95 @@ class HaAssist(_Base):
                     # HA's own message, which names no token.
                     raise DestinationError(f"Home Assistant refused the token in {self.token_env} "
                                            f"({str(auth.get('message') or auth.get('type'))[:100]})")
-                device = await self._device(ws, req.satellite_id)
-                if device:
-                    run["device_id"] = device
-                await ws.send(json.dumps(run))
-                return await self._run(ws, req)
+                yield ws
         except DestinationError:
             raise
         # Refused, reset, a failed handshake (a redirect included), or a frame
-        # that is not JSON. The message names the host at most, never the token.
+        # that is not JSON.
         except (OSError, ValueError, WebSocketException) as e:
             raise DestinationError(f"Home Assistant's websocket failed: {type(e).__name__}: "
                                    f"{str(e)[:150]}") from None
+
+    async def call(self, client: httpx.AsyncClient, req: Request) -> str | None:
+        run: dict = {"id": 2, "type": "assist_pipeline/run", "start_stage": "intent",
+                     "end_stage": "intent", "input": {"text": req.text}}
+        if self.pipeline:
+            run["pipeline"] = self.pipeline
+        if req.state.get("ha_assist_conversation_id"):
+            run["conversation_id"] = req.state["ha_assist_conversation_id"]
+        async with self._session() as ws:
+            device = await self._device(ws, req.satellite_id)
+            if device:
+                run["device_id"] = device
+            await ws.send(json.dumps(run))
+            return await self._run(ws, req)
+
+    # -- the pipeline's own speech -----------------------------------------------
+
+    async def speech(self) -> Pipeline:
+        """The pipeline's settings, for a turn that has no audio to hear."""
+        async with self._session() as ws:
+            return await self._pipeline(ws)
+
+    async def transcribe(self, pcm: bytes, rate: int) -> tuple[str | None, Pipeline]:
+        """What was said, heard by the pipeline's own speech-to-text, and the
+        pipeline. The text is None when the pipeline has no speech-to-text."""
+        async with self._session() as ws:
+            pipeline = await self._pipeline(ws)
+            if pipeline.stt_engine is None:
+                return None, pipeline
+            await ws.send(json.dumps({"id": 2, "type": "assist_pipeline/run", "start_stage": "stt",
+                                      "end_stage": "stt", "pipeline": pipeline.id,
+                                      "input": {"sample_rate": rate, "no_vad": True}}))
+            return await self._hear(ws, pcm[:len(pcm) & ~1]), pipeline
+
+    async def synthesise(self, client: httpx.AsyncClient, text: str, pipeline: Pipeline,
+                         rate: int) -> bytes:
+        """`text` in the pipeline's voice, as 16-bit mono PCM at `rate`."""
+        options: dict = {"preferred_format": "wav", "preferred_sample_rate": rate,
+                         "preferred_sample_channels": 1, "preferred_sample_bytes": 2}
+        if pipeline.tts_voice:
+            options["voice"] = pipeline.tts_voice
+        body: dict = {"engine_id": pipeline.tts_engine, "message": text, "options": options}
+        if pipeline.tts_language:
+            body["language"] = pipeline.tts_language
+        r = await client.post(f"{self.url}/api/tts_get_url", json=body, timeout=self.timeout,
+                              headers={"Authorization": f"Bearer {self._token()}"})
+        path = _json(r, "Home Assistant's text-to-speech").get("path")
+        # Only ever a path on the same Home Assistant, so the audio is never
+        # fetched from a host the action did not name.
+        if not isinstance(path, str) or not path.startswith("/api/tts_proxy/"):
+            raise DestinationError("Home Assistant's text-to-speech answered without an audio path")
+        r = await client.get(f"{self.url}{path}", timeout=self.timeout)
+        if r.status_code != 200:
+            raise DestinationError(f"Home Assistant's text-to-speech answered {r.status_code} "
+                                   f"for the audio")
+        try:
+            pcm, got = audio.pcm_from_wav(r.content)
+        except ValueError as e:
+            raise DestinationError(f"Home Assistant's text-to-speech sent audio that is not "
+                                   f"16-bit WAV: {e}") from None
+        return audio.resample(pcm, got, rate)
+
+    async def pipelines(self) -> dict:
+        """HA's pipelines and its preferred one, for the page's picker."""
+        async with self._session() as ws:
+            await ws.send(json.dumps({"id": 1, "type": "assist_pipeline/pipeline/list"}))
+            msg = await self._result(ws, 1)
+        if not msg.get("success"):
+            raise DestinationError(f"Home Assistant would not list its pipelines: "
+                                   f"{_ha_error(msg)}")
+        result = msg.get("result") if isinstance(msg.get("result"), dict) else {}
+        found = []
+        for raw in result.get("pipelines") or []:
+            try:
+                found.append(Pipeline.of(raw).summary())
+            except DestinationError:
+                continue
+        preferred = result.get("preferred_pipeline")
+        return {"preferred": preferred if isinstance(preferred, str) else None, "pipelines": found}
+
+    # -- the websocket ---------------------------------------------------------------
 
     @staticmethod
     async def _receive(ws) -> dict:
@@ -553,6 +704,23 @@ class HaAssist(_Base):
         if not isinstance(msg, dict):
             raise DestinationError("Home Assistant's websocket sent something that is not an object")
         return msg
+
+    async def _result(self, ws, msg_id: int) -> dict:
+        while True:
+            msg = await self._receive(ws)
+            if msg.get("id") == msg_id and msg.get("type") == "result":
+                return msg
+
+    async def _pipeline(self, ws) -> Pipeline:
+        get: dict = {"id": 1, "type": "assist_pipeline/pipeline/get"}
+        if self.pipeline:
+            get["pipeline_id"] = self.pipeline
+        await ws.send(json.dumps(get))
+        msg = await self._result(ws, 1)
+        if not msg.get("success"):
+            which = f"the pipeline {self.pipeline}" if self.pipeline else "its preferred pipeline"
+            raise DestinationError(f"Home Assistant could not find {which}: {_ha_error(msg)}")
+        return Pipeline.of(msg.get("result"))
 
     async def _device(self, ws, satellite_id: str) -> str | None:
         """The satellite's device id in Home Assistant, from its device
@@ -562,10 +730,7 @@ class HaAssist(_Base):
         if cached is not None and cached[1] > time.monotonic():
             return cached[0]
         await ws.send(json.dumps({"id": 1, "type": "config/device_registry/list"}))
-        while True:
-            msg = await self._receive(ws)
-            if msg.get("id") == 1 and msg.get("type") == "result":
-                break
+        msg = await self._result(ws, 1)
         found = None
         for device in (msg.get("result") or []) if msg.get("success") else []:
             if not isinstance(device, dict):
@@ -577,19 +742,44 @@ class HaAssist(_Base):
         self.devices[key] = (found, time.monotonic() + self.DEVICE_TTL_S)
         return found
 
-    async def _run(self, ws, req: Request) -> str | None:
+    async def _events(self, ws):
+        """The events of pipeline run 2, as (type, data), after HA accepted it."""
         while True:
             msg = await self._receive(ws)
             if msg.get("id") != 2:
                 continue
             if msg.get("type") == "result":
                 if not msg.get("success", False):
-                    err = msg.get("error") or {}
                     raise DestinationError(f"Home Assistant refused the pipeline run: "
-                                           f"{str(err.get('message') or err)[:200]}")
+                                           f"{_ha_error(msg)}")
                 continue
             event = msg.get("event") or {}
-            kind, data = event.get("type"), event.get("data") or {}
+            yield event.get("type"), event.get("data") or {}
+
+    async def _hear(self, ws, pcm: bytes) -> str:
+        async for kind, data in self._events(ws):
+            if kind == "run-start":
+                handler = (data.get("runner_data") or {}).get("stt_binary_handler_id")
+                if not isinstance(handler, int) or not 0 <= handler < 256:
+                    raise DestinationError("Home Assistant's pipeline run named no handler for the audio")
+                prefix = bytes([handler])
+                for i in range(0, len(pcm), STT_CHUNK):
+                    await ws.send(prefix + pcm[i:i + STT_CHUNK])
+                await ws.send(prefix)  # the end of the audio
+            elif kind == "error":
+                if data.get("code") == "stt-no-text-recognized":
+                    return ""
+                raise DestinationError(f"Home Assistant's speech-to-text failed: "
+                                       f"{str(data.get('message') or data.get('code'))[:200]}")
+            elif kind == "stt-end":
+                text = (data.get("stt_output") or {}).get("text")
+                return text.strip() if isinstance(text, str) else ""
+            elif kind == "run-end":
+                return ""
+        return ""
+
+    async def _run(self, ws, req: Request) -> str | None:
+        async for kind, data in self._events(ws):
             if kind == "error":
                 raise DestinationError(f"the Assist pipeline failed: "
                                        f"{str(data.get('message') or data.get('code'))[:200]}")
@@ -611,6 +801,13 @@ class HaAssist(_Base):
                 return speech
             if kind == "run-end":
                 return None  # a run with no intent stage output: nothing to say
+        return None
+
+
+def _ha_error(msg: dict) -> str:
+    err = msg.get("error") or {}
+    return str(err.get("message") or err.get("code") or err)[:200] if isinstance(err, dict) \
+        else str(err)[:200]
 
 
 Destination = Annotated[HaConversation | HaAssist | Llm | Webhook | Echo,
