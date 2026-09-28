@@ -115,3 +115,51 @@ def test_activity_opens_its_stream_again_after_the_hub_restarts(tmp_path):
     assert got["lost"] == {"said": lost, "sum": "not connected", "none": True}, got
     assert got["count"] == 2 and got["url"] == "/ui/api/satellites/events" and got["current"], got
     assert got["cleared"] == "" and got["sum"] == "", got
+
+
+def test_an_update_is_one_line_in_activity_and_asks_the_hub_nothing_per_ten_per_cent(tmp_path):
+    """The firmware reports progress every 10%, and each report was a line
+    of its own (about fifteen of the fifty kept per update) and a refresh of
+    three lists while the hub was sending the image. Progress rewrites the
+    update's line and the row; the other steps keep lines of their own, in
+    the words the row uses."""
+    got = run(tmp_path, """
+      let source = null;
+      globalThis.EventSource = window.EventSource = class { constructor() { source = this; } };
+      await satellitesRefresh();
+      $("tab-satellites").hidden = false;               // open, so an event may refresh
+      let added = 0, refreshed = 0;
+      const add = satEventAdd;
+      satEventAdd = li => { added++; return add(li); };
+      satellitesRefresh = () => { refreshed++; };
+      const id = "aaaaaaaaaaaa";
+      const row = SATELLITES.rows.get(id);
+      row._n = { ...row._n, ota: { state: "started", version: "v0.3.1" } };
+      const send = ev => source.onmessage({ data: JSON.stringify({ at: 1000, satellite: id, type: "ota", ...ev }) });
+      send({ state: "started", version: "v0.3.1" });
+      const after_start = { added, refreshed };
+      for (let pct = 10; pct <= 100; pct += 10) send({ state: "progress", pct, version: null });
+      const progress = { added, refreshed, pct: row._n.ota.pct, state: row._n.ota.state };
+      send({ state: "rebooting", version: "v0.3.1" });
+      send({ state: "verified", version: "v0.3.1" });
+      console.log(JSON.stringify({ after_start, progress, end: { added, refreshed },
+        said: ["started", "progress", "rebooting", "verified", "failed"].map(state =>
+          satEventWhat({ type: "ota", state, pct: 40, error: state === "failed" ? "bad signature" : null },
+                       "v0.3.1")),
+        button: satEventWhat({ type: "button", button: "vol_up", action: "release", held_ms: 820 }),
+        online: satEventWhat({ type: "online", name: "kitchen", firmware: "v0.3.1" }),
+        offline: satEventWhat({ type: "offline" }),
+        pending: satEventWhat({ type: "pending", satellite: "a1b2c3d4e5f6" }),
+        volume: satSettingsSaid({ volume: 58 }) }));
+    """)
+    assert got["after_start"] == {"added": 1, "refreshed": 1}, got
+    assert got["progress"] == {"added": 1, "refreshed": 1, "pct": 100, "state": "progress"}, \
+        "progress wrote lines of its own, or asked the hub again"
+    assert got["end"] == {"added": 3, "refreshed": 3}, got
+    assert got["said"] == ["update to v0.3.1 started", "updating to v0.3.1: 40%", "restarting into v0.3.1",
+                           "now on v0.3.1", "update to v0.3.1 failed: bad signature"], got
+    assert got["button"] == "Vol + released after 820 ms", got
+    assert got["online"] == "connected, on v0.3.1" and got["offline"] == "went offline", got
+    assert got["pending"] == "new, waiting to be adopted (ID a1b2c3d4e5f6)", got
+    # The slider's steps, where Activity said a percent seen nowhere else.
+    assert got["volume"] == "volume 7 of 12", got

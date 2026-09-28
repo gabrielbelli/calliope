@@ -928,8 +928,10 @@ def test_activity_is_a_log_a_screen_reader_hears_and_a_keyboard_can_scroll():
 def test_an_event_names_a_button_as_the_page_does():
     """Activity and Try it said "vol_up press", the firmware's id, beside a
     Buttons grid that calls it Vol +."""
-    assert "${satButtonName(ev.button)} ${ev.action}" in function("satEventWhat")
-    assert "${ev.button} ${ev.action}" not in function("satEventWhat")
+    what = function("satEventWhat")
+    assert "${satButtonName(ev.button)} ${SAT_EDGE_SAID[ev.action] || ev.action}" in what
+    assert "${ev.button} ${ev.action}" not in what
+    assert 'const SAT_EDGE_SAID = { press: "pressed", release: "released" };' in CODE
 
 
 def test_a_wake_word_that_failed_says_so_once_and_in_a_sentence():

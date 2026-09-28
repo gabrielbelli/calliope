@@ -3975,7 +3975,10 @@ const SATELLITES = { rows: new Map(), timer: null, events: null, list: [], firmw
                         off mid-transfer, and when it last heard a wake
                         word. */
                      online: new Map(), fw: new Map(), restarting: new Map(),
-                     otaFailed: new Map(), woke: new Map() };
+                     otaFailed: new Map(), woke: new Map(),
+                     /* Each update's line in Activity, rewritten as it
+                        progresses (satellitesListen). */
+                     otaLine: new Map() };
 const JSON_BODY = { "Content-Type": "application/json" };
 
 /* EVERY SENTENCE THE TAB BUILDS IN SCRIPT, IN ONE PLACE. The page's hint test
@@ -7037,8 +7040,13 @@ function satellitesListen() {
       return;
     }
     const row = SATELLITES.rows.get(ev.satellite);
-    const who = row && row._n ? satName(row._n) : ev.satellite;
-    const what = satEventWhat(ev);
+    /* A satellite the page has no row for yet is named from the event, as
+       the hub names it (online carries `name`, a trigger `satellite_name`);
+       a bare twelve-character ID was the log's name for it. */
+    const who = row && row._n ? satName(row._n) : ev.name || ev.satellite_name
+      || (ev.type === "pending" ? "New satellite" : ev.satellite);
+    const ota = row && row._n && row._n.ota;
+    const what = satEventWhat(ev, ota && ota.version);
     if (ev.type === "wake" && !ev.injected) {
       SATELLITES.woke.set(ev.satellite, Date.now());
       if (typeof ev.score === "number" && ev.wake_word !== "ptt") {
@@ -7053,7 +7061,6 @@ function satellitesListen() {
       WAKE.heard.set(ev.wake_word, { score: ev.score, who, at: ev.at });
       wakeRender();
     }
-    const ota = row && row._n && row._n.ota;
     if (ev.type === "ota" && ev.state === "rebooting") {
       SATELLITES.restarting.set(ev.satellite, { v: ev.version || (ota && ota.version), at: Date.now() });
       SATELLITES.otaFailed.delete(ev.satellite);
@@ -7065,13 +7072,34 @@ function satellitesListen() {
                                                at: Date.now() });
       SATELLITES.restarting.delete(ev.satellite);
     }
+    /* ONE LINE PER UPDATE, AND NO REFRESH PER TEN PER CENT. The firmware
+       reports progress every 10%, so an update wrote about fifteen lines of
+       the fifty kept, and Update every satellite on four of them pushed out
+       everything else; each progress also asked the hub for three lists
+       while it was busy sending the image. Progress rewrites the update's
+       own line and the row, from the event; started, rebooting, verified
+       and failed still get lines of their own. */
+    const progress = ev.type === "ota" && ev.state === "progress";
+    if (progress && row && row._n) {
+      row._n = { ...row._n, ota: { ...(row._n.ota || {}), state: "progress", pct: ev.pct } };
+    }
     if (row) {
       row._last = satText("lastEvent", { what, time: new Date(ev.at * 1000).toLocaleTimeString() });
       if (row._n) satelliteUpdate(row, row._n);
     }
-    satEventAdd(satEventLine(document.createElement("li"), ev, who, what));
+    const line = progress && SATELLITES.otaLine.get(ev.satellite);
+    if (line && line.isConnected) satEventLine(line, ev, who, what);
+    else {
+      const li = satEventLine(document.createElement("li"), ev, who, what);
+      satEventAdd(li);
+      if (ev.type === "ota") {
+        if (ev.state === "started" || progress) SATELLITES.otaLine.set(ev.satellite, li);
+        else SATELLITES.otaLine.delete(ev.satellite);
+      }
+    }
     $("evnone").hidden = true;
-    if (!["button", "wake", "routed", "turn", "triggered"].includes(ev.type) && satellitesOpen()) {
+    if (!progress && !["button", "wake", "routed", "turn", "triggered"].includes(ev.type)
+        && satellitesOpen()) {
       satellitesRefresh();
     }
   };
@@ -7117,15 +7145,27 @@ function satEventsSay(text) {
 /* What a button changed on the device, in words. */
 function satSettingsSaid(s) {
   const said = [];
-  if (typeof s.volume === "number") said.push(`volume ${s.volume}%`);
+  /* In the slider's twelve steps, rounded as satLevel rounds them: a percent
+     appeared nowhere else on the page. */
+  if (typeof s.volume === "number") said.push(`volume ${Math.round(s.volume * 12 / 100)} of 12`);
   if (typeof s.lights_enabled === "boolean") said.push(`lights ${s.lights_enabled ? "on" : "off"}`);
   if (typeof s.brightness === "number") said.push(`brightness ${s.brightness}%`);
   return said.join(", ") || "nothing";
 }
 
-function satEventWhat(ev) {
-  return ev.type === "button" ? `${satButtonName(ev.button)} ${ev.action}${ev.held_ms ? ` after ${ev.held_ms} ms` : ""}`
-    : ev.type === "ota" ? `update ${ev.state}${ev.pct != null ? " " + ev.pct + "%" : ""}${ev.error ? ": " + ev.error : ""}`
+/* IN THE PAGE'S WORDS, NOT THE PROTOCOL'S. The log said "Talk press",
+   "update verified" and "a1b2c3d4e5f6 pending" beside a Buttons grid that
+   says When pressed and a row that says Now on v0.3.1. `going` is the
+   version the row shows an update taking, since a progress event carries
+   none. */
+const SAT_EDGE_SAID = { press: "pressed", release: "released" };
+function satEventWhat(ev, going) {
+  const v = ev.version || going || "new firmware";
+  return ev.type === "button" ? `${satButtonName(ev.button)} ${SAT_EDGE_SAID[ev.action] || ev.action}${ev.held_ms ? ` after ${ev.held_ms} ms` : ""}`
+    : ev.type === "ota" ? satOtaSaid(ev, v)
+    : ev.type === "online" ? `connected${ev.firmware ? `, on ${ev.firmware}` : ""}`
+    : ev.type === "offline" ? "went offline"
+    : ev.type === "pending" ? `new, waiting to be adopted (ID ${ev.satellite})`
     : ev.type === "wake" ? satelliteHeard(ev)
     : ev.type === "routed" || ev.type === "turn" ? satelliteRouted(ev)
     : ev.type === "conversation_started" ? satTalkStarted(ev)
@@ -7136,6 +7176,18 @@ function satEventWhat(ev) {
     : ev.type;
 }
 const SAT_WOKE_ENDS = ["routed", "turn", "conversation_ended", "triggered"];
+
+/* An update's events, as its row says them (lineUpdating, lineRestarting,
+   lineUpdated, lineFailed). */
+function satOtaSaid(ev, v) {
+  const pct = typeof ev.pct === "number" ? `: ${Math.round(ev.pct)}%` : "";
+  return ev.state === "started" ? `update to ${v} started`
+    : ev.state === "progress" ? `updating to ${v}${pct}`
+    : ev.state === "rebooting" ? `restarting into ${v}`
+    : ev.state === "verified" ? `now on ${v}`
+    : ev.state === "failed" ? `update to ${v} failed${ev.error ? `: ${ev.error}` : ""}`
+    : `update ${ev.state}`;
+}
 
 /* One line each for the two listening events. "test" marks what /inject ran:
    a recorded clip, heard by nobody. */
