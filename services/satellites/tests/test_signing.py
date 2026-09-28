@@ -231,6 +231,44 @@ def test_the_build_script_refuses_a_public_key_the_satellite_could_not_use(scrip
         script.check_p256_public_key(rsa_der)
 
 
+def test_a_clone_of_the_repository_builds_unsigned_until_its_owner_makes_a_key(tmp_path, script,
+                                                                               monkeypatch):
+    """The maintainer's public key was committed under keys/, so every clone
+    built satellites that took updates only from him. The build now looks for
+    the key beside the private one first, and a clone has none anywhere."""
+    project, home = tmp_path / "korvo-satellite", tmp_path / "home"
+    (project / "keys").mkdir(parents=True)
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv(script.PUBLIC_KEY_ENV, raising=False)
+    assert script.public_key_path(str(project)) is None
+
+    in_tree = project / "keys" / "firmware-signing.pub.pem"
+    in_tree.write_text("tree")
+    assert script.public_key_path(str(project)) == str(in_tree)
+
+    beside = home / ".config" / "calliope" / "firmware-signing.pub.pem"
+    beside.parent.mkdir(parents=True)
+    beside.write_text("home")
+    assert script.public_key_path(str(project)) == str(beside), "the key beside the private one wins"
+
+    # Named, it wins, and is returned even when missing so the build can stop.
+    monkeypatch.setenv(script.PUBLIC_KEY_ENV, str(tmp_path / "typo.pub.pem"))
+    assert script.public_key_path(str(project)) == str(tmp_path / "typo.pub.pem")
+
+
+def test_the_upload_script_takes_no_public_key_as_a_build_without_one(tmp_path, script):
+    assert script.sign_for_upload(IMAGE, str(tmp_path / "absent.pem"), None) is None
+
+
+def test_no_public_key_is_committed_with_the_firmware():
+    keys = SCRIPTS.parent / "keys"
+    if not keys.exists():
+        pytest.skip("clients/korvo-satellite is not in this checkout")
+    ignore = (SCRIPTS.parent / ".gitignore").read_text()
+    assert "!keys/*.pub.pem" not in ignore, "a public key here would be one person's"
+
+
 # ---- which satellites an update is started on --------------------------------------
 
 

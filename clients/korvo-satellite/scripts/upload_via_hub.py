@@ -55,8 +55,7 @@ def upload(source, target, env):
         sig = firmware_signing.sign_for_upload(
             image,
             os.environ.get("CALLIOPE_SIGNING_KEY") or firmware_signing.DEFAULT_PRIVATE_KEY,
-            os.environ.get("CALLIOPE_FIRMWARE_PUBKEY")
-            or os.path.join(project, "keys", "firmware-signing.pub.pem"),
+            firmware_signing.public_key_path(project),  # the key the build compiled in
         )
     except firmware_signing.SigningError as e:
         sys.exit(str(e))

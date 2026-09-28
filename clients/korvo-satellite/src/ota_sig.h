@@ -1,6 +1,7 @@
 // Firmware signatures: ECDSA P-256 over the image's SHA-256, checked against
-// the public key scripts/firmware_key.py compiles in from
-// keys/firmware-signing.pub.pem. A build without that file defines no
+// the public key scripts/firmware_key.py compiles in (CALLIOPE_FIRMWARE_PUBKEY,
+// else ~/.config/calliope/firmware-signing.pub.pem, else
+// keys/firmware-signing.pub.pem). A build without one defines no
 // FIRMWARE_SIGNING and accepts unsigned images (development only).
 //
 // Nothing here uses Arduino, so the file also builds on a desktop against the

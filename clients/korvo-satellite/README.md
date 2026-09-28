@@ -65,12 +65,18 @@ path, so a board on that firmware is updated over the air like any other
 
 ### Signed firmware
 
-A satellite built while `keys/firmware-signing.pub.pem` exists installs only
-images signed by the matching private key. The signature is ECDSA P-256 over
-the image's SHA-256, in DER; mbedTLS in the Arduino core verifies it on the
+A satellite built with a firmware signing public key installs only images
+signed by the matching private key. The signature is ECDSA P-256 over the
+image's SHA-256, in DER; mbedTLS in the Arduino core verifies it on the
 satellite. The hub only carries the signature, so a hub that is compromised
-still cannot install its own firmware. [`keys/README.md`](keys/README.md) says
-how to make the key pair; the private key never enters the repository.
+still cannot install its own firmware.
+
+The repository carries no key, so a fresh clone builds unsigned satellites
+until you make a key pair of your own. [`keys/README.md`](keys/README.md) says
+how, and where the build looks for the public half
+(`CALLIOPE_FIRMWARE_PUBKEY`, else `~/.config/calliope/firmware-signing.pub.pem`).
+A satellite built unsigned accepts any image the hub sends, so the first
+signed build can go over the air; from then on it refuses unsigned ones.
 
 | | Build with the public key | Build without it |
 |---|---|---|

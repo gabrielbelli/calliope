@@ -28,6 +28,29 @@ P256_SPKI_PREFIX = bytes.fromhex(
 P256_SPKI_LEN = len(P256_SPKI_PREFIX) + 64
 
 DEFAULT_PRIVATE_KEY = "~/.config/calliope/firmware-signing.pem"
+# The public half, beside the private one. Neither half is in the repository:
+# a public key committed there would be one person's, and every clone would
+# build satellites that only that person can update.
+DEFAULT_PUBLIC_KEY = "~/.config/calliope/firmware-signing.pub.pem"
+PUBLIC_KEY_ENV = "CALLIOPE_FIRMWARE_PUBKEY"
+
+
+def public_key_places(project: str) -> list[str]:
+    """Where a build looks for the public key it compiles in, in order."""
+    return [os.path.expanduser(DEFAULT_PUBLIC_KEY),
+            os.path.join(project, "keys", "firmware-signing.pub.pem")]
+
+
+def public_key_path(project: str) -> str | None:
+    """The public key a build compiles in, and the one an upload checks the
+    private key against: CALLIOPE_FIRMWARE_PUBKEY, else the first of
+    public_key_places that exists, else None (an unsigned build). A key
+    named in CALLIOPE_FIRMWARE_PUBKEY is returned whether or not it exists,
+    so a mistyped path stops the build instead of making it unsigned."""
+    named = os.environ.get(PUBLIC_KEY_ENV)
+    if named:
+        return os.path.expanduser(named)
+    return next((p for p in public_key_places(project) if os.path.exists(p)), None)
 
 
 class SigningError(Exception):
@@ -105,12 +128,12 @@ def sign(image: bytes, key_path: str) -> bytes:
             return f.read()
 
 
-def sign_for_upload(image: bytes, key_path: str, pub_path: str) -> str | None:
+def sign_for_upload(image: bytes, key_path: str, pub_path: str | None) -> str | None:
     """The `signature` query parameter for POST /satellites/firmware,
     base64url, or None to upload unsigned. `pub_path` is the key the build
-    compiled in."""
+    compiled in (public_key_path), or None for a build without one."""
     key_path = os.path.expanduser(key_path)
-    have_key, have_pub = os.path.exists(key_path), os.path.exists(pub_path)
+    have_key, have_pub = os.path.exists(key_path), bool(pub_path) and os.path.exists(pub_path)
     if not have_key:
         if have_pub:
             raise SigningError(
