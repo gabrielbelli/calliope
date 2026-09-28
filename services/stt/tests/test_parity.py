@@ -601,10 +601,58 @@ def test_health_lists_every_engine_default_first(both: TestClient) -> None:
     models = both.get("/health").json()["models"]
     assert models == [
         {"id": "parakeet", "family": "parakeet", "default": True, "languages": ["en", "pt"],
-         "accepts_language": False, "accepts_boost": True},
+         "accepts_language": False, "accepts_boost": True, "can_translate": False,
+         "can_stream": False},
         {"id": "whisper", "family": "whisper", "default": False, "languages": ["en", "ja", "pt"],
-         "accepts_language": True, "accepts_boost": False},
+         "accepts_language": True, "accepts_boost": False, "can_translate": True,
+         "can_stream": True},
     ]
+
+
+def test_with_several_engines_a_refusal_names_the_one_that_can(both: TestClient) -> None:
+    """Under STT_MODELS=parakeet,whisper, a request that reached Parakeet was
+    told to redeploy with STT_MODEL=whisper, although Whisper was loaded and
+    `model=whisper` was all it took. /health said translations were off."""
+    translate = both.post("/v1/audio/translations",
+                          files={"file": ("clip.wav", wav(), "audio/wav")},
+                          data={"model": "whisper-1"})
+    assert translate.status_code == 400
+    assert "Send model=whisper" in translate.json()["error"]["message"]
+    for field in ({"stream": "true"}, {"language": "pt"}, {"temperature": "0.2"}):
+        refused = post(both, **field)
+        assert refused.status_code == 400, field
+        message = refused.json()["error"]["message"]
+        assert "model=whisper" in message and "STT_MODEL=" not in message, message
+    assert both.post("/v1/audio/translations", files={"file": ("clip.wav", wav(), "audio/wav")},
+                     data={"model": "whisper"}).status_code == 200
+    health = both.get("/health").json()
+    assert (health["translations"], health["streaming"]) == (True, True)
+
+
+def test_with_one_engine_a_refusal_still_names_the_deployment(parakeet: TestClient) -> None:
+    refused = post(parakeet, language="pt")
+    assert "deploy with STT_MODEL=whisper" in refused.json()["error"]["message"]
+
+
+def test_the_run_record_names_the_engine_that_ran(both: TestClient, monkeypatch) -> None:
+    """The record was built with the default's name, so a request that
+    picked Whisper was recorded as Parakeet beside model_requested=whisper."""
+    bodies = []
+    real = pipeline.runlog.record
+    monkeypatch.setattr(pipeline.runlog, "record",
+                        lambda **fields: (bodies.append(pipeline.runlog._body(fields)), real(**fields)))
+    assert post(both, model="whisper", language="pt").status_code == 200
+    assert bodies and bodies[-1]["engine"] == "whisper"
+
+
+def test_stt_language_reaches_whisper_under_stt_models(monkeypatch) -> None:
+    """build() gives Whisper STT_LANGUAGE; build_all gave it none, so every
+    request without a language was autodetected, with no word said."""
+    made = []
+    monkeypatch.setattr(asr, "Whisper", lambda *a, **kw: made.append(kw) or FakeWhisper())
+    monkeypatch.setenv("STT_LANGUAGE", "pt")
+    asr.build_all(["whisper"], threads=1, hotwords=None)
+    assert made[0]["language"] == "pt"
 
 
 def test_an_unknown_engine_in_stt_models_stops_startup() -> None:

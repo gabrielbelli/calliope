@@ -79,6 +79,10 @@ def _health_details() -> dict[str, object]:
     contradict.
     """
     loaded = pipeline.loaded()
+    engines = list(pipeline.engines().values()) or ([loaded] if loaded else [])
+
+    def any_engine(flag: str) -> bool:
+        return any(bool(getattr(e, flag, False)) for e in engines)
     return {
         "status": "ok" if loaded else "loading",
         "model": pipeline.MODEL,
@@ -91,16 +95,22 @@ def _health_details() -> dict[str, object]:
              "default": index == 0,
              "languages": list(getattr(engine, "languages", ()) or ()),
              "accepts_language": bool(engine.accepts_language),
-             "accepts_boost": bool(getattr(engine, "accepts_boost", False))}
+             "accepts_boost": bool(getattr(engine, "accepts_boost", False)),
+             "can_translate": bool(getattr(engine, "can_translate", False)),
+             "can_stream": bool(getattr(engine, "can_stream", False))}
             for index, (engine_id, engine) in enumerate(pipeline.engines().items())
         ],
-        "model_id": os.getenv("STT_MODEL_ID", ""),
-        "accepts_vocabulary": bool(getattr(loaded, "accepts_vocabulary", False)),
+        # STT_MODEL_ID names the one engine STT_MODEL loads; STT_MODELS
+        # ignores it, and each entry above says its own.
+        **({} if os.getenv("STT_MODELS", "").strip()
+           else {"model_id": os.getenv("STT_MODEL_ID", "")}),
+        "accepts_vocabulary": any_engine("accepts_vocabulary"),
         # What the compatibility surface will and will not do on this
         # deployment, so a client can find out without spending a request on a
-        # refusal. Both are properties of the engine, not of the service.
-        "translations": bool(getattr(loaded, "can_translate", False)),
-        "streaming": bool(getattr(loaded, "can_stream", False)),
+        # refusal: whether any loaded engine can, which a request reaches by
+        # its `model` (each entry above says which).
+        "translations": any_engine("can_translate"),
+        "streaming": any_engine("can_stream"),
         "hotwords": pipeline.HOTWORDS_ENABLED,
         # Which profiles this process has loaded, so a client can see the set
         # without spending a request on a 400 for a name that is not there.

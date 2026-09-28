@@ -139,7 +139,7 @@ seen no events and raised nothing.
 | Field | Behaviour |
 |---|---|
 | `file` | All nine formats, any rate, mono or stereo |
-| `model` | **Required**, and it does not choose an engine. See the deviation below |
+| `model` | **Required**. It picks an engine only under `STT_MODELS`; see the deviation below |
 | `response_format` | `json`, `text`, `verbose_json`, `srt`, `vtt`. `diarized_json` is refused |
 | `timestamp_granularities[]` | Honoured. `segment` is the default, `word` adds word timings |
 | `chunking_strategy` | Honoured — `server_vad`'s `threshold`, `prefix_padding_ms` and `silence_duration_ms` tune the VAD this service already runs |
@@ -163,8 +163,10 @@ saying which engine could do it:
 
 The two recognisers are not interchangeable, and the compatibility layer
 answers for the difference rather than papering over it. `/health` reports
-`translations` and `streaming` for the engine that is loaded, so a client can
-find out without spending a request on a refusal.
+`translations` and `streaming`, true when a loaded engine can, and each entry
+of `models` says which (`can_translate`, `can_stream`), so a client can find
+out without spending a request on a refusal. A refusal names the fix: `model`
+of a loaded engine that can, or the deployment that would.
 
 | | Parakeet (default) | Whisper |
 |---|---|---|
@@ -261,20 +263,24 @@ already repaired.
 What cannot be 1:1, why, and the measurement that forces it. Nothing here is
 hidden and nothing is faked.
 
-**`model` does not choose an engine.** It is required, as the specification
-requires it, and its value is not obeyed: Parakeet needs 1.4 GB resident and
-Whisper large-v3 2.9 GB, holding both does not fit the memory this is deployed
-under, and a cold load is minutes. Refusing `whisper-1` on a Parakeet
-deployment would reject every existing client — Open WebUI sends it, the
-example above sends it — to make a point about a name. So the request is
-answered and **every `/v1` response carries `x-stt-engine`** naming the engine
-that actually ran. Honesty rather than obedience.
+**`model` does not choose between Parakeet and Whisper by OpenAI's names.** It
+is required, as the specification requires it, and `whisper-1` is not obeyed:
+Parakeet needs 1.4 GB resident and Whisper large-v3 2.9 GB, holding both does
+not fit the memory this is deployed under, and a cold load is minutes.
+Refusing `whisper-1` on a Parakeet deployment would reject every existing
+client — Open WebUI sends it, the example above sends it — to make a point
+about a name. So the request is answered and **every `/v1` response carries
+`x-stt-engine`** naming the engine that actually ran. Honesty rather than
+obedience. A deployment that loads several engines side by side
+(`STT_MODELS`) picks one by its id (`model=whisper`, `model=parakeet-pt-br`);
+any other name, `whisper-1` included, gets the first.
 
 **No streaming, translation, `language` or `temperature` under Parakeet.** All
 four are refusals, not silences, and all four are properties of a TDT decoder
 that has no such mechanism and nothing downstream that can stand in for one.
-Deploy with `STT_MODEL=whisper` if you need them, and pay the order of
-magnitude in latency.
+Deploy with `STT_MODEL=whisper` if you need them, or load Whisper beside
+Parakeet (`STT_MODELS=parakeet,whisper`) and send `model=whisper`, and pay
+the order of magnitude in latency.
 
 `prompt` and `keywords[]` used to be a fifth and sixth, on the grounds that
 Parakeet's decoder took no vocabulary. That was wrong twice over: they reach
@@ -489,7 +495,7 @@ transcript is the product.
 | Variable | Default | Notes |
 |---|---|---|
 | `STT_MODEL` | `parakeet` | `parakeet` or `whisper` |
-| `STT_MODELS` | unset | Engines to load side by side, the first the default: `parakeet`, `parakeet-pt-br` (a Brazilian Portuguese fine-tune, 2.4 GB), `whisper`. A request's `model` picks one; any other name gets the default. `/health` lists them under `models`. Overrides `STT_MODEL`, `STT_MODEL_ID` and `STT_QUANTISATION` |
+| `STT_MODELS` | unset | Engines to load side by side, the first the default: `parakeet`, `parakeet-pt-br` (a Brazilian Portuguese fine-tune, 2.4 GB), `whisper`. A request's `model` picks one; any other name gets the default. `/health` lists them under `models`. Overrides `STT_MODEL`, `STT_MODEL_ID` and `STT_QUANTISATION`; `STT_LANGUAGE` still applies to Whisper |
 | `STT_MODEL_ID` | model default | Override the specific checkpoint |
 | `STT_QUANTISATION` | `int8` | Whisper also takes `int8_float32`, `float32` |
 | `STT_LANGUAGE` | unset | Leave unset if you code-switch. See below |

@@ -632,9 +632,11 @@ def build_all(ids: list[str], threads: int,
             model: Parakeet | Whisper = Parakeet(spec.model_id, spec.quantisation,
                                                  engine_id=engine_id, languages=spec.languages)
         else:
+            # STT_LANGUAGE as build() gives it: set, it is the language
+            # every request without one is heard in.
             model = Whisper(spec.model_id, compute_type=spec.quantisation or "int8",
-                            threads=threads, language=None, hotwords=hotwords,
-                            engine_id=engine_id, languages=spec.languages)
+                            threads=threads, language=os.getenv("STT_LANGUAGE") or None,
+                            hotwords=hotwords, engine_id=engine_id, languages=spec.languages)
         log.info("%s ready: %s", engine_id, spec.model_id)
         built[engine_id] = model
     return built

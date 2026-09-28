@@ -224,6 +224,17 @@ def _value(form, name: str) -> str | None:  # noqa: ANN001
     return str(raw)
 
 
+def _elsewhere(capability: str) -> str:
+    """How a client gets a capability the engine it reached lacks: a loaded
+    engine that has it, by the `model` that picks it (STT_MODELS), or else
+    the deployment that would. Under STT_MODELS=parakeet,whisper the advice
+    to redeploy was wrong: Whisper was loaded, one field away."""
+    for engine_id, loaded in pipeline.engines().items():
+        if getattr(loaded, capability, False):
+            return f"send model={engine_id}"
+    return "deploy with STT_MODEL=whisper"
+
+
 def _bad(message: str, *, param: str | None = None,
          code: str = CODE_INVALID) -> ApiError:
     return ApiError(400, message, code=code, param=param)
@@ -300,8 +311,8 @@ def _temperature(form, engine) -> float | None:  # noqa: ANN001
         raise _unsupported(
             "temperature",
             f"is not supported by the '{engine.name}' engine: a TDT decoder "
-            "has no sampling temperature. Omit it, or deploy with "
-            "STT_MODEL=whisper.")
+            f"has no sampling temperature. Omit it, or "
+            f"{_elsewhere('accepts_temperature')}.")
     return value
 
 
@@ -316,7 +327,7 @@ def _language(form, engine) -> str | None:  # noqa: ANN001
             "the language itself and takes no hint. It used to be accepted "
             "and echoed back in verbose_json as if it had steered the "
             "decode, which was a claim about the output rather than a "
-            "setting. Omit it, or deploy with STT_MODEL=whisper.")
+            f"setting. Omit it, or {_elsewhere('accepts_language')}.")
     if not languages.known(value):
         raise _bad(
             f"'language' must be an ISO-639-1 code, got {value!r}.",
@@ -632,7 +643,7 @@ def _stream(form, engine, response_format: str) -> bool:  # noqa: ANN001
             "until it ends — measured 5.07 s to the first and only output on "
             "a 14.2 s clip — so there is no partial transcript to send. "
             "Cutting a finished transcript into timed deltas would be a lie "
-            "about latency. Deploy with STT_MODEL=whisper to stream.")
+            f"about latency. {_elsewhere('can_stream').capitalize()} to stream.")
     if response_format != "json":
         raise _bad(
             "'stream' requires response_format=json: the stream carries "
@@ -1084,8 +1095,8 @@ async def translations(request: Request,
             f"Unsupported value: translation requires an engine with a "
             f"translate task, and this deployment loaded '{engine.name}', "
             "which has none — it has no target-language conditioning either, "
-            "so there is nothing to translate with. Deploy with "
-            "STT_MODEL=whisper, or use /v1/audio/transcriptions.",
+            "so there is nothing to translate with. "
+            f"{_elsewhere('can_translate').capitalize()}, or use /v1/audio/transcriptions.",
             code=CODE_UNSUPPORTED_VALUE, param="model")
 
     _reject_unknown(form, TRANSLATION_FIELDS)

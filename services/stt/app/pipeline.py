@@ -719,6 +719,9 @@ def run(data: bytes, opts: asr.Options | None = None, *,
     origin = origin or Origin(route="")
     runlog.record(
         kind="transcribe",
+        # The engine that ran: the one the request picked (STT_MODELS), not
+        # the default the record was built with.
+        engine=getattr(model, "id", MODEL),
         route=origin.route or None,
         client=origin.client,
         model_requested=origin.model_requested,
