@@ -225,8 +225,16 @@ def check(entries: object, *, available: Iterable[str] | None = None,
             raise ValueError(f"{name!r} is listed twice; list each wake word once, with "
                              "every satellite it is for")
         old = before.get(name)
-        behaviour = behaviour_of(entry, old.behaviour if old else None, repr(name))
-        default = DEFAULT_TRIGGER_THRESHOLD if behaviour.mode == "trigger" else DEFAULT_THRESHOLD
+        # A word that has no behaviour yet (migrated from a rules.json that
+        # did not load) keeps none while the entry names none. The page sends
+        # every word back as GET gave it with each Save, and this one, read
+        # as a word told nothing, took default_behaviour(): the next Save of
+        # another word made it echo what was said after it.
+        if old is not None and old.behaviour is None and not any(k in entry for k in BEHAVIOUR_FIELDS):
+            behaviour = None
+        else:
+            behaviour = behaviour_of(entry, old.behaviour if old else None, repr(name))
+        default = DEFAULT_TRIGGER_THRESHOLD if behaviour and behaviour.mode == "trigger" else DEFAULT_THRESHOLD
         threshold = entry.get("threshold")
         if threshold is None:
             threshold = old.threshold if old else default

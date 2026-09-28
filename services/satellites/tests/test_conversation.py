@@ -932,6 +932,29 @@ def test_a_rules_json_that_does_not_load_migrates_nothing(env, monkeypatch, tmp_
     assert (tmp_path / "wake_words.json").read_text() == before
 
 
+def test_a_word_with_no_action_yet_keeps_none_when_another_is_saved(env, monkeypatch, tmp_path):  # noqa: F811
+    """The page sends every word back with each Save, as GET gave it: this
+    one as a name, a threshold and satellites. Read as a word told nothing,
+    it took the default action, so a Save of another word made it echo what
+    was said after it, with nothing on the page saying it had changed."""
+    monkeypatch.setattr(wakeword, "ensure_models", lambda names, model_dir, **kw: None)
+    monkeypatch.setattr(wakeword, "WakeWords", MarkerWords)
+    (tmp_path / "rules.json").write_text('{"version": 1, "rules": [{"id": ')
+    (tmp_path / "wake_words.json").write_text(json.dumps({"words": [
+        {"name": "hey_jarvis", "threshold": 0.5, "satellites": ["*"]}]}))
+    app = importlib.reload(importlib.import_module("app.main"))
+    with TestClient(app.app) as c:
+        words = c.get("/satellites/wake-words").json()["words"]
+        sent = [{k: w[k] for k in ("name", "threshold", "satellites")} for w in words]
+        sent.append({"name": "alexa", "threshold": 0.5, "satellites": ["*"], "mode": "command",
+                     "action": {"destination": {"type": "echo"}}})
+        r = c.put("/satellites/wake-words", json={"words": sent})
+        assert r.status_code == 200, r.text
+        after = {w["name"]: w for w in c.get("/satellites/wake-words").json()["words"]}
+    assert "mode" not in after["hey_jarvis"] and "action" not in after["hey_jarvis"], after
+    assert after["alexa"]["mode"] == "command"
+
+
 # ---- barge-in ------------------------------------------------------------------------------------
 
 
