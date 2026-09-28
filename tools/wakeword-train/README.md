@@ -21,11 +21,14 @@ every version pinned. It runs on a GPU with 4 GB of memory.
 | `train.py` | the driver: `prepare` the data, `train` models in order, make `heldout` clips |
 | `evaluate.py` | loads each `.onnx` as the hub does and measures it |
 | `make_say_clips.py` | makes held-out test clips with macOS `say` (Mac only), in English voices and in the accents you name |
-| `phrases.yaml` | the wake words: spellings, confusable phrases, test phrases |
+| `phrases.yaml` | the wake words to train, as examples to replace with yours: spellings, confusable phrases, test phrases |
 
 ## Quick start
 
-On the GPU host, as a user who owns the work directory:
+First put your own wake words in `phrases.yaml`, before the image is built:
+the build copies it in. The words there are examples, the ones the
+measurements below were made with; the file's comments say what each field
+does. Then, on the GPU host, as a user who owns the work directory:
 
 ```bash
 sudo mkdir -p /srv/wakeword-train && sudo chown "$USER": /srv/wakeword-train
@@ -36,7 +39,7 @@ run() {
     --user "$(id -u):$(id -g)" -v /srv/wakeword-train:/srv/wakeword-train wakeword-train:1 "$@"
 }
 run prepare                                   # about 20 GB, once
-run train --profile smoke --only hey_claude   # prove the pipeline, about 10 min
+run train --profile smoke --only hey_claude   # one word of phrases.yaml proves the pipeline: 10 min
 ```
 
 On the Mac, held-out clips from `say` (it writes files and plays nothing).
@@ -48,7 +51,8 @@ uv run tools/wakeword-train/make_say_clips.py --out /tmp/heldout --accent pt_BR
 rsync -a /tmp/heldout/ gpu-host:/srv/wakeword-train/data/heldout/
 ```
 
-Then the full run, detached:
+Then the full run, detached. It trains every model in `phrases.yaml`, about
+85 minutes each; add `--only` and your words' names to train fewer:
 
 ```bash
 sudo docker run -d --name wakeword-train --restart=no --gpus all --cpus 4 \

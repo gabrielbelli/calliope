@@ -1,6 +1,13 @@
 # The wake words to train. Each key under `models` is the model name and its
 # file name (<name>.onnx), the name the hub is given.
 #
+# THESE ARE EXAMPLES: the nine words the measurements in README.md were made
+# with. Replace them with your own, or train only yours with --only, or keep
+# yours in a file of your own and pass it with --phrases. `train --profile
+# full` with neither trains every model below, about 85 minutes each on a
+# 4 GB GPU. hey_chat_gpt shows letters spelt out, gemini a second reading,
+# and grok and lumos the `pronunciations` a word missing from CMUdict needs.
+#
 #   phrases         What the LibriTTS-R generator says (openWakeWord's
 #                   target_phrase). Spell it the way espeak-ng should read it:
 #                   "g p t" gives three stressed letters, "gpt" one acronym
