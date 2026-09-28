@@ -4240,7 +4240,7 @@ const SAT_COPY = {
   fixColour: "Pick the ring colour with the colour picker.",
   fixPauseFollow: "Pause for 0.2 to 3 seconds before a follow-up ends.",
   fixCooldown: "Make the cooldown 0 to 600 seconds.",
-  fixPhrase: "Keep each end phrase to 64 characters.",
+  fixPhrase: "Keep to 64 end phrases, each of 64 characters at most.",
   wwFix: "{word} needs a fix before the wake words can be saved.",
   wwUnfinished: "Finish setting up {word} to save the wake words.",
   wwModelChoose: "Choose an .onnx file first.",
@@ -5492,6 +5492,9 @@ const WAKE_TOOLS = ["web_search", "weather"];
 /* The pause that ends a command (and a follow-up), in milliseconds as the hub
    takes it; the page shows seconds. */
 const WAKE_PAUSE = { low: 200, high: 3000 };
+/* A conversation's end phrases: how many, and how long each may be
+   (router.ConversationSettings and its EndPhrase). */
+const WAKE_PHRASES = { most: 64, longest: 64 };
 const WAKE_LANG = /^([a-z]{2,3}(-[A-Za-z0-9]{2,8})*|auto)$/;
 const WAKE_ENV = /^[A-Z][A-Z0-9_]{0,63}$/;
 /* The hub's own settings (destinations.hub_setting): under its prefix, with
@@ -5764,6 +5767,11 @@ function wakeField(w, key, raw) {
 }
 
 function wakeWithin(v, low, high) { return typeof v === "number" && isFinite(v) && v >= low && v <= high; }
+/* Too many end phrases, or one too long. The box takes 2000 characters, so
+   seventy short ones passed here and came back from the hub as a 422. */
+function wakePhrasesBad(list) {
+  return !!list && (list.length > WAKE_PHRASES.most || list.some(p => p.length > WAKE_PHRASES.longest));
+}
 
 /* A base URL pasted as a provider's whole endpoint (its curl example's), cut
    back to the base as the hub cuts it (destinations._trim_endpoint), so the
@@ -5811,7 +5819,7 @@ function wakeProblem(w, words) {
     const c = w.conversation || {};
     if ("follow_up_s" in c && !wakeWithin(c.follow_up_s, 1, 60)) return SAT_COPY.fixFollow;
     if ("silence_ms" in c && !wakeWithin(c.silence_ms, WAKE_PAUSE.low, WAKE_PAUSE.high)) return SAT_COPY.fixPauseFollow;
-    if ((c.end_phrases || []).some(p => p.length > 64)) return SAT_COPY.fixPhrase;
+    if (wakePhrasesBad(c.end_phrases)) return SAT_COPY.fixPhrase;
   }
   return "";
 }

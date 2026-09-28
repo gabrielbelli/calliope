@@ -279,6 +279,21 @@ def test_a_word_takes_its_own_ring_colour_and_can_go_back_to_the_default(tmp_pat
     assert got["cleared"]["colour"] is None
 
 
+def test_more_end_phrases_than_the_hub_takes_are_named_before_save(tmp_path):
+    """The box takes 2000 characters and the hub 64 phrases: seventy short
+    ones passed the page and came back as a 422."""
+    got = run(tmp_path, MODERN + """
+      await satellitesRefresh();
+      wakeEdit("hey_jarvis", w => wakeSetMode(w, "conversation", "hey_jarvis"));
+      const say = text => { wakeEdit("hey_jarvis", w => wakeField(w, "c.end_phrases", text));
+                            return wakeProblem(WAKE.draft.find(w => w.name === "hey_jarvis"), wakeEffective()); };
+      const many = n => Array.from({ length: n }, (_, i) => "stop " + i).join(", ");
+      console.log(JSON.stringify({ seventy: say(many(70)), sixty_four: say(many(64)), long: say("x".repeat(65)) }));
+    """)
+    fix = "Keep to 64 end phrases, each of 64 characters at most."
+    assert got == {"seventy": fix, "sixty_four": "", "long": fix}, got
+
+
 def test_a_conversation_word_keeps_listening_and_hands_over_to_nobody(tmp_path):
     """A conversation's follow-up and end phrases are sent; a fallback is a
     command's, and switching to conversation takes it off."""

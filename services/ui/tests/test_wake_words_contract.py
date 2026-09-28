@@ -291,6 +291,20 @@ def test_the_pauses_the_page_allows_are_the_hubs():
         assert bounds(router[cls]) == (int(pause["low"]), int(pause["high"])), cls
 
 
+def test_the_end_phrases_the_page_allows_are_the_hubs():
+    """How many and how long: the list's max_length and each phrase's."""
+    router = {n.name: n for n in HUB_ROUTER.body if isinstance(n, ast.ClassDef)}
+    most = dict(re.findall(r"(most|longest): (\d+)", re.search(r"const WAKE_PHRASES = \{([^}]*)\}", CODE).group(1)))
+    field = next(a for a in router["ConversationSettings"].body
+                 if isinstance(a, ast.AnnAssign) and a.target.id == "end_phrases")
+    assert {k.arg: k.value.value for k in field.value.keywords}["max_length"] == int(most["most"])
+    phrase = next(n for n in HUB_ROUTER.body if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
+                  and n.targets[0].id == "EndPhrase")
+    longest = [k.value.value for c in ast.walk(phrase) if isinstance(c, ast.Call)
+               for k in c.keywords if k.arg == "max_length"]
+    assert longest == [int(most["longest"])]
+
+
 def test_try_a_word_sends_exactly_what_the_routing_test_takes():
     body = hub_class("TryBody", HUB_ROUTER)
     taken = {a.target.id for a in body.body if isinstance(a, ast.AnnAssign)}
