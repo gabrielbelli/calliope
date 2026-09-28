@@ -12,7 +12,10 @@ enum class Status : uint8_t {
   HubLost,      // was adopted, hub unreachable
 };
 
-enum class Mode : uint8_t { Off, Solid, Pulse, Spin, Pixels };
+// Listen: the ring breathes softly and a brighter arc glides towards the
+// talker (direction in degrees, as the hub's direction of arrival; negative
+// until there is one), animated here so it never looks like a stalled frame.
+enum class Mode : uint8_t { Off, Solid, Pulse, Spin, Pixels, Listen };
 
 void lights_begin();
 // Dark overrides every layer, status included: a bedroom satellite stays unlit
@@ -32,5 +35,7 @@ void lights_status(Status s);
 void lights_muted(bool muted);
 void lights_identify(uint32_t ms);
 void lights_ota(int percent);  // -1 clears
-// Hub layer. pixels is LED_COUNT * 3 bytes when mode is Pixels.
-void lights_hub(Mode mode, uint8_t r, uint8_t g, uint8_t b, uint8_t brightness, const uint8_t *pixels);
+// Hub layer. pixels is LED_COUNT * 3 bytes when mode is Pixels; direction is
+// read in Listen only.
+void lights_hub(Mode mode, uint8_t r, uint8_t g, uint8_t b, uint8_t brightness, const uint8_t *pixels,
+                float direction = -1);

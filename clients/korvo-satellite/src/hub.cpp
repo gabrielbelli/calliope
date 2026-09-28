@@ -237,6 +237,10 @@ static void send_hello() {
   spk["channels"] = 1;
   spk["format"] = "s16le";
   caps["lights"] = LED_COUNT;
+  // The light modes this firmware draws; older firmware sends none, and the
+  // hub then sticks to the first five.
+  JsonArray modes = caps["light_modes"].to<JsonArray>();
+  for (const char *m : {"off", "solid", "pulse", "spin", "pixels", "listen"}) modes.add(m);
   JsonArray b = caps["buttons"].to<JsonArray>();
   for (uint8_t i = 1; i <= BUTTON_COUNT; i++) b.add(button_name((Button)i));
   // What button_actions may name: the hub sends only these, and only to a
@@ -414,6 +418,7 @@ static Mode parse_mode(const char *m) {
   if (!strcmp(m, "pulse")) return Mode::Pulse;
   if (!strcmp(m, "spin")) return Mode::Spin;
   if (!strcmp(m, "pixels")) return Mode::Pixels;
+  if (!strcmp(m, "listen")) return Mode::Listen;
   return Mode::Off;
 }
 
@@ -444,8 +449,10 @@ static void on_text(const char *text, size_t len) {
     JsonArrayConst p = msg["pixels"];
     for (size_t i = 0; i < LED_COUNT && i < p.size(); i++)
       for (int k = 0; k < 3; k++) px[3 * i + k] = p[i][k] | 0;
+    JsonVariantConst dir = msg["direction"];
     lights_hub(parse_mode(msg["mode"]), msg["color"][0] | 0, msg["color"][1] | 0, msg["color"][2] | 0,
-               msg["brightness"] | 64, p.size() ? px : nullptr);
+               msg["brightness"] | 64, p.size() ? px : nullptr,
+               dir.is<float>() || dir.is<int>() ? dir.as<float>() : -1.0f);
   } else if (!strcmp(type, "identify")) {
     lights_identify((msg["seconds"] | 5) * 1000);
   } else if (!strcmp(type, "reboot")) {
