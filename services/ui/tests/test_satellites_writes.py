@@ -665,6 +665,8 @@ def test_airplay_says_what_plays_from_whom_and_how(tmp_path):
     got = run(tmp_path, """
       const ap = { running: true, session: true, playing: true, client: "Gabriel's iPhone",
                    title: "Clair de Lune", artist: "Debussy", album: "Suite bergamasque", volume: 50,
+                   client_info: { client_model: "iPhone15,2" }, progress: { position_s: 83, duration_s: 245 },
+                   track: { genre: "Classical", year: 1905, kind: "AAC audio file", bitrate_kbps: 256 },
                    stream: { format: "s32le 2ch 44100Hz", rate: 44100, bits: 32, channels: 2,
                              bitrate_kbps: 2822, latency_ms: 200 } };
       console.log(JSON.stringify({
@@ -677,8 +679,10 @@ def test_airplay_says_what_plays_from_whom_and_how(tmp_path):
         idle: satAirPlayFacts({ running: true, session: false }),
         line: satPlayingWhat(ap) }));
     """)
-    assert got["facts"] == [["Status", "Playing"], ["From", "Gabriel's iPhone"],
-                            ["Now playing", "Clair de Lune · Debussy"], ["Album", "Suite bergamasque"],
+    assert got["facts"] == [["Status", "Playing"], ["From", "Gabriel's iPhone (iPhone15,2)"],
+                            ["Now playing", "Clair de Lune · Debussy"], ["Album", "Suite bergamasque (1905)"],
+                            ["Genre", "Classical"], ["Position", "1:23 / 4:05"],
+                            ["Original file", "AAC audio file, 256 kb/s"],
                             ["Source", "ALAC, lossless · 44.1 kHz · 16-bit · stereo"],
                             ["Bit rate", "1,411 kb/s"], ["Handed on as", "44.1 kHz · 32-bit · stereo"],
                             ["Played at", "44.1 kHz · 16-bit · stereo"],
@@ -736,3 +740,32 @@ def test_a_speaker_with_no_microphone_is_online_or_playing_never_not_listening(t
     """)
     assert got["idle"] == ["Online", "A speaker, with no microphone to listen with"]
     assert got["playing"] == ["Playing", "Clair de Lune, from Gabriel's iPhone"]
+
+
+def test_each_output_says_its_quality_and_the_pis_own_jack_is_starred_with_its_limits(tmp_path):
+    got = run(tmp_path, """
+      const realtek = { name: "alsa_output.usb-Realtek", description: "Realtek USB2.0 Audio Analog Stereo",
+                        quality: { kind: "usb", dac: true, formats: ["S16_LE", "S24_3LE", "S32_LE"],
+                                   bits: [16, 24, 32], rates: [44100, 48000, 96000, 192000, 384000] } };
+      const jack = { name: "alsa_output.platform-mailbox", description: "Built-in Audio Stereo",
+                     quality: { kind: "pwm", dac: false, bits: [16], rates: [48000] } };
+      const hdmi = { name: "alsa_output.hdmi", description: "Built-in Audio Digital Stereo (HDMI)",
+                     quality: { kind: "hdmi", dac: null } };
+      const pi = { id: "b827eb121359", adopted: true, online: true, caps: { speaker: {}, audio_devices: true },
+                   status: { audio: { sinks: [jack, realtek], sources: [], default_sink: realtek.name } } };
+      console.log(JSON.stringify({
+        labels: [satDeviceLabel(realtek), satDeviceLabel(jack), satDeviceLabel(hdmi),
+                 satDeviceLabel({ name: "x", description: "Plain" })],
+        options: satOutputOptions(pi, {}, [pi]).options.map(o => o[1]),
+        usb: satOutputQuality(realtek, "44.1 kHz · 32-bit · stereo"),
+        pwm: satOutputQuality(jack, "") }));
+    """)
+    assert got["labels"] == ["Realtek USB2.0 Audio Analog Stereo · USB DAC · up to 32-bit · 384 kHz",
+                             "Built-in Audio Stereo * · PWM, not a DAC",
+                             "Built-in Audio Digital Stereo (HDMI) · HDMI: the display's own DAC", "Plain"]
+    assert got["options"] == ["The system's default", "Built-in Audio Stereo * · PWM, not a DAC",
+                              "Realtek USB2.0 Audio Analog Stereo · USB DAC · up to 32-bit · 384 kHz"]
+    assert got["usb"] == "It takes 16, 24 or 32-bit, 44.1 to 384 kHz. Driven now at 44.1 kHz · 32-bit · stereo."
+    assert got["pwm"] == ("* The Pi's own jack is PWM from the processor, not a DAC. It plays 16-bit at 48 kHz "
+                          "only, with audible hiss and less detail than a DAC. For music, choose a USB DAC or a "
+                          "DAC HAT.")

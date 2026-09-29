@@ -4239,6 +4239,16 @@ const SAT_COPY = {
   apPaused: "paused",
   apBitrate: "{kbps} kb/s",
   apSource: "ALAC, lossless · 44.1 kHz · 16-bit · stereo",
+  qPwm: "PWM, not a DAC",
+  qHdmi: "HDMI: the display's own DAC",
+  qHat: "DAC HAT",
+  qUsb: "USB DAC · up to {up}",
+  qUsbPlain: "USB DAC",
+  qPwmWhy: "* The Pi's own jack is PWM from the processor, not a DAC.",
+  qPwmLimits: "It plays 16-bit at 48 kHz only, with audible hiss and less detail than a DAC.",
+  qPwmBetter: "For music, choose a USB DAC or a DAC HAT.",
+  qTakes: "It takes {bits}-bit, {rates}.",
+  qNow: "Driven now at {now}.",
   lineSpeaker: "A speaker, with no microphone to listen with",
   linePlaying: "{what}",
   powerOk: "Good",
@@ -4780,6 +4790,7 @@ function satAdoptedMarkup(u) {
           <select id="${u}-source" data-cfg="audio_source" data-text></select></div>
       </div>
       <div class="hint sat-outhint"></div>
+      <div class="hint sat-outq"></div>
 
       <div class="hint sat-output"></div>
       <div class="row sat-switches">
@@ -4802,6 +4813,12 @@ function satAdoptedMarkup(u) {
               <input type="text" id="${u}-apname" maxlength="64" data-cfg="airplay_name" data-text
                      spellcheck="false" autocomplete="off"></div>
           </div>
+          <div class="grid2">
+            <div><label for="${u}-apvol">Starting volume</label>
+              <div class="slider"><input type="range" id="${u}-apvol" min="0" max="100" step="5" data-cfg="airplay_volume">
+                <output for="${u}-apvol"></output></div></div>
+          </div>
+          <div class="hint">A phone that starts playing after a minute of quiet starts at this volume.</div>
           <div class="hint sat-aphint"></div>
           <dl class="facts sat-apfacts"></dl>
         </div>
@@ -5020,12 +5037,53 @@ function satNoteFor(li, from) {
    with a speaker. Values are "dev:<node name>" and "sat:<id>". A device or
    satellite chosen before and not there now stays chosen and says so, as a
    wake word's missing model does. */
+/* AN OUTPUT'S QUALITY, as the satellite reports it (calliope_pi pipewire.
+   quality): a USB DAC's formats and rates from the kernel, a DAC HAT, HDMI
+   (the display's own DAC), or the Pi's own jack, which is PWM from the
+   processor and not a DAC at all, marked with an asterisk wherever it is
+   named. */
+function satKhz(rate) {
+  return String(Math.round(rate / 100) / 10).replace(/\.0$/, "");
+}
+function satQualityLabel(q) {
+  if (!q) return "";
+  const bits = (q.bits || []).length ? Math.max(...q.bits) : null;
+  const rate = (q.rates || []).length ? Math.max(...q.rates) : null;
+  const up = [bits ? `${bits}-bit` : "", rate ? `${satKhz(rate)} kHz` : ""].filter(Boolean).join(" · ");
+  return q.kind === "pwm" ? SAT_COPY.qPwm : q.kind === "hdmi" ? SAT_COPY.qHdmi
+    : q.kind === "i2s" ? SAT_COPY.qHat
+    : q.kind === "usb" ? (up ? satText("qUsb", { up }) : SAT_COPY.qUsbPlain) : "";
+}
+function satDeviceLabel(d) {
+  const q = d.quality, label = satQualityLabel(q);
+  const name = (d.description || d.name) + (q && q.kind === "pwm" ? " *" : "");
+  return label ? `${name} · ${label}` : name;
+}
+/* The line under Output: what the chosen output is and takes, and what it
+   is driven at now; for the Pi's own jack, its limits. */
+function satOutputQuality(d, now) {
+  const q = d && d.quality;
+  if (!q) return "";
+  if (q.kind === "pwm") return [SAT_COPY.qPwmWhy, SAT_COPY.qPwmLimits, SAT_COPY.qPwmBetter].join(" ");
+  const bits = [...new Set(q.bits || [])].sort((a, b) => a - b);
+  const rates = [...new Set(q.rates || [])].sort((a, b) => a - b);
+  const said = [];
+  if (bits.length && rates.length) {
+    said.push(satText("qTakes", {
+      bits: bits.length > 1 ? `${bits.slice(0, -1).join(", ")} or ${bits[bits.length - 1]}` : bits[0],
+      rates: rates.length > 1 ? `${satKhz(rates[0])} to ${satKhz(rates[rates.length - 1])} kHz`
+        : `${satKhz(rates[0])} kHz` }));
+  }
+  if (now) said.push(satText("qNow", { now }));
+  return said.join(" ");
+}
+
 function satOutputOptions(n, cfg, list) {
   const audio = n.caps && n.caps.audio_devices && n.status && n.status.audio;
   const sinks = (audio && audio.sinks) || [];
   const own = audio
     ? [["dev:", SAT_COPY.audioDefault, SAT_COPY.outHere],
-       ...sinks.map(d => ["dev:" + d.name, d.description || d.name, SAT_COPY.outHere])]
+       ...sinks.map(d => ["dev:" + d.name, satDeviceLabel(d), SAT_COPY.outHere])]
     : [["dev:", SAT_COPY.outOwn, SAT_COPY.outHere]];
   if (audio && cfg.audio_sink && !sinks.some(d => d.name === cfg.audio_sink)) {
     own.push(["dev:" + cfg.audio_sink, satText("audioMissing", { name: cfg.audio_sink }), SAT_COPY.outHere]);
@@ -5048,6 +5106,13 @@ function satAudio(li, n, cfg) {
   satFillSelect(sel, out.options);
   if (!sel.dataset.held) sel.value = out.chosen;
   const via = cfg.output_satellite && SATELLITES.list.find(o => o.id === cfg.output_satellite);
+  const audioNow = n.caps && n.caps.audio_devices && n.status && n.status.audio;
+  const pickedName = cfg.output_satellite ? null
+    : (cfg.audio_sink || (audioNow && audioNow.default_sink) || null);
+  const picked = audioNow && pickedName && (audioNow.sinks || []).find(d => d.name === pickedName);
+  const nowAt = audioNow && audioNow.playing_at && audioNow.playing_at.name === pickedName
+    ? satPlayedAt(audioNow.playing_at) : "";
+  satSet(q(".sat-outq"), n.online && picked ? satOutputQuality(picked, nowAt) : "");
   satSet(q(".sat-outhint"), !cfg.output_satellite ? ""
     : via && via.online ? satText("outVia", { name: satName(via) })
     : satText("outFallback", { name: via ? satName(via) : cfg.output_satellite }));
@@ -5125,14 +5190,30 @@ function satPlayedAt(out) {
   return satFormat(out.format) + (out.state && out.state !== "running" ? ` (${out.state})` : "");
 }
 
+/* 245 s as "4:05". */
+function satClockTime(seconds) {
+  const t = Math.max(0, Math.round(seconds || 0));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
+}
+
 function satAirPlayFacts(ap, out) {
   if (!ap || !ap.session) return [];
-  const s = ap.stream || {};
+  const s = ap.stream || {}, t = ap.track || {}, c = ap.client_info || {}, p = ap.progress;
   const now = [ap.title, ap.artist].filter(Boolean).join(" · ");
+  const from = ap.client ? ap.client + (c.client_model ? ` (${c.client_model})` : "") : "";
+  const album = ap.album ? ap.album + (t.year ? ` (${t.year})` : "") : "";
+  /* THE PHONE'S OWN FILE, as it describes it ("AAC audio file", 256 kb/s):
+     what the music was before AirPlay carried it, which no setting here can
+     improve on. */
+  const original = [t.kind, t.bitrate_kbps ? `${t.bitrate_kbps} kb/s` : "",
+                    t.sample_rate ? `${satKhz(t.sample_rate)} kHz` : ""].filter(Boolean).join(", ");
   return [["Status", ap.playing ? "Playing" : "Paused"],
-    ["From", ap.client || ""],
+    ["From", from],
     ["Now playing", now],
-    ["Album", ap.album || ""],
+    ["Album", album],
+    ["Genre", t.genre || ""],
+    ["Position", p && p.duration_s ? `${satClockTime(p.position_s)} / ${satClockTime(p.duration_s)}` : ""],
+    ["Original file", original],
     /* WHAT AIRPLAY SENDS, and not what the stream's container makes of it:
        classic AirPlay is always ALAC, lossless, 16-bit at 44.1 kHz, 1,411
        kb/s. Shairport Sync hands it on at 32 bits so the phone's volume costs
@@ -5154,6 +5235,7 @@ function satAirPlay(li, n, cfg) {
   const name = q('[data-cfg="airplay_name"]');
   if (!name.dataset.held && name !== document.activeElement) name.value = cfg.airplay_name || "";
   name.placeholder = satName(n);
+  satLevel(q('[data-cfg="airplay_volume"]'), typeof cfg.airplay_volume === "number" ? cfg.airplay_volume : 70);
   const ap = n.online ? (n.status && n.status.airplay) || null : null;
   satSet(q(".sat-ap .sum-note"), n.online ? satAirPlayNote(cfg, ap) : "");
   satSet(q(".sat-aphint"), !on || !n.online ? ""
