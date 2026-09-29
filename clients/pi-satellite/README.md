@@ -15,7 +15,31 @@ Tested target: Raspberry Pi 3 Model B+ on Raspberry Pi OS Lite 64-bit
 | Updates | Signed bundles from the hub, installed beside the running release, rolled back if the new one does not reach the hub within 180 s |
 | Wi-Fi | On first boot, or after three minutes without a network, an open network `calliope-sat-XXXX` with a setup page, as on the ESP32 |
 
-AirPlay and Bluetooth come next (they share this output through PipeWire).
+| AirPlay | An AirPlay receiver under the satellite's name (or one you give it), on the same output, turned down while the satellite speaks or someone talks to it |
+
+Bluetooth comes next, through the same output.
+
+## AirPlay
+
+Shairport Sync from Debian runs as the `calliope` user
+(`calliope-airplay.service`, a user unit) and plays through PipeWire, so it
+goes to the output chosen on the Satellites tab and mixes with the
+satellite's voice. The tab turns it on and off (**AirPlay**) and names it
+(**AirPlay name**, the satellite's own name when empty); the agent writes
+`~/.config/calliope/shairport-sync.conf` and restarts it only when the name
+changes. Debian's package runs its own system service straight to ALSA:
+`install.sh` disables it.
+
+This is **classic AirPlay**: trixie's Shairport Sync 4.3.7 is built without
+AirPlay 2, so iPhones, iPads and Macs list it, but multi-room and the Home
+app do not. AirPlay 2 needs Shairport Sync 5.5 with NQPTP, which Debian
+ships only from forky.
+
+**Ducking.** While the satellite plays a reply, and while the hub holds a
+duck (someone is speaking to it, or to a satellite that plays through it),
+every other stream goes down to 20% of its own volume, and back afterwards.
+The agent does it with `pactl` on each stream (`airplay.Ducker`), and never
+touches its own (`media.role` Assistant).
 
 ## Set up a card, once
 

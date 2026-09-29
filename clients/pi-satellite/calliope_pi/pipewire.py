@@ -171,6 +171,9 @@ class Player:
         self.until = 0.0          # time.monotonic() when what was written has played
         self.dropped = 0          # writes lost to a player that failed
         self._closer: asyncio.Task | None = None
+        # Told True when a voice starts playing and False when it has ended,
+        # so the agent can turn other streams down meanwhile (airplay.Ducker).
+        self.on_active = None
 
     def buffered_ms(self) -> int:
         return max(0, int((self.until - time.monotonic()) * 1000))
@@ -183,6 +186,8 @@ class Player:
                 *_cat("playback", self.rate, 1, self.target, self.role),
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
+            if self.on_active is not None:
+                await self.on_active(True)
         try:
             self.proc.stdin.write(pcm)
             await self.proc.stdin.drain()
@@ -205,6 +210,8 @@ class Player:
 
     async def _stop(self, drain: bool) -> None:
         proc, self.proc = self.proc, None
+        if proc is not None and self.on_active is not None:
+            await self.on_active(False)
         if proc is None or proc.returncode is not None:
             return
         if drain:

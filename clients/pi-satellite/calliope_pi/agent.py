@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from . import bundle, frames, paths, pipewire, system, version
+from . import airplay, bundle, frames, paths, pipewire, system, version
 from .state import State, load, save
 
 log = logging.getLogger("calliope.agent")
@@ -44,6 +44,7 @@ DEVICES_S = 10.0
 BACKOFF = (1, 2, 5, 10, 20, 30)
 EARCON_MAX, EARCON_MAX_BYTES, EARCON_RATE = 16, 512 * 1024, 48000
 ROOT = ["sudo", "-n", "/usr/local/sbin/calliope-root"]
+SPEAK_DUCK = 0.2       # other streams, while the satellite itself speaks
 
 
 def socket_url(hub: str) -> str:
@@ -167,6 +168,11 @@ class Agent:
         self.seq = 0
         self.duck: int | None = None
         self.welcomed = False
+        self.airplay = airplay.AirPlay()
+        self.ducker = airplay.Ducker()
+        self.speaking = False
+        self.player.on_active = self._speaking
+        self.airplay_state: dict | None = None
 
     # -- sending --
 
@@ -194,12 +200,18 @@ class Agent:
         key = bundle.key_id()
         if key:
             caps["ota_key"] = key
+        if airplay.available():
+            caps["airplay"] = {"version": 1}
         return caps
 
     def settings(self) -> dict:
         c = self.st.config
         return {k: c.get(k) for k in ("volume", "mic_gain_db", "mic_enabled", "speaker_enabled",
-                                      "audio_sink", "audio_source", "echo_reference")}
+                                      "audio_sink", "audio_source", "echo_reference",
+                                      "airplay_enabled", "airplay_name")}
+
+    def airplay_name(self) -> str:
+        return self.st.config.get("airplay_name") or self.st.name or f"calliope-sat-{self.id[-4:]}"
 
     def hello(self) -> dict:
         rolled = None
@@ -217,7 +229,7 @@ class Agent:
                 "load": round(os.getloadavg()[0], 2),
                 "muted": False, "mic_dropped": self.mic_dropped, "spk_dropped": self.player.dropped,
                 "spk_buffered_ms": self.player.buffered_ms(), "duck": self.duck, "earcons_ready": True,
-                "audio": self.devices.view(), **self.settings()}
+                "audio": self.devices.view(), "airplay": self.airplay_state, **self.settings()}
 
     # -- settings --
 
@@ -235,7 +247,18 @@ class Agent:
         if self.devices.sources:
             await pipewire.set_source_volume(source, 10 ** (float(c.get("mic_gain_db") or 0) / 20))
         self.player.target = sink.name if sink else None
+        await self.airplay.apply(bool(c.get("airplay_enabled", True)), self.airplay_name())
         await self.refresh_recording()
+
+    # -- ducking: other streams go down while the satellite speaks, or while the hub asks --
+
+    async def _speaking(self, active: bool) -> None:
+        self.speaking = active
+        await self._duck_now()
+
+    async def _duck_now(self) -> None:
+        level = SPEAK_DUCK if self.speaking else (self.duck / 100 if self.duck is not None else None)
+        await self.ducker.set(level)
 
     async def refresh_recording(self) -> None:
         c = self.st.config
@@ -331,9 +354,11 @@ class Agent:
             if pcm and self.st.config.get("speaker_enabled", True):
                 asyncio.create_task(self.player.play_once(pcm, EARCON_RATE))
         elif kind == "duck":
-            self.duck = int(msg.get("level") or 0)
+            self.duck = max(0, min(100, int(msg.get("level") or 0)))
+            await self._duck_now()
         elif kind == "unduck":
             self.duck = None
+            await self._duck_now()
         elif kind == "ota":
             await self.begin_update(msg)
         return None
@@ -465,10 +490,17 @@ class Agent:
                 with contextlib.suppress(Exception):
                     await self.ws.close()
                 return
+            self.airplay_state = await self._airplay_state()
             with contextlib.suppress(Exception):
                 await self.send(self.status())
             if self.welcomed:
                 await self.refresh_recording()
+
+    async def _airplay_state(self) -> dict | None:
+        if not airplay.available():
+            return None
+        return {"enabled": bool(self.st.config.get("airplay_enabled", True)), "name": self.airplay_name(),
+                "running": await self.airplay.running(), "error": self.airplay.error}
 
     async def run(self) -> None:
         tries = 0

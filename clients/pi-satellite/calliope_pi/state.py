@@ -18,6 +18,8 @@ DEFAULT_CONFIG = {
     "audio_sink": None,        # node.name of the output; None keeps PipeWire's default
     "audio_source": None,      # node.name of the microphone; None keeps the default
     "echo_reference": True,    # send what the output plays as channel 0
+    "airplay_enabled": True,   # an AirPlay receiver (airplay.py), where shairport-sync is installed
+    "airplay_name": None,      # what phones list it as; None is the satellite's own name
 }
 CONFIG_KEYS = frozenset(DEFAULT_CONFIG)
 

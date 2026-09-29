@@ -6,12 +6,19 @@ set -eu
 R="${CALLIOPE_RELEASE:-$(cd "$(dirname "$0")" && pwd)}"
 
 # Packages, only the missing ones (an update that needs none installs none).
-PKGS="pipewire pipewire-pulse pipewire-alsa pipewire-bin wireplumber python3-websockets python3-cryptography"
+PKGS="pipewire pipewire-pulse pipewire-alsa pipewire-bin wireplumber pulseaudio-utils python3-websockets python3-cryptography shairport-sync"
 missing=""
 for p in $PKGS; do dpkg -s "$p" >/dev/null 2>&1 || missing="$missing $p"; done
 if [ -n "$missing" ]; then
   apt-get update -q
   DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $missing
+fi
+
+# Shairport Sync's own system service plays straight to ALSA as its own
+# user; the satellite runs it as calliope instead, through PipeWire, under
+# the name the hub gives it (calliope-airplay.service, a user unit).
+if systemctl list-unit-files shairport-sync.service >/dev/null 2>&1; then
+  systemctl disable --now shairport-sync.service >/dev/null 2>&1 || true
 fi
 
 # The user the agent runs as: made by cloud-init on a card set up with
@@ -31,6 +38,11 @@ visudo -cqf /etc/sudoers.d/calliope.new && mv /etc/sudoers.d/calliope.new /etc/s
 # The services and timers, with the agent's user id filled in.
 for f in "$R"/systemd/*; do
   sed "s/@UID@/$UID_/g" "$f" > "/etc/systemd/system/$(basename "$f")"
+done
+# The units calliope's own session runs (AirPlay).
+install -d /etc/systemd/user
+for f in "$R"/systemd-user/*; do
+  install -m 644 "$f" "/etc/systemd/user/$(basename "$f")"
 done
 # PipeWire runs in calliope's own session, started at boot without a login.
 loginctl enable-linger calliope

@@ -1,0 +1,135 @@
+"""AirPlay: Shairport Sync's configuration, the user service, and ducking
+every other stream while the satellite speaks or the hub asks. systemctl and
+pactl are fakes that record what they were asked."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import pytest
+
+from calliope_pi import agent as agentmod
+from calliope_pi import airplay, pipewire, state
+
+
+def sink_input(index: int, volume: int, role: str | None = None, app: str = "AirPlay") -> dict:
+    props = {"application.name": app}
+    if role:
+        props["media.role"] = role
+    return {"index": index, "properties": props,
+            "volume": {"front-left": {"value": volume, "value_percent": "?"},
+                       "front-right": {"value": volume, "value_percent": "?"}}}
+
+
+@pytest.fixture
+def shell(monkeypatch):
+    """A fake systemctl and pactl: what was run, and what pactl lists."""
+    world = {"ran": [], "inputs": [], "active": "active"}
+
+    async def run(*argv, timeout=15.0):
+        world["ran"].append(argv)
+        if argv[:2] == ("pactl", "-f"):
+            return 0, json.dumps(world["inputs"])
+        if argv[:3] == ("systemctl", "--user", "is-active"):
+            return 0, world["active"] + "\n"
+        return 0, ""
+    monkeypatch.setattr(airplay, "_run", run)
+    monkeypatch.setattr(airplay, "available", lambda: True)
+    return world
+
+
+def test_the_name_is_quoted_so_a_name_cannot_break_the_configuration():
+    text = airplay.config('Kitchen "big" speaker\\ \n')
+    assert 'name = "Kitchen \\"big\\" speaker\\\\ ";' in text
+    assert 'output_backend = "pa";' in text and 'application_name = "AirPlay";' in text
+
+
+async def test_it_runs_as_a_user_service_and_restarts_only_when_its_name_changed(shell, tmp_path):
+    ap = airplay.AirPlay(conf=tmp_path / "shairport-sync.conf")
+    await ap.apply(True, "pi-edifier")
+    assert ("systemctl", "--user", "restart", airplay.UNIT) in shell["ran"]
+    assert 'name = "pi-edifier";' in (tmp_path / "shairport-sync.conf").read_text()
+    shell["ran"].clear()
+    await ap.apply(True, "pi-edifier")
+    assert ("systemctl", "--user", "start", airplay.UNIT) in shell["ran"], "no restart: the music goes on"
+    assert not any(a[2] == "restart" for a in shell["ran"] if a[0] == "systemctl")
+    await ap.apply(False, "pi-edifier")
+    assert shell["ran"][-1] == ("systemctl", "--user", "disable", "--now", airplay.UNIT)
+
+
+def test_the_satellites_own_voice_is_never_ducked():
+    listed = [sink_input(3, 65536), sink_input(9, 32768, role="Assistant", app="pw-cat")]
+    assert airplay.others(listed) == [{"index": 3, "volume": 1.0, "app": "AirPlay"}]
+
+
+async def test_ducking_lowers_every_other_stream_and_gives_each_its_own_volume_back(shell):
+    shell["inputs"] = [sink_input(3, 65536), sink_input(4, 32768, app="Bluetooth")]
+    d = airplay.Ducker()
+    await d.set(0.2)
+    await asyncio.sleep(0.05)
+    sets = [a for a in shell["ran"] if a[:2] == ("pactl", "set-sink-input-volume")]
+    assert ("pactl", "set-sink-input-volume", "3", "0.200") in sets
+    assert ("pactl", "set-sink-input-volume", "4", "0.100") in sets
+    shell["inputs"].append(sink_input(7, 65536, app="Late"))   # starts while ducked
+    await asyncio.sleep(0.6)
+    assert ("pactl", "set-sink-input-volume", "7", "0.200") in shell["ran"]
+    shell["ran"].clear()
+    await d.set(None)
+    back = {a[2]: a[3] for a in shell["ran"] if a[:2] == ("pactl", "set-sink-input-volume")}
+    assert back == {"3": "1.000", "4": "0.500", "7": "1.000"}
+
+
+async def test_the_agent_ducks_while_it_speaks_and_while_the_hub_holds_a_duck(shell, monkeypatch):
+    monkeypatch.setattr(agentmod.system, "satellite_id", lambda: "b827eb121359")
+    a = agentmod.Agent(state.State(hub="ws://x", token="t", name="pi-edifier"))
+    levels = []
+
+    async def fake_set(level):
+        levels.append(level)
+    a.ducker.set = fake_set
+    await a.on_text({"type": "duck", "level": 20, "ms": 60000})
+    await a._speaking(True)
+    await a.on_text({"type": "unduck"})      # the reply began: the hub lifts its duck
+    await a._speaking(False)
+    assert levels == [0.2, agentmod.SPEAK_DUCK, agentmod.SPEAK_DUCK, None]
+    assert a.caps()["airplay"] == {"version": 1}
+    assert a.airplay_name() == "pi-edifier"
+    a.st.config["airplay_name"] = "Living room"
+    assert a.airplay_name() == "Living room"
+
+
+async def test_the_player_says_when_a_voice_starts_and_ends(monkeypatch):
+    seen = []
+
+    class Proc:
+        returncode = None
+
+        class stdin:
+            @staticmethod
+            def write(b):
+                pass
+
+            @staticmethod
+            async def drain():
+                pass
+
+            @staticmethod
+            def close():
+                pass
+
+        async def wait(self):
+            self.returncode = 0
+
+    async def spawn(*a, **k):
+        return Proc()
+    monkeypatch.setattr(pipewire.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(pipewire, "IDLE_S", 0.05)
+    p = pipewire.Player()
+
+    async def on_active(active):
+        seen.append(active)
+    p.on_active = on_active
+    await p.write(b"\x00\x00" * 480)       # 10 ms
+    await asyncio.sleep(0.2)
+    assert seen == [True, False]

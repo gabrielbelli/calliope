@@ -1,0 +1,13 @@
+[Unit]
+Description=AirPlay receiver for the Calliope satellite (Shairport Sync)
+After=pipewire-pulse.service
+Wants=pipewire-pulse.service
+
+[Service]
+# Written by the agent (calliope_pi/airplay.py) with the satellite's name.
+ExecStart=/usr/bin/shairport-sync -c %h/.config/calliope/shairport-sync.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
