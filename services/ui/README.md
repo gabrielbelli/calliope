@@ -766,7 +766,9 @@ released** choice for each. The choices are Nothing, Talk (`ptt`), Stop,
 Mute mic (`mute`), Volume up, Volume down, Lights on/off (`lights`), Dimmer,
 Brighter and Webhook, which asks for its address. Every change sends the
 whole mapping as `buttons` in one `PATCH`. The hub refuses a mapping with no
-mute ([Buttons](../satellites/README.md#buttons)).
+mute on a button other than Side, since a stock board does not wire Side, and
+the page says so before it sends one
+([Buttons](../satellites/README.md#buttons)).
 
 **Device** holds what is set once:
 

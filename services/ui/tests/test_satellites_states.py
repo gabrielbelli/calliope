@@ -267,17 +267,21 @@ def test_a_row_says_what_it_listens_for_from_the_saved_words(tmp_path):
 def test_a_button_mapping_is_one_the_hub_accepts(tmp_path):
     """The hub replaces the whole mapping, refuses a webhook with a user in it
     or no scheme, and refuses a mapping with no mute left in it, since only a
-    button undoes the mute. Any button may do anything else, Rec included.
-    "none" is the default and is left out."""
+    button undoes the mute. A mute on Side alone does not count: a stock board
+    does not wire it, and the firmware made Rec the mute while the grid showed
+    Rec as Talk. Any button may do anything else, Rec included, and Side may
+    mute beside another. "none" is the default and is left out."""
     got = run(tmp_path, SAT + """
       const e = (button, edge, action, url) => ({ button, edge, action, url: url || "" });
       const mute = e("rec", "press", "mute");
       console.log(JSON.stringify({
         good: satMapping([e("play", "press", "ptt"), e("play", "release", "none"),
                           e("set", "press", "stop"), e("mode", "press", "webhook", "https://ha.local/hook"),
-                          e("key1", "press", "mute"), e("rec", "press", "lights"),
-                          e("vol_up", "release", "brighter")]),
+                          e("key1", "press", "lights"), e("rec", "press", "lights"),
+                          e("vol_up", "release", "brighter"), e("vol_down", "release", "mute")]),
         no_mute: satMapping([e("play", "press", "ptt"), e("rec", "press", "none")]),
+        side_only: satMapping([e("key1", "press", "mute"), e("rec", "press", "ptt")]),
+        side_too: satMapping([e("key1", "release", "mute"), e("mode", "press", "mute")]),
         userinfo: satMapping([mute, e("mode", "press", "webhook", "https://me:pw@ha.local/hook")]),
         scheme: satMapping([mute, e("mode", "press", "webhook", "ha.local/hook")]),
         empty: satMapping([mute, e("mode", "press", "webhook", "")]),
@@ -298,10 +302,13 @@ def test_a_button_mapping_is_one_the_hub_accepts(tmp_path):
     """)
     assert got["good"] == {"mapping": {
         "play": {"press": "ptt"}, "set": {"press": "stop"}, "mode": {"press": "webhook:https://ha.local/hook"},
-        "key1": {"press": "mute"}, "rec": {"press": "lights"}, "vol_up": {"release": "brighter"}}}, got
-    for refused in ("no_mute", "userinfo", "scheme", "empty"):
+        "key1": {"press": "lights"}, "rec": {"press": "lights"}, "vol_up": {"release": "brighter"},
+        "vol_down": {"release": "mute"}}}, got
+    for refused in ("no_mute", "side_only", "userinfo", "scheme", "empty"):
         assert "error" in got[refused], (refused, got[refused])
     assert "muted" in got["no_mute"]["error"]
+    assert "other than Side" in got["side_only"]["error"], got["side_only"]
+    assert got["side_too"] == {"mapping": {"key1": {"release": "mute"}, "mode": {"press": "mute"}}}, got
     assert got["note"] == "Play talks, Set stops, Mode calls a webhook", got
     # A key doing what it is printed with goes unsaid, unless that is all.
     assert got["note_device"] == "Mode dims, Side switches the lights", got

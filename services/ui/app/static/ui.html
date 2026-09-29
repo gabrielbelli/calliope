@@ -4058,7 +4058,9 @@ const SAT_COPY = {
   tryUpdating: "Blink and Show wait until this update finishes.",
   devOffline: "Offline, so Reboot, Move and Update wait for it to reconnect.",
   devUpdating: "Reboot, Move, Update and the ring's set-up wait until this update finishes.",
-  btnNoMute: "Keep Mute mic on one button at least, or a muted satellite could never be unmuted.",
+  /* Side does not count, as the hub and the firmware do not count it: a
+     stock board does not wire it, and the firmware makes Rec the mute. */
+  btnNoMute: "Keep Mute mic on one button other than Side, or a muted satellite could never be unmuted.",
   sideNeeds: "Needs R37 fitted and R50 removed on the board.",
   ringTop: "Move the lit LED with ◀ ▶ until it is at 12 o'clock, then press That's the top.",
   ringWay: "The bar runs from the brightest LED. Which way does it go, as you look at it?",
@@ -5031,6 +5033,8 @@ const SAT_VERBS = { ptt: "talks", stop: "stops", mute: "mutes", volume_up: "loud
                     volume_down: "quieter", lights: "switches", dimmer: "dims", brighter: "brightens" };
 /* The hub's ButtonAction pattern, so nothing is sent that it would refuse. */
 const SAT_WEBHOOK = /^https?:\/\/[^\s/?#@]+(\/\S*)?$/;
+/* The hub's MUTE_DOES_NOT_COUNT: a mute there is no way out of one. */
+const SAT_MUTE_DOES_NOT_COUNT = ["key1"];
 
 function satButtonName(key) {
   const k = String(key);
@@ -5062,8 +5066,13 @@ function satMapping(entries) {
     }
     (mapping[e.button] = mapping[e.button] || {})[e.edge] = act;
   }
-  /* The hub refuses a mapping without a mute: only a button undoes it. */
-  if (!Object.values(mapping).some(edges => Object.values(edges).includes("mute"))) {
+  /* The hub refuses a mapping without a mute, since only a button undoes
+     it, and a mute on Side (key1) alone does not count (the hub's
+     store.MUTE_DOES_NOT_COUNT): a stock board does not wire Side, and the
+     firmware would quietly make Rec the mute while this grid showed Rec
+     doing something else. */
+  if (!Object.entries(mapping).some(([key, edges]) =>
+        !SAT_MUTE_DOES_NOT_COUNT.includes(key) && Object.values(edges).includes("mute"))) {
     return { error: SAT_COPY.btnNoMute };
   }
   return { mapping };

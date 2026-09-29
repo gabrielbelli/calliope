@@ -460,6 +460,22 @@ def test_the_move_address_is_checked_as_the_hub_checks_it():
     assert "const SAT_WEBHOOK = /^https?:\\/\\/[^\\s/?#@]+(\\/\\S*)?$/;" in CODE
 
 
+def test_a_mute_on_side_alone_does_not_count_here_as_on_the_hub_and_the_board():
+    """The firmware stopped counting a mute on KEY1 (a stock board does not
+    wire it) and makes Rec the mute instead. The hub and this page counted
+    it, so a mapping saved without an error while Rec, shown as Talk, muted
+    on the device. The three lists of buttons that do not count agree."""
+    hub = (REPO / "services" / "satellites" / "app" / "store.py").read_text()
+    firmware = (REPO / "clients" / "korvo-satellite" / "src" / "hub.cpp").read_text()
+    on_hub = re.search(r"^MUTE_DOES_NOT_COUNT = frozenset\(\{(.*?)\}\)$", hub, re.M)
+    on_page = re.search(r"^const SAT_MUTE_DOES_NOT_COUNT = \[(.*?)\];$", CODE, re.M)
+    assert on_hub and on_page
+    names = lambda listed: set(re.findall(r'"([a-z0-9_]+)"', listed))
+    assert names(on_hub.group(1)) == names(on_page.group(1)) == {"key1"}
+    assert "mute |= a == Action::Mute && (Button)i != Button::Key1;" in firmware
+    assert "!SAT_MUTE_DOES_NOT_COUNT.includes(key)" in function("satMapping")
+
+
 def test_a_forgotten_row_hands_focus_on():
     body = function("satForgotten")
     assert "rows[at + 1] || rows[at - 1]" in body
