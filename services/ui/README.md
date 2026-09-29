@@ -747,7 +747,7 @@ Closed, a row shows the name, one state word and one line. Open, it has:
 | **Speaker**, **Microphone**, **Lights** | `speaker_enabled`, `mic_enabled`, `lights_enabled` | |
 | **Output** | `audio_sink` or `output_satellite` | Its own outputs first (a Linux satellite's devices from its last status and the system's default; the Korvo's speaker), then every other adopted satellite with a speaker. One chosen before and gone now stays chosen and says so. Chosen another satellite, the hint names where it plays, or that it plays on its own speaker while that one is offline |
 | **Microphone input** | `audio_source` | A Linux satellite only (caps `audio_devices`) |
-| **AirPlay** (its own section) | `airplay_enabled`, `airplay_name` | A satellite with caps `airplay` only. **On**, and **Name on phones** (the satellite's own when empty). Its summary says playing, paused, waiting, off or not running; under it, while a phone is connected: Status, From (the phone), Now playing, Album, Stream (rate, bits, channels), Bit rate (PCM), Delay here, and the phone's volume |
+| **AirPlay** (its own section) | `airplay_enabled`, `airplay_name` | A satellite with caps `airplay` only. **On**, and **Name on phones** (the satellite's own when empty). Its summary says playing, paused, waiting, off or not running; under it, while a phone is connected: Status, From (the phone), Now playing, Album, Source (classic AirPlay is always ALAC, lossless, 16-bit at 44.1 kHz), Bit rate (1,411 kb/s), Handed on as (the 32-bit stream into PipeWire), Played at (what the card is driven at), Delay here, and the phone's volume |
 
 A control for hardware a satellite does not have is not shown at all: a
 Raspberry Pi with no ring, buttons or microphone has no light brightness,
@@ -756,7 +756,8 @@ Listen or wake word link, and its **Blink** is **Chime** (three of its wake
 sounds). What it has but has switched off stays, greyed with the reason.
 Its closed row says **Playing** and the track while AirPlay plays, and
 otherwise that it is a speaker, not that it failed to listen. **Device**
-adds its temperature and whether its power supply is too low.
+adds its output format (what the card is driven at now), its temperature
+and whether its power supply is too low.
 | **Change wake words** | | Opens **Wake words** |
 
 Each change is one `PATCH /satellites/{id}`. A slider sends its value when

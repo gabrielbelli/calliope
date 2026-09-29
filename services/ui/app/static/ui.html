@@ -4238,6 +4238,7 @@ const SAT_COPY = {
   apPlaying: "playing",
   apPaused: "paused",
   apBitrate: "{kbps} kb/s",
+  apSource: "ALAC, lossless · 44.1 kHz · 16-bit · stereo",
   lineSpeaker: "A speaker, with no microphone to listen with",
   linePlaying: "{what}",
   powerOk: "Good",
@@ -5107,18 +5108,39 @@ function satAirPlayNote(cfg, ap) {
   return ap.playing ? SAT_COPY.apPlaying : ap.session ? SAT_COPY.apPaused : SAT_COPY.apIdle;
 }
 
-function satAirPlayFacts(ap) {
+/* "s32le 2ch 44100Hz", as PipeWire says it, as a person reads it:
+   "44.1 kHz · 32-bit · stereo". */
+function satFormat(spec) {
+  const m = /^([a-z]+?)(\d+)?(le|be|ne)?\s+(\d+)ch\s+(\d+)Hz/i.exec(spec || "");
+  if (!m) return spec || "";
+  const bits = m[1].toLowerCase().startsWith("float") ? `${m[2] || 32}-bit float` : m[2] ? `${m[2]}-bit` : "";
+  const ch = Number(m[4]), rate = Number(m[5]);
+  return [`${(rate / 1000).toFixed(1).replace(/\.0$/, "")} kHz`, bits,
+          ch === 2 ? "stereo" : ch === 1 ? "mono" : `${ch} channels`].filter(Boolean).join(" · ");
+}
+
+/* What the output card is driven at now, and whether it is running. */
+function satPlayedAt(out) {
+  if (!out || !out.format) return "";
+  return satFormat(out.format) + (out.state && out.state !== "running" ? ` (${out.state})` : "");
+}
+
+function satAirPlayFacts(ap, out) {
   if (!ap || !ap.session) return [];
   const s = ap.stream || {};
   const now = [ap.title, ap.artist].filter(Boolean).join(" · ");
-  const channels = s.channels === 2 ? "stereo" : s.channels === 1 ? "mono" : s.channels ? `${s.channels} channels` : "";
   return [["Status", ap.playing ? "Playing" : "Paused"],
     ["From", ap.client || ""],
     ["Now playing", now],
     ["Album", ap.album || ""],
-    ["Stream", s.rate ? [`${(s.rate / 1000).toFixed(1)} kHz`, s.bits ? `${s.bits}-bit` : "", channels]
-      .filter(Boolean).join(" · ") : ""],
-    ["Bit rate", s.bitrate_kbps ? satText("apBitrate", { kbps: s.bitrate_kbps.toLocaleString("en-GB") }) : ""],
+    /* WHAT AIRPLAY SENDS, and not what the stream's container makes of it:
+       classic AirPlay is always ALAC, lossless, 16-bit at 44.1 kHz, 1,411
+       kb/s. Shairport Sync hands it on at 32 bits so the phone's volume costs
+       no resolution; that is headroom, not more music. */
+    ["Source", SAT_COPY.apSource],
+    ["Bit rate", satText("apBitrate", { kbps: "1,411" })],
+    ["Handed on as", s.format ? satFormat(s.format) : ""],
+    ["Played at", satPlayedAt(out)],
     ["Delay here", s.latency_ms ? `${s.latency_ms} ms` : ""],
     ["Phone's volume", typeof ap.volume === "number" ? `${ap.volume}%` : ""]].filter(f => f[1]);
 }
@@ -5137,7 +5159,8 @@ function satAirPlay(li, n, cfg) {
   satSet(q(".sat-aphint"), !on || !n.online ? ""
     : ap && ap.error ? satText("apError", { error: ap.error })
     : ap && ap.running ? satText("apOn", { name: cfg.airplay_name || satName(n) }) : SAT_COPY.apStarting);
-  const facts = on ? satAirPlayFacts(ap) : [];
+  const audio = (n.status && n.status.audio) || {};
+  const facts = on ? satAirPlayFacts(ap, audio.playing_at) : [];
   const dl = q(".sat-apfacts");
   const sig = JSON.stringify(facts);
   if (dl.dataset.sig !== sig) {
@@ -5521,6 +5544,7 @@ function satDevice(li, n, s) {
     ["Wi-Fi signal", n.online ? rssiWords(st.rssi) : ""],
     ["Reply time", satLatency(n)],
     ["Output", n.online ? satOutput(n) : ""],
+    ["Output format", n.online ? satPlayedAt((st.audio || {}).playing_at) : ""],
     ["Temperature", n.online && typeof st.temp_c === "number" ? `${st.temp_c} °C` : ""],
     ["Power supply", !n.online ? "" : st.under_voltage === true ? SAT_COPY.powerLow
       : st.under_voltage === false ? SAT_COPY.powerOk : ""],

@@ -665,9 +665,12 @@ def test_airplay_says_what_plays_from_whom_and_how(tmp_path):
     got = run(tmp_path, """
       const ap = { running: true, session: true, playing: true, client: "Gabriel's iPhone",
                    title: "Clair de Lune", artist: "Debussy", album: "Suite bergamasque", volume: 50,
-                   stream: { rate: 44100, bits: 16, channels: 2, bitrate_kbps: 1411, latency_ms: 200 } };
+                   stream: { format: "s32le 2ch 44100Hz", rate: 44100, bits: 32, channels: 2,
+                             bitrate_kbps: 2822, latency_ms: 200 } };
       console.log(JSON.stringify({
-        facts: satAirPlayFacts(ap),
+        facts: satAirPlayFacts(ap, { format: "s16le 2ch 44100Hz", state: "running" }),
+        formats: [satFormat("float32le 2ch 96000Hz"), satFormat("s24le 6ch 48000Hz"), satFormat("odd")],
+        idleOut: satPlayedAt({ format: "s16le 2ch 48000Hz", state: "idle" }),
         notes: [satAirPlayNote({}, ap), satAirPlayNote({}, { ...ap, playing: false }),
                 satAirPlayNote({}, { running: true, session: false }), satAirPlayNote({ airplay_enabled: false }, ap),
                 satAirPlayNote({}, { running: false, error: "no PipeWire" })],
@@ -676,8 +679,12 @@ def test_airplay_says_what_plays_from_whom_and_how(tmp_path):
     """)
     assert got["facts"] == [["Status", "Playing"], ["From", "Gabriel's iPhone"],
                             ["Now playing", "Clair de Lune · Debussy"], ["Album", "Suite bergamasque"],
-                            ["Stream", "44.1 kHz · 16-bit · stereo"], ["Bit rate", "1,411 kb/s"],
+                            ["Source", "ALAC, lossless · 44.1 kHz · 16-bit · stereo"],
+                            ["Bit rate", "1,411 kb/s"], ["Handed on as", "44.1 kHz · 32-bit · stereo"],
+                            ["Played at", "44.1 kHz · 16-bit · stereo"],
                             ["Delay here", "200 ms"], ["Phone's volume", "50%"]]
+    assert got["formats"] == ["96 kHz · 32-bit float · stereo", "48 kHz · 24-bit · 6 channels", "odd"]
+    assert got["idleOut"] == "48 kHz · 16-bit · stereo (idle)"
     assert got["notes"] == ["playing", "paused", "waiting", "off", "not running"]
     assert got["idle"] == []
     assert got["line"] == "Clair de Lune by Debussy, from Gabriel's iPhone"
