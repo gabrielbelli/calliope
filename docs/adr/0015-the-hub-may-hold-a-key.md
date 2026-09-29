@@ -60,7 +60,7 @@ answer. The log names a key and never its value.
   point it anywhere and press Try a word, and a picker (the model list, the
   Assist pipelines) sends it without a save. The trust boundary is still who
   may write the configuration (destinations.py). This ADR first said those
-  are the same callers who can reflash every satellite; with firmware signing
+  are the same callers who can reflash every satellite. With firmware signing
   on they are not, since a key holder cannot install firmware the board
   refuses. So the boundary is narrower, and stated where it holds: behind the
   gateway every client key can do this (`GATEWAY_API_KEYS` has one tier), and
@@ -76,5 +76,5 @@ answer. The log names a key and never its value.
 - **A resolution path for the language model destination only.** It would
   need a second code path, and `env` would say "unset" for a key that works.
 - **Reading a key back to the page**, even masked. A prefix, a suffix or a
-  length is a start on the secret; the page shows where a value lives and
+  length is a start on the secret. The page shows where a value lives and
   offers Replace and Clear.

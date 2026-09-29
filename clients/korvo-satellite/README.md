@@ -8,7 +8,7 @@ The board is Espressif's original ESP32-Korvo (ESP32-WROVER-E, 16 MB flash,
 PSRAM). It has an ES7210 four-channel ADC carrying three analogue mics 65 mm
 apart plus a loopback of the speaker output for echo cancellation, an ES8311
 codec for the speaker and the 3.5 mm jack (headphones or aux), twelve WS2812 LEDs and six buttons.
-Pins come from Espressif's schematics; see `src/board.h`.
+Pins come from Espressif's schematics, in `src/board.h`.
 
 ## First flash (once, over USB)
 
@@ -44,7 +44,7 @@ that CA's root when you build:
 CALLIOPE_HUB_CA=~/hub-ca.pem pio run -e usb -t upload
 ```
 
-The file can hold several certificates; to trust Let's Encrypt as well, add
+The file can hold several certificates. To trust Let's Encrypt as well, add
 `certs/lets-encrypt-roots.pem` to it. The build prints `hub TLS: trusts N CA
 certificate(s) from <file>`, and stops on a file with none. Set the same
 variable for every over-the-air update too: an image built without it trusts
@@ -116,7 +116,7 @@ firmware is updated over the air like any other
 
 A satellite built with a firmware signing public key installs only images
 signed by the matching private key. The signature is ECDSA P-256 over the
-image's SHA-256, in DER; mbedTLS in the Arduino core verifies it on the
+image's SHA-256, in DER, and mbedTLS in the Arduino core verifies it on the
 satellite. The hub only carries the signature, so a hub that is compromised
 still cannot install its own firmware.
 
@@ -125,7 +125,7 @@ until you make a key pair of your own. [`keys/README.md`](keys/README.md) says
 how, and where the build looks for the public half
 (`CALLIOPE_FIRMWARE_PUBKEY`, else `~/.config/calliope/firmware-signing.pub.pem`).
 A satellite built unsigned accepts any image the hub sends, so the first
-signed build can go over the air; from then on it refuses unsigned ones.
+signed build can go over the air. From then on it refuses unsigned ones.
 [ADR 0021](../../docs/adr/0021-signed-firmware.md) records the decision.
 
 | | Build with the public key | Build without it |
@@ -136,10 +136,11 @@ signed build can go over the air; from then on it refuses unsigned ones.
 | `hello` | `caps.ota_key` = the key's id | no `ota_key` |
 
 The satellite checks the signature twice. It checks first against the SHA-256
-the hub announces, so a bad signature is refused before the spare slot is
-written. It checks again against the digest of the bytes it received, before
-`Update.end()` makes the slot bootable; that second check decides. Rollback is
-unchanged: a signed image that cannot reach the hub is still rolled back.
+the hub announces, so it refuses a bad signature before it writes the spare
+slot. It checks again against the digest of the bytes it received, before
+`Update.end()` makes the slot bootable, and that second check decides.
+Rollback is unchanged: a signed image that cannot reach the hub still rolls
+back.
 
 `pio run -e ota -t upload` signs with the private key at `CALLIOPE_SIGNING_KEY`
 (default `~/.config/calliope/firmware-signing.pem`), through the `cryptography`
@@ -152,8 +153,9 @@ missing, or when the private key is not the build's.
 a desktop against the same mbedTLS release (2.28.7) and runs it with throwaway
 keys. It accepts good signatures in base64 and base64url, and it refuses a
 signature of another image, a flipped bit, another key, truncated DER, a
-trailing byte, and text that is not base64. The check has not yet been run on
-the board itself.
+trailing byte, and text that is not base64. On the board, a signed image
+installed and one signed by another key was refused (25 Sep 2026). How long
+the check takes on the ESP32 is not measured.
 
 ## Earcons
 
@@ -197,7 +199,7 @@ does not click.
 - `ms` > 0 restores the volume after that many milliseconds. `ms` = 0 keeps the
   duck until `{"type": "unduck"}` arrives.
 - A duck is not saved to NVS, because it changes too often for flash to take.
-  A reboot or a lost hub connection ends it; otherwise a hub that restarted
+  A reboot or a lost hub connection ends it. Otherwise a hub that restarted
   could leave the satellite quiet with nothing to lift it.
 - It is applied to the samples, not the codec, so it can only lower the
   output. Earcons are not ducked, so a chime can still be heard over lowered
@@ -236,21 +238,25 @@ The satellite says its settings (volume, mic gain, and the microphone, speaker
 and lights switches) in every `hello` as well as in `status`. A hub that adopts
 it before its first status therefore welcomes it with its own settings, so a
 dark satellite stays dark. Firmware before 2026-09-25 said them only in
-`status`; the hub leaves such a satellite's settings out of the welcome until
-it has reported them.
+`status`, and the hub leaves such a satellite's settings out of the welcome
+until it has reported them
+([firmware compatibility](../../services/satellites/README.md#firmware-compatibility)).
 
 ## Buttons
 
-Every press and release is reported to the hub, and each may also do one
-thing here, chosen on the hub (`src/actions.h`): the privacy mute, volume up or
-down a step (twelve, one to an LED; the ring shows the level for 1.5 s, and
-does for a volume the hub sets too, unless it is dark; it is a clock bar, from
-the LED set as 12 o'clock, `ring_top`, clockwise as seen, which
-`ring_upside_down` reverses for a board whose LEDs run the other way round),
-night mode (the ring off or on), or the ring's brightness down or up a step.
-They run here so they work with the hub down and only a button can undo the
-mute. The hub sends the table as `button_actions`; until it does, Rec mutes
-and VOL+/- set the volume. A table without a mute keeps Rec as the mute, and
+The satellite reports every press and release to the hub. Each button may also
+do one thing on the satellite itself, chosen on the hub (`src/actions.h`):
+
+| Action | On the satellite |
+|---|---|
+| `mute` | The privacy mute, on or off |
+| `volume_up`, `volume_down` | One of twelve steps, one to an LED. The ring shows the level for 1.5 s, for a volume the hub sets too, unless the ring is dark. The level is a clock bar: it starts at the LED set as 12 o'clock (`ring_top`) and fills clockwise as seen, and `ring_upside_down` reverses it for a board whose LEDs run the other way round |
+| `lights` | Night mode: the ring off, or on |
+| `dimmer`, `brighter` | The ring's brightness down or up a step |
+
+They run here so they work with the hub down, and so only a button can undo
+the mute. The hub sends the table as `button_actions`. Until it does, Rec
+mutes and VOL+/- set the volume. A table without a mute keeps Rec as the mute, and
 so does one whose only mute is KEY1, which a stock board does not wire. A
 setting a button changes is saved and reported at once, in a status marked
 `"cause": "button"`. Two holds are recovery, whatever the buttons are set to:
@@ -271,14 +277,14 @@ Its only path to the ESP32 is R37, a 0 Ω link to GPIO39 that is not fitted
 (main board sheet 2). Measured on 27 Sep 2026: pressing it moves the ladder
 not at all. Fitting R37 alone would also put KEY1's own 10 kΩ pull-up (R50) in
 parallel with the ladder's, which moves VOL+ to about 0.68 V, where it reads
-as VOL−. So KEY1 as a seventh button needs R37 fitted and R50 removed; the
+as VOL−. So KEY1 as a seventh button needs R37 fitted and R50 removed. The
 firmware already reads it (below 250 mV, as `key1`), and the hub lists it.
 
 ## Sound out
 
 The board is a voice device, not a music speaker ([ADR 0014](../../docs/adr/0014-voice-satellite-not-a-music-speaker.md)):
 
-- **Mono.** The ES8311 has one DAC channel; there is no stereo to be had.
+- **Mono.** The ES8311 has one DAC channel, so there is no stereo to be had.
 - **The 3.5 mm jack is differential.** OUTP is on the tip and OUTN, its
   inverse, on the ring. Into a stereo amplifier that is the same sound in
   opposite polarity on the two speakers: thin, and dizzying. For an aux
@@ -292,8 +298,8 @@ The board is a voice device, not a music speaker ([ADR 0014](../../docs/adr/0014
 - **The privacy mute.** It powers down the ES7210 mic front-end, and only a
   button set to mute (REC, out of the box) turns it off. It is saved on the
   satellite, so a restart, a power cut or an update the hub sends leaves the
-  microphones off and the ring red; a factory reset clears it.
-- **The volume ceiling.** 100 % is 0 dB at the DAC; the codec's +32 dB of
+  microphones off and the ring red. A factory reset clears it.
+- **The volume ceiling.** 100 % is 0 dB at the DAC. The codec's +32 dB of
   digital gain is never used.
 - **Recovery:** the setup portal, the factory reset, and firmware rollback.
 - **The firmware signature**, in a build with a public key. The hub cannot

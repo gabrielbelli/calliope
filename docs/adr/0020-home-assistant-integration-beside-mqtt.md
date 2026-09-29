@@ -40,7 +40,7 @@ MQTT discovery stays. Neither needs the other, and the hub needs neither.
   twice, once per integration, with separate entities. The READMEs say to use
   one of them. The hub cannot tell which one an operator uses.
 - **A second client to keep in step with the hub's events.** The integration
-  reads the hub's event and field names; renaming one breaks it. It is tested
+  reads the hub's event and field names, and renaming one breaks it. It is tested
   against a fake gateway with the hub's shapes, not in CI.
 - **HACS cannot install it from this repository**, because HACS reads a
   repository from its root. It installs by hand, or from a subtree split

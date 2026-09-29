@@ -17,7 +17,7 @@ The cause is the board, not the software (main board schematic, sheet 4):
 - **One channel.** The ES8311 is a mono codec. There is no second DAC channel
   anywhere on the board.
 - **The jack is driven differentially.** The codec's OUTP goes to the tip and
-  OUTN, its inverse, to the ring. Headphones cope; two speakers on an aux
+  OUTN, its inverse, to the ring. Headphones cope. Two speakers on an aux
   cable play the same signal in opposite polarity, which cancels the bass and
   moves the cancellation around the listener's head.
 - **A plug cuts the echo reference.** The jack's normally-closed contacts feed

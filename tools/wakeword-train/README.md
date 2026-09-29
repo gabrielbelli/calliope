@@ -27,7 +27,7 @@ every version pinned. It runs on a GPU with 4 GB of memory.
 
 First put your own wake words in `phrases.yaml`, before the image is built:
 the build copies it in. The words there are examples, the ones the
-measurements below were made with; the file's comments say what each field
+measurements below were made with. The file's comments say what each field
 does. Then, on the GPU host, as a user who owns the work directory:
 
 ```bash
@@ -52,7 +52,7 @@ rsync -a /tmp/heldout/ gpu-host:/srv/wakeword-train/data/heldout/
 ```
 
 Then the full run, detached. It trains every model in `phrases.yaml`, about
-85 minutes each; add `--only` and your words' names to train fewer:
+85 minutes each. Add `--only` and your words' names to train fewer:
 
 ```bash
 sudo docker run -d --name wakeword-train --restart=no --gpus all --cpus 4 \
@@ -79,8 +79,8 @@ ls -l /srv/wakeword-train/models/
 the `.onnx` is written, the evaluation summary, then `DONE <name>`. A model
 that fails is logged as `FAILED <name>` and the queue moves on. `FINISHED`
 ends the run. A model whose `.onnx` exists is skipped, so starting the same
-command again resumes; the clips and features of a model that was cut short
-are reused. `--force` trains again over an existing `.onnx` but still reuses
+command again resumes, and reuses the clips and features of a model that was
+cut short. `--force` trains again over an existing `.onnx` but still reuses
 the clips and features: after changing a phrase or a sample count, delete
 `work/<profile>/<name>` so they are made again.
 
@@ -119,13 +119,13 @@ the clips and features: after changing a phrase or a sample count, delete
 
 Measured on that GPU: the generator makes about 80 positive and 35 to 60
 negative clips a second (negatives run at a seventh of the batch size, and
-batch 50 fills 3.8 of the GPU's 4 GB); augmentation and features run at about
-60 clips a second; training runs at about 78 steps a second. So `full` spends
+batch 50 fills 3.8 of the GPU's 4 GB). Augmentation and features run at about
+60 clips a second, and training at about 78 steps a second. So `full` spends
 roughly 35 minutes making clips, 30 augmenting them, 15 training and 3
 evaluating, and nine models take about 13 hours.
 
 Do not cut `steps` below about 10,000. The weight on negatives rises from 1 to
-`max_negative_weight` over the steps; in a 3,000-step smoke run it overtook
+`max_negative_weight` over the steps. In a 3,000-step smoke run it overtook
 the positives before the model had learnt anything, and the model collapsed
 to one constant output for every input.
 The same data at 20,000 steps gave recall 0.51 at 0.44 false positives an
@@ -180,8 +180,8 @@ depends on the word. Measured with `--accent pt_BR`:
 Recall at 0.5, clean. "Claude" is one syllable whose vowel differs from
 accent to accent. A check with "Hey Clawed", "Hey Clawd" and "Hey Clode" in
 the same voices showed that the voices do say "clawd" (the first two score
-exactly as "Claude" does); the British, Australian, Irish, Indian and South
-African versions of that vowel are what the model rejects. Both models are
+exactly as "Claude" does). The model rejects the British, Australian, Irish,
+Indian and South African versions of that vowel. Both models are
 also very conservative: no false activation in 10.7 hours even at 0.3. So
 expect any accent but an American one to be missed more often than the
 LibriTTS-R numbers suggest, try the hub's threshold at 0.3 first, and see
@@ -240,7 +240,7 @@ v2.0.0:
 - **Only speakers 0 to 699.** `PSG_MAX_SPEAKERS=700` (set in the image) fills
   the `max_speakers` argument that `train.py` never passes. The generator's
   own README warns that the late LibriTTS-R speakers had little data and can
-  produce artefacts; they also make a held-out voice set for `evaluate.py`.
+  produce artefacts. They also make a held-out voice set for `evaluate.py`.
 
 `oww_train.py`, around upstream `train.py` without changing it:
 
@@ -274,7 +274,7 @@ v2.0.0:
 
 Why the `train.py` from `main` and not the 0.6.0 tag: the tag sizes the model
 input from a fixed 2 s, which breaks phrases whose clips run longer
-(`hey chat g p t`); `main` fixes it and changes nothing else that matters. The
+(`hey chat g p t`). `main` fixes it and changes nothing else that matters. The
 library is still the PyPI 0.6.0 release, the one the hub runs.
 
 To regenerate the lock after changing `requirements.txt`, install it in the
@@ -306,6 +306,7 @@ terms. `THIRD-PARTY-NOTICES.md` at the repository root covers the hub's side.
 
 ## Using a model in the hub
 
-Copy `models/<name>.onnx` into the hub's wake word directory; the hub loads a
-custom model by name as `<model_dir>/<name>.onnx`. The feature models it
+Upload `models/<name>.onnx` on the Satellites tab (Wake words, Custom models),
+or copy it into the hub's wake word directory, where the hub loads a custom
+model by name as `<model_dir>/<name>.onnx`. The feature models it
 already has are the same files, by hash, as the ones used here.

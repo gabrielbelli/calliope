@@ -158,12 +158,12 @@ the Satellites tab. From a pending satellite the hub accepts no microphone
 audio, and it sends that satellite nothing but `pending`.
 
 `POST /satellites/{id}/adopt` issues a random token. The satellite stores it
-and says `hello` again with it; the hub answers `welcome` with the satellite's
-name and config. The hub keeps only the token's SHA-256, so a copy of
+and says `hello` again with it, and the hub answers `welcome` with the
+satellite's name and config. The hub keeps only the token's SHA-256, so a copy of
 `satellites.json` cannot impersonate a satellite.
 `POST /satellites/{id}/forget` drops the record and tells the satellite, which
 goes back to pending. Whatever the hub was playing to it stops first, and a
-duck it held is lifted.
+duck it held ends.
 
 **Adoption takes the satellite's own settings**: volume, mic gain, and the
 microphone, speaker and lights switches. The satellite is the thing in the
@@ -191,7 +191,7 @@ stays offline, with its own firmware and settings, on the page and in Home
 Assistant, and nothing that connection reports is published as its. A board
 that lost its token (a factory reset) is forgotten and adopted again.
 
-A satellite is addressed by its id (the MAC, with or without colons) or its
+Every route takes a satellite's id (the MAC, with or without colons) or its
 name.
 
 ## Routes
@@ -272,7 +272,7 @@ Transcripts and replies are in this stream and not in the INFO log.
 
 ## The device protocol
 
-One WebSocket. Control travels as JSON text frames; audio and firmware travel
+One WebSocket. Control travels as JSON text frames. Audio and firmware travel
 as binary frames whose first byte names the kind.
 
 **Binary frames**
@@ -352,8 +352,8 @@ when the satellite holds it.
 
 ## Listening
 
-Every adopted satellite with its microphone enabled and not muted is listened
-to, for the wake words assigned to it:
+The hub listens to every adopted satellite with its microphone enabled and
+not muted, for the wake words assigned to it:
 
 ```text
 mic frames ─▶ bounded queue ─▶ FrontEnd ─▶ WakeWords ─▶ Endpointer ─▶ router ─▶ reply
@@ -382,11 +382,11 @@ event loop never does it. A full queue drops its oldest frame and counts it as
    ([Lights](#lights)),
    the satellite ducked (and the satellite the word answers on, if that is
    another one), then STT, the word's action and the reply, streamed
-   sentence by sentence. The reply is played on the action's `reply_to`
-   satellite, over nothing: audio still playing there is dropped and the duck
-   lifted first, because the firmware ducks the hub's audio and the reply is
-   the hub's audio. An error plays `error`; a success with nothing to say
-   plays `done`. A conversation then listens for its next turn; a trigger word
+   sentence by sentence. The reply plays on the action's `reply_to`
+   satellite, over nothing: the hub drops audio still playing there and lifts
+   the duck first, because the firmware ducks the hub's audio and the reply is
+   the hub's audio. An error plays `error`, and a success with nothing to say
+   plays `done`. A conversation then listens for its next turn. A trigger word
    skips all of this. [Command, conversation and trigger](#command-conversation-and-trigger).
 
 A wake word heard while a reply is playing interrupts it, as speech over the
@@ -396,9 +396,8 @@ still listening for its command, or routing it, is dropped.
 **Events.** A conversation publishes `wake`, then `routed` for a command or
 `conversation_started`, a `turn` per exchange and `conversation_ended` for a
 conversation, and a trigger word only `triggered`
-([Events](#events)). `conversation_ended` gives its `reason`: `silence`,
-`phrase`, `error`, `no_audio`, `stop`, `muted`, `mic_off`, `wake_word`,
-`trigger` or `unadopted`.
+([Events](#events)). `conversation_ended` gives its `reason`
+([Conversations](#conversations)).
 
 **Measured** on darwin (Apple silicon) and in the image on arm64, 2026-09-25:
 
@@ -483,14 +482,14 @@ streams and still takes push-to-talk.
 `PUT /satellites/wake-words` replaces the whole set, and the change is live at
 once, with no restart:
 
-- **A threshold** is changed in place on every detector. Nothing is rebuilt.
+- **A threshold** changes in place on every detector. Nothing is rebuilt.
 - **An action** applies from the next time its word is heard.
 - **A satellite whose words changed** gets a new detector before its next batch
   of audio. A new detector hears nothing for its first 1.2 s (openWakeWord's
-  warm-up, see `app/wakeword.py`). The other satellites are not touched.
+  warm-up, see `app/wakeword.py`). The other satellites keep theirs.
 - **A word taken off a satellite** is not acted on there from the moment the
   PUT answers, even in audio that was already being processed.
-- **A name not loaded yet** is `downloading`: a built-in name is fetched from
+- **A name not loaded yet** is `downloading`: the hub fetches a built-in name from
   openWakeWord's GitHub release into `SATELLITES_MODEL_DIR` in the background
   and checked against a pinned SHA-256. Then every detector is rebuilt with it,
   the word is `ready`, and a `{"type": "wake_words", "words": [...]}` event is
@@ -506,7 +505,7 @@ so the list `GET` returned can always be sent back. A MAC with colons is taken
 as the id.
 
 Forgetting a satellite takes it out of every word that names it. Adopted
-again, it hears the `"*"` words until it is given more.
+again, it hears the `"*"` words until you give it more.
 
 **`SATELLITES_WAKE_WORDS` only seeds the file.** On the first start with a
 volume that has no `wake_words.json`, each word it names is written with
@@ -522,8 +521,8 @@ next PUT replaces the file.
 wake word. A `wake_words.json` from then has no `version`, and on its first
 start each word, and push-to-talk, gets the rule it would have taken: the
 first rule in file order that names the word or `*` and names no satellites.
-A rule that named satellites cannot become one entry for every room; the log
-names each one left behind. The hub writes the file as version 2 and leaves
+A rule that named satellites cannot become one entry for every room, and the
+log names each one left behind. The hub writes the file as version 2 and leaves
 `rules.json` where it is, untouched. A `rules.json` that does not load
 migrates nothing, and those words route nowhere, as before, until they are
 given an action.
@@ -538,9 +537,9 @@ secrets have a value, as booleans, and in `secrets` where each value lives.
 
 The hub refuses, with a 422:
 
-- a field it does not know;
-- a name that does not look like a variable's, so a pasted token is refused;
-- a URL with a user and password in it;
+- a field it does not know
+- a name that does not look like a variable's, so a pasted token is refused
+- a URL with a user and password in it
 - a name that is one of the hub's own settings: under `SATELLITES_` (or
   `NODES_`) with no `TOKEN`, `KEY`, `SECRET` or `PASSWORD` in it as a word.
   `SATELLITES_MQTT_URL`, which carries the broker's password, is one. Such a
@@ -579,8 +578,8 @@ until it restarts.
 
 Only the answer's text is spoken, never reasoning: not `reasoning_content`,
 `reasoning`, a `<think>` block or a "thinking" part. A model that spent its
-whole `max_tokens` thinking is an error that says so. A refusal is shown in
-the provider's words, with any key in it hidden.
+whole `max_tokens` thinking is an error that says so. The hub shows a refusal
+in the provider's words, with any key in it hidden.
 
 #### Tools and the date
 
@@ -653,7 +652,7 @@ applies from the next turn with no restart.
    and Test say which variable to set again, and never what it holds.
 2. **A key stored on the hub**, from a language model word's API key box on
    the Satellites tab, or with `PUT /satellites/secrets` and `{"name":
-   "OPENAI_API_KEY", "value": "..."}`; `"value": null` clears it. The hub
+   "OPENAI_API_KEY", "value": "..."}`. `"value": null` clears it. The hub
    keeps it in `secrets.json` in `SATELLITES_DATA_DIR`, mode 0600, beside
    `wake_words.json` and never in it. Clearing the last key removes the file.
 
@@ -691,7 +690,7 @@ may be rotated or mirrored.
 lights message goes through one function (`Hub.send_lights`) that reads the
 setting at the moment of sending, and `POST /satellites/{id}/lights` answers
 409 rather than go around it. A ring left lit when lights were turned off
-mid-conversation is put out when they are turned back on.
+mid-conversation goes out when they are turned back on.
 `tests/test_pipeline.py` runs a whole wake, route and reply cycle on a dark
 satellite and checks that it received no `lights`.
 
@@ -715,8 +714,8 @@ while it waited.
 
 `buttons` in a satellite's config maps each button (`rec`, `mode`, `play`,
 `set`, `vol_down`, `vol_up`, and `key1`, the side button) and edge to an
-action. No button is special; the default is what they did before there was a
-choice:
+action. No button is special. The default is what they did before there was
+a choice:
 
 ```json
 {"rec": {"press": "mute"}, "vol_up": {"press": "volume_up"}, "vol_down": {"press": "volume_down"},
@@ -742,16 +741,16 @@ least one button: the hub refuses one without, and the firmware keeps Rec as
 the mute if it is ever sent one anyway. Holding Set 5 s (Wi-Fi setup) and Mode
 10 s (factory reset) are recovery, whatever those buttons are mapped to.
 
-A PATCH replaces the whole mapping. Every press and release is published as
-an event, whatever it maps to.
+A PATCH replaces the whole mapping. The hub publishes every press and release
+as an event, whatever it maps to.
 
 **What a button changed is the hub's too.** A button can change the volume,
 `lights_enabled` or `brightness` on the satellite. The satellite then sends a
 status marked `"cause": "button"`, and the hub takes those settings from it:
 
-- the page and Home Assistant show them;
-- a `settings` event says what changed ([Events](#events));
-- the next welcome does not put the old values back.
+- the page and Home Assistant show them
+- a `settings` event says what changed ([Events](#events))
+- the next welcome does not put the old values back
 
 The hub does not take these settings from any other status. A status already
 on its way when the page changed a setting carries the old value. Firmware
@@ -797,27 +796,29 @@ Each wake word has a mode (`app/router.py`, `app/dialogue.py`, and
 
 After each reply has finished playing, or at once when nothing was played
 (the speaker is off, or the answer was silent), the satellite listens for
-`follow_up_s` without the wake word. The ring pulses while it waits. A
-follow-up is heard only once the satellite's own voice has been off its
-loopback channel for 250 ms, so the tail of the reply is never taken for the
-next question.
+`follow_up_s` without the wake word. The ring breathes while it waits
+([Lights](#lights)). A follow-up is heard only once the satellite's own voice
+has been off its loopback channel for 250 ms, so the tail of the reply is
+never taken for the next question. With a plug in the jack the loopback is
+silent, so the hub waits 0.6 s after the reply instead.
 
-A conversation ends on:
+A conversation ends on any of these, and `conversation_ended` names which:
 
-- **silence** for `follow_up_s`;
-- **an ending phrase** said on its own: "that's all", "stop", "goodbye",
-  "thanks" and a few more, with filler around them ("ok, thanks"). "Thanks,
-  and what about tomorrow?" carries on. The hub plays `done` and asks the
-  assistant nothing. Each language Kokoro speaks has its own ("obrigado,
-  tchau", "gracias", "merci, c'est tout", "basta così"); a conversation ends
-  on English's and on those of `SATELLITES_LANGUAGES`, of the word's
-  `language` hint, of the language the conversation is in so far and of the
-  one the goodbye is said in. A word's `end_phrases` replaces them;
-- **an error** from STT, the assistant or TTS;
-- **the stop button**, the privacy mute, the microphone turned off, forgetting
-  the satellite, or another wake word;
-- **no audio**: the device stopped streaming without a word, noticed 3 s after
-  `follow_up_s`.
+| `reason` | When |
+|---|---|
+| `silence` | Nothing is said for `follow_up_s` |
+| `phrase` | An ending phrase said on its own: "that's all", "stop", "goodbye", "thanks" and a few more, with filler around them ("ok, thanks"). "Thanks, and what about tomorrow?" carries on. The hub plays `done` and asks the assistant nothing |
+| `error` | STT, the assistant or TTS fails |
+| `stop`, `muted`, `mic_off`, `unadopted` | The stop button, the privacy mute, the microphone turned off, or the satellite forgotten |
+| `wake_word`, `trigger` | Another wake word, or a trigger word with `ends_conversation` |
+| `no_audio` | The device stopped streaming without a word, noticed 3 s after `follow_up_s` |
+| `stopped listening`, `listening failed` | The satellite disconnected, or the hub could not go on listening to it |
+
+Each language Kokoro speaks has its own ending phrases ("obrigado, tchau",
+"gracias", "merci, c'est tout", "basta così"). A conversation ends on
+English's, and on those of `SATELLITES_LANGUAGES`, of the word's `language`
+hint, of the language the conversation is in so far, and of the one the
+goodbye is said in. A word's `end_phrases` replaces them all.
 
 The conversation remembers its last 20 turns, and no more than 8000
 characters of them. An `llm` destination gets them as chat messages (system
@@ -840,8 +841,8 @@ stt-stack's default engine, recognises 25 European languages by itself,
 refuses a `language` field with a 400, and does not say which language it
 heard. A word's `language` hint replaces the detection.
 
-The language decides three things. Home Assistant is sent it. An `llm` is
-told to answer in it. The reply voice speaks it:
+The language decides three things. Home Assistant gets it. An `llm` is told
+to answer in it. The reply voice speaks it:
 
 | Spoken | Voice | Answer in |
 |---|---|---|
@@ -859,7 +860,7 @@ The first utterance has no language in use yet, so it is weighed against the
 household's main language.
 
 `SATELLITES_LANGUAGES` names the household's languages as BCP 47 tags, most
-spoken first; unset, it is `en`. The first is the main language above. Each
+spoken first. Unset, it is `en`. The first is the main language above. Each
 tag's region is the one its language is sent on in: with `en-GB,pt-PT`,
 detected English goes to Home Assistant as `en-GB` and Portuguese as `pt-PT`,
 so a command is matched against Home Assistant's European Portuguese
@@ -888,7 +889,7 @@ command:
   too. It transcribes English badly (a word error rate of 0.89), so do that
   only in a household that speaks no English to it.
 - **The hint.** A word's `language` hint is sent only to an engine that takes
-  one: Whisper gets it; Parakeet never does.
+  one. Whisper gets it, and Parakeet never does.
 - **Home Assistant's names.** The Calliope integration for Home Assistant
   keeps the `home-assistant` glossary profile on the stack
   ([`clients/home-assistant`](../../clients/home-assistant/README.md#vocabulary)).
@@ -1032,7 +1033,7 @@ has a hard time limit: STT 30 s, TTS 30 s, the destination its own `timeout`.
 With `SATELLITES_MQTT_URL` set, every adopted satellite is one Home Assistant
 device, by discovery. The Calliope integration
 ([`clients/home-assistant`](../../clients/home-assistant/README.md)) is the
-other way in, with device triggers, actions and Assist's speech engines; with
+other way in, with device triggers, actions and Assist's speech engines. With
 both on, each satellite appears twice
 ([ADR 0020](../../docs/adr/0020-home-assistant-integration-beside-mqtt.md)).
 Over MQTT a satellite has Wi-Fi signal, online, microphone, speaker and lights
@@ -1040,7 +1041,7 @@ switches, volume, audio output (speaker or jack, unknown until something
 has played), last wake word, a wake word event and one event per button. A
 switch goes through the same code as `PATCH /satellites/{id}`, and nothing but
 those four settings can be changed from the broker. Button presses and wake
-words are dropped while the broker is away rather than delivered late; state,
+words are dropped while the broker is away rather than delivered late. State,
 discovery and availability are retained and sent again on every reconnect.
 Forgetting a satellite removes its device. Injected test clips are not
 published. Checked against Home Assistant 2026.8.1's own MQTT integration: 14
@@ -1058,7 +1059,7 @@ the upload's `signature`, out in the `ota` message. With
 signed upload with 400 `bad_signature`, and `POST /satellites/ota` skips a
 satellite whose `caps.ota_key` the image would not satisfy, saying why, rather
 than sending 15 s of image to be refused. The running unsigned firmware ignores
-`signature`, so the first signed build installs over the air as usual; after
+`signature`, so the first signed build installs over the air as usual. After
 that the satellite requires one.
 [ADR 0021](../../docs/adr/0021-signed-firmware.md) records the decision.
 
@@ -1066,9 +1067,9 @@ that the satellite requires one.
 
 `POST /satellites/{id}/inject` runs a recorded clip through the same path a
 live satellite's audio takes, from the wake word on, and answers with what
-happened. Without `?play=1` nothing at all is sent to any satellite: no sound,
-no light, no duck. Its events are marked `"injected": true` and are not sent to
-MQTT.
+happened. Without `?play=1` the hub sends nothing at all to any satellite: no
+sound, no light, no duck. Its events carry `"injected": true`, and MQTT does
+not get them.
 
 ```bash
 say -v Samantha -o /tmp/q.aiff "hey jarvis, what time is it"   # writes a file, plays nothing
@@ -1082,7 +1083,7 @@ ended, its length), `outcome` (the word that answered, transcript, language,
 voice, reply text, errors, timings, reply audio length) and `played`. An
 injected clip is always one turn, whatever the word's mode, and a trigger
 word answers `"triggered": true` with its event marked injected. Detection listens for the satellite's own
-wake words, as it would live; a satellite with none assigned answers 409
+wake words, as it would live, and a satellite with none assigned answers 409
 `no_wake_words`. `?wake_word=ptt` skips detection and takes the whole clip as
 the command. The wake word models are voice-dependent: the same
 phrase in macOS's default voice peaked at 0.05, and in Samantha and Daniel at
@@ -1139,7 +1140,7 @@ environment instead if that is not acceptable.
 
 `ORT_DISABLE_TELEMETRY=1` is set in the image and by `app/wakeword.py`. ONNX
 Runtime's Linux wheel reports usage to Microsoft and writes a device id without
-it; measured in this image, two connections to its collector within 15 s of a
+it. Measured in this image: two connections to its collector within 15 s of a
 session, and none with it set. See THIRD-PARTY-NOTICES.md.
 
 ## Install and tests
@@ -1158,8 +1159,8 @@ dependencies and what it imports is pinned in `requirements.txt`.
 The device is played by Starlette's test socket, and STT, TTS, webhooks,
 language model servers and Home Assistant by `httpx.MockTransport` on `*.test`
 hosts, which never resolve.
-Nothing starts a server and no board is needed. Most pipeline tests stand a
-fake in for the wake word model; the tests that need the real ones fetch them
+Nothing starts a server, and the tests need no board. Most pipeline tests stand a
+fake in for the wake word model. The tests that need the real ones fetch them
 from openWakeWord's GitHub release once per run (5.4 MB, or
 `SATELLITES_TEST_WAKEWORD_DIR` to keep them) and skip with the reason when
 offline.
@@ -1177,7 +1178,7 @@ offline.
   button interrupt those.
 - Tokens from the destination read aloud as they arrive. The unit is the
   sentence, because Kokoro reads a whole sentence better than a fragment.
-- Discovery. A satellite is told its hub in the setup portal, or moved with
+- Discovery. A satellite learns its hub in the setup portal, or moves with
   `set-hub`.
 - Speaker identification, and a television or a second talker is speech to the
   front-end: it tells speech from noise by how steady it is.
@@ -1185,5 +1186,5 @@ offline.
 ## Licence
 
 BSD 2-Clause. See [LICENSE](LICENSE). The wake word models in the image are
-CC BY-NC-SA 4.0 (non-commercial) and carry their own notice; see
+CC BY-NC-SA 4.0 (non-commercial) and carry their own notice. See
 [THIRD-PARTY-NOTICES.md](../../THIRD-PARTY-NOTICES.md).
