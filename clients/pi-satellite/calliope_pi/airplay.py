@@ -358,7 +358,11 @@ def stream(sink_inputs: list) -> dict | None:
     own delay. None while nothing plays."""
     for si in sink_inputs if isinstance(sink_inputs, list) else []:
         props = si.get("properties") or {}
-        if props.get("application.process.binary") != BINARY:
+        # Through the PulseAudio server it carries its process name; through
+        # ALSA's PipeWire plugin only a node name made from it.
+        if (props.get("application.process.binary") != BINARY
+                and props.get("node.name") != f"alsa_playback.{BINARY}"
+                and f"[{BINARY}]" not in str(props.get("application.name") or "")):
             continue
         spec = str(si.get("sample_specification") or "")
         m = FORMAT.match(spec)

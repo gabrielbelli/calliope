@@ -269,3 +269,10 @@ def test_the_phones_volume_becomes_the_outputs_own_in_the_same_decibels(tmp_path
     assert log.read_text().splitlines() == ["set-sink-mute @DEFAULT_SINK@ 0",
                                             "set-sink-volume @DEFAULT_SINK@ -- -15.000000dB",
                                             "set-sink-mute @DEFAULT_SINK@ 1"]
+
+
+def test_the_airplay_stream_is_found_through_alsa_too():
+    through_alsa = [{"index": 7, "properties": {"application.name": "PipeWire ALSA [shairport-sync]",
+                                                "node.name": "alsa_playback.shairport-sync"},
+                     "sample_specification": "s16le 2ch 44100Hz", "corked": False}]
+    assert airplay.stream(through_alsa)["format"] == "s16le 2ch 44100Hz"
