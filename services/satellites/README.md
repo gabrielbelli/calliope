@@ -264,6 +264,7 @@ satellite's id. An event from a clip run through `/inject` carries
 | `status` | Every status report, about every 10 s | `status`: the report as sent ([protocol](#the-device-protocol)) |
 | `settings` | A button on the satellite changed a setting | `settings`: what changed, among `volume`, `lights_enabled` and `brightness` |
 | `output` | The hub decides the audio goes to the speaker or the jack | `output` ([Speaker or jack](#speaker-or-jack)) |
+| `jack` | A plug goes in or out of a Linux satellite's card that detects its jacks | `device`, `name` (the PipeWire node), `direction` (`output` or `input`), `plugged` |
 | `button` | A button is pressed or released | `button`, `action` (`press` or `release`), `held_ms` |
 | `ota` | An update moves on | `state` (`started`, `progress`, `rebooting`, `verified`, `failed`), `pct`, `version`, `error` |
 | `wake_words` | A wake word's model finishes downloading, or fails | `words`: every word with its `state` and `error` |

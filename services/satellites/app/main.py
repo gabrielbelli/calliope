@@ -1926,6 +1926,32 @@ class Conversation:
             self.phase = "done"
 
 
+# ---- jacks ------------------------------------------------------------------------
+
+
+def _jacks(status: dict) -> dict:
+    audio = status.get("audio") if isinstance(status.get("audio"), dict) else {}
+    out = {}
+    for direction, key in (("output", "sinks"), ("input", "sources")):
+        for d in audio.get(key) or []:
+            if isinstance(d, dict) and d.get("name") and d.get("jack") in ("plugged", "unplugged"):
+                out[d["name"]] = (direction, d.get("description") or d["name"], d["jack"])
+    return out
+
+
+def jack_changes(before: dict, after: dict) -> list[dict]:
+    """A plug that went in or out on a satellite whose card can tell
+    (a Linux satellite's `audio`, calliope_pi pipewire.jacks), as events:
+    {device, name, direction, plugged}. A device that came or went with its
+    card is not a plug; nor is the first status after connecting."""
+    if not before:
+        return []
+    old, new = _jacks(before), _jacks(after)
+    return [{"device": desc, "name": name, "direction": direction, "plugged": state == "plugged"}
+            for name, (direction, desc, state) in new.items()
+            if name in old and old[name][2] != state]
+
+
 # ---- telemetry ----------------------------------------------------------------------
 
 # A satellite's status fields that go into a turn's telemetry record.
@@ -2234,7 +2260,11 @@ async def on_message(s: Session, msg: dict) -> None:
         await hub.greet(s)
     elif kind == "status":
         was_muted = bool(s.status.get("muted"))
+        before = s.status
         s.status = {k: v for k, v in msg.items() if k != "type"}
+        if s.adopted:
+            for change in jack_changes(before, s.status):
+                hub.publish({"type": "jack", "satellite": s.id} | change)
         if s.adopted:
             # After a welcome that left out settings the hub did not know,
             # the firmware applies the rest and reports at once: this is where

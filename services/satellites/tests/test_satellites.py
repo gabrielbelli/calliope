@@ -820,3 +820,19 @@ def test_a_pi_that_is_an_airplay_receiver_is_turned_on_off_and_named_from_the_pa
         adopt(client, korvo)
         r = client.patch(f"/satellites/{NID}", json={"airplay_enabled": True})
         assert r.status_code == 409 and r.json()["error"]["code"] == "no_airplay"
+
+
+def test_a_plug_going_in_or_out_on_a_satellites_card_is_an_event():
+    from app.main import jack_changes
+    def status(jack):
+        return {"audio": {"sinks": [{"name": "alsa_output.usb-Realtek", "description": "Realtek USB2.0 Audio",
+                                     "jack": jack},
+                                    {"name": "alsa_output.platform-mailbox", "description": "Built-in Audio",
+                                     "jack": None}], "sources": []}}
+    assert jack_changes(status("plugged"), status("unplugged")) == [
+        {"device": "Realtek USB2.0 Audio", "name": "alsa_output.usb-Realtek", "direction": "output",
+         "plugged": False}]
+    assert jack_changes(status("unplugged"), status("plugged"))[0]["plugged"] is True
+    assert jack_changes(status("plugged"), status("plugged")) == []
+    assert jack_changes({}, status("unplugged")) == [], "the first status is not a plug"
+    assert jack_changes(status("plugged"), {"audio": {"sinks": [], "sources": []}}) == [], "a card that went"
