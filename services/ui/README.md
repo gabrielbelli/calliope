@@ -762,12 +762,14 @@ adds its temperature and whether its power supply is too low.
 Each change is one `PATCH /satellites/{id}`. A slider sends its value when
 it is let go. A change made with the satellite's own buttons shows here too.
 
-Under **Try it**, each control makes a noise or lights the ring:
+Under **Try it**, each control makes a noise or lights the ring. A sound
+plays where the satellite's **Output** is, on another satellite if it plays
+through one:
 
 | Control | Request |
 |---|---|
 | **Say** | `POST /satellites/{id}/say` `{"text"}`, in the hub's default voice |
-| **Blink** | `POST /satellites/{id}/identify` |
+| **Blink** | `POST /satellites/{id}/identify`. **Chime** on a satellite without a ring (a Raspberry Pi), which plays its wake sound three times |
 | **Play a tone** | `POST /satellites/{id}/tone` |
 | **Listen 5 s** | `GET /satellites/{id}/listen?seconds=5`, played back in the page |
 | **Stop** | `POST /satellites/{id}/flush`: what the satellite's Set button does |
