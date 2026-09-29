@@ -619,6 +619,21 @@ def test_a_mapping_saved_before_button_actions_keeps_what_the_buttons_did(app, t
     assert ("vol_up" in buttons and "vol_down" in buttons) is pair
 
 
+def test_a_mapping_saved_with_its_only_mute_on_key1_gets_rec_as_the_mute(app, tmp_path):
+    """The hub took a mute on key1 alone as a mute, and the firmware does not:
+    a stock board does not wire KEY1, so it makes Rec's press the mute
+    whatever the table says. The saved mapping now says what the satellite
+    does, and the welcome sends it that."""
+    (tmp_path / "satellites.json").write_text(json.dumps({"satellites": [{
+        "id": NID, "name": "bedroom", "model": MODEL, "token_sha256": "0" * 64,
+        "adopted_at": 1.0, "config": {"buttons": {
+            "key1": {"press": "mute"}, "rec": {"press": "ptt", "release": "stop"}}}}]}))
+    with TestClient(app.app) as c:
+        buttons = c.get(f"/satellites/{NID}").json()["config"]["buttons"]
+    assert buttons["rec"] == {"press": "mute", "release": "stop"}, buttons
+    assert buttons["key1"] == {"press": "mute"}, "a key1 wired on the board still mutes"
+
+
 def test_how_the_ring_is_mounted_is_its_top_led_and_which_way_it_runs(client):
     """Where a bar on the ring starts (12 o'clock) and whether it runs the
     other way round, as the satellite is mounted."""

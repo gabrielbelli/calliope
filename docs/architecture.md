@@ -1475,8 +1475,9 @@ rather than in records of their own:
 - **Every button maps to an action, but `mute` stays on the device.** Mute,
   volume, the lights and brightness run on the satellite, so they work with
   the hub down and only a button can undo the privacy mute. A mapping must
-  keep `mute` on one button: the hub refuses one without, and the firmware
-  keeps Rec as the mute if it is sent one anyway
+  keep `mute` on one button other than `key1`, which a stock board does not
+  wire: the hub refuses one without, and the firmware keeps Rec as the mute
+  if it is sent one anyway
   ([Buttons](../services/satellites/README.md#buttons)).
 - **The firmware draws the ring's animations**, and says which in
   `hello.caps.light_modes`, rather than the hub streaming frames. The hub

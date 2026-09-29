@@ -737,9 +737,14 @@ a choice:
 welcome and in each `config` that changes the mapping, to firmware that lists
 them in its hello (`caps.actions`). They work with the hub down, and only a
 button, never the hub, can undo the mute. So a mapping must keep `mute` on at
-least one button: the hub refuses one without, and the firmware keeps Rec as
-the mute if it is ever sent one anyway. Holding Set 5 s (Wi-Fi setup) and Mode
-10 s (factory reset) are recovery, whatever those buttons are mapped to.
+least one button other than `key1`, which a stock board does not wire
+([korvo Buttons](../../clients/korvo-satellite/README.md#buttons)). The hub
+refuses a mapping without one. The firmware applies the same rule, and makes
+Rec's press the mute if it is ever sent such a mapping anyway. A mapping saved
+before the hub applied the rule gets Rec's press as the mute when the hub
+starts, so the page shows what the satellite does. `key1` may still mute beside
+another button. Holding Set 5 s (Wi-Fi setup) and Mode 10 s (factory reset)
+are recovery, whatever those buttons are mapped to.
 
 A PATCH replaces the whole mapping. The hub publishes every press and release
 as an event, whatever it maps to.

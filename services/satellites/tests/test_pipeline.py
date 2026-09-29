@@ -754,15 +754,23 @@ def test_a_button_mapping_is_validated_and_firmware_without_actions_is_sent_none
         bad = [client.patch(f"/satellites/{NID}", json={"buttons": b}) for b in (
             {"play": {"press": "ptt"}},                              # no mute left anywhere
             {},                                                      # nor here
+            # Only on key1, which a stock board does not wire: the firmware
+            # would make Rec the mute while the page showed Rec as Talk.
+            {"key1": {"press": "mute"}, "rec": {"press": "ptt"}},
             MUTE | {"play": {"press": "webhook:https://u:p@hooks.test/"}},  # credentials in a URL
             MUTE | {"play": {"press": "launch"}},                    # not an action
             MUTE | {"play": {"hold": "ptt"}},                        # not an action kind
         )]
+        also = client.patch(f"/satellites/{NID}", json={"buttons": MUTE | {"key1": {"press": "mute"}}})
         time.sleep(0.1)
     assert ok.status_code == 200
     assert ok.json()["config"]["buttons"]["mode"] == {"release": "webhook:https://hooks.test/x"}
-    assert [r.status_code for r in bad] == [422] * 5
+    assert [r.status_code for r in bad] == [422] * 6
     assert "never be unmuted" in bad[0].text
+    assert "other than key1" in bad[2].text and "never be unmuted" in bad[2].text
+    # key1 may still mute, beside a button that counts: a board with it wired
+    # runs it.
+    assert also.status_code == 200, also.text
     assert satellite.texts("config") == []
 
 
@@ -781,11 +789,11 @@ def test_what_a_satellite_runs_itself_is_sent_to_it_and_nothing_else(client, plu
             "vol_down": {"press": "volume_down"}}
         satellite = plug(ws)
         assert client.patch(f"/satellites/{NID}", json={"buttons": {
-            "key1": {"press": "mute"}, "rec": {"press": "lights", "release": "ptt"},
-            "mode": {"press": "dimmer"}, "set": {"press": "stop"}}}).status_code == 200
+            "key1": {"press": "lights"}, "rec": {"press": "dimmer", "release": "ptt"},
+            "mode": {"press": "mute"}, "set": {"press": "stop"}}}).status_code == 200
         wait(lambda: satellite.texts("config"), what="the config")
     assert satellite.texts("config") == [{"type": "config", "button_actions": {
-        "key1": {"press": "mute"}, "rec": {"press": "lights"}, "mode": {"press": "dimmer"}}}]
+        "key1": {"press": "lights"}, "rec": {"press": "dimmer"}, "mode": {"press": "mute"}}}]
 
 
 def test_a_press_the_satellite_ran_is_not_run_again_by_the_hub(client, app, events, plug):

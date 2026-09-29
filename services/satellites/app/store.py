@@ -45,6 +45,14 @@ DEFAULT_CONFIG = {
 # Button actions the satellite runs itself: they work with the hub down, and
 # only a button, never the hub, can undo the privacy mute.
 DEVICE_ACTIONS = frozenset({"mute", "volume_up", "volume_down", "lights", "dimmer", "brighter"})
+# Buttons whose mute does not count as the way out of one. KEY1, on the main
+# board's edge, is not wired on a stock board (the korvo README, "Buttons"),
+# and the mute holds through a restart, so a table whose only mute is KEY1
+# could leave a muted satellite muted for good. The firmware does not count
+# it (hub.cpp, apply_button_actions) and makes Rec's press the mute instead,
+# whatever the table says Rec does; the hub applies the same rule, so that
+# what it saves and shows is what the satellite does.
+MUTE_DOES_NOT_COUNT = frozenset({"key1"})
 # Config the hub acts on itself and never sends to the satellite: the firmware
 # would ignore it, and it would cost a JSON document on a board with 300 KB of
 # heap.
@@ -105,12 +113,21 @@ def device_actions(buttons: dict | None) -> dict:
     return out
 
 
+def keeps_a_mute(buttons: dict | None) -> bool:
+    """Whether a button the satellite counts is the privacy mute: any but
+    those in MUTE_DOES_NOT_COUNT, the firmware's own rule."""
+    return any(act == "mute" for button, edges in (buttons or {}).items()
+               if button not in MUTE_DOES_NOT_COUNT for act in (edges or {}).values())
+
+
 def with_button_defaults(config: dict) -> dict:
     """A mapping saved before button actions had no Rec (the firmware kept
     it) and no volume pair while the firmware kept those too: given them, so
-    that the buttons do what they did."""
+    that the buttons do what they did. One saved before the hub stopped
+    counting a mute on KEY1 gets Rec's press as the mute, as the firmware
+    has done since 2026-09-28."""
     buttons = {k: dict(v) for k, v in (config.get("buttons") or {}).items()}
-    if not any(a == "mute" for edges in buttons.values() for a in edges.values()):
+    if not keeps_a_mute(buttons):
         buttons.setdefault("rec", {})["press"] = "mute"
     if config.get("local_volume_buttons", True):
         for key, act in (("vol_up", "volume_up"), ("vol_down", "volume_down")):

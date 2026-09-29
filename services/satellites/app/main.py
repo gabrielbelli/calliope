@@ -110,8 +110,8 @@ from . import router as routing
 from . import tools as tooling
 from .destinations import EnvName
 from .mqtt import MqttBridge
-from .store import (DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions, reported_config,
-                    satellite_config)
+from .store import (DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions, keeps_a_mute,
+                    reported_config, satellite_config)
 
 log = voice_logging.setup("voice-satellites", "SATELLITES")
 
@@ -2145,10 +2145,13 @@ class ConfigBody(BaseModel):
     @classmethod
     def _keeps_a_mute(cls, v: dict | None) -> dict | None:
         # Only a button can undo the privacy mute, so a mapping without one
-        # would leave a muted satellite muted for good.
-        if v is not None and not any(a == "mute" for edges in v.values() for a in edges.values()):
-            raise ValueError("one button must stay the privacy mute (mute), or a muted "
-                             "satellite could never be unmuted")
+        # would leave a muted satellite muted for good. A mute on key1 alone
+        # does not count (store.MUTE_DOES_NOT_COUNT): a stock board does not
+        # wire it, and the firmware would quietly make Rec the mute while the
+        # page showed Rec doing something else.
+        if v is not None and not keeps_a_mute(v):
+            raise ValueError("one button other than key1 must stay the privacy mute (mute), "
+                             "or a muted satellite could never be unmuted")
         return v
 
 
