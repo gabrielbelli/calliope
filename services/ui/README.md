@@ -718,8 +718,10 @@ downloading.
   Reading and editing those profiles is its own panel, in *Vocabulary
   profiles*. An *irrelevant* glossary cost +12 % WER on Parakeet and +28 % on
   Whisper, which is a finding no slider can express.
-- **`model` on STT.** Required by `/v1` validation, but it does not choose an
-  engine — Parakeet runs regardless and says so in `x-stt-engine`.
+- **`model` on STT.** Required by `/v1` validation, and the page offers no
+  choice. On `/v1` it sends `model=parakeet`, which reaches Parakeet wherever
+  the stack loaded it and the default engine elsewhere. `/transcribe` always
+  gets the default engine. `x-stt-engine` and `x-stt-model` say which ran.
 - **The TTS language dropdown, on the fast path.** It is *inferred* from the
   voice prefix (`a`→en-us, `b`→en-gb, `p`→pt-br, …). This is the single best
   easy-mode win available: `/speak` defaults to `en-us`, so a UI that simply

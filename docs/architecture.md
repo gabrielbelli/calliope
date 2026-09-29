@@ -228,7 +228,7 @@ own behind a key and a wildcard would quietly undo that.
 | Route | Answered by | Notes |
 |---|---|---|
 | `POST /v1/audio/transcriptions` | `stt` | Streamed through. All nine input formats, any rate, mono or stereo |
-| `POST /v1/audio/translations` | `stt` | Whisper only. A Parakeet deployment refuses it by name |
+| `POST /v1/audio/translations` | `stt` | Whisper only. A request that reaches a Parakeet engine is refused by name |
 | `POST /v1/audio/speech` | `tts` or `tts-long`, by `model` | Buffered at the gateway only to read `model` |
 | `POST /v1/chat/completions` | `stt`, or answered at the gateway | See below |
 | `GET /v1/models` | the gateway | A static table, no backend call |
@@ -447,7 +447,7 @@ service:
 
 | | Its deviations cover |
 |---|---|
-| [`services/stt`](../services/stt/README.md) | `model` not choosing an engine, the four Parakeet refusals, no diarisation, the two synthesised segment fields, what word timings mean on each decoder, `usage` as the duration variant, `glossary` as an extension |
+| [`services/stt`](../services/stt/README.md) | `model` picking an engine only when `STT_MODELS` loaded it, the four Parakeet refusals, no diarisation, the two synthesised segment fields, what word timings mean on each decoder, `usage` as the duration variant, `glossary` as an extension |
 | [`services/tts`](../services/tts/README.md) | `instructions` accepted and named, an unknown custom voice id rejected rather than substituted, `speed` clamped and announced, the 510-phoneme window, how streamed `wav` and `opus` differ from the buffered file, an empty `input` |
 | [`services/tts-long`](../services/tts-long/README.md) | The 202, the 400 for a catalogue model this box has not enabled, `speed` and `instructions` as 400s, the thirteen OpenAI voice names, `sse` accepted for every model, unknown fields as 400s |
 | [`services/gateway`](../services/gateway/README.md) | The routing rule itself, the chat route, the forwarding contract |
@@ -1395,7 +1395,7 @@ skips the extension if OpenClip is absent.
 ## 10. Decision records
 
 `docs/adr/` holds the decisions, dated, each with what it cost. The sequence
-runs 0001–0010 and 0012–0015; there is no 0011.
+runs 0001–0010 and 0012–0016; there is no 0011.
 
 | | Status |
 |---|---|
@@ -1413,6 +1413,7 @@ runs 0001–0010 and 0012–0015; there is no 0011.
 | [0013 — Satellites come in through the one door, and their socket is not behind a key](adr/0013-satellites-one-door.md) | accepted |
 | [0014 — The Korvo is a voice satellite, not a music speaker](adr/0014-voice-satellite-not-a-music-speaker.md) | accepted |
 | [0015 — The satellite hub may hold an API key, by name, and never shows it](adr/0015-the-hub-may-hold-a-key.md) | accepted |
+| [0016 — Several speech-to-text engines side by side, picked by `model`](adr/0016-several-stt-engines.md) | accepted |
 
 0009 is kept rather than deleted because every engineering fact in it is still
 true; what it got wrong is its own first sentence, that this deployment offers a

@@ -32,6 +32,33 @@ at decode time; that is no longer true. Both engines now bias their decoder
 from the same terms — Whisper always, Parakeet when a request adds
 `boost=true`. See [Decode-time biasing on Parakeet](#decode-time-biasing-on-parakeet).
 
+**A Brazilian Portuguese fine-tune can run beside Parakeet.**
+`STT_MODELS=parakeet,parakeet-pt-br` loads
+`alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx`, Parakeet v3 fine-tuned on
+the TAGARELA corpus, as a second engine that a request picks with
+`model=parakeet-pt-br`. Measured against Parakeet v3 on the CPU host on
+28 Sep 2026, word error rate on Brazilian Portuguese:
+
+| Audio | `parakeet-pt-br` | `parakeet` |
+|---|---|---|
+| Spoken commands | **0.224** | 0.436 |
+| The same commands through a cheap microphone | **0.195** | 0.523 |
+| CORAA, spontaneous speech | **0.110** | 0.219 |
+| Commands after an English-sounding wake word | **0.129** | 0.313 |
+| Median time per command | **355 ms** | 410 ms |
+
+Parakeet heard up to 9% of those clips as English; the fine-tune heard none.
+It is useless for English (WER 0.89), so it is loaded for Portuguese only and
+never as the only engine of a stack that also hears English. Its weights are
+fp32, 2.4 GB, against Parakeet's 461 MB in int8.
+
+**Canary 1B v2 is not offered**, although onnx-asr loads it and it takes a
+language. On the same host it ran at 3.2× realtime against Parakeet's 9.4×,
+was no more accurate on Brazilian Portuguese commands, and on unclear speech
+its autoregressive decoder looped ("falei, falei, …") for 48 s on a 3 s
+command. [ADR 0016](../../docs/adr/0016-several-stt-engines.md) has the
+decision and what it costs.
+
 ## Status
 
 `main` carries validated versions only. Work happens on `prerelease`, which
@@ -45,7 +72,7 @@ docker run -p 8000:8000 -v stt-models:/models \
   ghcr.io/gabrielbelli/calliope-stt:pre
 ```
 
-First start downloads the selected model into the volume. Later starts are
+First start downloads each engine it loads into the volume. Later starts are
 immediate.
 
 ```bash
@@ -139,7 +166,7 @@ seen no events and raised nothing.
 | Field | Behaviour |
 |---|---|
 | `file` | All nine formats, any rate, mono or stereo |
-| `model` | **Required**. It picks an engine only under `STT_MODELS`; see the deviation below |
+| `model` | **Required**. It picks an engine only when it names one `STT_MODELS` loaded. Anything else, `whisper-1` included, gets the default. See the deviation below |
 | `response_format` | `json`, `text`, `verbose_json`, `srt`, `vtt`. `diarized_json` is refused |
 | `timestamp_granularities[]` | Honoured. `segment` is the default, `word` adds word timings |
 | `chunking_strategy` | Honoured — `server_vad`'s `threshold`, `prefix_padding_ms` and `silence_duration_ms` tune the VAD this service already runs |
@@ -162,13 +189,45 @@ saying which engine could do it:
 ### What each engine can do
 
 The two recognisers are not interchangeable, and the compatibility layer
-answers for the difference rather than papering over it. `/health` reports
-`translations` and `streaming`, true when a loaded engine can, and each entry
-of `models` says which (`can_translate`, `can_stream`), so a client can find
-out without spending a request on a refusal. A refusal names the fix: `model`
-of a loaded engine that can, or the deployment that would.
+answers for the difference rather than papering over it. What a request may
+send depends on the engine it reaches, not on the deployment. Under
+`STT_MODELS=parakeet,whisper`, `stream=true` streams with `model=whisper` and
+is refused with `model=whisper-1`, because `whisper-1` reaches the default
+engine. A refusal names the fix: the `model` of a loaded engine that can, or
+the deployment that would.
 
-| | Parakeet (default) | Whisper |
+`GET /health` lists every loaded engine under `models`, the default first, so
+a client can find out without spending a request on a refusal:
+
+```json
+"models": [
+  {"id": "parakeet", "family": "parakeet", "default": true, "languages": ["bg", "cs", "…"],
+   "accepts_language": false, "accepts_boost": true, "can_translate": false, "can_stream": false},
+  {"id": "parakeet-pt-br", "family": "parakeet", "default": false, "languages": ["pt"],
+   "accepts_language": false, "accepts_boost": true, "can_translate": false, "can_stream": false}
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | What a request sends as `model` to reach this engine, and what `x-stt-model` says after it ran |
+| `family` | `parakeet` or `whisper`: the code that runs it, and what `x-stt-engine` says |
+| `default` | Whether a request with any other `model` gets this engine |
+| `languages` | The ISO 639-1 codes it can hear |
+| `accepts_language`, `accepts_boost` | Whether it takes a `language` field, and `boost=true` |
+| `can_translate`, `can_stream` | Whether it answers `/v1/audio/translations` and `stream=true` |
+
+The top-level `translations`, `streaming` and `accepts_vocabulary` are true
+when any loaded engine can. `model` is the default engine's id, and
+`model_id` appears only without `STT_MODELS`. The Home Assistant integration
+builds one speech-to-text entity from each entry, and the satellite hub reads
+the list to choose an engine for each wake word, so both break if a field is
+renamed.
+
+`/transcribe` takes no `model`. It always runs the default engine, and its
+`model` field names that engine.
+
+| | `parakeet` (default), `parakeet-pt-br` | `whisper` |
 |---|---|---|
 | `stream=true` | refused — batch decoder | transcript deltas, one per window |
 | `/v1/audio/translations` | refused — no translate task | `task="translate"` |
@@ -263,24 +322,29 @@ already repaired.
 What cannot be 1:1, why, and the measurement that forces it. Nothing here is
 hidden and nothing is faked.
 
-**`model` does not choose between Parakeet and Whisper by OpenAI's names.** It
-is required, as the specification requires it, and `whisper-1` is not obeyed:
-Parakeet needs 1.4 GB resident and Whisper large-v3 2.9 GB, holding both does
-not fit the memory this is deployed under, and a cold load is minutes.
-Refusing `whisper-1` on a Parakeet deployment would reject every existing
-client — Open WebUI sends it, the example above sends it — to make a point
-about a name. So the request is answered and **every `/v1` response carries
-`x-stt-engine`** naming the engine that actually ran. Honesty rather than
-obedience. A deployment that loads several engines side by side
-(`STT_MODELS`) picks one by its id (`model=whisper`, `model=parakeet-pt-br`);
-any other name, `whisper-1` included, gets the first.
+**`model` picks an engine only when it names one `STT_MODELS` loaded.** It is
+required, as the specification requires it. `model=parakeet-pt-br` or
+`model=whisper` reaches that engine on a deployment that loaded it. Any other
+name, `whisper-1` included, gets the default engine: the first in
+`STT_MODELS`, or the one `STT_MODEL` names. Refusing `whisper-1` would reject
+every existing client (Open WebUI sends it, and so does the example above) to
+make a point about a name. So the request is answered, and **every `/v1`
+response carries `x-stt-engine` and `x-stt-model`**: the family that ran and
+the engine's id. `parakeet-pt-br` answers `x-stt-engine: parakeet` and
+`x-stt-model: parakeet-pt-br`. Honesty rather than obedience.
 
-**No streaming, translation, `language` or `temperature` under Parakeet.** All
-four are refusals, not silences, and all four are properties of a TDT decoder
-that has no such mechanism and nothing downstream that can stand in for one.
-Deploy with `STT_MODEL=whisper` if you need them, or load Whisper beside
-Parakeet (`STT_MODELS=parakeet,whisper`) and send `model=whisper`, and pay
-the order of magnitude in latency.
+`whisper-1` does not select Whisper even where Whisper is loaded. An OpenAI
+client nobody configured sends `whisper-1`, and it gets the engine the
+operator made the default rather than the slowest one. Send `model=whisper`.
+A deployment still loads one engine unless told otherwise: Parakeet needs
+1.4 GB resident and Whisper large-v3 2.9 GB, and a cold load is minutes.
+
+**No streaming, translation, `language` or `temperature` on a Parakeet
+engine.** All four are refusals, not silences, and all four are properties of
+a TDT decoder that has no such mechanism and nothing downstream that can stand
+in for one. They follow the engine a request picks. Load Whisper beside
+Parakeet (`STT_MODELS=parakeet,whisper`) and send `model=whisper`, or deploy
+with `STT_MODEL=whisper`, and pay the order of magnitude in latency.
 
 `prompt` and `keywords[]` used to be a fifth and sixth, on the grounds that
 Parakeet's decoder took no vocabulary. That was wrong twice over: they reach
@@ -495,7 +559,7 @@ transcript is the product.
 | Variable | Default | Notes |
 |---|---|---|
 | `STT_MODEL` | `parakeet` | `parakeet` or `whisper` |
-| `STT_MODELS` | unset | Engines to load side by side, the first the default: `parakeet`, `parakeet-pt-br` (a Brazilian Portuguese fine-tune, 2.4 GB), `whisper`. A request's `model` picks one; any other name gets the default. `/health` lists them under `models`. Overrides `STT_MODEL`, `STT_MODEL_ID` and `STT_QUANTISATION`; `STT_LANGUAGE` still applies to Whisper |
+| `STT_MODELS` | unset | Engines to load side by side, comma-separated, the first the default: `parakeet`, `parakeet-pt-br` (the Brazilian Portuguese fine-tune, 2.4 GB fp32, not for English), `whisper` (large-v3, int8). A request's `model` picks one by id. Any other name, `whisper-1` included, gets the first. `/health` lists them under `models`. Set, it replaces `STT_MODEL`, `STT_MODEL_ID` and `STT_QUANTISATION`, which are then not read. `STT_LANGUAGE` still applies to Whisper. Size `mem_limit` for the sum ([Limiting CPU use](#limiting-cpu-use)) |
 | `STT_MODEL_ID` | model default | Override the specific checkpoint |
 | `STT_QUANTISATION` | `int8` | Whisper also takes `int8_float32`, `float32` |
 | `STT_LANGUAGE` | unset | Leave unset if you code-switch. See below |
@@ -908,8 +972,10 @@ STT_GLOSSARY_DEFAULT=dictation,tech
 That is opting in to the WER cost above on every request, including the ones
 whose audio contains none of those terms. Prefer selecting per request.
 
-For Brazilian Portuguese, `alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx`
-drops in via `STT_MODEL_ID`, with `STT_MODEL` left at `parakeet`.
+For Brazilian Portuguese, load the fine-tune beside Parakeet with
+`STT_MODELS=parakeet,parakeet-pt-br` rather than in its place with
+`STT_MODEL_ID`: it cannot transcribe English
+([Which model](#which-model)).
 
 ### Switching biasing off
 
@@ -1024,6 +1090,19 @@ volumes:
 
 Steady state is about 1.4 GB on Parakeet and 2.9 GB on Whisper; 6 GB leaves
 room for a long clip without letting a runaway request take the host down.
+
+Under `STT_MODELS` the engines add up, before any clip:
+
+| `STT_MODELS` | Resident, before a clip |
+|---|---|
+| `parakeet` | about 1.4 GB |
+| `parakeet,parakeet-pt-br` | about 4 GB, counting the fine-tune as its 2.4 GB of weights |
+| `parakeet,whisper` | about 4.3 GB |
+| `parakeet,parakeet-pt-br,whisper` | about 6.7 GB, more than the 6 GB above |
+
+The fine-tune's resident size has not been measured here, so treat its row as
+a floor. Raise `mem_limit` before adding an engine, or the container is
+killed when it passes the limit.
 
 Every response carries `realtime_factor`. If it drops when you raise
 `STT_THREADS`, you have crossed the point where coordination costs more than

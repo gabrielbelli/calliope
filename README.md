@@ -116,11 +116,13 @@ audio = client.audio.speech.create(
 
 | Ask for this `model` | Answered by | You get |
 |---|---|---|
-| `parakeet`, `whisper-1` | `stt` | a transcript |
+| `parakeet`, `whisper-1`, and any engine `STT_MODELS` loads (`parakeet-pt-br`, `whisper`) | `stt` | a transcript |
 | `kokoro`, `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` | `tts` | audio, straight away |
 | `chatterbox`, `chatterbox-turbo`, `tts-long` | `tts-long` | a job id |
 
-Those nine ids are what `GET /v1/models` advertises.
+`GET /v1/models` advertises nine fixed ids. It does not list `parakeet-pt-br`
+or `whisper`, which work only where `STT_MODELS` loaded them. `GET /health`
+names the engines a deployment loaded.
 
 **OpenAI-shaped:** `POST` on `/v1/audio/transcriptions`,
 `/v1/audio/translations`, `/v1/audio/speech` and `/v1/chat/completions`; `GET`
@@ -134,10 +136,12 @@ request carrying audio is transcribed, and one without gets a fixed reply.
 `GET /health` is the only route that never needs a key.
 
 > [!NOTE]
-> On the transcription side `model` does not choose an engine. One recogniser
-> is loaded per deployment, by `STT_MODEL`. `whisper-1` is accepted so existing
-> clients keep working, and every `/v1` response carries `x-stt-engine` naming
-> the engine that actually ran.
+> On the transcription side, `model` picks an engine only when it names one
+> the deployment loaded with `STT_MODELS`. Any other name, `whisper-1`
+> included, gets the default engine, so existing clients keep working. Every
+> `/v1` response carries `x-stt-engine` (the family) and `x-stt-model` (the
+> engine) that actually ran. [ADR 0016](docs/adr/0016-several-stt-engines.md)
+> has the rule.
 
 Deviations from OpenAI's schema, and the measurement forcing each one, are in
 [ADR 0001](docs/adr/0001-openai-api-compatibility.md) and in each service's
@@ -165,7 +169,7 @@ flowchart LR
 
 | | Image | Runs | Resident |
 |---|---|---|---|
-| [`services/stt`](services/stt/README.md) | `calliope-stt` | Parakeet TDT 0.6B v3, or Whisper large-v3 with `STT_MODEL=whisper` | 1.4 GB |
+| [`services/stt`](services/stt/README.md) | `calliope-stt` | Parakeet TDT 0.6B v3, or Whisper large-v3 with `STT_MODEL=whisper`, or several side by side with `STT_MODELS` | 1.4 GB |
 | [`services/tts`](services/tts/README.md) | `calliope-tts` | Kokoro-82M, 54 voices, six output formats | 0.33 GB |
 | [`services/tts-long`](services/tts-long/README.md) | `calliope-tts-long` | Chatterbox and Chatterbox Turbo, as jobs | 6.6 GB |
 | [`services/gateway`](services/gateway/README.md) | `calliope-gateway` | Auth, routing, one health answer | — |
@@ -196,8 +200,11 @@ Parakeet won 21 of the 25, at roughly seventy times the speed, and degrades far
 better: band-limiting to 4 kHz, which is what a cheap or distant microphone
 does, cost Whisper +206% WER and Parakeet +41%. Whisper leads on clean read
 speech and is the only engine here that translates, streams, or takes
-`language` — it costs an order of magnitude in latency and a redeploy. Both
-bias their decoder from a vocabulary profile.
+`language`. It costs an order of magnitude in latency, and either a redeploy
+or the memory to load it beside Parakeet. Both bias their decoder from a
+vocabulary profile. A Brazilian Portuguese fine-tune of Parakeet can be
+loaded beside it for Portuguese commands. The
+[stt README](services/stt/README.md#which-model) has its measurements.
 
 ### Long speech is a job
 

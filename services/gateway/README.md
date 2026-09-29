@@ -240,6 +240,15 @@ client most wants to know what it can send while a backend is restarting. The
 tts-long rows are generated from `GATEWAY_LONG_MODELS`, so what is advertised
 and what is routed cannot disagree.
 
+The two speech-to-text rows, `parakeet` and `whisper-1`, are fixed. Every
+transcription goes to stt-stack whatever `model` says, and stt-stack decides
+the engine: a `model` that names an engine its `STT_MODELS` loaded
+(`parakeet-pt-br`, `whisper`) reaches that engine, and anything else,
+`whisper-1` included, reaches its default. Those ids work but are not listed
+here, because the list is static and a deployment's engines are not. A client
+that needs them reads `backends.stt.health.models` in `GET /health`
+([ADR 0016](../../docs/adr/0016-several-stt-engines.md)).
+
 **The 404 row exists because the rule above it became a trap, and this
 deployment is now living in exactly the case it was built for.** "Everything
 else goes fast, including an unrecognised name" is right for a typo and was

@@ -221,6 +221,13 @@ services:
     environment:
       STT_MODEL: parakeet
       STT_QUANTISATION: int8
+      # SEVERAL ENGINES SIDE BY SIDE, the first the default; a request picks
+      # one with `model` (ADR 0016). parakeet-pt-br is Parakeet fine-tuned for
+      # Brazilian Portuguese: 2.4 GB of fp32 weights on top of Parakeet's
+      # 1.4 GB, and useless for English. Set, it replaces STT_MODEL and
+      # STT_QUANTISATION. The sum has to fit mem_limit below: parakeet and
+      # parakeet-pt-br together is about 4 GB, and adding whisper passes 6g.
+      # STT_MODELS: "parakeet,parakeet-pt-br"
       STT_THREADS: "8"
       STT_VAD: "1"
       # WHERE A FINISHED RUN IS RECORDED, and the reason there is no

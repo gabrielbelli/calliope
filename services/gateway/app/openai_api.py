@@ -63,9 +63,13 @@ FIXED: tuple[dict[str, object], ...] = (
     {"id": "tts-1", "object": "model", "created": _CREATED, "owned_by": "tts-stack"},
     {"id": "tts-1-hd", "object": "model", "created": _CREATED, "owned_by": "tts-stack"},
     {"id": "gpt-4o-mini-tts", "object": "model", "created": _CREATED, "owned_by": "tts-stack"},
-    # Speech-to-text. There is one STT backend and no decision to make, so
-    # these names are documentation rather than routing keys — every
-    # transcription request reaches stt-stack whatever `model` says.
+    # Speech-to-text. There is one STT backend and nothing to route on here:
+    # every transcription reaches stt-stack whatever `model` says, and
+    # stt-stack picks the engine. A `model` naming an engine its STT_MODELS
+    # loaded (parakeet-pt-br, whisper) reaches that engine; anything else,
+    # whisper-1 included, gets its default. Those ids are not listed, because
+    # this table is static and a deployment's engines are not: GET /health
+    # lists them (backends.stt.health.models). ADR 0016.
     {"id": "parakeet", "object": "model", "created": _CREATED, "owned_by": "stt-stack"},
     {"id": "whisper-1", "object": "model", "created": _CREATED, "owned_by": "stt-stack"},
 )

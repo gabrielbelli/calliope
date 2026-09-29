@@ -113,6 +113,17 @@ the image:
 Other built-in names are fetched at start-up into `SATELLITES_MODEL_DIR` on the
 data volume, from the same release and under the same licence.
 
+### The Brazilian Portuguese Parakeet — `alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx` — **CC BY 4.0**
+
+stt-stack loads it only when `STT_MODELS` names `parakeet-pt-br`. It is
+downloaded from Hugging Face into the `stt-models` volume on first start and
+is in no image. Its model card gives CC BY 4.0 (checked 28 Sep 2026). It names
+`alexandreacff/parakeet-tdt-0.6b-v3-ptBR-plus` as its base, which could not be
+read without an account when this was checked, so that repository's own terms
+are not recorded here. The model both start from, NVIDIA's Parakeet TDT 0.6B
+v3, is CC BY 4.0 as well. CC BY 4.0 allows commercial use and asks for
+attribution, which this entry and stt-stack's README give.
+
 ---
 
 ### Satellite firmware (`clients/korvo-satellite`)
