@@ -812,6 +812,8 @@ def test_a_pi_that_is_an_airplay_receiver_is_turned_on_off_and_named_from_the_pa
             msg = ws.receive_json()
         assert msg == {"type": "config", "airplay_name": "Living room"}
         assert client.patch(f"/satellites/{PI_MAC}", json={"airplay_name": "bad\nname"}).status_code == 422
+        assert client.patch(f"/satellites/{PI_MAC}", json={"airplay_volume": 70}).status_code == 200
+        assert client.patch(f"/satellites/{PI_MAC}", json={"airplay_volume": 101}).status_code == 422
         client.patch(f"/satellites/{PI_MAC}", json={"airplay_name": ""})
         assert client.get(f"/satellites/{PI_MAC}").json()["config"]["airplay_name"] is None
     with client.websocket_connect("/satellites/ws") as korvo:
