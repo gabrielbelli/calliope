@@ -8,9 +8,11 @@
 ERASES THE DISK. It refuses a disk that is internal, not removable, or over
 256 GB, and asks you to type its name before writing.
 
-Raspberry Pi Imager's command line writes the image with the cloud-init
-user-data and network-config from setup/ (Imager 2.0.3 or later; macOS asks
-for your password to write to the disk). Then this copies onto the boot
+The image is written with `xz -dc | sudo dd` (run it from Terminal: sudo
+asks for your password), and the cloud-init user-data and network-config
+from setup/ go onto the boot partition beside it. (--writer imager uses
+Raspberry Pi Imager's command line instead; on macOS it stopped at
+"Unmounting drive..." and never wrote.) Then this copies onto the boot
 partition, under calliope/:
 
   bundle.tar.gz, .sig        the release the first boot installs (build_bundle.py)
@@ -97,12 +99,13 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--ssh-key")
     ap.add_argument("--admin", default="calliope-admin")
     ap.add_argument("--yes", action="store_true", help="do not ask to type the disk's name")
+    ap.add_argument("--writer", choices=("dd", "imager"), default="dd")
     args = ap.parse_args(argv)
 
     bundle = Path(args.bundle)
     sig = bundle.parent / (bundle.name + ".sig")
     pub = Path(args.pubkey).expanduser()
-    for need in (Path(args.image), bundle, sig, pub, Path(IMAGER)):
+    for need in (Path(args.image), bundle, sig, pub) + ((Path(IMAGER),) if args.writer == "imager" else ()):
         if not need.exists():
             raise SystemExit(f"missing: {need}")
     if not args.hub.startswith(("wss://", "ws://")):
@@ -118,15 +121,27 @@ def main(argv: list[str]) -> int:
         ud, nc = Path(tmp) / "user-data", Path(tmp) / "network-config"
         ud.write_text(user_data(args))
         shutil.copyfile(HERE / "setup" / "network-config", nc)
-        subprocess.run(["diskutil", "unmountDisk", args.disk], check=False)
-        done = subprocess.run([IMAGER, "--cli", "--cloudinit-userdata", str(ud),
-                               "--cloudinit-networkconfig", str(nc), "--disable-eject",
-                               args.image, args.disk])
+        subprocess.run(["diskutil", "unmountDisk", args.disk], check=True)
+        if args.writer == "imager":
+            done = subprocess.run([IMAGER, "--cli", "--cloudinit-userdata", str(ud),
+                                   "--cloudinit-networkconfig", str(nc), "--disable-eject",
+                                   args.image, args.disk])
+        else:
+            raw = args.disk.replace("/dev/disk", "/dev/rdisk")
+            print(f"writing {Path(args.image).name} to {raw}; sudo asks for your password")
+            xz = subprocess.Popen(["xz", "-dc", args.image], stdout=subprocess.PIPE)
+            done = subprocess.run(["sudo", "dd", f"of={raw}", "bs=4m", "status=progress"], stdin=xz.stdout)
+            xz.stdout.close()
+            if xz.wait() != 0:
+                raise SystemExit("xz could not read the image")
         if done.returncode:
-            raise SystemExit(f"Raspberry Pi Imager failed ({done.returncode}); nothing else was done")
-
-    subprocess.run(["diskutil", "mountDisk", args.disk], check=False)
-    boot = wait_for_boot_volume()
+            raise SystemExit(f"writing failed ({done.returncode})")
+        subprocess.run(["sync"], check=False)
+        subprocess.run(["diskutil", "mountDisk", args.disk], check=False)
+        boot = wait_for_boot_volume()
+        if args.writer == "dd":
+            shutil.copyfile(ud, boot / "user-data")
+            shutil.copyfile(nc, boot / "network-config")
     dest = boot / "calliope"
     dest.mkdir(exist_ok=True)
     shutil.copyfile(bundle, dest / "bundle.tar.gz")
