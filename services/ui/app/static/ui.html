@@ -4215,7 +4215,9 @@ const SAT_COPY = {
      action's key (POST /satellites/llm/models), and asked for only once the
      address is committed, and by itself only where the key would go there
      anyway (wakeModelsFree). The id can always be typed. */
-  toolsHint: "Used only when a question needs them; a search adds about a second.",
+  /* Offered with every request, which a server without tool calling
+     refuses whole: "used only when needed" read as a box that costs nothing. */
+  toolsHint: "Offered with every question, so a server of your own must support tool calls.",
   toolsNoSearch: "Web search needs SATELLITES_SEARXNG_URL set on the hub; the weather needs nothing.",
   modelsAsk: "Its models are listed to pick from once the base URL is filled in.",
   modelsWait: "List models sends the key in {var} to {name}; check the key is for it.",

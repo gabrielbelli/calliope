@@ -550,3 +550,13 @@ def test_an_address_is_kept_as_the_hub_keeps_it_and_a_model_it_does_not_list_is_
     assert got["listed"] == "2 models to pick from; type to narrow the list."
     assert got["other"] == "vendor/old-model is not one llm.example.com lists; clear Model to see its list.", got
 
+
+def test_the_tools_hint_says_they_go_with_every_question(tmp_path):
+    """Ticked tools are offered with every request, and a server without
+    tool calling refuses every one; the hint said they were used only when
+    needed, which read as a box that costs nothing."""
+    got = run(tmp_path, LLM_HUB + """
+      console.log(JSON.stringify({ hint: SAT_COPY.toolsHint }));
+    """)
+    assert got["hint"] == "Offered with every question, so a server of your own must support tool calls."
+
