@@ -541,7 +541,7 @@ def test_the_health_line_announces_once_and_only_when_it_changes():
 # -------------------------------------------------------- generated copy --
 
 
-SAMPLES = {"up": "32-bit · 384 kHz", "bits": "16, 24 or 32", "rates": "44.1 to 384 kHz", "now": "44.1 kHz · 32-bit · stereo", "kbps": "1,411", "lang": "Portuguese (Brazil)", "size": "12.4 MB", "days": "14 days", "name": "Kitchen", "old": "Kitchen", "new": "Bedroom", "id": "a1b2c3d4e5f6",
+SAMPLES = {"from": "44.1 kHz · 16-bit · stereo", "to": "48 kHz · 32-bit · stereo", "up": "32-bit · 384 kHz", "bits": "16, 24 or 32", "rates": "44.1 to 384 kHz", "now": "44.1 kHz · 32-bit · stereo", "kbps": "1,411", "lang": "Portuguese (Brazil)", "size": "12.4 MB", "days": "14 days", "name": "Kitchen", "old": "Kitchen", "new": "Bedroom", "id": "a1b2c3d4e5f6",
            "v": "v0.3.1", "fw": "v0.3.1", "clock": "24 Sep, 14:02", "time": "12:04:31",
            "error": "bad signature", "why": "offline or not adopted", "url": "wss://hub.local:8443",
            "what": "heard hey jarvis (0.82) from 40°", "words": "hey jarvis, alexa",

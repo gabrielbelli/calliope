@@ -671,6 +671,8 @@ def test_airplay_says_what_plays_from_whom_and_how(tmp_path):
                              bitrate_kbps: 2822, latency_ms: 200 } };
       console.log(JSON.stringify({
         facts: satAirPlayFacts(ap, { format: "s16le 2ch 44100Hz", state: "running" }),
+        perfect: satAirPlayPath({ format: "s16le 2ch 44100Hz" }, { format: "s16le 2ch 44100Hz" }, { playing: true }),
+        converted: satAirPlayPath({ format: "s16le 2ch 44100Hz" }, { format: "s32le 2ch 48000Hz" }, { playing: true }),
         formats: [satFormat("float32le 2ch 96000Hz"), satFormat("s24le 6ch 48000Hz"), satFormat("odd")],
         idleOut: satPlayedAt({ format: "s16le 2ch 48000Hz", state: "idle" }),
         notes: [satAirPlayNote({}, ap), satAirPlayNote({}, { ...ap, playing: false }),
@@ -686,7 +688,10 @@ def test_airplay_says_what_plays_from_whom_and_how(tmp_path):
                             ["Source", "ALAC, lossless · 44.1 kHz · 16-bit · stereo"],
                             ["Bit rate", "1,411 kb/s"], ["Handed on as", "44.1 kHz · 32-bit · stereo"],
                             ["Played at", "44.1 kHz · 16-bit · stereo"],
+                            ["Path", "Converted from 44.1 kHz · 32-bit · stereo to 44.1 kHz · 16-bit · stereo"],
                             ["Delay here", "200 ms"], ["Phone's volume", "50%"]]
+    assert got["perfect"] == "Bit-perfect: the phone's samples reach the card unchanged"
+    assert got["converted"] == "Converted from 44.1 kHz · 16-bit · stereo to 48 kHz · 32-bit · stereo"
     assert got["formats"] == ["96 kHz · 32-bit float · stereo", "48 kHz · 24-bit · 6 channels", "odd"]
     assert got["idleOut"] == "48 kHz · 16-bit · stereo (idle)"
     assert got["notes"] == ["playing", "paused", "waiting", "off", "not running"]

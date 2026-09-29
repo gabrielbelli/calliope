@@ -4239,6 +4239,8 @@ const SAT_COPY = {
   apPaused: "paused",
   apBitrate: "{kbps} kb/s",
   apSource: "ALAC, lossless · 44.1 kHz · 16-bit · stereo",
+  apBitPerfect: "Bit-perfect: the phone's samples reach the card unchanged",
+  apConverted: "Converted from {from} to {to}",
   qPwm: "PWM, not a DAC",
   qHdmi: "HDMI: the display's own DAC",
   qHat: "DAC HAT",
@@ -5197,6 +5199,18 @@ function satPlayedAt(out) {
   return satFormat(out.format) + (out.state && out.state !== "running" ? ` (${out.state})` : "");
 }
 
+/* BIT-PERFECT OR NOT: AirPlay's 16-bit samples reach the card unchanged
+   when Shairport Sync hands them on as they came (16-bit, 44.1 kHz), the
+   card is driven at exactly that, and nothing is mixed in or turned down
+   (a reply ducks the music). The phone's volume is the output's own then
+   (calliope-airplay-volume), not a change to the samples. */
+function satAirPlayPath(s, out, ap) {
+  if (!s || !s.format || !out || !out.format) return "";
+  const same = s.format === out.format && /^s16/i.test(s.format) && / 44100Hz$/.test(s.format);
+  if (same && ap.playing) return SAT_COPY.apBitPerfect;
+  return same ? "" : satText("apConverted", { from: satFormat(s.format), to: satFormat(out.format) });
+}
+
 /* 245 s as "4:05". */
 function satClockTime(seconds) {
   const t = Math.max(0, Math.round(seconds || 0));
@@ -5229,6 +5243,7 @@ function satAirPlayFacts(ap, out) {
     ["Bit rate", satText("apBitrate", { kbps: "1,411" })],
     ["Handed on as", s.format ? satFormat(s.format) : ""],
     ["Played at", satPlayedAt(out)],
+    ["Path", satAirPlayPath(s, out, ap)],
     ["Delay here", s.latency_ms ? `${s.latency_ms} ms` : ""],
     ["Phone's volume", typeof ap.volume === "number" ? `${ap.volume}%` : ""]].filter(f => f[1]);
 }
