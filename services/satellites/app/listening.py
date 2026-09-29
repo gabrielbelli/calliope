@@ -272,6 +272,12 @@ class Ear:
     def direction(self) -> float | None:
         return self.frontend.direction if self.frontend else None
 
+    def near_misses(self) -> list[tuple[str, float]]:
+        """The wake words that nearly fired since the last call (telemetry).
+        Called between two process() calls, never while one runs."""
+        take = getattr(self.wake, "take_near_misses", None)
+        return take() if take is not None else []
+
     def stats(self) -> dict:
         """For GET /satellites. Read on the event loop while process() may be
         running in its thread, so it takes only scalars, and a read that

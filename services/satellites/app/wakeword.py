@@ -76,6 +76,10 @@ os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
 
 RATE = 16000
 FRAME = 1280  # openWakeWord scores one 80 ms frame at a time
+# A score that reaches this share of its threshold and falls back is a near
+# miss (WakeWords._near); at most NEAR_MISS_KEPT wait to be taken.
+NEAR_MISS = 0.5
+NEAR_MISS_KEPT = 32
 REFRACTORY_S = 1.5
 
 # The release assets openwakeword 0.6.0 names in openwakeword.MODELS and
@@ -337,6 +341,28 @@ class WakeWords:
         self._scored = 0      # samples openWakeWord has scored, a multiple of FRAME
         self._armed = dict.fromkeys(self._keys, True)
         self._quiet_until = dict.fromkeys(self._keys, 0)
+        self._near_peak: dict[str, float] = {}
+        # (name, peak) of each rise that did not reach the threshold, for
+        # telemetry; drained by take_near_misses(), and bounded if nobody does.
+        self.near_misses: list[tuple[str, float]] = []
+
+    def _near(self, name: str, score: float, threshold: float) -> None:
+        """A NEAR MISS: the score rose to at least NEAR_MISS of the threshold
+        and fell back below that without firing. Its peak is kept, so the
+        words said to a satellite that did not hear them can be told apart
+        from words nobody said."""
+        floor = threshold * NEAR_MISS
+        if score >= floor:
+            if score > self._near_peak.get(name, 0.0):
+                self._near_peak[name] = score
+        elif name in self._near_peak:
+            if len(self.near_misses) < NEAR_MISS_KEPT:
+                self.near_misses.append((name, self._near_peak[name]))
+            del self._near_peak[name]
+
+    def take_near_misses(self) -> list[tuple[str, float]]:
+        taken, self.near_misses = self.near_misses, []
+        return taken
 
     def feed(self, pcm: np.ndarray) -> list[Detection]:
         """The detections this chunk completed, in stream order."""
@@ -356,12 +382,17 @@ class WakeWords:
                 continue
             for name, key in self._keys.items():
                 score = float(scores[key])
-                if score < self.thresholds[name]:
+                threshold = self.thresholds[name]
+                if score < threshold:
                     self._armed[name] = True
+                    self._near(name, score, threshold)
                 elif self._armed[name] and self._scored >= self._quiet_until[name]:
                     self._armed[name] = False
                     self._quiet_until[name] = self._scored + self._refractory
+                    self._near_peak.pop(name, None)
                     found.append(Detection(name, score, self._scored))
+                else:
+                    self._near_peak.pop(name, None)
         self._pending = x[whole:].copy()
         return found
 

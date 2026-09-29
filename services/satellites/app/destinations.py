@@ -92,7 +92,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from . import audio
 from . import language as lang
-from . import secret_store
+from . import secret_store, telemetry
 from . import tools as tooling
 
 log = logging.getLogger("voice-satellites.destinations")
@@ -310,9 +310,12 @@ class HaConversation(_Base):
         # "and the other one"); within one of our conversations it is sent back.
         if req.state.get("ha_conversation_id"):
             body["conversation_id"] = req.state["ha_conversation_id"]
+        t0 = time.monotonic()
         r = await client.post(f"{self.url}/api/conversation/process", json=body,
                               headers={"Authorization": f"Bearer {token}"},
                               timeout=self.timeout)
+        telemetry.note("ha", "conversation", agent=self.agent_id, status=r.status_code,
+                       ms=telemetry.since(t0))
         if r.status_code == 401:
             raise DestinationError(f"Home Assistant refused the token in {self.token_env} (401)")
         data = _json(r, "Home Assistant")
@@ -327,10 +330,20 @@ class HaConversation(_Base):
             # that is success with nothing to say, not an error.
             speech = None
         speech = speech if isinstance(speech, str) and speech.strip() else None
+        _note_response(response, speech)
         if response.get("response_type") == "error":
             code = (response.get("data") or {}).get("code") if isinstance(response.get("data"), dict) else None
             raise NotUnderstood(f"Home Assistant did not understand ({code or 'error'})", speech)
         return speech
+
+
+def _note_response(response: dict, speech: str | None, **more) -> None:
+    """Home Assistant's answer, for telemetry: its type, and how many of the
+    targets it named it acted on and failed on."""
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    telemetry.note("ha", "intent_end", response_type=response.get("response_type"),
+                   success=len(data.get("success") or []), failed=len(data.get("failed") or []),
+                   code=data.get("code"), speech=telemetry.preview(speech), **more)
 
 
 def answer_instruction(language: str | None, reply_language: str | None) -> str | None:
@@ -645,6 +658,7 @@ class Llm(_Base):
                 if r.status_code >= 400:
                     raw = await _read_error(r)
                     if limit == "max_tokens" and _wants_completion_tokens(r.status_code, raw):
+                        telemetry.note("llm", "retry", status=r.status_code, reason="max_completion_tokens")
                         limit = "max_completion_tokens"
                         self.limit_names[(self.base_url, self.model)] = limit
                         continue
@@ -686,10 +700,27 @@ class Llm(_Base):
             calls: dict[int, dict] = {}
             said: list[str] = []
             final = not self.tools or n == self.TOOL_ROUNDS
-            async for piece in self._turn(client, req, messages, "none" if self.tools and final else None,
-                                          calls):
-                said.append(piece)
-                yield piece
+            choice = "none" if self.tools and final else None
+            meta: dict = {}
+            t0, first, failed = time.monotonic(), None, None
+            try:
+                async for piece in self._turn(client, req, messages, choice, calls, meta):
+                    if first is None:
+                        first = telemetry.since(t0)
+                    said.append(piece)
+                    yield piece
+            except DestinationError as e:
+                failed = str(e)
+                raise
+            finally:
+                usage = meta.get("usage") if isinstance(meta.get("usage"), dict) else {}
+                telemetry.note("llm", "round", n=n, model=self.model, stream=self.stream,
+                               tool_choice=choice, ms=telemetry.since(t0), first_token_ms=first,
+                               finish=meta.get("finish"), prompt_tokens=usage.get("prompt_tokens"),
+                               completion_tokens=usage.get("completion_tokens"),
+                               messages=len(messages), chars=len("".join(said)),
+                               tool_calls=[c["name"] for _, c in sorted(calls.items())] or None,
+                               text=telemetry.preview("".join(said)), error=failed)
             if calls and final and self.tools and not "".join(said).strip():
                 # Some servers ignore tool_choice: the turn would end in
                 # silence, with nothing to say why.
@@ -725,14 +756,21 @@ class Llm(_Base):
                 slot["arguments"] += fn["arguments"]
 
     async def _turn(self, client: httpx.AsyncClient, req: Request, messages: list[dict],
-                    tool_choice: str | None, calls: dict[int, dict]) -> AsyncIterator[str]:
+                    tool_choice: str | None, calls: dict[int, dict],
+                    meta: dict | None = None) -> AsyncIterator[str]:
         """One request: its text as it comes, and the tool calls it asks for
-        gathered into `calls`."""
+        gathered into `calls`. `meta` gets the finish reason and the token
+        usage, where the server says them (telemetry)."""
+        meta = meta if meta is not None else {}
         async with self._open(client, req, self.stream, messages, tool_choice) as r:
             if not self.stream or "text/event-stream" not in r.headers.get("content-type", ""):
                 # One body: asked for, or a server that ignores the flag.
                 await r.aread()
                 data = _json(r, "the LLM")
+                if isinstance(data, dict):
+                    meta["usage"] = data.get("usage")
+                    with contextlib.suppress(KeyError, IndexError, TypeError, AttributeError):
+                        meta["finish"] = data["choices"][0].get("finish_reason")
                 try:
                     wanted = data["choices"][0]["message"].get("tool_calls")
                 except (KeyError, IndexError, TypeError, AttributeError):
@@ -766,12 +804,15 @@ class Llm(_Base):
                 if isinstance(chunk, dict) and chunk.get("error"):
                     raise DestinationError("the LLM streamed an error: "
                                            + _provider_message(chunk, _held(self.api_key_env)))
+                if isinstance(chunk, dict) and isinstance(chunk.get("usage"), dict):
+                    meta["usage"] = chunk["usage"]
                 try:
                     choice = chunk["choices"][0]
                     delta = choice.get("delta") or {}
                 except (KeyError, IndexError, TypeError, AttributeError):
                     continue  # a usage chunk
                 finish = choice.get("finish_reason") or finish
+                meta["finish"] = finish
                 if isinstance(delta, dict) and delta.get("tool_calls") and self.tools:
                     self._gather(calls, delta["tool_calls"])
                 piece = _text(delta.get("content")) if isinstance(delta, dict) else ""
@@ -865,12 +906,14 @@ class Webhook(_Base):
             if token is None:
                 raise DestinationError(f"{self.token_env} is not set, so there is no token for the webhook")
             headers["Authorization"] = f"Bearer {token}"
+        t0 = time.monotonic()
         r = await client.post(self.url, headers=headers, timeout=self.timeout, json={
             "satellite": req.satellite_name or req.satellite_id,
             "satellite_id": req.satellite_id,
             "wake_word": req.wake_word, "mode": req.mode, "text": req.text,
             "language": req.language, "audio_seconds": round(req.audio_seconds, 3),
             "history": [{"user": t.user, "assistant": t.assistant} for t in req.history]})
+        telemetry.note("webhook", "call", status=r.status_code, ms=telemetry.since(t0))
         if r.status_code >= 400:
             raise DestinationError(f"the webhook answered {r.status_code}: {r.text[:200].strip()}")
         try:
@@ -1074,12 +1117,16 @@ class HaAssist(_Base):
             run["pipeline"] = self.pipeline
         if req.state.get("ha_assist_conversation_id"):
             run["conversation_id"] = req.state["ha_assist_conversation_id"]
+        t0 = time.monotonic()
         async with self._session() as ws:
+            telemetry.note("ha", "connected", ms=telemetry.since(t0))
+            t1 = time.monotonic()
             try:
                 device = await self._device(ws, req.satellite_id)
             except _NoDevice:
-                pass  # the connection went with the lookup: the intent goes on a fresh one
+                telemetry.note("ha", "device", ms=telemetry.since(t1), found=False, lost_connection=True)
             else:
+                telemetry.note("ha", "device", ms=telemetry.since(t1), found=bool(device))
                 if device:
                     run["device_id"] = device
                 await ws.send(json.dumps(run))
@@ -1117,6 +1164,7 @@ class HaAssist(_Base):
         body: dict = {"engine_id": pipeline.tts_engine, "message": text, "options": options}
         if pipeline.tts_language:
             body["language"] = pipeline.tts_language
+        t0 = time.monotonic()
         r = await client.post(f"{self.url}/api/tts_get_url", json=body, timeout=self.timeout,
                               headers={"Authorization": f"Bearer {self._token()}"})
         path = _json(r, "Home Assistant's text-to-speech").get("path")
@@ -1133,6 +1181,9 @@ class HaAssist(_Base):
         except ValueError as e:
             raise DestinationError(f"Home Assistant's text-to-speech sent audio that is not "
                                    f"16-bit WAV: {e}") from None
+        telemetry.note("tts", "synth", engine=pipeline.tts_engine, voice=pipeline.tts_voice,
+                       chars=len(text), ms=telemetry.since(t0),
+                       audio_s=round(len(pcm) / 2 / got, 2) if got else None, via="home_assistant")
         return audio.resample(pcm, got, rate)
 
     async def pipelines(self) -> dict:
@@ -1237,20 +1288,45 @@ class HaAssist(_Base):
                     await ws.send(prefix + pcm[i:i + STT_CHUNK])
                 await ws.send(prefix)  # the end of the audio
             elif kind == "error":
+                telemetry.note("ha", "error", code=data.get("code"),
+                               message=telemetry.preview(data.get("message")))
                 if data.get("code") == "stt-no-text-recognized":
                     return ""
                 raise DestinationError(f"Home Assistant's speech-to-text failed: "
                                        f"{str(data.get('message') or data.get('code'))[:200]}")
             elif kind == "stt-end":
                 text = (data.get("stt_output") or {}).get("text")
+                telemetry.note("ha", "stt_end", text=telemetry.preview(text))
                 return text.strip() if isinstance(text, str) else ""
             elif kind == "run-end":
                 return ""
         return ""
 
     async def _run(self, ws, req: Request) -> str | None:
+        started, texted = None, False
         async for kind, data in self._events(ws):
+            if kind == "intent-start":
+                started = time.monotonic()
+                telemetry.note("ha", "intent_start", engine=data.get("engine"),
+                               language=data.get("language"), device=bool(data.get("device_id")),
+                               prefer_local=data.get("prefer_local_intents"))
+            elif kind == "intent-progress":
+                delta = data.get("chat_log_delta") or {}
+                for call in delta.get("tool_calls") or []:
+                    if isinstance(call, dict):
+                        telemetry.note("ha", "tool_call", name=call.get("tool_name"),
+                                       args=telemetry.preview(call.get("tool_args")))
+                if delta.get("role") == "tool_result":
+                    result = delta.get("tool_result")
+                    telemetry.note("ha", "tool_result", name=delta.get("tool_name"),
+                                   error=isinstance(result, dict) and bool(result.get("error")) or None,
+                                   result=telemetry.preview(result))
+                if delta.get("content") and not texted:
+                    texted = True
+                    telemetry.note("ha", "first_text")
             if kind == "error":
+                telemetry.note("ha", "error", code=data.get("code"),
+                               message=telemetry.preview(data.get("message")))
                 raise DestinationError(f"the Assist pipeline failed: "
                                        f"{str(data.get('message') or data.get('code'))[:200]}")
             if kind == "intent-end":
@@ -1264,6 +1340,8 @@ class HaAssist(_Base):
                 except (KeyError, TypeError):
                     speech = None
                 speech = speech if isinstance(speech, str) and speech.strip() else None
+                _note_response(response, speech, processed_locally=data.get("processed_locally"),
+                               intent_ms=telemetry.since(started) if started else None)
                 if response.get("response_type") == "error":
                     code = (response.get("data") or {}).get("code")
                     raise NotUnderstood(f"Home Assistant did not understand ({code or 'error'})",

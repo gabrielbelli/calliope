@@ -95,6 +95,9 @@ from pathlib import Path
 from typing import Annotated, Any, AsyncIterator, Literal
 
 import httpx
+import math
+from datetime import UTC, datetime, timedelta
+
 import numpy as np
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse
@@ -103,7 +106,7 @@ from voice_common import auth, errors, health
 from voice_common import logging as voice_logging
 from voice_common.errors import ApiError
 
-from . import audio, dialogue, earcons, listening, secret_store, signing, wakeword, wakewords_config
+from . import audio, dialogue, earcons, listening, secret_store, signing, telemetry, wakeword, wakewords_config
 from . import output as outputs
 from . import language as lang
 from . import router as routing
@@ -675,6 +678,25 @@ class Hub:
         # (satellite, trigger word) -> time.monotonic() before which it does
         # not fire again.
         self.cooldown: dict[tuple[str, str], float] = {}
+        # Off until turned on (telemetry.py); None in a hub built without one.
+        self.telemetry: telemetry.Recorder | None = None
+
+    def record(self, record: dict) -> None:
+        """One telemetry record, when telemetry is on."""
+        if self.telemetry is not None:
+            self.telemetry.write(record)
+
+    def record_wake(self, s: Session, heard: listening.Heard, decision: str) -> None:
+        """What the hub did with a wake word, for telemetry: `decision` is
+        started, carried_on, interrupted, ignored_busy, trigger or
+        trigger_cooldown."""
+        if self.telemetry is None or not self.telemetry.enabled:
+            return
+        self.record({"kind": "wake", "satellite": s.id, "word": heard.wake_word,
+                     "score": heard.score,
+                     "threshold": self.voice.assignment.thresholds().get(heard.wake_word),
+                     "direction": heard.direction, "decision": decision,
+                     "ptt": heard.score is None or None})
 
     def publish(self, event: dict) -> None:
         event = {"at": time.time()} | event
@@ -945,10 +967,15 @@ class Hub:
         conv = s.conversation
         if conv is not None:
             if conv.takes(heard):
+                self.record_wake(s, heard, "carried_on")
                 return
             if not conv.interruptible:
+                self.record_wake(s, heard, "ignored_busy")
                 return
             conv.supersede()
+            self.record_wake(s, heard, "interrupted")
+        else:
+            self.record_wake(s, heard, "started")
         rec = self.store.satellites.get(s.id)
         conv = Conversation(self, s.id, rec.name if rec else "", heard, session=s)
         s.conversation = conv
@@ -966,8 +993,10 @@ class Hub:
         if now < self.cooldown.get(key, 0.0):
             log.debug("satellite %s: trigger %s again within its cooldown; ignored",
                       s.id, heard.wake_word)
+            self.record_wake(s, heard, "trigger_cooldown")
             return
         self.cooldown[key] = now + behaviour.trigger.cooldown_s
+        self.record_wake(s, heard, "trigger")
         rec = self.store.satellites.get(s.id)
         self.publish({"type": "triggered", "satellite": s.id,
                       "satellite_name": rec.name if rec else "", "wake_word": heard.wake_word,
@@ -1242,10 +1271,16 @@ async def listen_loop(h: Hub, s: Session) -> None:
         except Exception:
             log.exception("satellite %s: listening failed; starting it again", s.id)
             s.ear = listening.Ear(debug_s=DEBUG_AUDIO_S, rate=s.mic_rate, channels=s.mic_channels,
-                                  frontend=h.voice.frontend)
+                                  frontend=h.voice.frontend,
+                                  silence_for=lambda word: silence_for(s.id, word))
             if s.conversation is not None:
                 s.conversation.cancel("listening failed")
             continue
+        near = ear.near_misses()
+        if near and h.telemetry is not None and h.telemetry.enabled:
+            thresholds = h.voice.assignment.thresholds()
+            for word, peak in near:
+                h.telemetry.near_miss(s.id, word, peak, thresholds.get(word))
         dropped = False
         for ev in events:
             if isinstance(ev, listening.Heard):
@@ -1426,6 +1461,7 @@ class Conversation:
         self._silence_ms = self.route.behaviour.silence_ms if self.route else 800
         self._command: listening.Command | None = None
         self._published = False
+        self._n = 0  # turns begun, for telemetry
         self._cancelled = False
         self._closing = False
 
@@ -1684,6 +1720,7 @@ class Conversation:
         out = routing.Outcome(rule_id=self.route.id if self.route else None,
                               mode=self.route.behaviour.mode if self.route else "command")
         self.outcome, self._command, self._published = out, command, False
+        self._n += 1
         self.phase = "routing"
         self._hold_still()
         if command is None:
@@ -1776,10 +1813,46 @@ class Conversation:
                      "handed_over_to": o.handed_over_to} | common
         else:
             event = {"type": "routed"} | common | ({"injected": True} if self.injected else {})
+        self._record(o, command, played, note or self.note)
         self.note = None
         self._published = True
         self.hub.publish(event)
         return event
+
+    def _record(self, o: routing.Outcome, command: listening.Command | None, played: bool,
+                note: str | None) -> None:
+        """The turn's telemetry record (telemetry.py), when telemetry is on."""
+        rec = self.hub.telemetry
+        if rec is None or not rec.enabled:
+            return
+        b = self.route.behaviour if self.route else None
+        d = b.action.destination if b is not None and b.action is not None else None
+        s = self.s
+        word = self.heard.wake_word
+        trigger = ("inject" if self.injected else "follow_up" if self._n > 1
+                   else "ptt" if self.heard.score is None else "wake")
+        # Ear.stats never raises: a front-end caught mid-reset reports nothing.
+        ear = ({k: v for k, v in s.ear.stats().items() if k in ("erle_db", "far_end", "beamformer", "rtf")}
+               if s is not None and s.ear is not None else {})
+        rec.write({
+            "kind": "turn", "satellite": self.nid, "satellite_name": self.name,
+            "firmware": s.fw if s is not None else None, "word": word, "rule_id": o.rule_id,
+            "mode": o.mode, "trigger": trigger, "turn": self._n,
+            "action": getattr(d, "type", None), "destination": _destination_view(d),
+            "wake": ({"score": self.heard.score, "direction": self.heard.direction,
+                      "threshold": self.hub.voice.assignment.thresholds().get(word)}
+                     if trigger == "wake" else None),
+            "command": _command_view(command, self._silence_ms),
+            "language": o.language, "language_source": o.language_source,
+            "reply_language": o.reply_language, "voice": o.voice,
+            "transcript": o.transcript, "reply_text": o.reply_text, "spoken_text": o.spoken_text,
+            "error": o.error, "handed_over_to": o.handed_over_to, "interrupted": o.interrupted,
+            "ended": o.ended, "played": played, "note": note, "reply_to": o.reply_to,
+            "reply_audio_s": round(o.audio_bytes / 2 / routing.SPEAKER_RATE, 2) if o.audio_bytes else None,
+            "timings_ms": o.timings_ms, "timeline_ms": o.timeline_ms, "events": o.events,
+            "device": ({k: s.status[k] for k in TELEMETRY_STATUS if k in s.status}
+                       if s is not None else None) or None,
+            "ear": ear or None, "quiet": self.quiet or None})
 
     async def _close(self) -> None:
         """Whatever the way out: a reply cut short stops, the duck is
@@ -1809,6 +1882,44 @@ class Conversation:
                                   "turns": self.turns, "reason": self.reason or "cancelled",
                                   "seconds": round(time.monotonic() - self.started_at, 1)})
             self.phase = "done"
+
+
+# ---- telemetry ----------------------------------------------------------------------
+
+# A satellite's status fields that go into a turn's telemetry record.
+TELEMETRY_STATUS = ("rssi", "heap", "psram", "uptime_s", "mic_dropped", "spk_dropped",
+                    "spk_buffered_ms", "volume", "mic_gain_db")
+
+
+def _destination_view(d) -> dict | None:
+    """What a turn's destination is, without its address or key names."""
+    if d is None:
+        return None
+    view = {"type": d.type}
+    for key in ("model", "pipeline", "agent_id", "tools", "stream", "timeout", "max_tokens"):
+        value = getattr(d, key, None)
+        if value not in (None, [], ""):
+            view[key] = value
+    return view
+
+
+def _command_view(command: listening.Command | None, silence_ms: int | None) -> dict | None:
+    """How long the command was, why the endpointer ended it, and how loud it
+    was (dBFS): a quiet command is a far or turned-away talker, a clipped
+    one a gain set too high."""
+    if command is None:
+        return None
+    view = {"seconds": round(command.seconds, 2), "endpoint": command.reason,
+            "had_speech": command.had_speech, "silence_ms": silence_ms}
+    pcm = command.audio[:len(command.audio) & ~1]
+    if pcm:
+        x = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+        rms = float(np.sqrt(np.mean(x * x)))
+        peak = float(np.max(np.abs(x)))
+        view |= {"rms_dbfs": round(20 * math.log10(rms / 32768), 1) if rms > 0 else -120.0,
+                 "peak_dbfs": round(20 * math.log10(peak / 32768), 1) if peak > 0 else -120.0,
+                 "clipped_pct": round(float(np.mean(np.abs(x) >= 32000)) * 100, 3)}
+    return view
 
 
 # ---- the rename from "nodes" ------------------------------------------------------
@@ -1900,6 +2011,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     FIRMWARE_KEY = signing.load_public_key()
     EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ear")
     hub = Hub(Store(DATA_DIR))
+    hub.telemetry = telemetry.Recorder(DATA_DIR, os.environ.get("SATELLITES_TELEMETRY"))
+    telemetry.install(hub.telemetry)
+    log.info("telemetry %s", f"on ({hub.telemetry.level})" if hub.telemetry.enabled else "off")
     # Before anything that could make a request with a key: the keys the hub
     # holds, by name, beside the environment's (secret_store.py).
     held = secret_store.configure(secret_store.SecretStore(DATA_DIR))
@@ -2012,6 +2126,11 @@ async def satellite_socket(ws: WebSocket) -> None:
     player = asyncio.create_task(s.speaker_loop(lambda: hub.speaker_allowed(s)))
     log.info("satellite %s connected from %s (%s, firmware %s)", s.id, s.address, s.model, s.fw)
     boot = s.hello.get("boot") or {}
+    connected_at, close_code = time.monotonic(), None
+    hub.record({"kind": "session", "satellite": s.id, "event": "connected", "firmware": s.fw,
+                "model": s.model, "reset_reason": s.hello.get("reset_reason"),
+                "boot_ms": boot.get("stages_ms"), "stalled_in": boot.get("stalled_in"),
+                "replaced": old is not None or None})
     if boot:
         # The satellite's own account of its start-up: how long each step took,
         # and whether a previous start-up stalled (see clients/korvo-satellite
@@ -2024,6 +2143,7 @@ async def satellite_socket(ws: WebSocket) -> None:
         while True:
             msg = await ws.receive()
             if msg["type"] == "websocket.disconnect":
+                close_code = msg.get("code")
                 break
             if msg.get("bytes") is not None:
                 data = msg["bytes"]
@@ -2037,9 +2157,15 @@ async def satellite_socket(ws: WebSocket) -> None:
                         hub.on_output(s)
             elif msg.get("text") is not None:
                 await on_message(s, json.loads(msg["text"]))
-    except (WebSocketDisconnect, RuntimeError):
+    except WebSocketDisconnect as e:
+        close_code = e.code
+    except RuntimeError:
         pass
     finally:
+        hub.record({"kind": "session", "satellite": s.id, "event": "disconnected",
+                    "close_code": close_code,
+                    "seconds": round(time.monotonic() - connected_at),
+                    "superseded": hub.sessions.get(s.id) is not s or None})
         player.cancel()
         hub.stop_listening(s)
         if s.ota and s.ota.get("state") in ("requested", "started", "progress"):
@@ -2076,6 +2202,8 @@ async def on_message(s: Session, msg: dict) -> None:
                 hub.take_own(s)
         if hub.speaks_for(s):
             hub.publish({"type": "status", "satellite": s.id, "status": s.status})
+            if hub.telemetry is not None:
+                hub.telemetry.device(s.id, s.status)
         # The privacy mute stops everything: nothing more will arrive to be
         # heard, and a conversation that is waiting for it, or answering it,
         # ends now rather than when its follow-up times out. Going on, it
@@ -2319,6 +2447,96 @@ async def put_secret(body: SecretBody) -> dict:
                        type_="server_error") from None
     log.info("secret %s %s", body.name, "cleared" if body.value is None else "stored on the hub")
     return hub.voice.describe()
+
+
+class TelemetryBody(BaseModel):
+    """Telemetry's settings (telemetry.py); a field left out keeps its value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    level: Literal["timings", "full"] | None = None
+    retention_days: int | None = None
+    max_mb: int | None = None
+
+
+def _telemetry() -> telemetry.Recorder:
+    if hub.telemetry is None:
+        raise ApiError(503, "telemetry is not set up on this hub", code="telemetry_unavailable")
+    return hub.telemetry
+
+
+def _when(value: str | None, name: str) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        at = datetime.fromisoformat(value)
+    except ValueError:
+        raise ApiError(422, f"{name} must be an ISO 8601 time, like 2026-09-29T14:00:00Z",
+                       code="invalid_time", param=name) from None
+    return at if at.tzinfo else at.replace(tzinfo=UTC)
+
+
+@app.get("/satellites/telemetry")
+async def get_telemetry() -> dict:
+    """Whether telemetry is on, at which level, how long it keeps what it
+    records, and the day files it holds."""
+    return await asyncio.to_thread(_telemetry().status)
+
+
+@app.put("/satellites/telemetry")
+async def put_telemetry(body: TelemetryBody) -> dict:
+    """Turn telemetry on or off, or change its level, retention or size cap.
+    Saved on the hub and in force at once, for every satellite."""
+    rec = _telemetry()
+    try:
+        rec.update(body.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise ApiError(422, str(e), code="invalid_telemetry") from None
+    except OSError as e:
+        raise ApiError(500, f"could not write telemetry.json: {e.strerror or type(e).__name__}",
+                       type_="server_error") from None
+    return await asyncio.to_thread(rec.status)
+
+
+@app.delete("/satellites/telemetry")
+async def delete_telemetry() -> dict:
+    """Delete every telemetry record. The settings stay as they are."""
+    rec = _telemetry()
+    n = await asyncio.to_thread(rec.wipe)
+    log.info("telemetry: %d day files deleted", n)
+    return await asyncio.to_thread(rec.status) | {"deleted": n}
+
+
+@app.get("/satellites/telemetry/records")
+async def telemetry_records(since: str | None = None, until: str | None = None,
+                            hours: float | None = Query(None, gt=0, le=24 * 366),
+                            kind: str | None = None, satellite: str | None = None,
+                            word: str | None = None,
+                            limit: int = Query(500, ge=1, le=20000)) -> dict:
+    """The newest `limit` records that match, oldest first: from `since`
+    (or the last `hours`) to `until`, of the kinds named (turn, wake,
+    near_miss, session, device; comma-separated), for one satellite or one
+    wake word."""
+    start = _when(since, "since")
+    if start is None and hours is not None:
+        start = datetime.now(UTC) - timedelta(hours=hours)
+    kinds = {k.strip() for k in kind.split(",") if k.strip()} if kind else None
+    records = await asyncio.to_thread(_telemetry().read, since=start, until=_when(until, "until"),
+                                      kinds=kinds, satellite=satellite, word=word, limit=limit)
+    return {"count": len(records), "records": records}
+
+
+@app.get("/satellites/telemetry/summary")
+async def telemetry_summary(hours: float = Query(24, gt=0, le=24 * 366),
+                            satellite: str | None = None) -> dict:
+    """What the last `hours` of records say (telemetry.summarise): per wake
+    word, how often it worked and how long each stage took; each engine,
+    model and tool; and the wake words and satellites between turns."""
+    rec = _telemetry()
+    records = await asyncio.to_thread(rec.read, since=datetime.now(UTC) - timedelta(hours=hours),
+                                      satellite=satellite, limit=500_000)
+    return await asyncio.to_thread(telemetry.summarise, records, hours) | {"telemetry": rec.settings()}
 
 
 @app.post("/satellites/wake-words/models")

@@ -959,6 +959,11 @@ services:
       # hub at start. The satellites check signatures themselves either way
       # (clients/korvo-satellite/keys).
       # SATELLITES_FIRMWARE_PUBKEY: "/data/firmware-signing.pub.pem"
+      # Telemetry, off by default: each turn's timings, calls and results,
+      # kept on this volume for tuning (services/satellites#telemetry). This
+      # only sets where a hub with no saved choice starts; the Satellites
+      # tab turns it on and off after that. off, on, or timings (no words).
+      # SATELLITES_TELEMETRY: "off"
     # 1 CPU and 512 MiB, measured with the image on arm64, satellites played by
     # a script inside the container streaming four channels in real time: the
     # hub's peak resident memory was 228 MiB idle with hey_jarvis loaded, 239

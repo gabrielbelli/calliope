@@ -1200,3 +1200,53 @@ def test_hey_jarvis_through_the_front_end_on_three_microphones_is_heard_live(
     assert done["endpoint"] == "silence" and done["error"] is None
     assert stats["frontend"] is True and stats["mic_dropped"] == 0
     assert satellite.texts("lights")  # lit on the way, and the dark test covers the other case
+
+
+# ---- telemetry --------------------------------------------------------------------------------
+
+
+def test_telemetry_is_off_until_turned_on_and_then_keeps_the_whole_turn(client, services, plug, tmp_path):
+    """Off: a turn writes nothing. On (PUT /satellites/telemetry): the
+    satellite's connection, the wake word, and the turn with its command's
+    loudness, every call it made and the satellite's health, all readable
+    back from /satellites/telemetry/records and summarised."""
+    assert client.get("/satellites/telemetry").json()["enabled"] is False
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        plug(ws)
+        assert client.post(f"/satellites/{NID}/inject", content=wav(utterance())).status_code == 200
+    assert client.get("/satellites/telemetry").json()["files"] == []
+
+    got = client.put("/satellites/telemetry", json={"enabled": True, "level": "full"}).json()
+    assert (got["enabled"], got["level"]) == (True, "full")
+    assert client.put("/satellites/telemetry", json={"level": "all"}).status_code == 422
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        plug(ws)
+        assert client.post(f"/satellites/{NID}/inject", content=wav(utterance())).status_code == 200
+    time.sleep(0.2)
+
+    records = client.get("/satellites/telemetry/records").json()["records"]
+    kinds = [r["kind"] for r in records]
+    # An injected clip is a test: its turn is kept, marked, and its wake word
+    # is not counted among the ones the room said.
+    assert "session" in kinds and "wake" not in kinds and kinds.count("turn") == 1
+    [turn] = [r for r in records if r["kind"] == "turn"]
+    assert (turn["satellite"], turn["word"], turn["trigger"], turn["action"]) == (
+        NID, "hey_jarvis", "inject", "echo")
+    assert turn["transcript"] == "what time is it" and turn["error"] is None
+    assert turn["command"]["endpoint"] == "silence" and -60 < turn["command"]["rms_dbfs"] < 0
+    stages = [(e["stage"], e["what"]) for e in turn["events"]]
+    assert ("stt", "request") in stages and ("tts", "synth") in stages
+    [stt] = [e for e in turn["events"] if e["stage"] == "stt"]
+    assert stt["status"] == 200 and stt["audio_s"] > 0 and stt["ms"] >= 0
+    assert "stt_done" in turn["timeline_ms"] and turn["timings_ms"]["stt"] >= 0
+    assert turn["destination"] == {"type": "echo"}
+
+    summary = client.get("/satellites/telemetry/summary", params={"hours": 1}).json()
+    assert summary["injected_turns"] == 1 and summary["words"] == {}
+    assert summary["telemetry"]["enabled"] is True
+    assert client.get("/satellites/telemetry/records", params={"since": "yesterday"}).status_code == 422
+
+    gone = client.delete("/satellites/telemetry").json()
+    assert gone["deleted"] >= 1 and gone["files"] == [] and gone["enabled"] is True

@@ -85,7 +85,7 @@ from voice_common.errors import ApiError
 
 from . import audio
 from . import language as lang
-from . import secret_store
+from . import secret_store, telemetry
 from .destinations import (MODELS_TIMEOUT_S, Destination, DestinationError, Echo, EnvName,
                            HaAssist, Llm, LlmUrl, Url, _held, transport_error)
 from .destinations import Request as Asked
@@ -529,6 +529,10 @@ class Outcome:
     interrupted: bool = False
     ended: bool = False                  # an ending phrase: nothing was routed
     audio_bytes: int = 0                 # reply audio handed to the player
+    # Each call the turn made, timed from the end of speech, when telemetry
+    # is on (telemetry.Trace); empty otherwise. Not in as_json: the event
+    # stream and the page do not carry it.
+    events: list[dict] = field(default_factory=list, repr=False)
 
     def as_json(self) -> dict:
         n = len(self.reply_pcm48k) if self.reply_pcm48k else self.audio_bytes
@@ -801,19 +805,19 @@ class Router:
                     or time.monotonic() - self._boost_refused >= GLOSSARY_RETRY_S):
                 data["boost"] = "true"
         wav = audio.wav(pcm, MIC_RATE, 1)
-        r = await self._post_stt(data, wav)
+        r = await self._post_stt(data, wav, hint=hint)
         if "boost" in data and r.status_code == 400 and _refuses_boost(r):
             log.warning("routing: stt-stack refused to boost the %s vocabulary, so its names go "
                         "without the boost for %.0f min: %s", HA_GLOSSARY, GLOSSARY_RETRY_S / 60,
                         r.text[:300].strip())
             self._boost_refused = time.monotonic()
             del data["boost"]
-            r = await self._post_stt(data, wav)
+            r = await self._post_stt(data, wav, retry="boost_refused")
         if "glossary" in data and r.status_code == 400:
             log.warning("routing: stt-stack refused the %s vocabulary, transcribing without it "
                         "for %.0f min: %s", HA_GLOSSARY, GLOSSARY_RETRY_S / 60, r.text[:300].strip())
             self._glossary_missing = time.monotonic()
-            r = await self._post_stt(plain, wav)
+            r = await self._post_stt(plain, wav, retry="glossary_refused")
         answered = r.headers.get("x-stt-engine")
         if answered and (engine is None or engine.get("default")):
             self.stt_engine = answered.lower()
@@ -827,20 +831,32 @@ class Router:
             raise DestinationError("STT answered a \"text\" that is not a string")
         return text.strip()
 
-    async def _post_stt(self, data: dict, wav: bytes) -> httpx.Response:
-        return await self.client.post(
+    async def _post_stt(self, data: dict, wav: bytes, *, retry: str | None = None,
+                        hint: str | None = None) -> httpx.Response:
+        t0 = time.monotonic()
+        r = await self.client.post(
             f"{self.stt_url}/v1/audio/transcriptions", data=data, timeout=self.stt_timeout,
             files={"file": ("utterance.wav", wav, "audio/wav")})
+        telemetry.note("stt", "request", engine=(r.headers.get("x-stt-engine") or "").lower()
+                       or data.get("model"), model=data.get("model"), glossary=data.get("glossary"),
+                       boost=bool(data.get("boost")), language=data.get("language"), hint=hint,
+                       status=r.status_code, ms=telemetry.since(t0),
+                       audio_s=round(max(0, len(wav) - 44) / 2 / MIC_RATE, 2), retry=retry)
+        return r
 
     async def synthesise(self, text: str, voice: str) -> bytes:
         if not self.tts_url:
             raise DestinationError("SATELLITES_TTS_URL is not set, so the reply cannot be spoken")
+        t0 = time.monotonic()
         r = await self.client.post(f"{self.tts_url}/v1/audio/speech", timeout=self.tts_timeout,
                                    json={"model": "kokoro", "voice": voice,
                                          "input": clip(text), "response_format": "pcm"})
+        pcm = r.content[:len(r.content) & ~1] if r.status_code == 200 else b""
+        telemetry.note("tts", "synth", engine="kokoro", voice=voice, chars=len(clip(text)),
+                       status=r.status_code, ms=telemetry.since(t0),
+                       audio_s=round(len(pcm) / 2 / TTS_RATE, 2) if pcm else None)
         if r.status_code != 200:
             raise DestinationError(f"TTS answered {r.status_code}: {r.text[:200].strip()}")
-        pcm = r.content[:len(r.content) & ~1]
         return audio.resample(pcm, TTS_RATE, SPEAKER_RATE)
 
     def log_outcome(self, satellite_id: str, wake_word: str, out: Outcome) -> None:

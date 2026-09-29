@@ -228,17 +228,23 @@ name.
 | `POST /satellites/llm/models` | `{"base_url", "api_key_env"}`: `{"models": [...]}`, the ids a language model server lists at `GET {base_url}/models`, asked with that key, for an `llm` word's picker. A listing that pages (`has_more` and `last_id`, as Anthropic's does) is read to its end, from `after_id`, up to ten pages more. 502 in the server's own words, 504 after 10 s. |
 | `POST /satellites/llm/test` | An `llm` destination, saved or not: one short question through the same path a turn takes, with no TTS. `{"model", "reply", "first_token_ms", "total_ms", "token_limit"}`, or 502 in the provider's words, or 504 after 25 s. |
 | `PUT /satellites/secrets` | `{"name": "OPENAI_API_KEY", "value": "..."}`: store an API key on the hub under that name, or clear it with `"value": null`. Answers the wake word view. No route reads a value back. 409 `set_in_environment` when the environment already sets the name. [Keys](#keys). |
+| `GET /satellites/telemetry` | Whether [telemetry](#telemetry) is on, its `level`, `retention_days` and `max_mb`, and the day `files` it holds with their `bytes` |
+| `PUT /satellites/telemetry` | `{"enabled": true, "level": "full|timings", "retention_days": 1-365, "max_mb": 10-5000}`, any of them: saved and in force at once. 422 for a value out of range |
+| `DELETE /satellites/telemetry` | Delete every record; the settings stay |
+| `GET /satellites/telemetry/records?hours=&since=&until=&kind=&satellite=&word=&limit=500` | The newest `limit` records that match (up to 20000), oldest first. `kind` is comma-separated: `turn`, `wake`, `near_miss`, `session`, `device` |
+| `GET /satellites/telemetry/summary?hours=24&satellite=` | The records of the last `hours`, aggregated ([Telemetry](#telemetry)) |
 | `GET /satellites/firmware` | Uploaded images |
 | `POST /satellites/firmware?model=&version=&signature=` | The `.bin` as the raw body. It must start with the ESP32 image magic (0xE9) and fit a 4 MB slot. `signature` is base64 or base64url DER ECDSA. |
 | `DELETE /satellites/firmware/{sha256}` | |
 | `POST /satellites/ota` | `{"satellite": "<id>|<name>|all", "sha256": "..."}`. Images are only sent to adopted, online satellites of the image's model, and not to a satellite that would refuse the signature. |
 
-The gateway routes all of these. The Satellites tab uses all but five:
+The gateway routes all of these. The Satellites tab uses all but six:
 
 - `GET /satellites/{id}`, because the list already carries every satellite.
 - `GET` and `PUT /satellites/routing`, because routing lives on each wake
   word and the tab edits it there.
 - `ptt`, which is Home Assistant's.
+- `GET /satellites/telemetry/summary`, which is for scripts and tuning.
 - `inject`, which is for scripts. A button that runs a clip through a
   satellite's real actions would be one press from Home Assistant acting on
   it.
@@ -1097,6 +1103,60 @@ the command. The wake word models are voice-dependent: the same
 phrase in macOS's default voice peaked at 0.05, and in Samantha and Daniel at
 0.99 and 1.00.
 
+## Telemetry
+
+Off by default. Turned on, the hub keeps a record of each turn and of what
+happens between turns, so speed, reliability and the wake words can be tuned
+from what the satellites actually did rather than from one remembered
+example. Nothing is collected while it is off.
+
+Turn it on with the **Telemetry** section of the Satellites tab, or
+`PUT /satellites/telemetry {"enabled": true}`. The choice is saved in
+`telemetry.json` on the data volume and survives restarts and updates;
+`SATELLITES_TELEMETRY` only sets where a hub with no saved choice starts.
+
+Records are JSON lines in `telemetry/YYYY-MM-DD.jsonl` (UTC days), written
+by a background thread, so a turn never waits on the disk. Days older than
+`retention_days` (14) are deleted, then the oldest while the files are over
+`max_mb` (200); today's file is never deleted.
+
+| `kind` | One for each | What it holds |
+|---|---|---|
+| `turn` | Utterance, through to its reply | The wake word, its score and threshold; how the turn started (`wake`, `ptt`, `follow_up`, `inject`); the destination (type, model, pipeline, agent, tools); the command's length, why it ended, its loudness (`rms_dbfs`, `peak_dbfs`, `clipped_pct`) and the pause setting; the language, voice, transcript and reply; the error; `timings_ms` and `timeline_ms` as the event stream has them; the satellite's Wi-Fi, memory and dropped audio; the echo canceller's state; and `events`, below |
+| `wake` | Wake word the hub heard | Score, threshold, direction, and what the hub did: `started`, `carried_on`, `interrupted`, `ignored_busy`, `trigger`, `trigger_cooldown`. A clip through `/inject` is not counted |
+| `near_miss` | Score that reached half its threshold and fell back without firing (at most one every 2 s per word) | The peak and the threshold: a word said to a satellite that did not hear it |
+| `session` | Satellite connecting or going away | Firmware, reset reason and boot timings; the close code and how long it was connected |
+| `device` | Satellite, once a minute | Wi-Fi signal, free heap and PSRAM, uptime, the speaker buffer, and the audio dropped since the last one |
+
+A turn's `events` are each call it made, in order, timed from the end of
+speech (`t_ms`, as `timeline_ms` is):
+
+| `stage`, `what` | Fields |
+|---|---|
+| `stt`, `request` | Engine and model, glossary and boost, language sent, status, `ms`, `audio_s`, and `retry` when it was sent again without the boost or the vocabulary |
+| `language`, `detected` or `hint` | The language spoken and the one answered in |
+| `llm`, `round` | Round `n`, model, `ms`, `first_token_ms`, `finish`, `prompt_tokens` and `completion_tokens` where the server reports them, the tool calls asked for, the text |
+| `tool`, `run` | `web_search` or `weather`: `ms`, `ok`, why it failed, the arguments and the result |
+| `ha`, `connected`, `device`, `intent_start`, `tool_call`, `tool_result`, `first_text`, `intent_end`, `error` | An Assist run: the websocket and device lookup, the agent's own tool calls with their arguments and results, when its first words arrived, and its answer's `response_type`, `success` and `failed` targets, `processed_locally` and `intent_ms` |
+| `ha`, `conversation` | An `ha_conversation` call: agent, status, `ms`, then `intent_end` |
+| `webhook`, `call` | Status and `ms` |
+| `tts`, `synth` | Each sentence batch: engine, voice, `chars`, `ms`, `audio_s`, and `via` Home Assistant for a pipeline's own voice |
+
+**Levels.** `full` keeps what was said, answered, searched and returned, each
+cut to 400 characters. `timings` keeps every number and none of the words.
+Either way the records stay on the hub's volume; nothing is sent anywhere.
+
+The summary (`GET /satellites/telemetry/summary`) gives, per wake word, how
+many turns worked, their errors grouped, p50/p90/max of each stage and of the
+timeline, the command's loudness and length, and `bottleneck`: the stage with
+the largest median. Then each STT engine (requests, time, retries, statuses),
+the language models (rounds per turn, time to first token, tokens, models,
+finish reasons), each tool, Home Assistant's agents (their tool calls, failed
+targets, how often an intent was handled locally), each TTS engine (time per
+second of audio), each wake word (decisions, scores, near misses), and each
+satellite (signal, memory, dropped audio, disconnects by close code). Turns
+from `/inject` are counted apart, as `injected_turns`.
+
 ## Configuration
 
 | Variable | Default | |
@@ -1122,6 +1182,7 @@ phrase in macOS's default voice peaked at 0.05, and in Samantha and Daniel at
 | `SATELLITES_FIRMWARE_PUBKEY` | unset | A PEM public key, or a path to one. Set, uploads must be signed by it. A bad value stops the service at start. |
 | `SATELLITES_API_KEYS` | unset | As on the other backends. Behind the gateway it stays unset. |
 | `SATELLITES_LOG_LEVEL` | `INFO` | Transcripts and replies are logged only at `DEBUG`. |
+| `SATELLITES_TELEMETRY` | `off` | Where a hub with no saved choice starts: `off`, `on` (or `full`), or `timings`. The Satellites tab and `PUT /satellites/telemetry` change it after that, and their choice is the one kept ([Telemetry](#telemetry)). |
 
 In pre-release builds before 2026-09-25 every one of these was `NODES_*`. The old names are not
 read. At start the hub logs a warning for each `NODES_*` variable still set,
@@ -1140,6 +1201,8 @@ action carried over from a rule saved before the rename says `"token_env":
 | `firmware/` | Uploaded firmware images |
 | `models/` | Wake word models, fetched and uploaded (`SATELLITES_MODEL_DIR`) |
 | `debug/` | With `SATELLITES_DEBUG_AUDIO=1`, the last ten commands' audio |
+| `telemetry.json` | Whether [telemetry](#telemetry) is on, its level, retention and size cap |
+| `telemetry/` | With telemetry on, a JSON-lines file of records per UTC day |
 | `rules.json` | Routing from before 2026-09-25. Read once into `wake_words.json`, then left where it is |
 | `nodes.json` | A pre-release build's satellites. Read once into `satellites.json`, then left where it is |
 

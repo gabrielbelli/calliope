@@ -51,6 +51,7 @@ from typing import Awaitable, Callable, Protocol
 import httpx
 
 from . import language as lang
+from . import telemetry
 from .destinations import (DestinationError, HaAssist, NotUnderstood, Pipeline, Request, Turn,
                            _held, transport_error)
 from .router import (MIC_RATE, SPEAKER_RATE, Failed, Outcome, Route, Router, clip,
@@ -332,6 +333,7 @@ async def run_turn(router: Router, route: Route | None, *, satellite_id: str, sa
     out = out if out is not None else Outcome()
     start = time.monotonic()
     speech_end = speech_end if speech_end is not None else start
+    telemetry.begin(speech_end, out.events)
     try:
         if route is None:
             out.error = (f"no rule matches wake word {wake_word!r} on satellite "
@@ -415,6 +417,7 @@ async def _language(out: Outcome, behaviour, said: str, memory: Memory | None) -
         spoken = lang.tag(lang.detect(said, prior=memory.language if memory else None))
         out.language_source = "detected"
     out.language, out.reply_language = spoken, lang.reply_tag(spoken)
+    telemetry.note("language", out.language_source, spoken=spoken, reply=out.reply_language)
     if memory is not None:
         memory.language = spoken
 

@@ -42,6 +42,8 @@ import zoneinfo
 
 import httpx
 
+from . import telemetry
+
 log = logging.getLogger("voice-satellites.tools")
 
 NAMES = ("web_search", "weather")
@@ -195,21 +197,32 @@ async def prime(client: httpx.AsyncClient) -> None:
 
 async def run(name: str, arguments: str, client: httpx.AsyncClient, allowed, language: str | None) -> str:
     """One tool call's result, as text for the model. Never raises."""
+    t0 = time.monotonic()
+    text, failed = await _run(name, arguments, client, allowed, language)
+    telemetry.note("tool", "run", name=name, ok=failed is None, failed=failed, ms=telemetry.since(t0),
+                   chars=len(text), args=telemetry.preview(arguments), result=telemetry.preview(text))
+    return text
+
+
+async def _run(name: str, arguments: str, client: httpx.AsyncClient, allowed,
+               language: str | None) -> tuple[str, str | None]:
+    """The result, and why it failed (None when it did not)."""
     if name not in allowed:
-        return f"There is no tool called {name}."
+        return f"There is no tool called {name}.", "unknown_tool"
     try:
         args = json.loads(arguments or "{}")
     except ValueError:
         args = None
     if not isinstance(args, dict):
-        return f"The arguments for {name} were not a JSON object."
+        return f"The arguments for {name} were not a JSON object.", "bad_arguments"
     try:
         if name == "web_search":
-            return await web_search(client, str(args.get("query") or "").strip(), language)
-        return await weather(client, str(args.get("location") or "").strip(), language)
+            return await web_search(client, str(args.get("query") or "").strip(), language), None
+        return await weather(client, str(args.get("location") or "").strip(), language), None
     except Exception as e:  # noqa: BLE001 - any answer in a shape not expected; CancelledError is not one
         log.info("tools: %s failed: %s", name, type(e).__name__)
-        return f"The {name.replace('_', ' ')} failed ({type(e).__name__}); answer without it."
+        return (f"The {name.replace('_', ' ')} failed ({type(e).__name__}); answer without it.",
+                type(e).__name__)
 
 
 async def web_search(client: httpx.AsyncClient, query: str, language: str | None) -> str:
