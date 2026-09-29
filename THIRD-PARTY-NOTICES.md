@@ -113,6 +113,24 @@ the image:
 Other built-in names are fetched at start-up into `SATELLITES_MODEL_DIR` on the
 data volume, from the same release and under the same licence.
 
+### Open-Meteo — weather data **CC BY 4.0**, the free API for non-commercial use
+
+A language model word with the `weather` tool on makes the satellite hub call
+`api.open-meteo.com` and `geocoding-api.open-meteo.com` over the internet
+(`services/satellites/app/tools.py`). Nothing of Open-Meteo's is in the tree
+or in an image. Its terms (checked 28 Sep 2026) allow the free API for
+non-commercial use only, such as home automation, at under 10,000 calls a
+day, 5,000 an hour and 600 a minute, and provide the data under CC BY 4.0.
+Commercial use needs one of Open-Meteo's paid plans. A spoken answer carries
+no attribution; this entry and the satellite hub's README name the source.
+
+### SearXNG — `searxng/searxng` — **AGPL-3.0**
+
+The `web_search` tool calls a SearXNG instance that the operator runs, over
+its JSON API. No SearXNG code is in this repository or in an image, and
+calling a separate program's network API does not make the hub a derivative
+work, as for MeTube above.
+
 ### The Brazilian Portuguese Parakeet — `alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx` — **CC BY 4.0**
 
 stt-stack loads it only when `STT_MODELS` names `parakeet-pt-br`. It is

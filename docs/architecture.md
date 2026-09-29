@@ -1395,7 +1395,7 @@ skips the extension if OpenClip is absent.
 ## 10. Decision records
 
 `docs/adr/` holds the decisions, dated, each with what it cost. The sequence
-runs 0001–0010 and 0012–0017; there is no 0011.
+runs 0001–0010 and 0012–0018; there is no 0011.
 
 | | Status |
 |---|---|
@@ -1415,6 +1415,7 @@ runs 0001–0010 and 0012–0017; there is no 0011.
 | [0015 — The satellite hub may hold an API key, by name, and never shows it](adr/0015-the-hub-may-hold-a-key.md) | accepted |
 | [0016 — Several speech-to-text engines side by side, picked by `model`](adr/0016-several-stt-engines.md) | accepted |
 | [0017 — Home Assistant's names are one glossary profile, written by the integration and named by the hub](adr/0017-home-assistant-vocabulary.md) | accepted |
+| [0018 — A language model word may call two tools, and the date is not one of them](adr/0018-language-model-tools.md) | accepted |
 
 0009 is kept rather than deleted because every engineering fact in it is still
 true; what it got wrong is its own first sentence, that this deployment offers a

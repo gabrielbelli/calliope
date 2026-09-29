@@ -12,6 +12,7 @@ satellite ──wss /satellites/ws──▶ voice-gateway :30080 ──ws──�
                                                                wake words, routing
 browser ──/ui/api/satellites──▶ voice-ui ──▶ voice-gateway ──▶ voice-satellites
 voice-satellites ──▶ stt-stack, tts-stack, and whatever a wake word's action names (Home Assistant, an LLM, a webhook)
+voice-satellites ──▶ a SearXNG and Open-Meteo, only for a language model word with those tools on
 ```
 
 Sibling of `stt`, `tts`, `tts-long`, `gateway` and `ui`. The first satellite is
@@ -21,30 +22,133 @@ decision to bring satellites in through the gateway, and to keep their socket
 out of `GATEWAY_API_KEYS`, is
 [ADR 0013](../../docs/adr/0013-satellites-one-door.md).
 
+**Contents:** [Quick start](#quick-start) · [Deploy](#deploy) ·
+[Upgrade](#upgrade) · [Status](#status) · [Adoption](#adoption) ·
+[Routes](#routes) · [Events](#events) · [The device protocol](#the-device-protocol) ·
+[Listening](#listening) · [Wake words](#wake-words) ·
+[Destinations](#destinations) · [Keys](#keys) · [Lights](#lights) ·
+[Buttons](#buttons) · [Command, conversation and trigger](#command-conversation-and-trigger) ·
+[Speech-to-text](#speech-to-text) · [Routing](#routing) ·
+[Home Assistant over MQTT](#home-assistant-over-mqtt) ·
+[Signed firmware](#signed-firmware) ·
+[Verifying the pipeline without a voice](#verifying-the-pipeline-without-a-voice) ·
+[Configuration](#configuration) · [Install and tests](#install-and-tests)
+
+## Quick start
+
+With the stack deployed and the hub in it ([Deploy](#deploy)):
+
+1. Flash a satellite once over USB, with the hub's address built in
+   ([first flash](../../clients/korvo-satellite/README.md#first-flash-once-over-usb)).
+2. Join the Wi-Fi network it opens, `calliope-sat-XXXX`, from a phone, and
+   give it your Wi-Fi and the hub's address.
+3. On the page's **Satellites** tab, name it and press **Adopt**.
+4. Under **Wake words**, add a word or open `hey_jarvis`, and choose what it
+   does under **Action**. Press **Save wake words**.
+5. Type a sentence under **Try a word** to run that action without speaking,
+   then say the wake word to the satellite.
+
+## Deploy
+
+The hub is optional. The stack runs without it, and adding it changes nothing
+else.
+
+1. **Add the hub to the deployment.** `compose.yaml` has the
+   `voice-satellites` block and its `nodes-data` volume. The volume holds the
+   adoptions, the wake words, stored keys, firmware and models: losing it
+   un-adopts every satellite. The gateway reaches the hub through
+   `GATEWAY_SATELLITES_URL` (default `http://voice-satellites:8003`).
+2. **Point it at speech.** `SATELLITES_STT_URL` and `SATELLITES_TTS_URL`, as
+   compose sets them. Without STT, wake words are heard and nothing is
+   transcribed.
+3. **Serve the gateway over TLS with a certificate the firmware trusts.**
+   Release firmware connects only to `wss://`, and it checks the certificate
+   against the CA roots compiled into it: ISRG Root X1 and X2 (Let's Encrypt)
+   unless the build names others. The certificate can be on the gateway
+   (`GATEWAY_TLS_CERT`) or on a proxy in front of it. With any other CA, an
+   internal or a self-signed one, build the firmware with `CALLIOPE_HUB_CA`
+   naming that CA's root
+   ([korvo-satellite](../../clients/korvo-satellite/README.md#wi-fi-and-adoption)).
+   A satellite that cannot verify the hub spins blue and says nothing more.
+   Plain `ws://` works only in a development build (`DEV_HUB`).
+4. **Deploy with `--remove-orphans`**
+   (`docker compose up -d --remove-orphans`). It matters only on a deployment
+   that ran a pre-release image, which had a `voice-nodes` container
+   ([ADR 0013](../../docs/adr/0013-satellites-one-door.md#renamed)).
+5. **Flash, connect and adopt** a satellite, as in the [Quick start](#quick-start).
+   The hub address is `wss://<host>` with the port if it is not 443, such as
+   `wss://calliope.example.com` or `wss://calliope.example.com:30080`. The
+   firmware adds `/satellites/ws` itself.
+6. **Give a wake word something to do.** Every satellite hears `hey_jarvis`
+   at first, and it echoes what it heard until it has an action
+   ([Wake words](#wake-words)).
+7. **Then, as needed:** an API key for a language model ([Keys](#keys)),
+   Home Assistant through the Calliope integration
+   ([`clients/home-assistant`](../../clients/home-assistant/README.md)) or
+   over MQTT ([below](#home-assistant-over-mqtt)), and a firmware signing key
+   ([Signed firmware](#signed-firmware)).
+
+## Upgrade
+
+**Update the hub first, then the firmware.** The hub checks what each
+satellite says it can do (`hello.caps`) before it sends anything newer, so a
+new hub works with old firmware. Old hubs know nothing of newer firmware.
+
+1. Raise the image tag of `voice-satellites` in `compose.yaml`, and of
+   `voice-gateway` and `voice-ui` when the release changes them, then
+   `docker compose up -d --remove-orphans`.
+2. Update each satellite over the air: `pio run -e ota -t upload`, or upload
+   the image on the Satellites tab and press **Update every satellite**
+   ([korvo-satellite](../../clients/korvo-satellite/README.md#updates-over-the-air)).
+   A satellite that cannot reach the hub on its new image rolls back.
+
+A release is a `v*` tag, and compose names a version rather than a moving
+tag ([ADR 0012](../../docs/adr/0012-one-branch.md)). A push to a `feat/**`
+branch also publishes images, as `:feat-<branch>` (moving) and
+`:feat-<branch>-<sha>` (fixed), and never `:latest`. Deploy the fixed one to
+try a feature before its release.
+
+### Firmware compatibility
+
+| Firmware from | What it adds | What the hub does for older firmware |
+|---|---|---|
+| 2026-09-25 | `/satellites/ws`, the setup network `calliope-sat-XXXX`, and its settings in `hello` | Answers `/nodes/ws` too. Leaves the settings out of the welcome until the satellite's first `status` reports them ([Adoption](#adoption)) |
+| 2026-09-26 | `boot` (the start-up stages) in `hello`, and a restart when start-up stalls | Shows no `boot` in `GET /satellites/{id}` |
+| 2026-09-27 | Every button mappable (`caps.actions`, `button_actions`), a status marked `"cause": "button"`, twelve volume steps, `ring_top` and `ring_upside_down` | Keeps the old buttons: Rec mutes, and the volume pair works on the device while `local_volume_buttons` is on. Takes a status within 2 s of a volume press as the button's |
+| 2026-09-28 | The `listen` light mode (`caps.light_modes`), a ring with no random dim LEDs, and a privacy mute that survives a restart | Sends a pulse where it would send `listen` |
+
+A signed build adds `caps.ota_key`, and the hub sends it only images signed
+for that key ([Signed firmware](#signed-firmware)).
+
 ## Status
 
-Measured on a development server with no GPU (an eight-thread Xeon E5-2697 v4, 25 Sep 2026)
-with the first board, an ESP32-Korvo, adopted over `wss://` to the gateway, or to a proxy in
-front of it (`wss://calliope.example.com`):
+**Run live on an ESP32-Korvo,** adopted over `wss://` through a proxy in front
+of the gateway, with the hub on a development server with no GPU (an
+eight-thread Xeon E5-2697 v4):
 
-- **Working on the board:** adoption (keeping the satellite's own settings),
-  config, lights off, a four-channel stream with no dropped frames, and live
-  listening: front-end plus wake word at a real-time factor of 0.09 on that
-  Xeon, 24 % of one core, 215 MiB.
-- **Signed updates, on the board:** a signed 1.17 MB release image installed in
-  20 s, including through the Satellites tab's route. The hub will not send an
-  unsigned image to a satellite that advertises a key. With the hub bypassed,
-  an image signed by another key was refused by the satellite itself
-  (`bad signature`), and the satellite stayed on its image.
-- **The listening path on the server, from recorded clips (`/inject`):** "hey jarvis,
-  what time is it" is detected (score 0.995), transcribed by Parakeet as "What
-  time is it?", routed by the default echo action, and answered by Kokoro
-  (1.3 s). "The weather is fine today" is ignored.
-- **Not yet heard live:** a wake word spoken in the room. Earcons and ducking
-  have not played on the board yet; its speaker is off.
-- **Built and tested against fakes only (25 Sep 2026):** conversation and
-  trigger words, follow-ups, barge-in, streamed replies and the language of
-  each utterance. None of it has run on the board or against the server's services.
+- Adoption keeping the satellite's own settings, config, lights off, and a
+  four-channel stream with no dropped frames (25 Sep 2026).
+- Listening: the front-end and the wake word at a real-time factor of 0.09 on
+  that Xeon, 24 % of one core, 215 MiB (25 Sep 2026).
+- Signed updates: a 1.17 MB release image installed in 20 s, including through
+  the Satellites tab's route. The hub will not send an unsigned image to a
+  satellite that advertises a key, and with the hub bypassed, the satellite
+  refused an image signed by another key (`bad signature`) and stayed on its
+  image (25 Sep 2026).
+- A spoken command answered by Home Assistant, its reply played through the
+  3.5 mm jack. That run found that a plug in the jack cuts the echo reference
+  ([Barge-in](#barge-in)) (27 Sep 2026).
+- The button ladder, and why KEY1 sends nothing (27 Sep 2026).
+
+**Run on the server from recorded clips** (`/inject`): "hey jarvis, what time
+is it" is detected (score 0.995), transcribed by Parakeet as "What time is
+it?", routed by the default echo action, and answered by Kokoro (1.3 s). "The
+weather is fine today" is ignored.
+
+**Tested only against fakes:** conversation and trigger words, follow-ups,
+voice barge-in on the satellite's own speaker, streamed replies, language
+model tools, and the language of each utterance. Earcons and ducking have not
+been recorded as heard on the board, nor the direction of the listening arc.
 
 ## Adoption
 
@@ -61,18 +165,22 @@ name and config. The hub keeps only the token's SHA-256, so a copy of
 goes back to pending. Whatever the hub was playing to it stops first, and a
 duck it held is lifted.
 
-**Adoption takes the satellite's own settings** (volume, mic gain, and the
-microphone, speaker and lights switches), because the satellite is the thing
-in the room: a bedroom satellite that was dark stays dark. Current firmware
-says them in its `hello`. Firmware from before 2026-09-25 says them only in its
-`status`, every 10 s, so a satellite adopted in its first seconds has said
-nothing yet. The hub does not guess: the welcome leaves those settings out, so
-the satellite keeps what it has, and until the satellite reports them the
-record holds the switches as off, so nothing lights or plays on a value the hub
-made up. The firmware reports as soon as it applies the welcome. A setting
-changed with `PATCH` in the meantime is the hub's, and the report does not undo
-it. Only these settings are taken, and only within the ranges `PATCH` accepts;
-`buttons` is never the satellite's to report.
+**Adoption takes the satellite's own settings**: volume, mic gain, and the
+microphone, speaker and lights switches. The satellite is the thing in the
+room, so a bedroom satellite that was dark stays dark. The satellite says
+these settings in its `hello`, and the welcome keeps them. Only these are
+taken, only within the ranges `PATCH` accepts, and never `buttons`.
+
+Firmware from before 2026-09-25 says them only in its `status`, every 10 s,
+so a satellite adopted in its first seconds has said nothing yet. For such a
+satellite the hub does not guess:
+
+- The welcome leaves those settings out, so the satellite keeps what it has.
+- Until the satellite reports them, the record holds its switches as off, so
+  nothing lights or plays on a value the hub made up. The firmware reports as
+  soon as it applies the welcome.
+- A setting changed with `PATCH` in the meantime is the hub's, and the report
+  does not undo it.
 
 A satellite's id is its MAC, which is no secret. While an adopted satellite is
 connected, a `hello` with its id and without its token is closed with 1008,
@@ -92,23 +200,24 @@ name.
 |---|---|
 | `WS /satellites/ws` | The device connection. Protocol below. |
 | `WS /nodes/ws` | The same handler, under the name pre-release builds used until 2026-09-25. A board flashed from one runs firmware that connects here, and its next firmware arrives over this socket, so the old path stays until no board reports firmware from before the rename ([ADR 0013](../../docs/adr/0013-satellites-one-door.md#renamed)). The gateway relays both. |
-| `GET /satellites` | Every satellite seen since the hub started, adopted or not, with its listening state, earcons and `wake_words` (the names assigned to it) |
-| `GET /satellites/events` | Server-sent events: buttons, wake words, routing, conversations and their turns, triggers, status, updates, satellites coming and going, a wake word's model becoming ready, a volume set with the satellite's own buttons (`volume`), speaker or jack (`output`) |
+| `GET /health` | No key. `status`, and `satellites` (`online`, `adopted`, `pending`), `tts`, `voice` (the wake word engine's state, its words and thresholds, the front-end, the model directory), `routing` (how many words have an action, the STT URL and engine, a `load_error`) and `mqtt` (null without it). The gateway's own `/health` carries it as `backends.satellites` |
+| `GET /satellites` | Every satellite seen since the hub started, adopted or not, each as `GET /satellites/{id}` describes it |
+| `GET /satellites/events` | Server-sent events, one JSON object each. [Events](#events) lists every type |
 | `GET /satellites/wake-words` | `{"available", "words", "ptt", "custom", "env", "secrets", "tools", "warnings", "load_error"}`: the names the hub can load, each word's whole entry with its `state` and `error`, push-to-talk's entry, which secrets the actions name have a value, where each value lives, and which language model tools work here (`web_search` only with `SATELLITES_SEARXNG_URL`). [Wake words](#wake-words). |
 | `PUT /satellites/wake-words` | `{"words": [...], "ptt": {...}}`: replace them all, live. A field an entry leaves out keeps its saved value. A bad set is a 422 and the old one stays. |
-| `POST /satellites/wake-words/models?name=` | A custom wake word: the `.onnx` as the raw body, checked to be an openWakeWord classifier (input `[batch, 16, 96]`, under 5 MB) before it is written. Then offered in `available` and assigned like a built-in. |
+| `POST /satellites/wake-words/models?name=` | A custom wake word: the `.onnx` as the raw body, checked to be an openWakeWord classifier (input `[batch, 16, 96]`, under 5 MB) before it is written. Then offered in `available` and assigned like a built-in. [`tools/wakeword-train`](../../tools/wakeword-train/README.md) trains one; a model trained there is CC BY-NC-SA 4.0, because its training features and feature models are. |
 | `DELETE /satellites/wake-words/models/{name}` | Only a custom model, and only once no wake word uses it (409 otherwise). |
-| `GET /satellites/{id}` | One satellite, with `latency`: how quickly its last 20 replies began and ended, and `output`: `speaker`, `jack` or `null` ([Speaker or jack](#speaker-or-jack)) |
+| `GET /satellites/{id}` | One satellite: its name, whether it is adopted and online, model, `firmware`, `config`, its last `status`, `caps`, the update in progress (`ota`), `listening`, `earcons`, `wake_words` (the names assigned to it), `output` (`speaker`, `jack` or `null`, [Speaker or jack](#speaker-or-jack)), `boot` (`reset_reason`, `stages_ms`, and `stalled_in` and `stall_restarts` after a stalled start; firmware from 2026-09-26) and `latency` (how quickly its last 20 replies began and ended, [Streaming](#streaming)) |
 | `PATCH /satellites/{id}` | `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness` (1-100), `ring_top` (0-11: the LED at 12 o'clock as mounted, where a bar on the ring starts) and `ring_upside_down` (the bar then runs the other way, so it still fills clockwise as seen), `buttons` ([Buttons](#buttons)); `local_volume_buttons` for firmware from before 2026-09-27 |
 | `POST /satellites/{id}/adopt` | `{"name": "..."}` |
 | `POST /satellites/{id}/forget` | |
 | `POST /satellites/{id}/identify` | Blink for five seconds. Works before adoption, which is the point. |
 | `POST /satellites/{id}/reboot` | |
-| `POST /satellites/{id}/lights` | `{"mode": "off|solid|pulse|spin|pixels", "color": [r,g,b], "brightness": 0-255, "pixels": [[r,g,b], ...]}`. 409 for a satellite with `lights_enabled` false. |
+| `POST /satellites/{id}/lights` | `{"mode": "off|solid|pulse|spin|pixels", "color": [r,g,b], "brightness": 0-255, "pixels": [[r,g,b], ...]}`. 409 for a satellite with `lights_enabled` false. `listen` is the hub's own, for a conversation, and is not offered here. |
 | `POST /satellites/{id}/tone` | `{"frequency": 440, "seconds": 1}` on the satellite's speaker. 409 for a satellite with `speaker_enabled` false. |
 | `POST /satellites/{id}/say` | `{"text": "...", "voice": "bm_george"}`: Kokoro, via `SATELLITES_TTS_URL`. 409 for a satellite with `speaker_enabled` false. |
 | `POST /satellites/{id}/flush` | Stop: drop the speaker audio queued and playing, and cancel the conversation in progress |
-| `POST /satellites/{id}/ptt` | `{"wake_word": "..."}`, optional: listen as if the satellite's push-to-talk button had been pressed, handled by that word's entry or by `ptt`. 204, or 409 naming why not (`satellite_busy`, `satellite_muted`, `mic_disabled`, `trigger_word`). For Home Assistant. |
+| `POST /satellites/{id}/ptt` | `{"wake_word": "..."}`, optional: listen as if the satellite's push-to-talk button had been pressed, handled by that word's entry or by `ptt`. 204, or 409 naming why not (`satellite_busy`, `satellite_muted`, `mic_disabled`, `trigger_word`), or 404 `wake_word_not_found`. For Home Assistant. |
 | `GET /satellites/{id}/listen?seconds=5&channel=` | A WAV of the raw mic channels, up to 60 s |
 | `POST /satellites/{id}/set-hub` | `{"url": "wss://host:port"}`: the satellite saves it and reboots onto that hub |
 | `POST /satellites/{id}/inject?play=0&wake_word=` | A 16 kHz mono 16-bit WAV as the body, through the satellite's own wake words, the endpoint and routing path as if the satellite had heard it. [Verifying](#verifying-the-pipeline-without-a-voice). |
@@ -124,12 +233,42 @@ name.
 | `DELETE /satellites/firmware/{sha256}` | |
 | `POST /satellites/ota` | `{"satellite": "<id>|<name>|all", "sha256": "..."}`. Images are only sent to adopted, online satellites of the image's model, and not to a satellite that would refuse the signature. |
 
-The gateway routes all of these. The Satellites tab uses all but five: `GET
-/satellites/{id}`, because the list already carries every satellite; `GET` and
-`PUT /satellites/routing`, because routing now lives on each wake word and the
-tab edits it there; `ptt`, which is Home Assistant's; and `inject`, which is
-for scripts: a button that runs a clip through a satellite's real actions
-would be one press from Home Assistant acting on it.
+The gateway routes all of these. The Satellites tab uses all but five:
+
+- `GET /satellites/{id}`, because the list already carries every satellite.
+- `GET` and `PUT /satellites/routing`, because routing lives on each wake
+  word and the tab edits it there.
+- `ptt`, which is Home Assistant's.
+- `inject`, which is for scripts. A button that runs a clip through a
+  satellite's real actions would be one press from Home Assistant acting on
+  it.
+
+### Events
+
+`GET /satellites/events` is a server-sent event stream behind the same keys
+as the rest of the API. Each event is one JSON object, and `satellite` is the
+satellite's id. An event from a clip run through `/inject` carries
+`"injected": true`.
+
+| `type` | When | Fields |
+|---|---|---|
+| `online` | An adopted satellite connects | `name`, `firmware` |
+| `offline` | A satellite's socket closes | |
+| `pending` | A satellite with no token connects | `address` |
+| `status` | Every status report, about every 10 s | `status`: the report as sent ([protocol](#the-device-protocol)) |
+| `settings` | A button on the satellite changed a setting | `settings`: what changed, among `volume`, `lights_enabled` and `brightness` |
+| `output` | The hub decides the audio goes to the speaker or the jack | `output` ([Speaker or jack](#speaker-or-jack)) |
+| `button` | A button is pressed or released | `button`, `action` (`press` or `release`), `held_ms` |
+| `ota` | An update moves on | `state` (`started`, `progress`, `rebooting`, `verified`, `failed`), `pct`, `version`, `error` |
+| `wake_words` | A wake word's model finishes downloading, or fails | `words`: every word with its `state` and `error` |
+| `wake` | A wake word is heard, or push-to-talk pressed | `wake_word`, `score`, `direction` |
+| `routed` | A command, or an injected clip, has been answered | `wake_word`, `rule_id` (the word that answered), `mode`, `reply_to`, `error`, `transcript`, `language`, `language_source`, `reply_language`, `voice`, `reply_text`, `spoken_text`, `interrupted`, `timings_ms`, `timeline_ms`, `endpoint`, `command_s`, `played`, `note` |
+| `conversation_started` | A conversation word is heard, or a command hands over | `wake_word`, `rule_id`, `reason` (`wake_word` or `fallback`), `from_rule`, `follow_up_s` |
+| `turn` | Each exchange in a conversation | the fields of `routed`, and `turn`, `ended`, `handed_over_to` |
+| `conversation_ended` | A conversation ends | `rule_id`, `turns`, `seconds`, `reason` ([Conversations](#conversations)) |
+| `triggered` | A trigger word is heard | `satellite_name`, `wake_word`, `score`, `direction` |
+
+Transcripts and replies are in this stream and not in the INFO log.
 
 ## The device protocol
 
@@ -149,29 +288,51 @@ The Korvo sends 4 channels at 16 kHz in 20 ms frames: the speaker loopback
 first, then the three microphones. It plays 48 kHz mono. The hub paces speaker
 audio at real time plus a 300 ms lead.
 
-**Text frames, satellite → hub:** `hello` (id, model, firmware, token, caps,
-and on firmware from 2026-09-25 its settings: `volume`, `mic_gain_db`,
-`mic_enabled`, `speaker_enabled`, `lights_enabled`), `status` (every 10 s and
-after every `welcome` or `config`: RSSI, heap, mute, the same settings, drop
-counters, `duck`, `earcons_ready`), `button` (`press` or `release`, with `held_ms`), `ota`
-(`started`, `progress`, `rebooting`, `failed`, `verified`; a signed build fails
-with `unsigned image` or `bad signature`), `ota_next` (`offset`), and for
-earcons `earcons` (`ready`, `items`, `last_load_us`), `earcon_next` (`id`,
-`offset`), `earcon_stored` (`id`, `size`, `sha256`) and `earcon_failed` (`op`
-put, play or delete, `id`, `error`).
+**Text frames, satellite → hub**
 
-`hello.caps` names what the satellite can do: `mic`, `speaker`, `lights` (the
-LED count), `buttons`, and on current firmware `earcons` (`max`, `max_bytes`,
-`rate`), `duck: true`, and on a signed build `ota_key`. The hub sends earcon,
-duck and signature messages only to a satellite whose caps say it takes them;
-older firmware ignores them without a word.
+| `type` | When | Fields |
+|---|---|---|
+| `hello` | On connecting, and again after adoption with the new token | `id` (the MAC), `model`, `fw`, `token`, `name`, `reset_reason`, `ota_pending`, `caps` (below), `boot` (`stages_ms`, and `stalled_in` and `stall_restarts` after a stalled start; firmware from 2026-09-26), and its settings: `volume`, `mic_gain_db`, `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness`, `ring_top`, `ring_upside_down` (firmware from 2026-09-25; the last two from 2026-09-27) |
+| `status` | Every 10 s, after every `welcome` or `config`, and at once after a button changed a setting | `uptime_s`, `rssi`, `heap`, `psram`, `muted`, the same settings as `hello`, `mic_dropped`, `spk_dropped`, `spk_buffered_ms`, `duck`, `earcons_ready`, `buttons_mv` (the button ladder's `now`, `min`, `max` and `polls`), and `cause: "button"` after a button's action (firmware from 2026-09-27) |
+| `button` | A press or a release | `button`, `action` (`press` or `release`), `held_ms` |
+| `ota` | An update moves on | `state` (`started`, `progress`, `rebooting`, `failed`, `verified`), `version`, `pct`, `error`. A signed build fails with `unsigned image` or `bad signature` |
+| `ota_next` | The next piece of an update, please | `offset` |
+| `earcons` | The answer to `earcon_list` | `ready`, `items` (`id`, `size`, `sha256`), `last_load_us` |
+| `earcon_next`, `earcon_stored`, `earcon_failed` | An earcon upload moves on | `id` and `offset`; `id`, `size` and `sha256`; `op` (`put`, `play` or `delete`), `id` and `error` |
 
-**Text frames, hub → satellite:** `pending`, `adopt`, `welcome` (name and
-config), `config` (any subset), `lights`, `identify`, `reboot`, `forget`,
-`set_hub`, `flush`, `ota` (size, sha256, version, and `signature` when the
-image has one), `earcon_put` (`id`, `size`, `sha256`), `earcon` (`id`: play
-it), `earcon_list`, `earcon_delete`, `duck` (`level` 0-100 on the volume scale,
-`ms`, 0 for until `unduck`) and `unduck`.
+`hello.caps` names what the satellite can do. The hub sends a message that
+needs a capability only to a satellite whose caps list it. Older firmware
+ignores what it does not know without a word.
+
+| Capability | Meaning |
+|---|---|
+| `mic` | `rate`, `channels`, `format` of the microphone stream |
+| `speaker` | `rate`, `channels`, `format` it plays |
+| `lights` | The number of LEDs |
+| `light_modes` | The light modes it draws. `listen` is in it from 2026-09-28; without it the hub uses the first five |
+| `buttons` | The buttons it reports |
+| `actions` | The button actions it runs itself, which `button_actions` may name (from 2026-09-27) |
+| `earcons` | `max`, `max_bytes`, `rate` of the sounds it can keep |
+| `duck` | `true`: it takes `duck` and `unduck` |
+| `ota_key` | On a signed build, the id of the key an update must be signed by |
+
+**Text frames, hub → satellite**
+
+| `type` | Fields |
+|---|---|
+| `pending` | None: not adopted |
+| `adopt` | `token`, `name` |
+| `welcome` | `name`, and `config`: `volume`, `mic_gain_db`, `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness`, `ring_top`, `ring_upside_down`, `local_volume_buttons`, and `button_actions` for firmware that lists `actions` |
+| `config` | Any subset of the same |
+| `lights` | `mode` (`off`, `solid`, `pulse`, `spin`, `pixels`, `listen`), `color` `[r, g, b]`, `brightness` 0-255, `pixels`, and for `listen` the talker's `direction` in degrees or `null` |
+| `identify` | `seconds` |
+| `reboot`, `forget`, `flush`, `unduck`, `earcon_list` | None |
+| `set_hub` | `url` |
+| `ota` | `size`, `sha256`, `version`, and `signature` when the image has one |
+| `earcon_put` | `id`, `size`, `sha256` |
+| `earcon` | `id`: play it |
+| `earcon_delete` | `id`. The firmware takes it; the hub does not send it today |
+| `duck` | `level` 0-100 on the volume scale, and `ms`, 0 for until `unduck` |
 
 **Updates.** The hub sends `ota`. The satellite begins writing to its spare
 slot and asks for chunks with `ota_next`, one at a time, hashing as it goes. On
@@ -213,10 +374,12 @@ event loop never does it. A full queue drops its oldest frame and counts it as
 2. **Wake words** (`app/wakeword.py`): openWakeWord's ONNX models, loaded
    once. Each satellite gets a stream of its own that runs only its own words,
    on sessions shared by all of them.
-3. **Endpointer:** webrtcvad. The command ends after 800 ms without speech, at
-   10 s, or at 4 s if no speech started.
+3. **Endpointer:** webrtcvad. The command ends after the word's `silence_ms`
+   without speech (800 ms unless set), at 10 s, or at 4 s if no speech
+   started.
 4. **What the word does**, one conversation per satellite at a time: the
-   `wake` earcon if the satellite holds it, the ring pointed at the talker,
+   `wake` earcon if the satellite holds it, the ring lit in the word's colour
+   ([Lights](#lights)),
    the satellite ducked (and the satellite the word answers on, if that is
    another one), then STT, the word's action and the reply, streamed
    sentence by sentence. The reply is played on the action's `reply_to`
@@ -230,20 +393,12 @@ A wake word heard while a reply is playing interrupts it, as speech over the
 reply does ([Barge-in](#barge-in)). A wake word heard while a conversation is
 still listening for its command, or routing it, is dropped.
 
-**Events.** Each conversation publishes `{"type": "wake", "satellite",
-"wake_word", "score", "direction"}`. A command then publishes `{"type":
-"routed", "satellite", "wake_word", "rule_id", "mode", "reply_to", "error",
-"transcript", "language", "language_source", "reply_language", "voice",
-"reply_text", "spoken_text", "interrupted", "timings_ms", "timeline_ms",
-"endpoint", "command_s", "played", "note"}`, where `rule_id` names the wake
-word that answered. A conversation publishes `conversation_started`
-(`rule_id`, `reason`: `wake_word` or `fallback`, `from_rule`,
-`follow_up_s`), a `turn` for each exchange (the fields of `routed`, and
-`turn`, `ended`, `handed_over_to`), and `conversation_ended` (`rule_id`,
-`turns`, `seconds`, `reason`: `silence`, `phrase`, `error`, `no_audio`,
-`stop`, `muted`, `mic_off`, `wake_word`, `trigger`, `unadopted`). A trigger
-word publishes only `triggered`. Transcripts are in the event stream, which
-is behind the same keys as the rest of the API, and not in the INFO log.
+**Events.** A conversation publishes `wake`, then `routed` for a command or
+`conversation_started`, a `turn` per exchange and `conversation_ended` for a
+conversation, and a trigger word only `triggered`
+([Events](#events)). `conversation_ended` gives its `reason`: `silence`,
+`phrase`, `error`, `no_audio`, `stop`, `muted`, `mic_off`, `wake_word`,
+`trigger` or `unadopted`.
 
 **Measured** on darwin (Apple silicon) and in the image on arm64, 2026-09-25:
 
@@ -284,73 +439,32 @@ The Satellites tab edits the same entries through `GET` and `PUT
               "reply_to": "same"},
    "conversation": {"follow_up_s": 8, "silence_ms": 600, "end_phrases": null}},
   {"name": "lumos", "threshold": 0.7, "satellites": ["020000000001"],
-   "mode": "trigger",
+   "mode": "trigger", "colour": "#ffb000",
    "trigger": {"feedback": "earcon", "cooldown_s": 3, "ends_conversation": false}}],
  "ptt": {"mode": "command", "action": {"destination": {"type": "echo"}}}}
 ```
 
-| Field | |
-|---|---|
-| `name` | One of `available` in `GET /satellites/wake-words`: a built-in openWakeWord model (`alexa`, `hey_jarvis`, `hey_mycroft`, `hey_rhasspy`, `weather`), or `<name>.onnx` of your own in `SATELLITES_MODEL_DIR`. Each name once. `ptt` is push-to-talk and never a wake word. |
-| `threshold` | 0.1 to 0.95; higher is stricter. Unset, 0.5, or 0.7 for a trigger word. |
-| `satellites` | `["*"]` for every satellite, including one adopted later, or satellite ids. Empty means nobody hears the word. |
-| `mode` | `command`, `conversation` or `trigger`. [Command, conversation and trigger](#command-conversation-and-trigger). |
-| `language` | Unset (or `"auto"`): read from each transcript. A BCP 47 tag such as `pt-BR` is a hint: the word is always spoken in that language, and detection is skipped. |
-| `action` | Command and conversation only; a trigger has none. `destination` (below), `reply_to` (`same`, `none`, or another satellite's id or name), `voice` (a Kokoro voice; unset, the voice of the language), and for a command `fallback`: the name of a conversation word that takes over when this destination fails or does not understand. |
-| `silence_ms` | The pause that ends the command after the wake word. 800. |
-| `conversation` | `follow_up_s` (8): how long the satellite listens for the next turn after a reply. `silence_ms` (600): the pause that ends a follow-up turn. `end_phrases` (unset: the usual ones in English and in the conversation's languages, [below](#conversations); `[]` for none). |
-| `trigger` | `feedback`: `earcon` (the satellite's `done` and a flash of the ring) or `none`. `cooldown_s` (3). `ends_conversation` (false). |
+| Field | Default | Range | What it does |
+|---|---|---|---|
+| `name` | | | One of `available` in `GET /satellites/wake-words`: a built-in openWakeWord model (`alexa`, `hey_jarvis`, `hey_mycroft`, `hey_rhasspy`, `weather`), or `<name>.onnx` of your own in `SATELLITES_MODEL_DIR`. Each name once. `ptt` is push-to-talk and never a wake word. [`tools/wakeword-train`](../../tools/wakeword-train/README.md) trains a model of your own |
+| `threshold` | 0.5; 0.7 for a trigger word | 0.1 to 0.95 | How sure the detector must be. Higher is stricter |
+| `satellites` | | | `["*"]` for every satellite, including one adopted later, or satellite ids. Empty means nobody hears the word |
+| `mode` | `command` | `command`, `conversation`, `trigger` | [Command, conversation and trigger](#command-conversation-and-trigger) |
+| `language` | unset | a BCP 47 tag, or `"auto"` | Unset or `"auto"`: read from each transcript. A tag such as `pt-BR` is a hint that the word is always spoken in that language, and detection is skipped |
+| `action` | an echo | | Command and conversation only; a trigger has none. `destination` ([Destinations](#destinations)), `reply_to` (`same`, `none`, or another satellite's id or name), `voice` (a Kokoro voice; unset, the voice of the language), and for a command `fallback`: the name of a conversation word that takes over when this destination fails or does not understand |
+| `silence_ms` | 800 | 200 to 3000 | The pause that ends the command after the wake word |
+| `colour` | unset: the listening blue | `#rrggbb` | The ring's colour while this word listens, thinks and, for a trigger, flashes. Anything else is a 422 |
+| `conversation.follow_up_s` | 8 | 1 to 60 | How long the satellite listens for the next turn after a reply |
+| `conversation.silence_ms` | 600 | 200 to 3000 | The pause that ends a follow-up turn |
+| `conversation.end_phrases` | unset | up to 64, each up to 64 characters | Unset: the usual ones in English and in the conversation's languages ([Conversations](#conversations)). `[]` for none |
+| `trigger.feedback` | `earcon` | `earcon`, `none` | `earcon` plays the satellite's `done` and flashes the ring |
+| `trigger.cooldown_s` | 3 | 0 to 600 | How long the same word cannot fire again |
+| `trigger.ends_conversation` | false | | Whether the word ends a conversation it is heard in |
 
 The file's `ptt` block is push-to-talk's own entry, without a name, threshold
 or satellites. It cannot be a trigger.
 
-**Destinations.** A destination that needs a credential names it and never
-holds it: `token_env` or `api_key_env` is the name of a secret, whose value
-the hub reads on every request from its environment or from the keys it holds
-([Keys](#keys)). Unknown fields are refused, a name must look like a
-variable's (so a pasted token is a 422), and a URL with a user and password is
-refused. A name must not be one of the hub's own settings: under `SATELLITES_`
-(or `NODES_`) with no `TOKEN`, `KEY`, `SECRET` or `PASSWORD` in it as a word,
-such as `SATELLITES_MQTT_URL`, which carries the broker's password. It is
-refused with a 422 wherever an action, a picker or the key box names it, and
-it holds nothing for any destination. `GET /satellites/wake-words` says in `env` which named secrets have a
-value, as booleans, and in `secrets` where each value lives.
-
-| `type` | Fields | |
-|---|---|---|
-| `ha_conversation` | `url`, `token_env` (`SATELLITES_HA_TOKEN`), `agent_id`, `timeout` (15) | Home Assistant's `POST /api/conversation/process`, with the language that was spoken |
-| `ha_assist` | `url`, `token_env`, `pipeline` (an Assist pipeline id, picked by name on the page; unset, HA's preferred one), `timeout` | An Assist pipeline over HA's websocket API, **set up in Home Assistant**: it hears the command with its own speech-to-text, understands it with the satellite's own HA device (so "the lights" are that room's), and speaks the reply with its own text-to-speech and voice, in its own language. The word's language and voice are not read. A pipeline with no speech-to-text or text-to-speech leaves that part to Calliope's own. |
-| `llm` | `base_url`, `model`, `system`, `api_key_env` (`SATELLITES_LLM_API_KEY`), `max_tokens` (400), `timeout` (30), `stream` (true), `tools` (none; `web_search`, `weather`) | Any OpenAI-compatible `POST /chat/completions`, hosted or your own ([providers](#language-model-providers)), streamed, with the conversation so far. It sends `model`, `messages`, the token limit and `stream`, and no `temperature`. The limit goes as `max_tokens`; a server that refuses that and asks for `max_completion_tokens` (OpenAI's reasoning and GPT-5-class models) is asked again once with that name, and the name is kept per model until the hub restarts. A `base_url` with `/chat/completions` on the end is saved without it. Only the answer's text is spoken, never reasoning (`reasoning_content`, `reasoning`, a `<think>` block, a "thinking" part), and a model that spent its whole `max_tokens` thinking is an error that says so. A refusal is shown in the provider's words, with any key in it hidden. Every prompt carries the local date and time. With `tools`, the model may call `web_search` (SearXNG, top results' titles and snippets) and `weather` (Open-Meteo, now and three days, at home or a named place); the hub runs the calls together and asks again, at most twice, then with `tool_choice` `none` so it must answer. A tool that fails answers the model in words; the turn goes on. |
-| `webhook` | `url`, `token_env`, `timeout` (15) | POST `{satellite, satellite_id, wake_word, mode, text, language, audio_seconds, history}`; a JSON `reply` string is spoken |
-| `echo` | | Says back what it heard |
-
-Both Home Assistant destinations keep HA's `conversation_id` for as long as a
-conversation lasts, so HA keeps its own context between turns.
-
-#### Language model providers
-
-Any server that answers OpenAI's `POST /chat/completions` works. The
-Satellites tab's Provider list fills in these base URLs, and a model is picked
-from the ids the server lists at `GET {base_url}/models` or typed. Asking for
-that list sends the key, so the tab asks by itself only for the address and
-key name a word is saved with, or a name that holds no key. A provider just
-picked, a typed address or a renamed key waits for List models, or for a key
-stored while that address is in the form.
-
-| Provider | `base_url` | |
-|---|---|---|
-| OpenAI | `https://api.openai.com/v1` | |
-| Anthropic | `https://api.anthropic.com/v1` | Its OpenAI compatibility layer. Its `/models` may want its own `x-api-key` header, so the list can be empty: type the id. |
-| OpenRouter | `https://openrouter.ai/api/v1` | Ids are `vendor/model`, several hundred of them: type to narrow the list. |
-| Groq | `https://api.groq.com/openai/v1` | |
-| Mistral | `https://api.mistral.ai/v1` | |
-| DeepSeek | `https://api.deepseek.com` | |
-| Your own | e.g. `http://llm.example.com:8080/v1` | llama.cpp's server, vLLM, Ollama's `/v1`. Usually no key: set `api_key_env` to `null`, or leave the variable it names unset. The address is the hub's view of the network, so `localhost` is the hub's own container. |
-
-The list shows every id the server returns, including models that cannot
-chat (embeddings, speech). The Satellites tab's Test asks the form as it
-stands one short question through `POST /satellites/llm/test` and shows how
-long the first words and the whole reply took.
+#### Saving
 
 **A save merges by name.** A field an entry leaves out keeps what was saved
 for that name, so a client that knows only `name`, `threshold` and
@@ -383,8 +497,9 @@ once, with no restart:
   keep working, and the next PUT tries again.
 
 A PUT is also refused with 422 `invalid_wake_words`, and the file is not
-changed, for a name the hub cannot load, a name given twice, a threshold
-outside 0.1 to 0.95, `"*"` together with ids, and an id the hub does not know.
+changed, for a name the hub cannot load, a name given twice, a value outside
+its range in the table above, `"*"` together with ids, and an id the hub does
+not know.
 A known id is one adopted, seen since the hub started, or already in the file,
 so the list `GET` returned can always be sent back. A MAC with colons is taken
 as the id.
@@ -411,6 +526,117 @@ names each one left behind. The hub writes the file as version 2 and leaves
 `rules.json` where it is, untouched. A `rules.json` that does not load
 migrates nothing, and those words route nowhere, as before, until they are
 given an action.
+
+### Destinations
+
+A destination that needs a credential names it and never holds it:
+`token_env` or `api_key_env` is the name of a secret, whose value the hub
+reads on every request from its environment or from the keys it holds
+([Keys](#keys)). `GET /satellites/wake-words` says in `env` which named
+secrets have a value, as booleans, and in `secrets` where each value lives.
+
+The hub refuses, with a 422:
+
+- a field it does not know;
+- a name that does not look like a variable's, so a pasted token is refused;
+- a URL with a user and password in it;
+- a name that is one of the hub's own settings: under `SATELLITES_` (or
+  `NODES_`) with no `TOKEN`, `KEY`, `SECRET` or `PASSWORD` in it as a word.
+  `SATELLITES_MQTT_URL`, which carries the broker's password, is one. Such a
+  name holds nothing for any destination, wherever an action, a picker or the
+  key box names it.
+
+| `type` | Fields | What it does |
+|---|---|---|
+| `ha_conversation` | `url`, `token_env` (`SATELLITES_HA_TOKEN`), `agent_id`, `timeout` (15, up to 120) | Home Assistant's `POST /api/conversation/process`, with the language that was spoken |
+| `ha_assist` | `url`, `token_env`, `pipeline` (an Assist pipeline id, picked by name on the page; unset, HA's preferred one), `timeout` (15, up to 120) | An Assist pipeline over HA's websocket API, **set up in Home Assistant**. It hears the command with its own speech-to-text, understands it with the satellite's own HA device (so "the lights" are that room's), and speaks the reply with its own text-to-speech and voice, in its own language. The word's language and voice are not read. A pipeline with no speech-to-text or text-to-speech leaves that part to Calliope's own. The satellite's device exists only where the Calliope integration is installed ([`clients/home-assistant`](../../clients/home-assistant/README.md)) |
+| `llm` | [below](#language-model-destination) | Any OpenAI-compatible `POST /chat/completions`, streamed, with the conversation so far |
+| `webhook` | `url`, `token_env`, `timeout` (15, up to 120) | POST `{satellite, satellite_id, wake_word, mode, text, language, audio_seconds, history}`. A JSON `reply` string is spoken |
+| `echo` | | Says back what it heard |
+
+Both Home Assistant destinations keep HA's `conversation_id` for as long as a
+conversation lasts, so HA keeps its own context between turns.
+
+#### Language model destination
+
+| Field | Default | Range | What it does |
+|---|---|---|---|
+| `base_url` | | | The address before `/chat/completions`, such as `https://api.openai.com/v1`. One saved with `/chat/completions` on the end is saved without it |
+| `model` | | up to 120 characters | The model id, from the server's list or typed |
+| `system` | unset | up to 8000 characters | The system prompt. The hub adds the date and time, what the tools are for, and the language to answer in |
+| `api_key_env` | `SATELLITES_LLM_API_KEY` | a variable's name, or `null` | The key's name ([Keys](#keys)). With no value, no `Authorization` is sent, which suits a server of your own |
+| `max_tokens` | 400 | 1 to 8192 | The reply limit. A reasoning model spends part of it thinking |
+| `timeout` | 30 | up to 120 | Seconds |
+| `stream` | true | | Stream the reply, so the first sentence is spoken while the model writes the rest ([Streaming](#streaming)) |
+| `tools` | none | `web_search`, `weather` | [Tools and the date](#tools-and-the-date) |
+
+The hub sends `model`, `messages`, the token limit and `stream`, and no
+`temperature`. The limit goes as `max_tokens`. A server that refuses it and
+asks for `max_completion_tokens` (OpenAI's reasoning and GPT-5-class models)
+is asked again once with that name, and the hub keeps the name for that model
+until it restarts.
+
+Only the answer's text is spoken, never reasoning: not `reasoning_content`,
+`reasoning`, a `<think>` block or a "thinking" part. A model that spent its
+whole `max_tokens` thinking is an error that says so. A refusal is shown in
+the provider's words, with any key in it hidden.
+
+#### Tools and the date
+
+Every language model prompt carries the local date and time, with tools or
+without, so "what day is it" costs no round trip. The time zone is
+`SATELLITES_TIMEZONE`, else Home Assistant's, else `TZ`, else UTC.
+
+A word's `tools` lets the model call these:
+
+| Tool | Source | What leaves the hub, and to whom | Limits | Needs |
+|---|---|---|---|---|
+| `web_search` | A SearXNG you run (`SATELLITES_SEARXNG_URL`), JSON output on | The model's search query goes to your SearXNG, and from there to the search engines it is set to use | 4 s; the top 5 results' titles and snippets, 280 characters each, and any direct answer or infobox. No page is fetched | `SATELLITES_SEARXNG_URL`. Unset, the tool tells the model search is not set up, and the page greys the box |
+| `weather` | Open-Meteo, `api.open-meteo.com` and its geocoder `geocoding-api.open-meteo.com` | The home's coordinates, or the place the question names, go to Open-Meteo over the internet, even when the language model is on your own network | 4 s; now and the next three days, in the household's units (`SATELLITES_UNITS`) | Nothing. Open-Meteo's free API is for non-commercial use, and its data is CC BY 4.0 ([THIRD-PARTY-NOTICES.md](../../THIRD-PARTY-NOTICES.md)) |
+
+**Home** is `SATELLITES_HOME_LAT`, `SATELLITES_HOME_LON` and
+`SATELLITES_HOME_NAME` when set. Otherwise the hub asks Home Assistant's
+`GET /api/config`, through the first Home Assistant action a wake word has
+and that action's token, and keeps the answer an hour. A failed ask is not
+repeated for five minutes. With neither, the weather needs a place named.
+
+The hub runs the calls a model asks for together, sends the results back and
+asks again, at most twice. Then it asks with `tool_choice` `none`, so the
+model must answer. A tool that fails, times out or finds nothing answers the
+model in words, and the turn goes on. With no tool ticked, the request has no
+`tools` field at all, so a server without tool calling is never sent one.
+
+**The model and the server must support OpenAI's tool calling.** Ticked tools
+go with every question, and a server that cannot take them refuses every
+request. On a server of your own that may mean switching tool calling on:
+llama.cpp's `--jinja`, vLLM's automatic tool choice, or an Ollama model that
+has tools. [ADR 0018](../../docs/adr/0018-language-model-tools.md) records
+why these two tools and not more.
+
+#### Language model providers
+
+Any server that answers OpenAI's `POST /chat/completions` works. The
+Satellites tab's Provider list fills in these base URLs, and a model is
+picked from the ids the server lists at `GET {base_url}/models`, or typed.
+
+Asking for that list sends the key. So the page asks by itself only for an
+address and key name a word was saved with. After any change to the
+provider, the address or the key, press **List models**.
+
+| Provider | `base_url` | |
+|---|---|---|
+| OpenAI | `https://api.openai.com/v1` | |
+| Anthropic | `https://api.anthropic.com/v1` | Its OpenAI compatibility layer. Its `/models` may want its own `x-api-key` header, so the list can be empty: type the id. |
+| OpenRouter | `https://openrouter.ai/api/v1` | Ids are `vendor/model`, several hundred of them: type to narrow the list. |
+| Groq | `https://api.groq.com/openai/v1` | |
+| Mistral | `https://api.mistral.ai/v1` | |
+| DeepSeek | `https://api.deepseek.com` | |
+| Your own | e.g. `http://llm.example.com:8080/v1` | llama.cpp's server, vLLM, Ollama's `/v1`. Usually no key: set `api_key_env` to `null`, or leave the variable it names unset. The address is the hub's view of the network, so `localhost` is the hub's own container. |
+
+The list shows every id the server returns, including models that cannot
+chat (embeddings, speech). The Satellites tab's Test asks the form as it
+stands one short question through `POST /satellites/llm/test` and shows how
+long the first words and the whole reply took.
 
 ### Keys
 
@@ -445,13 +671,20 @@ environment instead if that is not acceptable.
 
 ### Lights
 
-While a satellite listens, its ring breathes in the word's colour and, on
-firmware that draws the `listen` mode itself (`light_modes` in its caps), a
-brighter arc glides towards the talker; older firmware gets a pulse. It spins
-while the router works, goes out when the reply starts, and pulses again while
-a conversation waits for its next turn. LED 0 is assumed to sit towards
-microphone 1, with the LEDs counting the same way round as the microphones.
-Neither has been checked on a board, so the arc may be rotated or mirrored.
+Each wake word lights the ring in its own `colour`, or in the listening blue
+(40, 110, 255) when it has none:
+
+| While | The ring |
+|---|---|
+| The satellite listens for the command | Breathes, with a brighter arc gliding towards the talker. The board draws this `listen` mode itself, from the direction the hub sends when it moves by half an LED. Firmware without `listen` in `caps.light_modes` gets a pulse instead |
+| The hub transcribes and asks the destination | Spins |
+| The reply plays | Off |
+| A conversation waits for its next turn | Breathes again, with no arc until someone speaks |
+| A trigger word with `feedback: "earcon"` fires | Flashes, where no conversation holds the ring |
+
+LED 0 is assumed to sit towards microphone 1, with the LEDs counting the same
+way round as the microphones. Neither has been checked on a board, so the arc
+may be rotated or mirrored.
 
 **A satellite with `lights_enabled` false is never sent `lights`.** Every
 lights message goes through one function (`Hub.send_lights`) that reads the
@@ -511,21 +744,24 @@ the mute if it is ever sent one anyway. Holding Set 5 s (Wi-Fi setup) and Mode
 A PATCH replaces the whole mapping. Every press and release is published as
 an event, whatever it maps to.
 
-**What a button changed is the hub's too.** After an action that changes a
-setting (volume, `lights_enabled`, `brightness`), the satellite sends a status
-marked `"cause": "button"`, and those settings in it are taken as the hub's:
-the page and Home Assistant show them, a `{"type": "settings", "satellite",
-"settings"}` event says what changed, and the next welcome does not put the
-old values back. Any other status is not believed on them, because one
-already on its way when the page changed a setting carries the old value.
-Firmware from before 2026-09-27 does not mark it; for that, the status within
-2 s of such a press counts. `local_volume_buttons` is read only by that
+**What a button changed is the hub's too.** A button can change the volume,
+`lights_enabled` or `brightness` on the satellite. The satellite then sends a
+status marked `"cause": "button"`, and the hub takes those settings from it:
+
+- the page and Home Assistant show them;
+- a `settings` event says what changed ([Events](#events));
+- the next welcome does not put the old values back.
+
+The hub does not take these settings from any other status. A status already
+on its way when the page changed a setting carries the old value. Firmware
+from before 2026-09-27 does not mark the status, so for it the status within
+2 s of a volume press counts. `local_volume_buttons` is read only by that
 firmware, and is turned into the volume pair's mapping once.
 
 ### Speaker or jack
 
-The Korvo's 3.5 mm jack (headphones, or an aux cable to another amplifier) switches in hardware, and no GPIO reads its detect
-pin. With no plug, the codec's output runs through the jack's
+The Korvo's 3.5 mm jack (headphones, or an aux cable to another amplifier)
+switches in hardware, and no GPIO reads its detect pin. With no plug, the codec's output runs through the jack's
 normally-closed contacts to the speaker amplifier and to the loopback (ES7210
 channel 0). A plug opens those contacts, so the loopback hears nothing
 ([schematic](https://dl.espressif.com/dl/schematics/ESP32-KORVO_V1.1_schematics.pdf),
@@ -540,8 +776,10 @@ compares the loopback over that sound with its idle level (`app/output.py`):
 
 So it is known only once something has played since the satellite connected,
 and a plug put in or pulled out in silence is seen at the next sound. A change
-publishes `{"type": "output", "satellite", "output"}`. Nothing needs a
-firmware change.
+publishes an `output` event. Nothing needs a firmware change.
+
+With a plug in, the echo canceller has no reference, so speaking over a reply
+does not stop it ([Barge-in](#barge-in)).
 
 ## Command, conversation and trigger
 
@@ -596,10 +834,10 @@ couldn't understand that" is spoken, as it always was.
 
 ### Language
 
-The hub reads the language of every utterance from its transcript, because
-stt-stack's Parakeet recognises 25 European languages by itself, refuses a
-`language` field with a 400, and does not say which language it heard. A
-word's `language` hint replaces the detection.
+The hub reads the language of every utterance from its transcript. Parakeet,
+stt-stack's default engine, recognises 25 European languages by itself,
+refuses a `language` field with a 400, and does not say which language it
+heard. A word's `language` hint replaces the detection.
 
 The language decides three things. Home Assistant is sent it. An `llm` is
 told to answer in it. The reply voice speaks it:
@@ -627,28 +865,52 @@ so a command is matched against Home Assistant's European Portuguese
 sentences, not its Brazilian ones. Kokoro's only Portuguese voice is
 Brazilian whatever the tag, which is why `pt-BR` is the default.
 
-The hub asks stt-stack's `/health` once a start, before its first
-transcription, for the engines it serves and what each takes. A hint is sent
-on to STT only when the engine takes one: Whisper gets it; Parakeet never
-does. A word whose hint is the one language an engine was loaded for goes to
-that engine by its id (with `STT_MODELS=parakeet,parakeet-pt-br`, a `pt` word
-is heard by the pt-BR fine-tune); anything else goes to the stack's default.
-
-Home Assistant's names (the `home-assistant` glossary profile, which the
-Calliope integration keeps on the stack) go with every transcription to an
-engine that boosts, Parakeet, boosted unless the stack has biasing off
-(`hotwords` false in its `/health`). Whisper is not sent them: it takes a
-glossary's terms as hotwords, and stt-stack measured terms absent from the
-audio raising its word error rate by 28%. The profile is not named while the
-stack does not list it, which is a hub without the integration; the list is
-looked at again every 10 minutes. A refused `boost` sends the names again
-without it, so the repairs still apply.
-
 The detector is py3langid 0.4.0, restricted to Parakeet's languages. On 96
 short commands and questions in eight languages it got 94 right, against 90
 for lingua-language-detector 2.2.0, and it installs in 4.4 MB rather than 295.
 It costs about 50 MB of memory. The two misses were "liga a luz" (Romanian)
 and "e a Roma?" (English, the prior). `app/language.py` has the rest.
+
+### Speech-to-text
+
+The hub asks stt-stack's `/health` once a start, before its first
+transcription, for the engines it serves and what each takes
+([stt-stack](../stt/README.md#what-each-engine-can-do)). Then, for each
+command:
+
+- **The engine.** A word whose `language` hint is the one language an engine
+  was loaded for goes to that engine by its id. With
+  `STT_MODELS=parakeet,parakeet-pt-br`, a word with a Portuguese hint (`pt`,
+  `pt-BR`) is heard by the Brazilian Portuguese fine-tune. Every other command goes to the
+  stack's default engine. To hear every command on the fine-tune, list it
+  first in `STT_MODELS`, which makes it the default for every other client
+  too. It transcribes English badly (a word error rate of 0.89), so do that
+  only in a household that speaks no English to it.
+- **The hint.** A word's `language` hint is sent only to an engine that takes
+  one: Whisper gets it; Parakeet never does.
+- **Home Assistant's names.** The Calliope integration for Home Assistant
+  keeps the `home-assistant` glossary profile on the stack
+  ([`clients/home-assistant`](../../clients/home-assistant/README.md#vocabulary)).
+  The hub names it on every transcription to an engine that boosts
+  (Parakeet), with `boost=true` unless the stack has biasing off (`hotwords`
+  false in its `/health`). Whisper is not sent it: it takes a glossary's terms
+  as hotwords, and stt-stack measured terms absent from the audio raising its
+  word error rate by 28%.
+
+The vocabulary never costs a transcription:
+
+- While the stack's `/health` does not list the profile, which is a hub
+  without the integration, the hub does not name it, and looks again every
+  10 minutes.
+- If the stack refuses the `boost`, the hub sends the names again without it,
+  so the repairs still apply, and leaves the boost off for 10 minutes. The
+  log has a WARNING that begins `routing: stt-stack refused to boost`.
+- If the stack refuses the profile with any other 400, the hub transcribes
+  again without it, leaves it out for 10 minutes, and logs a WARNING that
+  begins `routing: stt-stack refused the home-assistant vocabulary`.
+
+[ADR 0017](../../docs/adr/0017-home-assistant-vocabulary.md) records the
+profile as a contract between the integration and the hub.
 
 ### Streaming
 
@@ -694,6 +956,14 @@ interrupt it:
 Barge-in by voice needs the front-end, and is armed only when the reply plays
 on the satellite that heard: the canceller subtracts that satellite's own
 loopback, and knows nothing of a reply playing in another room.
+
+**It also needs the loopback to hear the reply.** With a plug in the jack it
+never does ([Speaker or jack](#speaker-or-jack)), so speaking over a reply
+does nothing, and only the wake word or the stop button interrupts it. Before
+this rule, the microphones heard the reply from the speakers on the aux
+cable, took it for the talker, and stopped it. A follow-up after such a reply
+starts listening 0.6 s after the reply ends, instead of waiting for a quiet
+loopback.
 
 The detector reads the front-end's decision for each 16 ms block. A block
 counts as speech when it is voiced by the front-end's own test, and, while
@@ -815,7 +1085,7 @@ phrase in macOS's default voice peaked at 0.05, and in Samantha and Daniel at
 
 | Variable | Default | |
 |---|---|---|
-| `SATELLITES_DATA_DIR` | `/data` | `satellites.json`, `rules.json`, `wake_words.json`, `secrets.json`, `firmware/` and `models/`. Mount a volume: losing it un-adopts every satellite. `secrets.json` holds the API keys stored from the Satellites tab, mode 0600, so the volume's backups hold them too ([Keys](#keys)). A volume from a pre-release build before the rename holds `nodes.json` instead; the hub reads it once and writes `satellites.json`, and leaves the old file where it is. |
+| `SATELLITES_DATA_DIR` | `/data` | Where the hub keeps its state ([The data volume](#the-data-volume)). Mount a volume: losing it un-adopts every satellite. |
 | `SATELLITES_TTS_URL` | unset | tts-stack's base URL, for `say` and every reply. Unset, `say` answers 503 and names this variable. |
 | `SATELLITES_TTS_VOICE` | `bm_george` | |
 | `SATELLITES_SEARXNG_URL` | unset | A SearXNG with JSON output on (`search.formats: [html, json]`), for the `web_search` tool. Unset, the tool tells the model search is not set up. SafeSearch is the instance's own setting. |
@@ -825,7 +1095,7 @@ phrase in macOS's default voice peaked at 0.05, and in Samantha and Daniel at
 | `SATELLITES_LANGUAGES` | `en` | The household's languages as BCP 47 tags, most spoken first: `fr`, `pt-PT`, `en,pt-BR`. The first is what a new conversation is expected to be in and what an answer falls back to; each tag's region is how its language is sent on ([Language](#language)). A tag for a language the recogniser does not hear is left out, with a warning at start. |
 | `SATELLITES_STT_URL` | unset | stt-stack's base URL. Unset, wake words are still heard and published, and routing says there is no STT. |
 | `SATELLITES_WAKE_WORDS` | `hey_jarvis:0.5` | Read once: the words `wake_words.json` starts with, each for every satellite, on the first start with a volume that has none. Names and thresholds, comma-separated. A name alone gets 0.5. Empty means none; push-to-talk still works. After that, [Wake words](#wake-words). |
-| `SATELLITES_MODEL_DIR` | `$SATELLITES_DATA_DIR/models` | Where wake word models live. The image's own are copied here at start; other built-in names (`alexa`, `hey_mycroft`, `hey_rhasspy`, `weather`) are fetched here once, when a word first names them, and `<name>.onnx` of your own loads by its name. |
+| `SATELLITES_MODEL_DIR` | `$SATELLITES_DATA_DIR/models` | Where wake word models live. The image's own are copied here at start; other built-in names (`alexa`, `hey_mycroft`, `hey_rhasspy`, `weather`) are fetched here once, when a word first names them, and `<name>.onnx` of your own loads by its name ([`tools/wakeword-train`](../../tools/wakeword-train/README.md) trains one). |
 | `SATELLITES_FRONTEND` | `1` | `0` skips echo cancellation, beamforming and noise suppression. |
 | `SATELLITES_DEBUG_AUDIO` | `0` | `1` keeps the last ten commands' surroundings under `$SATELLITES_DATA_DIR/debug`: 16 s of processed output, the first raw microphone, and the command, as WAV. It records the room; switch it on to find out why a command came back empty, then off. |
 | `SATELLITES_MQTT_URL` | unset | `mqtt://user:pass@host:1883` or `mqtts://...` (the system CA store, or `SSL_CERT_FILE`). Unset, no MQTT. |
@@ -843,6 +1113,22 @@ with the name it reads now, except one that a wake word's action names: an
 action carried over from a rule saved before the rename says `"token_env":
 "NODES_HA_TOKEN"` and reads exactly that
 ([ADR 0013](../../docs/adr/0013-satellites-one-door.md#renamed)).
+
+### The data volume
+
+| In `SATELLITES_DATA_DIR` | What it holds |
+|---|---|
+| `satellites.json` | Each adopted satellite: its name, model and config, and its token's SHA-256 only |
+| `wake_words.json` | The wake words and push-to-talk, each with its action ([Wake words](#wake-words)) |
+| `secrets.json` | The API keys stored from the Satellites tab, mode 0600, in plain text ([Keys](#keys)) |
+| `firmware/` | Uploaded firmware images |
+| `models/` | Wake word models, fetched and uploaded (`SATELLITES_MODEL_DIR`) |
+| `debug/` | With `SATELLITES_DEBUG_AUDIO=1`, the last ten commands' audio |
+| `rules.json` | Routing from before 2026-09-25. Read once into `wake_words.json`, then left where it is |
+| `nodes.json` | A pre-release build's satellites. Read once into `satellites.json`, then left where it is |
+
+**Backups of the volume hold every stored key.** Keep a key in the
+environment instead if that is not acceptable.
 
 `ORT_DISABLE_TELEMETRY=1` is set in the image and by `app/wakeword.py`. ONNX
 Runtime's Linux wheel reports usage to Microsoft and writes a device id without
@@ -879,8 +1165,9 @@ offline.
 - Barge-in while the satellite is still listening or routing. It applies while
   a reply plays and while a conversation waits for its next turn. During
   playback the beam keeps the steering it had before playback started.
-- Barge-in by voice without the front-end, or on a reply played on another
-  satellite. Only the wake word and the stop button interrupt those.
+- Barge-in by voice without the front-end, on a reply played on another
+  satellite, or with a plug in the jack. Only the wake word and the stop
+  button interrupt those.
 - Tokens from the destination read aloud as they arrive. The unit is the
   sentence, because Kokoro reads a whole sentence better than a fragment.
 - Discovery. A satellite is told its hub in the setup portal, or moved with
