@@ -455,8 +455,23 @@ def test_the_move_address_is_checked_as_the_hub_checks_it():
 def test_a_forgotten_row_hands_focus_on():
     body = function("satForgotten")
     assert "rows[at + 1] || rows[at - 1]" in body
+    # To something that can take it: not a hidden name field or a greyed Adopt.
+    assert '.find(el => !el.disabled && !el.closest("[hidden]"));' in body
     assert '(target || $("sat-h")).focus();' in body
     assert 'id="sat-h" tabindex="-1"' in PANEL
+
+
+def test_a_control_that_hides_itself_hands_the_focus_on():
+    """Update hides itself once its update has started, and Delete's next
+    image may have nothing due; either way the focus fell to the page. A
+    seen satellite's Forget was hidden under the focus when it came back."""
+    device = function("satDevice")
+    guard = "if (!img && !box.hidden && box.contains(document.activeElement)) {"
+    assert guard in device and device.index(guard) < device.index("box.hidden = !img;")
+    assert 'li.querySelector(".sat-device > summary").focus({ preventScroll: true });' in device
+    assert 'satSaid(host, satText("updStarted", { v: img.version }));' in function("satelliteAct")
+    assert 'next.querySelector("button:not(:disabled)")' in function("firmwareAct")
+    assert "if (gone !== document.activeElement) gone.hidden = !!n.online;" in function("satelliteUpdate")
 
 
 def test_setting_up_the_ring_keeps_the_focus_with_its_steps():

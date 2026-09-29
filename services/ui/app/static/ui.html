@@ -4071,6 +4071,7 @@ const SAT_COPY = {
   moving: "Moving. Forget it here once the other hub has adopted it.",
   updAvail: "{v} is available for this model.",
   updSkipped: "Not started: {why}.",
+  updStarted: "Updating to {v}; its row shows the progress.",
   sayEmpty: "Type something for it to say first.",
   renameEmpty: "Type a name first.",
   blinking: "Blinking white for five seconds.",
@@ -4854,7 +4855,8 @@ function satelliteUpdate(li, n) {
   if (!n.adopted) {
     /* Forget is for a satellite that was only seen: it has no row to forget
        it from otherwise, and the hub keeps it until it restarts. */
-    q('[data-act="dismiss"]').hidden = !!n.online;
+    const gone = q('[data-act="dismiss"]');
+    if (gone !== document.activeElement) gone.hidden = !!n.online;
     /* Nothing can be named until it is back, so a satellite that has gone
        keeps no field for it: the row is a word, a reason and Forget. */
     const named = q(".sat-newname");
@@ -5185,6 +5187,13 @@ function satDevice(li, n, s) {
   const img = satImageFor(n);
   li._img = img;
   const box = li.querySelector(".sat-update");
+  /* Update hides itself once the update has started, while its button holds
+     the focus, which then fell to the page: the next Tab began at the top
+     of the document, and nothing was said. Device's own summary takes it,
+     as Set up the ring hands it back to its button. */
+  if (!img && !box.hidden && box.contains(document.activeElement)) {
+    li.querySelector(".sat-device > summary").focus({ preventScroll: true });
+  }
   box.hidden = !img;
   if (img) {
     const go = box.querySelector("button");
@@ -5363,6 +5372,7 @@ async function satelliteAct(li, act, button) {
         body: JSON.stringify({ satellite: id, sha256: img.sha256 }) });
       const why = (r.skipped || {})[id];
       if (why) note(host, "bad", satText("updSkipped", { why }));
+      else satSaid(host, satText("updStarted", { v: img.version }));
     } else if (act === "forget" || act === "dismiss") {
       await json(`/satellites/${id}/forget`, { method: "POST" });
       SATELLITES.writes++;
@@ -5479,15 +5489,17 @@ function satRingSend(li, work) {
 }
 
 /* The row goes at once, and focus goes to the row that took its place, so a
-   keyboard is not left on a button that no longer exists. */
+   keyboard is not left on a button that no longer exists: to the first
+   thing in it that can take the focus. A seen satellite's name field is
+   hidden and its Adopt greyed, and focus() on either did nothing. */
 function satForgotten(li) {
   const rows = [...$("satellitelist").children];
   const at = rows.indexOf(li);
   const next = rows[at + 1] || rows[at - 1];
   li.remove();
   SATELLITES.rows.delete(li.dataset.id);
-  const target = next && (next.querySelector("details.sat-row > summary")
-    || next.querySelector(".sat-adopt input"));
+  const target = next && [...next.querySelectorAll("summary, input, button")]
+    .find(el => !el.disabled && !el.closest("[hidden]"));
   (target || $("sat-h")).focus();
 }
 
@@ -7478,7 +7490,9 @@ async function firmwareAct(fw, act, button) {
       /* Focus to the image that took its place, or to the upload. */
       const rows = $("fwlist").children;
       const next = rows[at] || rows[at - 1];
-      (next ? next.querySelector("button") : $("fwfile")).focus();
+      /* Its first button that is not greyed: Update every satellite is,
+         when nothing is due, and focus() on it did nothing. */
+      (next && next.querySelector("button:not(:disabled)") || $("fwfile")).focus();
     }
   } catch (e) { note(host, "bad", e.message); }
   finally { done(); }
