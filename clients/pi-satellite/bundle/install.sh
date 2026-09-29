@@ -39,6 +39,20 @@ visudo -cqf /etc/sudoers.d/calliope.new && mv /etc/sudoers.d/calliope.new /etc/s
 for f in "$R"/systemd/*; do
   sed "s/@UID@/$UID_/g" "$f" > "/etc/systemd/system/$(basename "$f")"
 done
+# Audio at the best the hardware takes (bundle/pipewire, bundle/wireplumber):
+# installed for every PipeWire client and the PulseAudio server, and PipeWire
+# restarted once in calliope's session when they changed, not on every update.
+before=$(cat /etc/pipewire/*.conf.d/calliope-quality.conf /etc/wireplumber/wireplumber.conf.d/calliope-quality.conf 2>/dev/null | sha256sum)
+for d in pipewire.conf.d client.conf.d pipewire-pulse.conf.d; do
+  install -d "/etc/pipewire/$d"
+  install -m 644 "$R/pipewire/calliope-quality.conf" "/etc/pipewire/$d/calliope-quality.conf"
+done
+install -d /etc/wireplumber/wireplumber.conf.d
+install -m 644 "$R/wireplumber/calliope-quality.conf" /etc/wireplumber/wireplumber.conf.d/calliope-quality.conf
+after=$(cat /etc/pipewire/*.conf.d/calliope-quality.conf /etc/wireplumber/wireplumber.conf.d/calliope-quality.conf | sha256sum)
+AUDIO_CHANGED=0
+[ "$before" = "$after" ] || AUDIO_CHANGED=1
+
 # The units calliope's own session runs (AirPlay).
 install -d /etc/systemd/user
 for f in "$R"/systemd-user/*; do
@@ -49,3 +63,7 @@ loginctl enable-linger calliope
 systemctl daemon-reload
 systemctl enable calliope-agent.service calliope-rollback.timer calliope-netcheck.timer
 systemctl start calliope-rollback.timer calliope-netcheck.timer
+if [ "$AUDIO_CHANGED" = 1 ] && systemctl is-active --quiet "user@$UID_.service"; then
+  systemctl --user -M calliope@ restart wireplumber.service pipewire.service pipewire-pulse.service || true
+  systemctl --user -M calliope@ try-restart calliope-airplay.service || true
+fi

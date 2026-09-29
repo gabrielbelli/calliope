@@ -42,7 +42,8 @@ def shell(monkeypatch):
 def test_the_name_is_quoted_so_a_name_cannot_break_the_configuration():
     text = airplay.config('Kitchen "big" speaker\\ \n')
     assert 'name = "Kitchen \\"big\\" speaker\\\\ ";' in text
-    assert 'output_backend = "pa";' in text and 'application_name = "AirPlay";' in text
+    assert 'output_backend = "alsa";' in text and 'output_format = "S32";' in text
+    assert 'output_device = "default";' in text and "output_rate = 44100;" in text
 
 
 async def test_it_runs_as_a_user_service_and_restarts_only_when_its_name_changed(shell, tmp_path):
@@ -164,9 +165,10 @@ def test_the_metadata_pipe_says_who_plays_what_and_when_it_pauses():
 
 
 def test_the_stream_says_its_format_rate_and_bit_rate():
-    si = [{"index": 5, "properties": {"application.name": "AirPlay"}, "sample_specification": "s16le 2ch 44100Hz",
+    si = [{"index": 5, "properties": {"application.process.binary": "shairport-sync"},
+           "sample_specification": "s16le 2ch 44100Hz",
            "corked": False, "buffer_latency_usec": 180000, "sink_latency_usec": 20000},
-          {"index": 6, "properties": {"application.name": "pw-cat", "media.role": "Assistant"},
+          {"index": 6, "properties": {"application.process.binary": "pw-cat", "media.role": "Assistant"},
            "sample_specification": "s16le 1ch 48000Hz"}]
     assert airplay.stream(si) == {"format": "s16le 2ch 44100Hz", "corked": False, "bits": 16, "channels": 2,
                                   "rate": 44100, "bitrate_kbps": 1411, "latency_ms": 200}
@@ -177,3 +179,13 @@ def test_the_stream_says_its_format_rate_and_bit_rate():
 def test_the_configuration_names_the_metadata_pipe(tmp_path):
     text = airplay.config("pi", tmp_path / "meta")
     assert 'enabled = "yes";' in text and f'pipe_name = "{tmp_path / "meta"}";' in text
+
+
+def test_the_output_says_what_the_card_is_driven_at():
+    from calliope_pi import pipewire
+    sinks = [{"name": "alsa_output.usb-dac", "sample_specification": "s32le 2ch 44100Hz", "state": "RUNNING"},
+             {"name": "alsa_output.builtin", "sample_specification": "s16le 2ch 48000Hz", "state": "SUSPENDED"}]
+    assert pipewire.output_format(sinks, "alsa_output.usb-dac") == {
+        "name": "alsa_output.usb-dac", "format": "s32le 2ch 44100Hz", "state": "running"}
+    assert pipewire.output_format(sinks, None)["name"] == "alsa_output.usb-dac"
+    assert pipewire.output_format(sinks, "gone") is None

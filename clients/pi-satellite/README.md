@@ -19,10 +19,33 @@ Tested target: Raspberry Pi 3 Model B+ on Raspberry Pi OS Lite 64-bit
 
 Bluetooth comes next, through the same output.
 
+## Audio quality
+
+The best each piece of hardware takes, and no conversion that is not needed
+(`bundle/pipewire`, `bundle/wireplumber`, installed by `install.sh`):
+
+| Link | Setting | Why |
+|---|---|---|
+| PipeWire's rate | follows what plays: 44.1, 48, 88.2, 96, 176.4 or 192 kHz, where the output can | AirPlay at 44.1 kHz reaches the card at 44.1 kHz instead of being converted to 48 |
+| Conversion, when two rates mix | quality 10 of 15 (the default is 4) | A reply over music; a Pi 3 does this for stereo easily |
+| Channels | never upmixed | Stereo stays stereo |
+| Outputs | never suspended | No clipped first syllable, no click as a card wakes |
+| Sample format | the widest the card takes | 32 or 24 bits on a USB DAC or DAC HAT, 16 on the Pi's own jack |
+| AirPlay | handed to PipeWire at 32 bits, through ALSA | The phone's volume is applied without losing resolution |
+
+What is left is the hardware. The Pi 3's own 3.5 mm jack is PWM, well below
+CD quality; a USB DAC or an I2S DAC HAT is the upgrade, and appears under
+**Output** by itself. Classic AirPlay is always ALAC, lossless, 16-bit at
+44.1 kHz (1,411 kb/s); AirPlay 2 adds 48 kHz.
+
+The status says what the output is driven at now (`audio.playing_at`), and
+the Satellites tab shows it under Device and in the AirPlay section.
+
 ## AirPlay
 
 Shairport Sync from Debian runs as the `calliope` user
-(`calliope-airplay.service`, a user unit) and plays through PipeWire, so it
+(`calliope-airplay.service`, a user unit) and plays into PipeWire, through
+ALSA at 32 bits (Audio quality, above), so it
 goes to the output chosen on the Satellites tab and mixes with the
 satellite's voice. The tab turns it on and off (**AirPlay**) and names it
 (**AirPlay name**, the satellite's own name when empty); the agent writes

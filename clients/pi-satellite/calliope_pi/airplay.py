@@ -37,7 +37,7 @@ CONF = Path.home() / ".config" / "calliope" / "shairport-sync.conf"
 # Shairport Sync writes what it plays here (its metadata pipe), in calliope's
 # own runtime directory, where only calliope can read it.
 PIPE = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "calliope-airplay-metadata"
-APP = "AirPlay"           # pa application_name: how its stream is found in pactl
+BINARY = "shairport-sync"   # how its stream is found in pactl, whatever the backend
 OURS = "Assistant"        # media.role of the agent's own streams (pipewire.Player)
 
 
@@ -57,11 +57,18 @@ def config(name: str, pipe: Path = PIPE) -> str:
         "// Written by the Calliope satellite agent (calliope_pi/airplay.py).",
         "general = {",
         f"  name = {_quote(name[:50] or 'Calliope')};",
-        '  output_backend = "pa";',
+        # ALSA's default device is PipeWire (pipewire-alsa). Through it, and
+        # not the PulseAudio backend, Shairport Sync can hand over 32-bit
+        # samples: the phone's volume is applied without losing the bits a
+        # 16-bit stream would, and PipeWire does the rest in float.
+        '  output_backend = "alsa";',
+        # Timing corrections resampled with SoX, the best of its choices.
         '  interpolation = "soxr";',
         "};",
-        "pa = {",
-        f'  application_name = "{APP}";',
+        "alsa = {",
+        '  output_device = "default";',
+        '  output_format = "S32";',
+        "  output_rate = 44100;",
         "};",
         "sessioncontrol = {",
         "  session_timeout = 20;",
@@ -227,7 +234,7 @@ def stream(sink_inputs: list) -> dict | None:
     own delay. None while nothing plays."""
     for si in sink_inputs if isinstance(sink_inputs, list) else []:
         props = si.get("properties") or {}
-        if props.get("application.name") != APP:
+        if props.get("application.process.binary") != BINARY:
             continue
         spec = str(si.get("sample_specification") or "")
         m = FORMAT.match(spec)

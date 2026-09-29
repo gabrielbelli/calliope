@@ -176,6 +176,7 @@ class Agent:
         self.speaking = False
         self.player.on_active = self._speaking
         self.airplay_state: dict | None = None
+        self.playing_at: dict | None = None
 
     # -- sending --
 
@@ -232,7 +233,8 @@ class Agent:
                 "load": round(os.getloadavg()[0], 2),
                 "muted": False, "mic_dropped": self.mic_dropped, "spk_dropped": self.player.dropped,
                 "spk_buffered_ms": self.player.buffered_ms(), "duck": self.duck, "earcons_ready": True,
-                "audio": self.devices.view(), "airplay": self.airplay_state, **self.settings()}
+                "audio": self.devices.view() | {"playing_at": self.playing_at},
+                "airplay": self.airplay_state, **self.settings()}
 
     # -- settings --
 
@@ -494,6 +496,7 @@ class Agent:
                     await self.ws.close()
                 return
             self.airplay_state = await self._airplay_state()
+            self.playing_at = pipewire.output_format(await pipewire.sinks(), self.devices.default_sink)
             with contextlib.suppress(Exception):
                 await self.send(self.status())
             if self.welcomed:

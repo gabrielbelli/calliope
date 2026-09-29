@@ -123,6 +123,28 @@ async def devices() -> Devices:
         return NONE
 
 
+async def sinks() -> list:
+    """pactl's view of the outputs: what each is open at now."""
+    code, out = await _run("pactl", "-f", "json", "list", "sinks")
+    if code:
+        return []
+    try:
+        return json.loads(out)
+    except ValueError:
+        return []
+
+
+def output_format(sinks_: list, name: str | None) -> dict | None:
+    """The output as the card is driven now: sample format, channels and
+    rate (\"s32le 2ch 44100Hz\"), and whether it is running, idle or
+    suspended. The default output when `name` is None."""
+    for s in sinks_ if isinstance(sinks_, list) else []:
+        if name is None or s.get("name") == name:
+            return {"name": s.get("name"), "format": s.get("sample_specification"),
+                    "state": str(s.get("state") or "").lower() or None}
+    return None
+
+
 async def set_default(dev: Device) -> bool:
     code, out = await _run("wpctl", "set-default", str(dev.id))
     if code:
