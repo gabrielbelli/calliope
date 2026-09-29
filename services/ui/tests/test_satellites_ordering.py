@@ -144,6 +144,36 @@ def test_activity_marks_the_gap_while_its_stream_was_down(tmp_path):
                              False]], got
 
 
+def test_the_docks_count_follows_the_stream_while_the_tab_is_shut(tmp_path):
+    """Nothing polls with the tab shut, so the count of satellites waiting to
+    be adopted stayed what it was when the tab was left. An event that can
+    change it asks for the satellite list alone; and the tab is named with
+    what the numeral counts."""
+    got = run(tmp_path, """
+      const sources = [], labels = [];
+      globalThis.EventSource = window.EventSource = class {
+        constructor(url) { this.url = url; this.readyState = 0; sources.push(this); } };
+      $("tab-btn-satellites").setAttribute = (k, v) => labels.push([k, v]);
+      $("tab-btn-satellites").removeAttribute = k => labels.push([k, null]);
+      await satellitesRefresh();
+      const before = $("satellitecount").textContent;
+      hub.satellites.push({ id: "cccccccccccc", name: "", adopted: false, online: true, config: {}, status: {} });
+      let gets = [];
+      const real = json;
+      json = async (path, o) => { gets.push(path); return real(path, o); };
+      sources[0].onmessage({ data: JSON.stringify({ type: "pending", satellite: "cccccccccccc", at: 1 }) });
+      await satellitesCount();
+      await new Promise(r => setTimeout(r, 10));
+      const after = $("satellitecount").textContent;
+      sources[0].onmessage({ data: JSON.stringify({ type: "button", satellite: "aaaaaaaaaaaa", at: 2 }) });
+      await new Promise(r => setTimeout(r, 10));
+      console.log(JSON.stringify({ before, after, gets, label: labels[labels.length - 1] }));
+    """)
+    assert got["before"] == "" and got["after"] == "1", got
+    assert got["gets"] == ["/satellites"], "a shut tab asked for more than the count, or for a button press"
+    assert got["label"] == ["aria-label", "Satellites, 1 waiting to be adopted"], got
+
+
 def test_an_update_is_one_line_in_activity_and_asks_the_hub_nothing_per_ten_per_cent(tmp_path):
     """The firmware reports progress every 10%, and each report was a line
     of its own (about fifteen of the fifty kept per update) and a refresh of

@@ -4012,7 +4012,7 @@ const SATELLITES = { rows: new Map(), timer: null, events: null, list: [], firmw
                         forget); asked and applied number the polls. */
                      writes: 0, asked: 0, applied: 0,
                      /* The refresh out now, and the one waiting for it. */
-                     polling: null, next: null,
+                     polling: null, next: null, counting: null,
                      /* What the page itself saw. The hub keeps a satellite's
                         last_seen and firmware after it disconnects, but only
                         in memory, so these stand in across a hub restart.
@@ -4137,6 +4137,7 @@ const SAT_COPY = {
   evHub: "Hub",
   evGap: "reconnected; anything in between is not in this log",
   noHub: "This deployment has no satellite hub: voice-satellites is not running.",
+  tabPending: "Satellites, {n} waiting to be adopted",
   hubError: "The satellite hub did not answer: {message}",
   hubLost: "The hub stopped answering, so this may be out of date: {message}",
   askReboot: "Reboot {name}? It is back in about ten seconds.",
@@ -4428,8 +4429,7 @@ async function satellitesPoll() {
    name; then ones that were only seen and have gone. */
 function satellitesRender(list) {
   $("satellitesempty").hidden = list.length > 0;
-  const pending = list.filter(n => n.online && !n.adopted).length;
-  $("satellitecount").textContent = pending ? String(pending) : "";
+  satellitesBadge(list);
   /* Open rows are remembered per viewer. With nothing remembered and only one
      satellite, it starts open: there is no list to scan, only it. */
   const remembered = store.get("sat.open", null);
@@ -4475,6 +4475,30 @@ function satellitesRender(list) {
     if (!seen.has(id)) { li.remove(); SATELLITES.rows.delete(id); }
   }
   SATELLITES.seeded = true;
+}
+
+/* THE DOCK'S COUNT OF SATELLITES WAITING TO BE ADOPTED, read from the other
+   tabs. A bare numeral told a screen reader "Satellites 1" and not what the
+   1 counts, so the tab is named with it while there are any. */
+function satellitesBadge(list) {
+  const pending = list.filter(n => n.online && !n.adopted).length;
+  satSet($("satellitecount"), pending ? String(pending) : "");
+  const tab = $("tab-btn-satellites");
+  if (pending) tab.setAttribute("aria-label", satText("tabPending", { n: pending }));
+  else tab.removeAttribute("aria-label");
+}
+
+/* WITH THE TAB SHUT NOTHING POLLS, so the count was written only while it
+   was open: a satellite that turned up, went away or was adopted from Home
+   Assistant meanwhile left the dock saying what it said when the tab was
+   left. The stream stays open, so one of its events that can change the
+   count asks for the satellite list alone, and only the count is taken
+   from it. */
+function satellitesCount() {
+  SATELLITES.counting = SATELLITES.counting || json("/satellites")
+    .then(r => satellitesBadge((r && r.satellites) || []), () => {})
+    .finally(() => { SATELLITES.counting = null; });
+  return SATELLITES.counting;
 }
 
 function satGroup(n) { return n.adopted ? 1 : n.online ? 0 : 2; }
@@ -7733,6 +7757,8 @@ function satellitesListen() {
     if (!progress && !["button", "wake", "routed", "turn", "triggered"].includes(ev.type)
         && satellitesOpen()) {
       satellitesRefresh();
+    } else if (!satellitesOpen() && ["pending", "online", "offline"].includes(ev.type)) {
+      satellitesCount();
     }
   };
 }
