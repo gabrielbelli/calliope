@@ -417,11 +417,12 @@ rotated or mirrored, and wake word thresholds are untuned for its microphones.
 
 ### Wake words
 
-A wake word is the unit of configuration. Each entry in `wake_words.json` (in
-`SATELLITES_DATA_DIR`) says which model to listen for, how sure the detector
-must be, which satellites listen for it, and what happens once it is heard.
-The Satellites tab edits the same entries through `GET` and `PUT
-/satellites/wake-words`.
+A wake word is the unit of configuration
+([ADR 0019](../../docs/adr/0019-the-wake-word-is-the-unit.md)). Each entry in
+`wake_words.json` (in `SATELLITES_DATA_DIR`) says which model to listen for,
+how sure the detector must be, which satellites listen for it, and what
+happens once it is heard. The Satellites tab edits the same entries through
+`GET` and `PUT /satellites/wake-words`.
 
 ```json
 {"version": 2,
@@ -1029,7 +1030,12 @@ has a hard time limit: STT 30 s, TTS 30 s, the destination its own `timeout`.
 ## Home Assistant over MQTT
 
 With `SATELLITES_MQTT_URL` set, every adopted satellite is one Home Assistant
-device, by discovery: Wi-Fi signal, online, microphone, speaker and lights
+device, by discovery. The Calliope integration
+([`clients/home-assistant`](../../clients/home-assistant/README.md)) is the
+other way in, with device triggers, actions and Assist's speech engines; with
+both on, each satellite appears twice
+([ADR 0020](../../docs/adr/0020-home-assistant-integration-beside-mqtt.md)).
+Over MQTT a satellite has Wi-Fi signal, online, microphone, speaker and lights
 switches, volume, audio output (speaker or jack, unknown until something
 has played), last wake word, a wake word event and one event per button. A
 switch goes through the same code as `PATCH /satellites/{id}`, and nothing but
@@ -1054,6 +1060,7 @@ satellite whose `caps.ota_key` the image would not satisfy, saying why, rather
 than sending 15 s of image to be refused. The running unsigned firmware ignores
 `signature`, so the first signed build installs over the air as usual; after
 that the satellite requires one.
+[ADR 0021](../../docs/adr/0021-signed-firmware.md) records the decision.
 
 ## Verifying the pipeline without a voice
 

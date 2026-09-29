@@ -864,8 +864,8 @@ services:
   # wss://<this host>:30080/satellites/ws through the gateway, are adopted
   # here, and are told what to do. It listens as well: echo cancellation,
   # beamforming and noise suppression on each satellite's microphones (numpy),
-  # wake words (openWakeWord on ONNX Runtime, CPU), an endpointer, then STT, a
-  # rule's destination and TTS on the services above. No GPU. Optional;
+  # wake words (openWakeWord on ONNX Runtime, CPU), an endpointer, then STT, the
+  # wake word's action and TTS on the services above. No GPU. Optional;
   # deleting this block and setting GATEWAY_SATELLITES_URL to "" leaves the
   # rest of the stack unchanged.
   #
@@ -927,11 +927,13 @@ services:
       # password is in the URL, so this belongs in the app's secret settings
       # rather than in this file.
       # SATELLITES_MQTT_URL: "mqtt://calliope:password@homeassistant.local:1883"
-      # The token for a routing rule of type ha_conversation, which names this
-      # variable rather than holding the token: rules.json is returned by GET
-      # /satellites/routing, and a secret in it would be one request away from
-      # anyone with an API key. A long-lived access token from your Home
-      # Assistant profile page; like the MQTT password, a secret setting.
+      # The token of a wake word whose action is Home Assistant (ha_conversation
+      # or ha_assist). The action names this variable rather than holding the
+      # token: wake_words.json is returned by GET /satellites/wake-words, and a
+      # secret in it would be one request away from anyone with an API key.
+      # The weather tool's home lookup uses the first such action's token too.
+      # A long-lived access token from your Home Assistant profile page; like
+      # the MQTT password, a secret setting.
       # SATELLITES_HA_TOKEN: "<long-lived access token>"
       # The key for a language model word (any OpenAI-compatible provider),
       # which names this variable, or another, rather than holding the key.
@@ -939,6 +941,24 @@ services:
       # /data/secrets.json (mode 0600, and in this volume's backups); one set
       # here wins over it. A secret setting, like the two above.
       # SATELLITES_LLM_API_KEY: "<key>"
+      # A SearXNG you run, with JSON output on, for a language model word's
+      # web_search tool. The model's query goes there and on to its engines.
+      # Unset, the tool says search is not set up (docs/adr/0018).
+      # SATELLITES_SEARXNG_URL: "http://searxng:8080"
+      # Home, for the weather tool, which sends these coordinates to
+      # Open-Meteo over the internet. Unset, the hub asks Home Assistant's
+      # /api/config with the first Home Assistant action's token.
+      # SATELLITES_HOME_LAT: "51.48"
+      # SATELLITES_HOME_LON: "0.00"
+      # SATELLITES_HOME_NAME: "home"
+      # The time zone of the date and time every language model prompt
+      # carries. Unset, Home Assistant's, else TZ, else UTC.
+      # SATELLITES_TIMEZONE: "Europe/London"
+      # The firmware signing public key (PEM, or a path to one). Set, the hub
+      # refuses an upload that key did not sign, and a bad value stops the
+      # hub at start. The satellites check signatures themselves either way
+      # (clients/korvo-satellite/keys).
+      # SATELLITES_FIRMWARE_PUBKEY: "/data/firmware-signing.pub.pem"
     # 1 CPU and 512 MiB, measured with the image on arm64, satellites played by
     # a script inside the container streaming four channels in real time: the
     # hub's peak resident memory was 228 MiB idle with hey_jarvis loaded, 239
@@ -949,17 +969,18 @@ services:
     cpus: 1
     mem_limit: 512m
     volumes:
-      # Adopted satellites (tokens only as hashes), the routing rules, which
-      # wake words each satellite hears, uploaded firmware images and fetched
-      # wake word models. Named, because losing it un-adopts every satellite
-      # in the house.
+      # Adopted satellites (tokens only as hashes), the wake words with what
+      # each does and which satellites hear it, API keys stored from the page
+      # (secrets.json, in plain text, so in this volume's backups too),
+      # uploaded firmware images and fetched wake word models. Named, because
+      # losing it un-adopts every satellite in the house.
       #
       # STILL nodes-data, AFTER THE RENAME TO SATELLITES (2026-09-25), AND ON
       # PURPOSE. Compose keys a named volume on the project and this key and on
       # nothing else, so a new key is a new, empty volume on the next `up`:
-      # every board back to pending, rules.json gone (routing falls back to the
-      # echo rule), wake_words.json, the firmware store and the fetched models
-      # with it. The hub's own migration (nodes.json to satellites.json) can
+      # every board back to pending, wake_words.json gone (every word back to
+      # SATELLITES_WAKE_WORDS, echoing what it hears), and the stored keys, the
+      # firmware store and the fetched models with it. The hub's own migration (nodes.json to satellites.json) can
       # only run on the volume that holds nodes.json.
       - nodes-data:/data
     healthcheck:
@@ -991,7 +1012,8 @@ volumes:
   tts-long-models:
   tts-long-out:
   voices:
-  # The satellite hub's adoptions, rules, firmware store and wake word models.
+  # The satellite hub's adoptions, wake words, stored keys, firmware store and
+  # wake word models.
   # Named for the feature's old name, which is also what the deployed volume is
   # called: renaming the key here would hand the hub an empty one (see the
   # voice-satellites block).

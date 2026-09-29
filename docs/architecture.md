@@ -1395,7 +1395,7 @@ skips the extension if OpenClip is absent.
 ## 10. Decision records
 
 `docs/adr/` holds the decisions, dated, each with what it cost. The sequence
-runs 0001–0010 and 0012–0018; there is no 0011.
+runs 0001–0010 and 0012–0021; there is no 0011.
 
 | | Status |
 |---|---|
@@ -1416,6 +1416,9 @@ runs 0001–0010 and 0012–0018; there is no 0011.
 | [0016 — Several speech-to-text engines side by side, picked by `model`](adr/0016-several-stt-engines.md) | accepted |
 | [0017 — Home Assistant's names are one glossary profile, written by the integration and named by the hub](adr/0017-home-assistant-vocabulary.md) | accepted |
 | [0018 — A language model word may call two tools, and the date is not one of them](adr/0018-language-model-tools.md) | accepted |
+| [0019 — The wake word is the unit of configuration, and it has one of three modes](adr/0019-the-wake-word-is-the-unit.md) | accepted |
+| [0020 — A Home Assistant integration beside MQTT discovery, and both are optional](adr/0020-home-assistant-integration-beside-mqtt.md) | accepted |
+| [0021 — Satellites install only firmware signed on the developer's machine, and the hub cannot waive it](adr/0021-signed-firmware.md) | accepted |
 
 0009 is kept rather than deleted because every engineering fact in it is still
 true; what it got wrong is its own first sentence, that this deployment offers a

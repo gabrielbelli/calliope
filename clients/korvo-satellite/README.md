@@ -126,6 +126,7 @@ how, and where the build looks for the public half
 (`CALLIOPE_FIRMWARE_PUBKEY`, else `~/.config/calliope/firmware-signing.pub.pem`).
 A satellite built unsigned accepts any image the hub sends, so the first
 signed build can go over the air; from then on it refuses unsigned ones.
+[ADR 0021](../../docs/adr/0021-signed-firmware.md) records the decision.
 
 | | Build with the public key | Build without it |
 |---|---|---|

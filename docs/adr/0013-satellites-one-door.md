@@ -26,7 +26,7 @@ the reason given below, on new installs too.
 | Image `ghcr.io/gabrielbelli/calliope-nodes` | `ghcr.io/gabrielbelli/calliope-satellites` | The first push creates a new package. Check that it is public before deploying: with `pull_policy: always`, a private package fails the deploy. |
 | Routes `/nodes/...` | `/satellites/...` | Scripts and bookmarks move. The device socket keeps its old path as well (below). |
 | JSON field `node` | `satellite` | In the body of `POST /satellites/ota` and `POST /satellites/routing/test`, and in every event from `GET /satellites/events`. |
-| Settings `NODES_*` | `SATELLITES_*` | Rename them, including the secrets in the app's settings. The hub does not read the old names, so an MQTT URL still set as `NODES_MQTT_URL` leaves MQTT off. At start the hub logs a warning for each `NODES_*` variable that is still set, with the name it now reads. The exception is a secret that a routing rule names (below). |
+| Settings `NODES_*` | `SATELLITES_*` | Rename them, including the secrets in the app's settings. The hub does not read the old names, so an MQTT URL still set as `NODES_MQTT_URL` leaves MQTT off. At start the hub logs a warning for each `NODES_*` variable that is still set, with the name it now reads. The exception is a secret that a wake word's action names (below). |
 | `GATEWAY_NODES_URL`, `GATEWAY_NODES_TIMEOUT` | `GATEWAY_SATELLITES_URL`, `GATEWAY_SATELLITES_TIMEOUT` | The gateway does not read the old names. Its default URL is now `http://voice-satellites:8003`. |
 | Gateway `/health`: `backends.nodes` | `backends.satellites` | Move any monitoring that reads the key. |
 | MQTT base `calliope/nodes` | `calliope/satellites` | Home Assistant entities survive, because their unique ids did not change. Automations on raw topics, such as `calliope/nodes/<id>/button/<name>` or `calliope/nodes/<id>/wake`, stop firing. Either set `SATELLITES_MQTT_BASE=calliope/nodes` to keep the old topics, or move the automations. The old retained topics stay on the broker until someone clears them. |
@@ -43,24 +43,39 @@ the reason given below, on new installs too.
   before the rename.
 - **The volume is still `nodes-data`.** Compose names a volume after the
   project and the volume key, and nothing else, so a new key is a new, empty
-  volume on the next `up`. Every board would come back pending, `rules.json`
-  would be gone and routing would fall back to the echo rule, and the wake
-  words, firmware store and fetched models would go with it.
+  volume on the next `up`. Every board would come back pending,
+  `wake_words.json` would be gone, so every word would go back to
+  `SATELLITES_WAKE_WORDS` and echo what it hears, and the stored keys, the
+  firmware store and the fetched models would go with it.
 - **The files on the volume keep working.** The hub reads `nodes.json` once,
   when `satellites.json` does not exist yet, and writes `satellites.json`. A
-  routing rule that says `nodes` instead of `satellites` loads as before.
-- **Routing rules still name the old secrets.** `rules.json` stores every
-  field, so a rule saved before the rename says `"token_env":
-  "NODES_HA_TOKEN"` or `"api_key_env": "NODES_LLM_API_KEY"`, and reads that
-  variable. If you rename the secret and not the rule, the rule fails with
-  "NODES_HA_TOKEN is not set". Either keep the old variable while a rule
-  names it, or change the rule (`PUT /satellites/routing`, or the Routing card)
-  and then rename the secret. The start-up warning does not report a `NODES_*`
-  variable that a rule names. It reports a rule that names a `NODES_*`
-  variable that is not set.
+  `rules.json` from either name is read once into `wake_words.json`
+  ([the satellites README](../../services/satellites/README.md#saving)).
+- **Actions carried over from routing rules still name the old secrets.** A
+  rule saved before the rename says `"token_env": "NODES_HA_TOKEN"` or
+  `"api_key_env": "NODES_LLM_API_KEY"`, and the move to `wake_words.json`
+  kept that name in the word's action, which reads that variable. If you
+  rename the secret and not the action, the action fails with
+  "NODES_HA_TOKEN is not set". Either keep the old variable while an action
+  names it, or change the action (the wake word's Action on the Satellites
+  tab, or `PUT /satellites/wake-words`) and then rename the secret. The
+  start-up warning does not report a `NODES_*` variable that an action names.
+  It reports an action that names a `NODES_*` variable that is not set.
 - **The firmware's settings namespace is still `node`**, so a board updated
   over the air keeps its hub address, adoption token and settings.
 - **The Home Assistant unique ids** (`calliope_<id>_*`) did not change.
+
+## Since
+
+**2026-09-25:** routing moved from `rules.json` onto each wake word's action,
+in `wake_words.json`. `PUT /satellites/routing` now answers 409
+`routing_per_wake_word`, and the Satellites tab has no Routing card. Signed
+firmware images, which the last bullet below calls the next step, exist:
+[ADR 0021](0021-signed-firmware.md). The decision below is unchanged.
+
+**2026-09-28:** the CA roots the firmware trusts can be named at build time
+(`CALLIOPE_HUB_CA`), so the gateway's certificate need not be Let's
+Encrypt's.
 
 ## Decision
 

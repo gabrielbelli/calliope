@@ -294,6 +294,8 @@ The hub can also publish satellites to Home Assistant over MQTT
 (`SATELLITES_MQTT_URL`). With both on, each satellite appears twice, once per
 integration. Use one of them. This integration adds triggers, actions and the
 Assist engines. MQTT needs no custom integration.
+[ADR 0020](../../docs/adr/0020-home-assistant-integration-beside-mqtt.md)
+records why there are both.
 
 ## Assist commands from a satellite
 
