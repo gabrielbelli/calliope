@@ -50,24 +50,60 @@ certificate(s) from <file>`, and stops on a file with none. Set the same
 variable for every over-the-air update too: an image built without it trusts
 Let's Encrypt only, cannot reach the hub, and is rolled back.
 
+**Behind a proxy that routes by host name.** The WebSocket library always
+sends the port in its `Host` header (`calliope.example.com:443`). A proxy that
+matches the host exactly must list the name both with and without `:443`, or
+it answers 404 and the board keeps retrying.
+
 A development build with a plain `ws://` hub is made with `DEV_HUB`:
 
 ```bash
 PLATFORMIO_BUILD_FLAGS='-DDEV_HUB=\"ws://192.0.2.10:8003\"' pio run -e usb -t upload
 ```
 
+## Build settings
+
+The build and the over-the-air upload read these from the environment:
+
+| Variable | Used by | What it is |
+|---|---|---|
+| `CALLIOPE_HUB` | every build | The hub address the setup portal starts with, such as `wss://calliope.example.com`. Unset, the field starts empty. A board that already has a hub keeps it |
+| `CALLIOPE_HUB_CA` | every build | A PEM file of the CA certificates the hub's certificate chains to. Unset, ISRG Root X1 and X2 (Let's Encrypt) |
+| `CALLIOPE_FIRMWARE_PUBKEY` | every build | The firmware signing public key to compile in. Else `~/.config/calliope/firmware-signing.pub.pem`, else `keys/firmware-signing.pub.pem`. None found: an unsigned build, with a warning ([keys/README.md](keys/README.md)) |
+| `CALLIOPE_URL` | `-e ota -t upload` | **Required.** The hub's base URL, which is the gateway's, such as `https://calliope.example.com`. The upload stops without it |
+| `CALLIOPE_SATELLITE` | `-e ota -t upload` | **Required.** A satellite's id, its name, or `all` |
+| `CALLIOPE_API_KEY` | `-e ota -t upload` | A gateway key, sent as `Authorization: Bearer`. Needed when the gateway sets `GATEWAY_API_KEYS` |
+| `CALLIOPE_SIGNING_KEY` | `-e ota -t upload` | The private key that signs the image. Default `~/.config/calliope/firmware-signing.pem` |
+
+`DEV_HUB` is a compiler flag, not a variable: set it through
+`PLATFORMIO_BUILD_FLAGS`, as above. The upload checks the gateway's
+certificate against the computer's own CA store.
+
 ## Updates, over the air
 
 ```bash
+export CALLIOPE_URL=https://calliope.example.com
 CALLIOPE_SATELLITE=kitchen pio run -e ota -t upload     # or CALLIOPE_SATELLITE=all
 ```
 
-This builds the image, signs it, uploads it to the hub (`CALLIOPE_URL`, default
-`https://calliope.example.com`), and asks the hub to update the
-satellite. The satellite pulls the image over its own connection. It keeps the
-new image only if it reaches the hub again afterwards; otherwise the bootloader
-rolls back. An image can also be uploaded from the Satellites tab, but only
-unsigned, so a satellite that requires signatures refuses it.
+This builds the image, signs it, uploads it to the hub at `CALLIOPE_URL`, and
+asks the hub to update the satellite. The satellite pulls the image over its
+own connection. It keeps the new image only if it reaches the hub again
+afterwards. Otherwise the bootloader rolls back.
+
+An image can also be uploaded on the Satellites tab, under **Firmware**:
+
+1. Build it: `pio run -e ota` builds `.pio/build/ota/firmware.bin` and uploads
+   nothing.
+2. For a satellite built with a public key, sign the image and put the
+   signature, in base64url, in **Signature**. The `openssl dgst` line in
+   [keys/README.md](keys/README.md#moving-a-satellite-to-a-new-key) makes one.
+3. Type the build's version in **Version**, exactly as
+   `git describe --always --dirty --tags` prints it in the same checkout. The
+   build stamps that string into the firmware, and the tab calls a satellite
+   up to date only when what it reports matches.
+4. Press **Upload**, then **Update every satellite** or a satellite's own
+   **Update**.
 
 This firmware connects to `/satellites/ws`. Pre-release firmware from before
 2026-09-25, when the feature was called nodes, connects to `/nodes/ws` and
@@ -177,7 +213,19 @@ does not click.
 | amber, breathing | adopted, but the hub is unreachable |
 | red, solid | privacy mute: the mics are powered down |
 | green, filling | firmware update in progress |
+| the wake word's colour, breathing, with a brighter arc gliding towards the talker | listening after a wake word, or for a conversation's next turn (the hub's `listen` mode) |
+| the wake word's colour, spinning | the hub is working on the command |
 | anything else | whatever the hub set |
+
+The board draws `listen` itself, from the colour and direction the hub sends,
+so the arc moves smoothly between the hub's updates. Firmware from before
+28 Sep 2026 does not have the mode, and the hub sends it a pulse instead. A
+wake word with no colour of its own uses the listening blue.
+
+That firmware also sends the ring's frames from an RMT channel large enough
+to hold a whole frame. Before it, the channel was refilled by an interrupt in
+the middle of each frame, and when Wi-Fi or a flash write delayed that
+interrupt, bits went to the wrong LED and random LEDs lit up dimly.
 
 With `lights_enabled` off (the Satellites tab's **Lights** box), the ring stays
 dark through everything above: reboots, updates and mute included. The setting
@@ -224,12 +272,6 @@ not at all. Fitting R37 alone would also put KEY1's own 10 kΩ pull-up (R50) in
 parallel with the ladder's, which moves VOL+ to about 0.68 V, where it reads
 as VOL−. So KEY1 as a seventh button needs R37 fitted and R50 removed; the
 firmware already reads it (below 250 mV, as `key1`), and the hub lists it.
-
-**Behind a proxy that routes by host name.** The WebSocket library always
-sends the port in its `Host` header (`calliope.example.com:443`), so a
-proxy that matches the host exactly must accept it with the port too, or it
-answers 404 and the board keeps retrying. The lab's HAProxy rule lists both
-(27 Sep 2026).
 
 ## Sound out
 

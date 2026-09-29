@@ -67,8 +67,14 @@ the old key until every satellite has moved.
 ```bash
 CALLIOPE_FIRMWARE_PUBKEY=NEW-KEY.pub.pem pio run -e ota   # builds; uploads nothing
 BIN=.pio/build/ota/firmware.bin
+VERSION=$(git describe --always --dirty --tags)           # what the build stamped
 SIG=$(openssl dgst -sha256 -sign OLD-KEY.pem "$BIN" | base64 | tr '+/' '-_' | tr -d '=\n')
 curl -fsS --data-binary @"$BIN" -H 'Content-Type: application/octet-stream' \
-  "$CALLIOPE_URL/satellites/firmware?model=esp32-korvo-v1.1&version=rekey&signature=$SIG"
+  -H "Authorization: Bearer $CALLIOPE_API_KEY" \
+  "$CALLIOPE_URL/satellites/firmware?model=esp32-korvo-v1.1&version=$VERSION&signature=$SIG"
 # then POST /satellites/ota with the sha256 it returns, or use the Satellites tab
 ```
+
+Leave out the `Authorization` line for a gateway without `GATEWAY_API_KEYS`.
+The version must be the one the build stamped, because the Satellites tab
+compares it with what each satellite reports.
