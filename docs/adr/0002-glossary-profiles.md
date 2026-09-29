@@ -88,3 +88,9 @@ Absent both, behaviour is the specification's: no glossary, no biasing.
   it was not — the same silence ADR 0001 exists to prevent.
 - Selecting many profiles at once should be discouraged in the documentation
   for the measured reason above, not merely on grounds of tidiness.
+
+## Later
+
+A profile that a program writes and other programs name, rather than one a
+person writes, came with the Home Assistant integration:
+[ADR 0017](0017-home-assistant-vocabulary.md).

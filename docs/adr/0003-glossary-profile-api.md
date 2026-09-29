@@ -116,3 +116,9 @@ compiled regexes; the cost is in the regex compilation, not the read.
 - Selecting several profiles at once stays discouraged in the documentation,
   for ADR 0002's measured reason: terms that do not occur cost **+12% WER on
   Parakeet, +28% on Whisper**.
+
+## Later
+
+A profile that a program writes and other programs name, rather than one a
+person writes, came with the Home Assistant integration:
+[ADR 0017](0017-home-assistant-vocabulary.md).

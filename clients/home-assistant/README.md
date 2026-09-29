@@ -9,8 +9,9 @@ three things:
 - **What a satellite hears becomes a trigger.** Wake words, trigger words,
   button presses and transcribed commands appear in the automation editor as
   device triggers. All logic stays in Home Assistant.
-- **Calliope becomes a speech engine for Assist.** Parakeet (speech-to-text)
-  and Kokoro (text-to-speech) can be chosen in any Assist pipeline.
+- **Calliope becomes a speech engine for Assist.** Each speech-to-text engine
+  the stack serves, and Kokoro for text-to-speech, can be chosen in any
+  Assist pipeline.
 
 It talks to the gateway only (`https://host:30080`). It holds one long-lived
 connection to the hub's event stream and polls nothing.
@@ -173,17 +174,33 @@ data:
 ```
 
 A satellite with its speaker off refuses `say` and `tone`, and the hub's reason
-is shown. **`push_to_talk` fails today** with a message saying the hub has no
-push-to-talk route yet. The hub starts listening from its PLAY button
-internally, but has no HTTP route for it.
+is shown.
+
+`calliope.push_to_talk` starts listening on the satellite as if its PLAY
+button had been pressed, so the next thing said is the command. Without
+`wake_word`, the hub's push-to-talk entry decides what happens to it. With
+`wake_word`, that word's mode and action apply, so a conversation word starts
+a conversation. The hub refuses, and the action shows its reason, when:
+
+| Reason | Why |
+|---|---|
+| `satellite_busy` | The satellite is in a conversation already |
+| `satellite_muted` | Its privacy mute is on. Only a button on the device turns it off |
+| `mic_disabled` | Its microphone switch is off |
+| `trigger_word` | The word named is a trigger word, so there is nothing to listen for after it |
+| `wake_word_not_found` | No wake word of that name has an action |
+
+A message that the hub has no push-to-talk route appears only against a hub
+or gateway from before 2026-09-25, when the route was added.
 
 ## Calliope in an Assist pipeline
 
 The integration adds the stack's engines to Home Assistant: one
 speech-to-text entity for each engine the stack serves (`GET /health`,
 `backends.stt.health.models`), and Kokoro for text-to-speech. It checks the
-list every 5 minutes and reloads itself when it changes, so a model added to
-the stack appears in Assist's menu without a restart. Each entity stays with
+list every 30 seconds while the stack loads its models, then every 5 minutes,
+and reloads itself when the list changes, so a model added to the stack
+appears in Assist's menu without a restart. Each entity stays with
 its engine: a new order in `STT_MODELS`, or a new default, does not move an
 entity id to another engine, so an assistant keeps the engine it was set up
 with.
@@ -192,6 +209,7 @@ with.
 |---|---|---|
 | `stt.calliope_parakeet` | Parakeet TDT 0.6B v3, through `POST /v1/audio/transcriptions` | Parakeet's 25 European languages |
 | `stt.calliope_parakeet_pt_br` | Its Brazilian Portuguese fine-tune, when the stack loads it (`STT_MODELS=parakeet,parakeet-pt-br`) | Portuguese |
+| `stt.calliope_whisper` | Whisper large-v3, when the stack loads it (`STT_MODEL=whisper`, or `whisper` in `STT_MODELS`) | Whisper's languages |
 | `tts.calliope_kokoro` | Kokoro, through `POST /v1/audio/speech` | English (US and UK), Brazilian Portuguese, Spanish, French, Hindi, Italian, Japanese and Mandarin, as far as the stack has voices |
 
 To use them:
@@ -201,32 +219,52 @@ To use them:
 3. Set *Text-to-speech* to **Calliope Kokoro**, then choose a language and a
    voice.
 
-**Speech-to-text.** Parakeet detects the language itself and refuses a
-`language` field. The pipeline's language only decides whether Home Assistant
-offers the engine, and the integration never sends it.
+### Speech-to-text
+
+Each entity sends its engine's id as `model`. Parakeet
+detects the language itself and refuses a `language` field, so for a Parakeet
+engine the pipeline's language only decides whether Home Assistant offers the
+engine, and the integration never sends it. Whisper takes it as a hint.
 
 Parakeet's languages are Bulgarian, Croatian, Czech, Danish, Dutch, English, Estonian, Finnish, French,
 German, Greek, Hungarian, Italian, Latvian, Lithuanian, Maltese, Polish,
 Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish and
 Ukrainian.
 
-A stack running Whisper (`STT_MODEL=whisper`) is read from
-`GET /health` at setup. The entity is then `stt.calliope_whisper`, offers
-Whisper's languages, and sends the language as a hint.
+### Vocabulary
 
-**Vocabulary.** The integration keeps a glossary profile named
-`home-assistant` on the stack. It holds the names of your floors and areas,
-the names of the entities exposed to Assist, the aliases of all three, and a
-short list of command words ("liga", "apaga", "turn on"…) for the languages
-your pipelines use: Portuguese, English, Spanish, French, German, Italian and
-Dutch. A pipeline in another language gets the names alone. Every Parakeet transcription names that profile, and
-Parakeet boosts the terms in its decoder, unless the stack has biasing off
+The integration keeps a glossary profile named `home-assistant` on the stack.
+It holds the names of your floors and areas, the names of the entities
+exposed to Assist, the aliases of all three, and a short list of command
+words ("liga", "apaga", "turn on"…) for the languages your pipelines use:
+Portuguese, English, Spanish, French, German, Italian and Dutch. A pipeline in
+another language gets the names alone.
+
+**It needs a stack that can store it.** The integration writes the profile
+with `PUT /glossaries/home-assistant` through the gateway, with the API key it
+was set up with. stt-stack refuses every write with 503 unless a volume is
+mounted at `/glossaries`
+([Turning the write routes on](../../services/stt/README.md#turning-the-write-routes-on)).
+Until a write succeeds, transcriptions go without the profile, and Home
+Assistant's log has a warning that begins `Could not write the home-assistant
+vocabulary to Calliope`. Diagnostics do not include the profile's state or
+its term count.
+
+**The name is reserved.** A profile you made by hand called `home-assistant`
+is replaced on the next write. The satellite hub names the same profile when
+it transcribes a command itself, so this integration is where the hub's
+vocabulary comes from too.
+[ADR 0017](../../docs/adr/0017-home-assistant-vocabulary.md) records how the
+two share it.
+
+Every transcription on a Parakeet engine names the profile, and Parakeet
+boosts the terms in its decoder, unless the stack has biasing off
 (`STT_HOTWORDS=0`). The terms only bias recognition: a term never replaces
-another word. Whisper is not sent the profile: it takes a profile's terms as
-hotwords, and the stack measured terms absent from the audio raising its
-word error rate by 28%. If the stack refuses the boost (a name with a
-character the model cannot spell), the names and repairs still go, without
-the boost, until the vocabulary changes.
+another word. Whisper is not sent the profile. It takes a profile's terms as
+hotwords, and the stack measured terms absent from the audio raising its word
+error rate by 28%. If the stack refuses the boost (a name with a character
+the model cannot spell), the names and repairs still go, without the boost,
+until the vocabulary changes.
 
 For Portuguese the profile also carries repair rules for commands the model
 runs together: spoken quickly, "desliga a luz da cama" can come back as
@@ -236,11 +274,12 @@ The profile is written about 10 seconds after Home Assistant starts, and again
 10 seconds after an area, floor, device, entity or exposure setting changes.
 It is also checked every hour, and written only when it changed. The stack
 boosts at most 200 phrases a request, the repairs' corrected phrases among
-them, so the profile holds at most 200 terms less those, taken in the order
-above; a house with more names logs which were left out. The satellite hub
-asks for the same profile when it transcribes a command itself.
+them. So the profile holds at most 200 terms less those, taken in the order
+above, and a house with more names logs which were left out.
 
-**Text-to-speech.** The languages and voices come from `GET /voices` at setup.
+### Text-to-speech
+
+The languages and voices come from `GET /voices` at setup.
 A Kokoro voice name starts with its language (`pf_dora` is Brazilian
 Portuguese). The default voice for English (UK) is `bm_george`, for English
 (US) `af_heart`, and for Brazilian Portuguese `pf_dora`.
@@ -256,24 +295,15 @@ The hub can also publish satellites to Home Assistant over MQTT
 integration. Use one of them. This integration adds triggers, actions and the
 Assist engines. MQTT needs no custom integration.
 
-## What the hub is expected to provide
+## Assist commands from a satellite
 
-The integration reads only what the hub publishes today. It also handles the
-events and fields the hub is about to add:
-
-- `triggered` (`satellite`, `satellite_name`, `wake_word`, `score`) for a
-  trigger word, and `conversation_started`, `turn` and `conversation_ended`
-  for conversations.
-- `mode` on each word in `GET /satellites/wake-words`, so that the editor
-  lists trigger words and wake words apart.
-- `POST /satellites/{id}/ptt`, with an optional `{"wake_word": "..."}`, for
-  `calliope.push_to_talk`. The gateway must also route it.
-
-Sending dictation into an Assist pipeline is the hub's own `ha_assist` action.
-It calls Home Assistant's `assist_pipeline/run` over the websocket with a
-long-lived token. It needs nothing from this integration. If it passes the
-satellite's Home Assistant `device_id`, Home Assistant knows the satellite's
-area, and "turn on the lights" means the lights in that room.
+A satellite's spoken command reaches an Assist pipeline through the hub's own
+`ha_assist` action, not through this integration. The hub calls Home
+Assistant's `assist_pipeline/run` over the websocket with a long-lived token,
+and sends the satellite's Home Assistant device as `device_id`. Home
+Assistant then knows the satellite's area, so "turn on the lights" means the
+lights in that room. This integration is what registers the device, so
+without it the command still runs, with no room.
 
 ## Tests
 
