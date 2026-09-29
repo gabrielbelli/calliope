@@ -147,6 +147,8 @@ HEADER = 16
 # whole connection on any frame over 15 KB (WEBSOCKETS_MAX_DATA_SIZE, not
 # overridable on ESP32). 16 KB chunks killed the first real update 17 ms in.
 OTA_CHUNK = 8 * 1024
+# How far a satellite's Output is followed through other satellites.
+OUTPUT_HOPS = 4
 SPEAKER_CHUNK_MS = 20
 SPEAKER_LEAD_S = 0.3  # how far ahead of real time playback is kept
 # A press that ran an action on the satellite is answered by its status in
@@ -1118,7 +1120,33 @@ class Hub:
     def speaker_allowed(self, s: Session) -> bool:
         return bool(s.adopted and self.config(s).get("speaker_enabled", True))
 
+    def output_of(self, nid: str) -> str:
+        """The satellite whose speaker plays what `nid` plays: `nid` itself,
+        or the one its Output names, followed for up to OUTPUT_HOPS (a loop
+        ends where it would come back). When that one is not connected and
+        adopted, `nid` plays it itself: a reply is not lost to a speaker
+        that is off."""
+        seen, cur = {nid}, nid
+        for _ in range(OUTPUT_HOPS):
+            rec = self.store.satellites.get(cur)
+            nxt = (rec.config.get("output_satellite") if rec else None) or None
+            if nxt is None or nxt in seen:
+                break
+            seen.add(nxt)
+            cur = nxt
+        if cur == nid:
+            return nid
+        s = self.sessions.get(cur)
+        return cur if s is not None and s.adopted else nid
+
+    def speaker_for(self, s: Session) -> Session:
+        """The session that plays what `s` plays (output_of)."""
+        other = self.sessions.get(self.output_of(s.id))
+        return other if other is not None else s
+
     async def earcon(self, s: Session | None, eid: str) -> bool:
+        if s is not None:
+            s = self.speaker_for(s)
         if s is None or s.earcons is None or not s.earcons.has(eid):
             return False
         sent = await _sent(s.send_if(lambda: self.speaker_allowed(s), earcons.play_message(eid)))
@@ -1575,17 +1603,21 @@ class Conversation:
         await self.hub.send_lights(s, msg)
 
     def _reply_satellite(self) -> Session | None:
-        """The other satellite this word answers on, so it can be ducked
-        while the question is asked."""
+        """The other satellite this word answers on (its Reply on, or this
+        satellite's Output), so it can be ducked while the question is asked:
+        the music there goes down, not only here."""
         if self.route is None or self.route.behaviour.action is None:
             return None
         reply_to = self.route.behaviour.action.reply_to
-        if reply_to in ("same", "none"):
+        if reply_to == "none":
             return None
-        found = lookup_satellite(reply_to)
-        if found is None or found[0] == self.nid:
+        found = (self.nid,) if reply_to == "same" else lookup_satellite(reply_to)
+        if found is None:
             return None
-        other = self.hub.sessions.get(found[0])
+        target = self.hub.output_of(found[0])
+        if target == self.nid:
+            return None
+        other = self.hub.sessions.get(target)
         return other if other is not None and other.adopted else None
 
     async def _duck(self, s: Session) -> None:
@@ -2042,6 +2074,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Routing is by each wake word's own entry (wakewords_config.WordActions);
     # rules.json was read once, above, by Assignment.open's migration.
     routing.configure(routing.Router(wakewords_config.WordActions(hub.voice.assignment),
+                                     output_of=hub.output_of,
                                      lookup=lookup_satellite))
     for problem in legacy_settings(dict(os.environ), _named_actions()) + lang.household_problems():
         log.warning("%s", problem)
@@ -2280,6 +2313,9 @@ class ConfigBody(BaseModel):
     audio_sink: str | None = Field(default=None, max_length=256, pattern=r"^[\w.:@+-]*$")
     audio_source: str | None = Field(default=None, max_length=256, pattern=r"^[\w.:@+-]*$")
     echo_reference: bool | None = None
+    # Another adopted satellite that plays what this one plays, or "" for
+    # its own speaker (Hub.output_of).
+    output_satellite: str | None = Field(default=None, max_length=64, pattern=r"^[0-9a-f]*$")
     # Replaces the whole mapping; the default is in store.py.
     buttons: dict[ButtonName, dict[Literal["press", "release"], ButtonAction]] | None = Field(
         default=None, max_length=16)
@@ -2726,9 +2762,12 @@ async def configure(nid: str, body: ConfigBody) -> dict:
     if audio and s is not None and not s.caps.get("audio_devices"):
         raise ApiError(409, f"satellite {nid} has no audio devices to choose from "
                             f"({', '.join(audio)})", code="no_audio_devices", param=audio[0])
+    if "output_satellite" in change:
+        change["output_satellite"] = _output_satellite(nid, change["output_satellite"])
     if "name" in change:
         rec.name = change["name"]
-    cfg = {k: v for k, v in change.items() if k in DEFAULT_CONFIG or k in AUDIO_SETTINGS}
+    cfg = {k: v for k, v in change.items()
+           if k in DEFAULT_CONFIG or k in AUDIO_SETTINGS or k == "output_satellite"}
     was_dark = not rec.config.get("lights_enabled", True)
     rec.config.update(cfg)
     # Set here, so the hub has it now: sent to the satellite below, and not
@@ -2789,6 +2828,36 @@ async def lights(nid: str, body: LightsBody) -> Response:
     return Response(status_code=204)
 
 
+def _output_satellite(nid: str, target: str) -> str | None:
+    """A satellite's Output, checked: "" is its own speaker (None); another
+    must be adopted, not this one, have a speaker when it is connected, and
+    not play back into this one."""
+    if not target:
+        return None
+    if target == nid:
+        raise ApiError(422, "a satellite's output is its own speaker; name another satellite, or \"\"",
+                       code="invalid_output", param="output_satellite")
+    if target not in hub.store.satellites:
+        raise ApiError(422, f"no adopted satellite {target}", code="invalid_output",
+                       param="output_satellite")
+    other = hub.sessions.get(target)
+    if other is not None and "speaker" not in other.caps and other.caps:
+        raise ApiError(409, f"satellite {target} has no speaker", code="no_speaker",
+                       param="output_satellite")
+    seen, cur = {nid}, target
+    for _ in range(OUTPUT_HOPS):
+        rec = hub.store.satellites.get(cur)
+        nxt = (rec.config.get("output_satellite") if rec else None) or None
+        if nxt is None:
+            break
+        if nxt in seen or nxt == nid:
+            raise ApiError(422, f"satellite {target} plays through {nid} already, so this would "
+                                "go round in a loop", code="output_loop", param="output_satellite")
+        seen.add(nxt)
+        cur = nxt
+    return target
+
+
 def _speaker_on(s: Session) -> Session:
     """A satellite with its speaker off is sent no audio at all, as one with
     its lights off is sent no "lights". The firmware keeps its amplifier off
@@ -2802,14 +2871,14 @@ def _speaker_on(s: Session) -> Session:
 
 @app.post("/satellites/{nid}/tone")
 async def tone(nid: str, body: ToneBody) -> Response:
-    s = _speaker_on(hub.session(nid))
+    s = _speaker_on(hub.speaker_for(hub.session(nid)))
     s.speaker.put_nowait(audio.tone(body.frequency, body.seconds, s.spk_rate))
     return Response(status_code=204)
 
 
 @app.post("/satellites/{nid}/say")
 async def say(nid: str, body: SayBody) -> Response:
-    s = _speaker_on(hub.session(nid))
+    s = _speaker_on(hub.speaker_for(hub.session(nid)))
     if not TTS_URL:
         raise ApiError(503, "SATELLITES_TTS_URL is not set, so there is no voice to speak with")
     async with httpx.AsyncClient(timeout=120) as c:

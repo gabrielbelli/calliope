@@ -573,8 +573,11 @@ class Router:
     def __init__(self, rules: Actions, *, stt_url: str | None = None, tts_url: str | None = None,
                  voice: str | None = None, client: httpx.AsyncClient | None = None,
                  lookup: Lookup | None = None, stt_timeout: float = 30.0,
-                 tts_timeout: float = 30.0):
+                 tts_timeout: float = 30.0, output_of: Callable[[str], str] | None = None):
         self.rules = rules
+        # Which satellite plays what one satellite plays: itself, or the one
+        # its Output names (main.Hub.output_of). None: always itself.
+        self.output_of = output_of
         env = os.environ.get
         self.stt_url = (stt_url if stt_url is not None
                         else env("SATELLITES_STT_URL", "")).rstrip("/")
@@ -653,12 +656,14 @@ class Router:
         if behaviour.action is None:
             return None
         reply_to = behaviour.action.reply_to
-        if reply_to == "same":
-            return satellite_id
         if reply_to == "none":
             return None
-        found = self.lookup(reply_to) if self.lookup else None
-        return found[0] if found else reply_to
+        if reply_to == "same":
+            nid = satellite_id
+        else:
+            found = self.lookup(reply_to) if self.lookup else None
+            nid = found[0] if found else reply_to
+        return self.output_of(nid) if self.output_of is not None else nid
 
     def voice_for(self, behaviour: Behaviour, reply_language: str | None) -> str:
         explicit = behaviour.action.voice if behaviour.action else None

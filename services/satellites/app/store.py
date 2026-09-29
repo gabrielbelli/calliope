@@ -57,7 +57,9 @@ MUTE_DOES_NOT_COUNT = frozenset({"key1"})
 # Config the hub acts on itself and never sends to the satellite: the firmware
 # would ignore it, and it would cost a JSON document on a board with 300 KB of
 # heap.
-HUB_ONLY = frozenset({"buttons"})
+# "output_satellite": another satellite that plays what this one plays
+# (main.Hub.output_of). The hub's routing, so never sent to the satellite.
+HUB_ONLY = frozenset({"buttons", "output_satellite"})
 
 
 def _flag(v: object) -> bool:

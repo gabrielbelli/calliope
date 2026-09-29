@@ -728,3 +728,69 @@ def test_a_release_bundle_is_stored_beside_esp32_images(client):
     r = client.post("/satellites/firmware", params={"model": "raspberry-pi", "version": "v1"}, content=bundle)
     assert r.status_code == 200, r.json()
     assert r.json()["model"] == "raspberry-pi" and r.json()["size"] == len(bundle)
+
+
+def adopt_pi(client, ws, name="Lounge") -> None:
+    ws.send_json(pi_hello())
+    assert ws.receive_json() == {"type": "pending"}
+    client.post(f"/satellites/{PI_MAC}/adopt", json={"name": name})
+    ws.send_json(pi_hello(ws.receive_json()["token"]))
+    assert ws.receive_json()["type"] == "welcome"
+
+
+def next_binary(ws) -> bytes:
+    while True:
+        msg = ws.receive()
+        if msg.get("bytes"):
+            return msg["bytes"]
+
+
+def test_a_satellite_can_play_through_another_and_falls_back_to_its_own_when_that_one_is_gone(client, app):
+    """The Korvo hears; the Pi beside the amplifier speaks. A tone asked of
+    the Korvo comes out of the Pi, and nothing reaches the Korvo's speaker.
+    With the Pi gone, the Korvo plays it itself."""
+    with client.websocket_connect("/satellites/ws") as korvo:
+        adopt(client, korvo)
+        with client.websocket_connect("/satellites/ws") as pi:
+            adopt_pi(client, pi)
+            r = client.patch(f"/satellites/{NID}", json={"output_satellite": PI_MAC})
+            assert r.status_code == 200 and r.json()["config"]["output_satellite"] == PI_MAC
+            assert app.hub.output_of(NID) == PI_MAC and app.hub.output_of(PI_MAC) == PI_MAC
+            assert client.post(f"/satellites/{NID}/tone", json={"seconds": 0.1}).status_code == 204
+            frame = next_binary(pi)
+            assert frame[0] == 2, "the Pi was sent the tone"
+        assert app.hub.output_of(NID) == NID, "the Pi is gone, so the Korvo plays for itself"
+        assert client.post(f"/satellites/{NID}/tone", json={"seconds": 0.1}).status_code == 204
+        assert next_binary(korvo)[0] == 2
+
+
+def test_an_output_is_another_adopted_satellite_never_itself_and_never_a_loop(client, app):
+    with client.websocket_connect("/satellites/ws") as korvo:
+        adopt(client, korvo)
+        with client.websocket_connect("/satellites/ws") as pi:
+            adopt_pi(client, pi)
+            bad = {"itself": {"output_satellite": NID}, "unknown": {"output_satellite": "0000000000ff"},
+                   "not an id": {"output_satellite": "kitchen"}}
+            for why, body in bad.items():
+                assert client.patch(f"/satellites/{NID}", json=body).status_code == 422, why
+            assert client.patch(f"/satellites/{NID}", json={"output_satellite": PI_MAC}).status_code == 200
+            loop = client.patch(f"/satellites/{PI_MAC}", json={"output_satellite": NID})
+            assert loop.status_code == 422 and loop.json()["error"]["code"] == "output_loop"
+            back = client.patch(f"/satellites/{NID}", json={"output_satellite": ""})
+            assert back.status_code == 200 and back.json()["config"]["output_satellite"] is None
+            assert app.hub.output_of(NID) == NID
+    # The hub's own routing: never sent to the satellite.
+    rec = app.hub.store.satellites[NID]
+    from app.store import satellite_config
+    assert "output_satellite" not in satellite_config(rec.config | {"output_satellite": PI_MAC})
+
+
+def test_a_word_that_answers_on_the_same_satellite_answers_where_its_output_is():
+    from app import router as routing
+    r = routing.Router(rules=None, output_of=lambda nid: {"korvo": "pi"}.get(nid, nid))
+    b = routing.Behaviour.model_validate({"mode": "command", "action": {
+        "destination": {"type": "echo"}, "reply_to": "same"}})
+    assert r.target(b, "korvo") == "pi" and r.target(b, "pi") == "pi"
+    b2 = routing.Behaviour.model_validate({"mode": "command", "action": {
+        "destination": {"type": "echo"}, "reply_to": "none"}})
+    assert r.target(b2, "korvo") is None

@@ -208,7 +208,7 @@ name.
 | `POST /satellites/wake-words/models?name=` | A custom wake word: the `.onnx` as the raw body, checked to be an openWakeWord classifier (input `[batch, 16, 96]`, under 5 MB) before it is written. Then offered in `available` and assigned like a built-in. [`tools/wakeword-train`](../../tools/wakeword-train/README.md) trains one; a model trained there is CC BY-NC-SA 4.0, because its training features and feature models are. |
 | `DELETE /satellites/wake-words/models/{name}` | Only a custom model, and only once no wake word uses it (409 otherwise). |
 | `GET /satellites/{id}` | One satellite: its name, whether it is adopted and online, model, `firmware`, `config`, its last `status`, `caps`, the update in progress (`ota`), `listening`, `earcons`, `wake_words` (the names assigned to it), `output` (`speaker`, `jack` or `null`, [Speaker or jack](#speaker-or-jack)), `boot` (`reset_reason`, `stages_ms`, and `stalled_in` and `stall_restarts` after a stalled start; firmware from 2026-09-26) and `latency` (how quickly its last 20 replies began and ended, [Streaming](#streaming)) |
-| `PATCH /satellites/{id}` | `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness` (1-100), `ring_top` (0-11: the LED at 12 o'clock as mounted, where a bar on the ring starts) and `ring_upside_down` (the bar then runs the other way, so it still fills clockwise as seen), `buttons` ([Buttons](#buttons)); `local_volume_buttons` for firmware from before 2026-09-27 |
+| `PATCH /satellites/{id}` | `output_satellite`: another adopted satellite that plays what this one plays (its replies, earcons, Say and tones), or `""` for its own speaker ([Output](#output)); `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness` (1-100), `ring_top` (0-11: the LED at 12 o'clock as mounted, where a bar on the ring starts) and `ring_upside_down` (the bar then runs the other way, so it still fills clockwise as seen), `buttons` ([Buttons](#buttons)); `local_volume_buttons` for firmware from before 2026-09-27 |
 | `POST /satellites/{id}/adopt` | `{"name": "..."}` |
 | `POST /satellites/{id}/forget` | |
 | `POST /satellites/{id}/identify` | Blink for five seconds. Works before adoption, which is the point. |
@@ -798,6 +798,24 @@ publishes an `output` event. Nothing needs a firmware change.
 
 With a plug in, the echo canceller has no reference, so speaking over a reply
 does not stop it ([Barge-in](#barge-in)).
+
+### Output
+
+A satellite plays through its own speaker, or through another satellite:
+a Korvo that hears well and sounds small can answer through the Pi beside
+the amplifier. `output_satellite` names that one, and the hub sends
+everything the satellite would play there: replies (a word's **Reply on**
+follows it too), earcons, **Say** and tones. While the question is asked,
+that satellite is ducked, so its music goes down.
+
+- It is followed through at most four satellites, and a loop is refused
+  (422 `output_loop`).
+- When the one named is not connected, the satellite plays for itself until
+  it is back, so no reply is lost to a speaker that is off.
+- Voice barge-in needs the reply on the satellite's own speaker, where its
+  echo canceller hears it; a reply played elsewhere can still be
+  interrupted with the wake word.
+- It is the hub's routing: the satellite is never told.
 
 ## Command, conversation and trigger
 
