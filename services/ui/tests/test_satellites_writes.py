@@ -161,6 +161,15 @@ async function json(path, options) {
     await later(); return { satellites: JSON.parse(JSON.stringify(hub.satellites)) };
   }
   if (method === "GET" && path === "/satellites/firmware") { await later(); return { firmware: [] }; }
+  if (path === "/satellites/telemetry") {
+    hub.telemetry = hub.telemetry || { enabled: false, level: "full", retention_days: 14, max_mb: 200,
+                                       files: [], bytes: 0 };
+    hub.tm = hub.tm || [];
+    hub.tm.push([method, options && options.body ? JSON.parse(options.body) : null]);
+    if (method === "PUT") Object.assign(hub.telemetry, JSON.parse(options.body));
+    if (method === "DELETE") Object.assign(hub.telemetry, { files: [], bytes: 0 });
+    await later(); return JSON.parse(JSON.stringify(hub.telemetry));
+  }
   if (method === "GET" && path === "/satellites/routing") {
     await later();
     return { rules: [], env: {}, services: { stt: "http://stt.test" }, warnings: [], load_error: null };
@@ -574,3 +583,24 @@ def test_refreshes_asked_while_one_is_out_are_one_more_after_it(tmp_path):
     """)
     assert got == {"gets": 2, "idle": True}, got
 
+
+
+def test_telemetry_is_read_once_with_the_satellites_and_its_switch_turns_it_on(tmp_path):
+    """The summary says whether the hub is recording without being opened:
+    read once with the first list of satellites, not on every poll. The
+    switch sends only what changed."""
+    got = run(tmp_path, """
+      await satellitesRefresh();
+      await satellitesRefresh();
+      await new Promise(r => setTimeout(r, 30));
+      const before = $("tm-sum").textContent;
+      await tmSend("PUT", { enabled: true });
+      hub.telemetry.files = [{ date: "2026-09-29", bytes: 2097152 }];
+      hub.telemetry.bytes = 2097152;
+      await tmLoad();
+      console.log(JSON.stringify({ before, after: $("tm-sum").textContent, calls: hub.tm,
+                                   size: $("tmsize").textContent, download: $("tmdownload").hidden }));
+    """)
+    assert got["before"] == "off" and got["after"] == "recording everything"
+    assert got["calls"] == [["GET", None], ["PUT", {"enabled": True}], ["GET", None]]
+    assert got["size"] == "2.0 MB kept, over 1 day." and got["download"] is False

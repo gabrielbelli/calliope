@@ -95,7 +95,7 @@ OPEN_ROW = BODY[:BODY.index('<details class="sub')]
 def test_the_satellites_tab_is_one_card():
     """It was five cards at one weight, which read as a settings dump. The
     list and the hub's disclosures are one card now, the hub sections at the
-    foot of it, and firmware last of all. Routing is not
+    foot of it (telemetry among them), and firmware last of all. Routing is not
     one of them any more: a wake word says what it does, and the hub answers
     PUT /satellites/routing 409."""
     assert PANEL.count('class="card"') == 1, "the tab is a stack of cards again"
@@ -104,7 +104,8 @@ def test_the_satellites_tab_is_one_card():
     assert order == sorted(order), "the list is not first, or Firmware is not last"
     hub = PANEL[PANEL.index('<div class="sat-hub"'):]
     assert re.findall(r'<details id="(sat-[a-z]+)"', hub) == [
-        "sat-wakewords", "sat-activity", "sat-firmware"], "the hub's disclosures changed"
+        "sat-wakewords", "sat-activity", "sat-telemetry", "sat-firmware"], \
+        "the hub's disclosures changed"
     # Everything the hub answers is inside #satellitesman, so a deployment with
     # no hub shows one sentence and no empty headings.
     man = PANEL[PANEL.index('id="satellitesman"'):]
@@ -540,7 +541,7 @@ def test_the_health_line_announces_once_and_only_when_it_changes():
 # -------------------------------------------------------- generated copy --
 
 
-SAMPLES = {"lang": "Portuguese (Brazil)", "name": "Kitchen", "old": "Kitchen", "new": "Bedroom", "id": "a1b2c3d4e5f6",
+SAMPLES = {"lang": "Portuguese (Brazil)", "size": "12.4 MB", "days": "14 days", "name": "Kitchen", "old": "Kitchen", "new": "Bedroom", "id": "a1b2c3d4e5f6",
            "v": "v0.3.1", "fw": "v0.3.1", "clock": "24 Sep, 14:02", "time": "12:04:31",
            "error": "bad signature", "why": "offline or not adopted", "url": "wss://hub.local:8443",
            "what": "heard hey jarvis (0.82) from 40°", "words": "hey jarvis, alexa",

@@ -705,8 +705,9 @@ downloading.
 
 The fifth tab is the satellite hub's page
 ([`services/satellites`](../satellites/README.md)). It lists every satellite
-the hub has seen, and below the list it has three closed sections for the
-hub's own settings: **Wake words**, **Activity** and **Firmware**. A
+the hub has seen, and below the list it has four closed sections for the
+hub's own settings: **Wake words**, **Activity**, **Telemetry** and
+**Firmware**. A
 deployment without the hub shows one sentence instead. The page asks the hub
 for the lists every 3 s while the tab is open, and keeps its event stream
 open once the tab has been visited.
@@ -843,11 +844,24 @@ through a word's saved action and makes the reply, and plays nothing.
 (`POST /satellites/wake-words/models`). The word is then offered under
 **Add a wake word**. **Delete** removes one no word uses.
 
-### Activity and Firmware
+### Activity, Telemetry and Firmware
 
 **Activity** is the hub's event stream (`GET /satellites/events`) as a log a
 screen reader hears: buttons, wake words, conversations, triggers, updates,
 and satellites coming and going. It marks a gap while the stream was down.
+
+**Telemetry** is off until turned on ([the hub's
+Telemetry](../satellites/README.md#telemetry)). Its summary says whether the
+hub is recording, read once with the first list of satellites and not on
+every poll.
+
+| Control | Field or request |
+|---|---|
+| **Record telemetry** | `PUT /satellites/telemetry {"enabled"}` |
+| **Keep** | `level`: **Everything, with what was said** (`full`) or **Timings only, no words** (`timings`) |
+| **Days kept** | `retention_days`, 1 to 365 |
+| **Download** | `GET /satellites/telemetry/records?limit=20000`, as `telemetry.json`. Shown once something is recorded |
+| **Delete all** | `DELETE /satellites/telemetry`, after a question. The settings stay |
 
 **Firmware** lists the uploaded images and uploads one:
 
@@ -873,6 +887,8 @@ and satellites coming and going. It marks a gap while the stream was down.
   `POST /satellites/llm/test`, `PUT /satellites/secrets`
 - `GET` and `POST /satellites/firmware`, `DELETE /satellites/firmware/{sha256}`
   and `POST /satellites/ota`
+- `GET`, `PUT` and `DELETE /satellites/telemetry`, `GET /satellites/telemetry/records`
+  and `GET /satellites/telemetry/summary`
 
 Two hub routes are left out on purpose. `POST /satellites/{id}/inject` runs a
 recorded clip through a satellite's real actions, which is a script's job: a

@@ -227,6 +227,13 @@ PROXIED: tuple[tuple[str, str], ...] = (
     # within 25 s, under this process's 30 s read timeout.
     ("POST", "/satellites/llm/models"),
     ("POST", "/satellites/llm/test"),
+    # The Telemetry disclosure: whether it records, at which level, for how
+    # long, its download and Delete all. The summary is for scripts.
+    ("GET", "/satellites/telemetry"),
+    ("PUT", "/satellites/telemetry"),
+    ("DELETE", "/satellites/telemetry"),
+    ("GET", "/satellites/telemetry/records"),
+    ("GET", "/satellites/telemetry/summary"),
     ("GET", "/satellites/{nid}"),
     ("PATCH", "/satellites/{nid}"),
     ("GET", "/satellites/{nid}/listen"),

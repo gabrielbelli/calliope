@@ -2572,6 +2572,34 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
             </div>
           </details>
 
+          <!-- TELEMETRY, OFF UNTIL TURNED ON (services/satellites/app/
+               telemetry.py): each turn's timings, calls and results, kept
+               on the hub for tuning. Read when opened and after a change,
+               never on a poll. -->
+          <details id="sat-telemetry">
+            <summary>Telemetry<span class="sum-note" id="tm-sum"></span></summary>
+            <div class="body">
+              <div class="hint">Every turn's timings, calls and results, kept on the hub to tune speed and reliability.</div>
+              <div class="row">
+                <label class="checkline tight"><input type="checkbox" id="tmon"> Record telemetry</label>
+                <div class="tight"><label for="tmlevel">Keep</label>
+                  <select id="tmlevel">
+                    <option value="full">Everything, with what was said</option>
+                    <option value="timings">Timings only, no words</option>
+                  </select></div>
+                <div class="tight"><label for="tmdays">Days kept</label>
+                  <input type="number" id="tmdays" min="1" max="365" step="1" inputmode="numeric"></div>
+              </div>
+              <div class="hint" id="tmsize" aria-live="polite"></div>
+              <div class="row">
+                <a class="button small tight" id="tmdownload" href="/ui/api/satellites/telemetry/records?limit=20000"
+                   download="telemetry.json" hidden>Download</a>
+                <button class="small tight" id="tmdelete" type="button">Delete all</button>
+              </div>
+              <div id="tmnote" aria-live="polite"></div>
+            </div>
+          </details>
+
           <!-- Last, because it is set once and rarely looked at again.
                Per-satellite progress shows on the satellite's own row. -->
           <details id="sat-firmware">
@@ -4199,6 +4227,14 @@ const SAT_COPY = {
   moreReply: "replies on {name}",
   moreSilent: "replies nowhere",
   moreVoice: "voice {v}",
+  tmOff: "off",
+  tmOnFull: "recording everything",
+  tmOnTimings: "recording timings only",
+  tmEmpty: "Nothing recorded yet.",
+  tmSize: "{size} kept, over {days}.",
+  tmFailed: "The hub did not answer: {message}",
+  tmDays: "Days kept is a whole number from 1 to 365.",
+  askTmDelete: "Delete every telemetry record on the hub? Its settings stay as they are.",
   voiceElsewhere: "{v} · {lang}, not this word's language",
   voiceUnlisted: "{v}, not a voice the stack lists",
   moreFix: "needs a fix",
@@ -4480,6 +4516,7 @@ function satellitesRender(list) {
   for (const [id, li] of SATELLITES.rows) {
     if (!seen.has(id)) { li.remove(); SATELLITES.rows.delete(id); }
   }
+  if (!SATELLITES.seeded) tmLoad();
   SATELLITES.seeded = true;
 }
 
@@ -7671,6 +7708,71 @@ async function firmwareUpload() {
   finally { done(); }
 }
 $("fwupload").addEventListener("click", firmwareUpload);
+
+/* ------------------------------------------------------------ telemetry --
+   OFF UNTIL TURNED ON, and kept on the hub (services/satellites/app/
+   telemetry.py). Read once with the first list of satellites, so the summary
+   says whether it is recording without being opened, then when opened and
+   after each change: nobody watches it while it records, so no poll. */
+const TELEMETRY = { state: null, busy: false };
+
+function tmBytes(n) {
+  return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+}
+
+function tmShow() {
+  const t = TELEMETRY.state;
+  if (!t) return;
+  $("tmon").checked = t.enabled;
+  $("tmlevel").value = t.level;
+  if (document.activeElement !== $("tmdays")) $("tmdays").value = t.retention_days;
+  for (const id of ["tmon", "tmlevel", "tmdays"]) $(id).disabled = TELEMETRY.busy;
+  const days = (t.files || []).length;
+  satSet($("tmsize"), days ? satText("tmSize", { size: tmBytes(t.bytes), days: satCount(days, "day", "days") })
+    : SAT_COPY.tmEmpty);
+  $("tmdelete").disabled = !days || TELEMETRY.busy;
+  $("tmdownload").hidden = !days;
+  satSet($("tm-sum"), !t.enabled ? SAT_COPY.tmOff
+    : t.level === "full" ? SAT_COPY.tmOnFull : SAT_COPY.tmOnTimings);
+}
+
+async function tmLoad() {
+  try {
+    TELEMETRY.state = await json("/satellites/telemetry");
+    note($("tmnote"), "", "");
+  } catch (e) {
+    /* A hub from before telemetry answers 404 here: nothing to say. */
+    if (e.status !== 404) note($("tmnote"), "bad", satText("tmFailed", { message: e.message }));
+  }
+  tmShow();
+}
+
+async function tmSend(method, changes) {
+  TELEMETRY.busy = true;
+  tmShow();
+  try {
+    TELEMETRY.state = await json("/satellites/telemetry", changes === undefined ? { method }
+      : { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes) });
+    note($("tmnote"), "", "");
+  } catch (e) {
+    note($("tmnote"), "bad", satText("tmFailed", { message: e.message }));
+  } finally {
+    TELEMETRY.busy = false;
+    tmShow();
+  }
+}
+
+$("sat-telemetry").addEventListener("toggle", () => { if ($("sat-telemetry").open) tmLoad(); });
+$("tmon").addEventListener("change", () => tmSend("PUT", { enabled: $("tmon").checked }));
+$("tmlevel").addEventListener("change", () => tmSend("PUT", { level: $("tmlevel").value }));
+$("tmdays").addEventListener("change", () => {
+  const days = Number($("tmdays").value);
+  if (Number.isInteger(days) && days >= 1 && days <= 365) tmSend("PUT", { retention_days: days });
+  else note($("tmnote"), "bad", SAT_COPY.tmDays);
+});
+$("tmdelete").addEventListener("click", () => {
+  if (confirm(SAT_COPY.askTmDelete)) tmSend("DELETE");
+});
 
 /* ================================================================ events == */
 /* THE EVENT LOG IS A STREAM, NOT A POLL: a button press is gone by the next
