@@ -1,6 +1,6 @@
 # voice-gateway
 
-One port, one key, three speech services.
+One port, one key, three speech services and a satellite hub.
 
 ```text
                         :8080  voice-gateway
@@ -19,9 +19,14 @@ One port, one key, three speech services.
                           │                            Chatterbox 0.138x here,
                           │                            turbo 1.54x on the card
                           │
+  /satellites/...         │
+  WS /satellites/ws       ├──────────────────────────►  voice-satellites:8003
+                          │                             the satellite hub, optional;
+                          │                             the socket is relayed, not keyed
+                          │
   /v1/models              ├─  answered here, from a static table
   /v1/models/{id}         ├─  one row of that same table
-  /health                 └─  all three, fanned out, no key required
+  /health                 └─  every backend, fanned out, no key required
 ```
 
 Sibling of [services/stt](../stt/README.md), [services/tts](../tts/README.md)
@@ -45,8 +50,8 @@ enforcement points is three places for the fourth bug. Here the backends run
 open, only `:8080` is published, and one file checks a token.
 
 **One health answer.** Knowing whether the stack is up currently means polling
-three ports. `GET /health` fans out and returns all three, unauthenticated, in
-one call.
+three ports. `GET /health` fans out and returns them all, unauthenticated, in
+one call, and the satellite hub with them when it is deployed.
 
 Routing is a consequence of those two, not the point.
 
@@ -85,7 +90,9 @@ curl -s localhost:8080/health | python3 -m json.tool
     "tts": {"url": "http://tts-stack:8001", "reachable": true, "http_status": 200,
             "health": {"status": "ok", "voices": 54, "default_voice": "bm_george"}},
     "tts_long": {"url": "http://tts-long:8002", "reachable": true, "http_status": 200,
-                 "health": {"status": "ok", "model_loaded": false, "queued": 0}}
+                 "health": {"status": "ok", "model_loaded": false, "queued": 0}},
+    "satellites": {"url": "http://voice-satellites:8003", "reachable": true, "http_status": 200,
+                   "health": {"status": "ok", "satellites": {"online": 2, "adopted": 2, "pending": 0}}}
   }
 }
 ```
@@ -115,7 +122,7 @@ here would quietly undo that.
 | `DELETE /jobs/{id}` | tts-long | cancel a queued job, or discard a finished one |
 | `GET /v1/models` | answered here | — |
 | `GET /v1/models/{id}` | answered here, indexed off that same list | — |
-| `GET /health` | all three | — |
+| `GET /health` | every backend, and voice-satellites when `GATEWAY_SATELLITES_URL` is set | — |
 | `GET`, `POST`, `PUT`, `PATCH`, `DELETE` `/satellites/...` | voice-satellites, if deployed | streamed through. Listed one by one in `SATELLITES_PATHS`; the hub's own README has what each does |
 | `WS /satellites/ws`, `WS /nodes/ws` | voice-satellites | relayed frame for frame, and **not** behind `GATEWAY_API_KEYS` ([ADR 0013](../../docs/adr/0013-satellites-one-door.md)). `/nodes/ws` is the path pre-release firmware from before 2026-09-25 dials, kept until no such board is left |
 
@@ -527,8 +534,8 @@ meant literally.
 The three services and this gateway are **one TrueNAS app**, which is the whole
 reason the single boundary is free: the containers already share a network.
 
-1. Publish `8080` **only**. 8000, 8001 and 8002 stay on the app-internal
-   network. This is the step that makes the boundary real; without it this
+1. Publish `8080` **only**. 8000, 8001, 8002 and the satellite hub's 8003 stay
+   on the app-internal network. This is the step that makes the boundary real; without it this
    component is an extra hop and nothing else.
 2. Leave `STT_API_KEYS` and `TTS_API_KEYS` unset on all three backends.
 3. **Do not set `GATEWAY_API_KEYS` yet.** Reproduced against the real app with
@@ -652,8 +659,10 @@ is 190-240 ms of recognition at the measured 8.5-10.4x, and a feature that adds
 - **TLS, CORS and certificates**, unlike the siblings, which do carry TLS. It
   is LAN traffic on one host; if it is ever exposed beyond the LAN that belongs
   to whatever reverse proxy already terminates TLS for the NAS.
-- **WebSocket or realtime STT.** stt-stack is file-in, transcript-out with a
-  VAD stage; there is no partial-hypothesis interface to expose.
+- **A realtime STT socket.** stt-stack is file-in, transcript-out with a VAD
+  stage, and there is no partial-hypothesis interface to expose. The one
+  WebSocket this service relays is the satellites' device socket
+  ([ADR 0013](../../docs/adr/0013-satellites-one-door.md)).
 
 ## Honest limitations
 
@@ -678,8 +687,9 @@ is 190-240 ms of recognition at the measured 8.5-10.4x, and a feature that adds
   mid-body. The code logs it and truncates, because the status line has
   already gone out and there is nothing left to change.
 - **`/health` fans out on every call with no cache.** Three concurrent local
-  requests, 5 s timeout each. Something polling it once a second would triple
-  that rate onto the backends; nothing does today.
+  requests, four with the satellite hub, 5 s timeout each. Something polling
+  it once a second would put that rate onto every backend; nothing does
+  today.
 - **Something already answers on `orko:8080`.** The host port for this app has
   to be chosen at deploy time; the container port is what the contract fixes.
 
