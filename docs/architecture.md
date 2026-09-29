@@ -13,19 +13,31 @@ what sits between them, plus the findings that are not any one service's.
 
 ## 1. The shape of the system
 
-### Five processes, one door
+### Six processes, one door
 
 ```mermaid
 flowchart TB
   C["OpenAI SDK, curl,<br/>anything else"] --> G
   B["Browser"] --> G
+  D["Satellites on Wi-Fi"] -->|"wss /satellites/ws"| G
   G["<b>voice-gateway</b> :8080<br/>published as 30080"]
   G -->|"/ and /ui/*"| U["<b>voice-ui</b> :8090"]
   U -->|"/ui/api/*, signed"| G
   G -->|"/v1/audio/transcriptions<br/>/transcribe, /glossaries"| S["<b>stt-stack</b> :8000"]
   G -->|"/speak, /voices<br/>/v1/audio/speech, fast"| T["<b>tts-stack</b> :8001"]
   G -->|"/jobs/*<br/>/v1/audio/speech, long"| L["<b>tts-long</b> :8002"]
+  G -->|"/satellites/*, and the<br/>device socket, relayed"| H["<b>voice-satellites</b> :8003"]
+  H -->|"/v1/audio/transcriptions"| S
+  H -->|"/v1/audio/speech"| T
 ```
+
+`voice-satellites` is optional. It is the one backend that calls others: it
+transcribes a satellite's command on `stt-stack` and speaks the reply through
+`tts-stack`, over the internal network and not through the gateway, and it
+calls whatever a wake word's action names (Home Assistant, a language model,
+a webhook). The device socket is relayed frame for frame and is not behind
+`GATEWAY_API_KEYS`; a per-satellite adoption token is the credential
+([ADR 0013](adr/0013-satellites-one-door.md)).
 
 The loop back from the page to the gateway is the point of it. `voice-ui` is a
 client of the gateway, never of a backend: it holds no key list, compares no
@@ -53,6 +65,7 @@ deployed.
 | `tts-long` — Chatterbox | 6.6 GB | 0.21× | yes, CPU wheel | Twenty times heavier and twenty times slower than Kokoro, so it loads lazily and unloads after 600 s idle. A model a thousandth its size must not queue behind that |
 | `gateway` | `mem_limit: 512m` | — | no | The auth boundary and the only published port |
 | `ui` | `mem_limit: 384m` | — | no | It spawns `yt-dlp` on a URL a browser chose |
+| `satellites` | 228 to 326 MiB, measured with 0 to 6 satellites; `mem_limit: 512m` | front-end 0.03 to 0.05 per satellite | no | A socket per device, and echo cancellation and wake word models on every satellite's microphones. Optional, so the rest of the stack must not depend on it |
 
 The gateway and the page hold no model and no state, so the only figures worth
 quoting for them are their limits. Nothing has measured their resident size.
@@ -72,6 +85,12 @@ not fit in 6 GB of VRAM at fp32 regardless.
 | `tts-long-models` | `tts-long` at `/models` | Chatterbox's weights |
 | `tts-long-out` | `tts-long` at `/output` | Job audio, and one record per run |
 | `voices` | `voice-ui` read-write, `tts-long` read-only | Reference clips for cloning |
+| `nodes-data` | `voice-satellites` at `/data` | Adopted satellites (`satellites.json`, tokens as SHA-256 only), the wake words and their actions (`wake_words.json`), API keys stored from the page (`secrets.json`), uploaded firmware, wake word models, and debug audio when switched on. Named for the feature's pre-release name ([ADR 0013](adr/0013-satellites-one-door.md#renamed)) |
+
+**`secrets.json` holds keys in plain text, so every backup of `nodes-data`
+holds them too** ([ADR 0015](adr/0015-the-hub-may-hold-a-key.md)). A key set
+in the hub's environment instead is not on the volume, and wins over a stored
+one.
 
 Two things are not on that list. The gateway mounts only `/etc/certificates`
 read-only and keeps nothing. And **`tts-long`'s queue is a dict in one process**,
@@ -258,7 +277,14 @@ own behind a key and a wildcard would quietly undo that.
 | `GET`, `POST /ui/clips`; `DELETE /ui/clips/{name}`; `POST /ui/clips/from-link` | The reference-clip store |
 | `POST /ui/resolve`, `/ui/commit`, `/ui/abandon`; `GET /ui/progress` | Link ingestion through MeTube |
 | `POST /ui/fetch`, `POST /ui/captions`; `GET /ui/media` | Transcribe an ingested file, take its subtitles instead, or play it back |
-| `POST`, `GET`, `PUT`, `DELETE /ui/api/{rest}` | The page's own XHRs, forwarded verbatim; `voice-ui` strips the prefix and sends them back with its key attached |
+| `POST`, `GET`, `PUT`, `PATCH`, `DELETE /ui/api/{rest}` | The page's own XHRs, forwarded verbatim; `voice-ui` strips the prefix and sends them back with its key attached. `PATCH` came with the Satellites tab |
+
+**Satellites**, when `GATEWAY_SATELLITES_URL` is set
+
+| Route | Notes |
+|---|---|
+| `GET`, `POST`, `PUT`, `PATCH`, `DELETE /satellites/...` | Streamed through to `voice-satellites`, each listed on its own in `SATELLITES_PATHS`. [`services/satellites`](../services/satellites/README.md#routes) has what each does. Unset, they answer 503 |
+| `WS /satellites/ws`, `WS /nodes/ws` | The device socket, relayed frame for frame and **not** behind the key. `/nodes/ws` is the path pre-release firmware dials |
 
 **Unauthenticated**
 
@@ -496,6 +522,7 @@ is documented as a deviation rather than dressed up as a 200.
 | **orko** | The TrueNAS box this is deployed on. Xeon E5-2697 v4 | Every figure labelled "on this deployment" |
 | **An M2 Max** | A laptop, CPU only | The bench figures, and the macOS client's |
 | **spring** | A Windows desktop on the same LAN. Ryzen 7 5700X3D, RTX 3070 with 8 GB | The optional GPU runner's figures |
+| **A GPU host** | A Linux machine with a GTX 1050 Ti (4 GB) | The wake word trainer's timings (`tools/wakeword-train`) |
 
 A realtime factor is a property of a machine, not of a model. Every figure below
 names the machine it came from, and `GET /health` reports what the running
@@ -799,7 +826,7 @@ boundary and must not be able to alter anything else. The five lines that belong
 to the original machine, and what to do with each, are in the README's *Run it*
 table.
 
-As written it asks for **31 CPUs and about 18.9 GB** across the five, which is
+As written it asks for **32 CPUs and about 19.4 GB** across the six, which is
 the box it came from rather than a requirement:
 
 | | `cpus` | `mem_limit` |
@@ -809,6 +836,7 @@ the box it came from rather than a requirement:
 | `tts-stack` | 8 | 2g |
 | `tts-long` | 10 | 10g |
 | `voice-ui` | 1 | 384m |
+| `voice-satellites` | 1 | 512m |
 
 Set the container's CPU limit **and** the service's `*_THREADS` to the same
 number. ONNX Runtime sizes its thread pool from the host's core count, not the
@@ -843,7 +871,7 @@ published port still presents the real certificate.
 
 ### 6.3 Healthchecks
 
-**None of the five images carries a `HEALTHCHECK` instruction, and that is not
+**None of the six images carries a `HEALTHCHECK` instruction, and that is not
 an oversight.** `HEALTHCHECK` is not a field in the OCI image spec, and CI
 builds with buildah, whose default format is `oci`, so the instruction is
 dropped silently on the way to the registry — `docker inspect` on a published
@@ -851,12 +879,12 @@ image shows none. The probes live in `compose.yaml`, which is where they take
 effect, and that copy is the only one there is. Delete a probe from that file
 and the container has no probe.
 
-Two rules hold across all five:
+Two rules hold across all six:
 
 - **Every healthcheck dials its own container's `127.0.0.1`.** None touches the
   gateway or a sibling. A container must never be restarted because a different
   container is down, and a probe aimed at the gateway would turn one backend's
-  outage into all five restarting.
+  outage into all six restarting.
 - **No `depends_on` anywhere.** `service_healthy` on `tts-long` would hold the
   gateway down for up to 900 s, which is exactly when somebody most wants
   `/health` to answer and the page to load. The gateway already returns a named
@@ -869,6 +897,7 @@ Two rules hold across all five:
 |---|---|---|
 | `voice-gateway` | 30s | No model to load |
 | `voice-ui` | 30s | No model to load |
+| `voice-satellites` | 30s | The image carries its wake word model, so a first start needs no download |
 | `tts-stack` | 300s | ~340 MB on first start |
 | `stt-stack` | 600s | 461 MB on first start |
 | `tts-long` | 900s | ~3 GB, and only on the first job. A shorter grace kills the container mid-download and the next one starts the download again |
@@ -887,14 +916,17 @@ read `status`, not the status code — and it says a great deal:
   threads, and the host label.
 - **From `tts`:** voice count, default voice, threads, and the realtime factor
   with its sample count — both absent until something has been synthesised.
+- **From `satellites`**, when it is deployed: how many satellites are online,
+  adopted and waiting, the wake word engine's state and thresholds, the STT
+  URL and engine the hub uses, and MQTT's state.
 - **From `tts-long`:** `model_loaded`, queue depth and capacity, the realtime
   factor broken down by lane and by engine with the observation count for each,
   the full engine catalogue (languages, controls, minimum reference seconds,
   cold-load seconds, native sample rate) and, when a runner is configured, its
   state, mode, machine state, limits, CPU and memory.
 
-It fans out on every call with **no cache** — three concurrent local requests, a
-5 s timeout each. Something polling it once a second would triple that rate onto
+It fans out on every call with **no cache**: three concurrent local requests,
+four with the satellite hub, a 5 s timeout each. Something polling it once a second would triple that rate onto
 the backends; nothing does today. The gateway's own healthcheck calls it, and it
 must never answer 503, because a 503 caused by a cold `tts-long` would have the
 orchestrator restart the one container that has to stay up to report the outage.
@@ -1158,12 +1190,17 @@ assembles them:
 |---|---|
 | `main` | `:latest` and `:main-<sha>` |
 | a `v*` tag | `:<version>` and `:latest` |
+| a `feat/**` branch | `:feat-<branch>` (moving) and `:feat-<branch>-<sha>`, never `:latest` |
+
+A feature branch publishes so it can be deployed and tried on the real box
+before a release, from its `-<sha>` tag. That was added with the satellites
+work; [ADR 0012](adr/0012-one-branch.md) has a dated note.
 
 **Deploy from the version.** A moving tag meant a redeploy for an unrelated
 reason silently swapped the running build — measured on this deployment, where
 the images tagged for prerelease were four weeks stale while the version tag
 carried every fix, and `pull_policy: always` made a redeploy swap the running
-build in either direction. `compose.yaml` names a version on all five images, so
+build in either direction. `compose.yaml` names a version on every image, so
 `git checkout <version>` gives you the stack that is running. Raising it is a
 deliberate edit, which is the point.
 
@@ -1238,6 +1275,18 @@ Counted at `15f4667`, one commit past `v0.1.1`, run locally:
 | `services/gateway` | 165, of which 8 are the live smoke test | Mock backends wired in through httpx's own transport layer, so every test runs the real proxy code — header filtering, streaming, timeout mapping, auth — with only the socket replaced. The deselected 8 are the live smoke test |
 | `services/ui` | 505 | TestClient over an httpx `MockTransport`. **Nothing starts a server and nothing may**, and `yt-dlp` is never spawned |
 | `docs/tests` | 64 | `compose.yaml` against the code, and the prose against the deployment |
+
+The satellites work added three suites, and grew three of the above. Counted
+on `feat/nodes` on 28 Sep 2026, run locally:
+
+| Suite | Tests | Shape | In CI |
+|---|---|---|---|
+| `services/satellites` | 625 | The device is played by Starlette's test socket; STT, TTS, Home Assistant, language model servers and webhooks by `httpx.MockTransport` on `*.test` hosts. The wake word tests fetch openWakeWord's models once per run and skip without the network | yes |
+| `clients/home-assistant` | 68 | `pytest-homeassistant-custom-component` pinned to Home Assistant 2026.8.1, against a fake gateway on 127.0.0.1 with the hub's shapes | no. Run it from `clients/home-assistant` in a Python 3.14 venv from `requirements_test.txt` |
+| `clients/korvo-satellite` | a compile, no tests | `pio run -e usb` builds the firmware; `scripts/sig_host_check.sh` builds the signature check on a desktop against the board's mbedTLS and runs it | no |
+| `services/ui` | 683 | The same, with the Satellites tab's suites; the ones that run the page's script need `node` on PATH | yes |
+| `services/stt` | 168, 2 skipped | The same, with `STT_MODELS` | yes |
+| `docs/tests` | 70 | The same, with the satellite hub's settings and notices | yes |
 
 The live smoke test against the running stack **skips itself** when the host is
 unreachable, which from a CI runner it should be, and is deselected by name
@@ -1419,6 +1468,23 @@ runs 0001–0010 and 0012–0021; there is no 0011.
 | [0019 — The wake word is the unit of configuration, and it has one of three modes](adr/0019-the-wake-word-is-the-unit.md) | accepted |
 | [0020 — A Home Assistant integration beside MQTT discovery, and both are optional](adr/0020-home-assistant-integration-beside-mqtt.md) | accepted |
 | [0021 — Satellites install only firmware signed on the developer's machine, and the hub cannot waive it](adr/0021-signed-firmware.md) | accepted |
+
+Smaller decisions from the satellites work are recorded where they apply
+rather than in records of their own:
+
+- **Every button maps to an action, but `mute` stays on the device.** Mute,
+  volume, the lights and brightness run on the satellite, so they work with
+  the hub down and only a button can undo the privacy mute. A mapping must
+  keep `mute` on one button: the hub refuses one without, and the firmware
+  keeps Rec as the mute if it is sent one anyway
+  ([Buttons](../services/satellites/README.md#buttons)).
+- **The firmware draws the ring's animations**, and says which in
+  `hello.caps.light_modes`, rather than the hub streaming frames. The hub
+  sends a mode, a colour and the talker's direction, and sends older
+  firmware a pulse ([Lights](../services/satellites/README.md#lights)).
+- **The hub detects the language of each transcript** (py3langid), because
+  Parakeet detects the language and does not report it
+  ([Language](../services/satellites/README.md#language)).
 
 0009 is kept rather than deleted because every engineering fact in it is still
 true; what it got wrong is its own first sentence, that this deployment offers a

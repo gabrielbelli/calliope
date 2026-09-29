@@ -61,3 +61,11 @@ branch and an immutable version tag is one thing that cannot.
 - The validation rule from ADR 0004 survives the branch it was attached to. A
   `v*` tag still means *exercised on orko and seen to work* — it is now the tag
   that carries the promise rather than the branch.
+
+## Since
+
+**2026-09-25:** a push to a `feat/**` branch publishes as well, under
+`:feat-<branch>` (moving) and `:feat-<branch>-<sha>` (fixed), and never
+`:latest`. A feature can then be deployed and tried on the real box before a
+release, from the fixed tag, without touching `main`. Releases are unchanged:
+a `v*` tag, and the deployment pins it.
