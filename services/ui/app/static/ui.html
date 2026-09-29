@@ -4232,6 +4232,16 @@ const SAT_COPY = {
   apOn: "Phones and Macs list it as {name}.",
   apStarting: "AirPlay is starting.",
   apError: "AirPlay did not start: {error}",
+  apOff: "off",
+  apDown: "not running",
+  apIdle: "waiting",
+  apPlaying: "playing",
+  apPaused: "paused",
+  apBitrate: "{kbps} kb/s",
+  lineSpeaker: "A speaker, with no microphone to listen with",
+  linePlaying: "{what}",
+  powerOk: "Good",
+  powerLow: "Too low now: use a stronger supply",
   outOwn: "Its own speaker",
   outHere: "On this satellite",
   outThere: "On another satellite",
@@ -4623,6 +4633,15 @@ function satState(n, mem) {
     return say("offline", "Offline", "warn",
       last ? satText("lineOffline", { clock: satClock(last) }) : "", "offline");
   }
+  /* A SPEAKER WITH NO MICROPHONE IS NOT A SATELLITE THAT FAILED TO LISTEN:
+     it says what it plays instead, AirPlay above all. */
+  if (!satHas(n, "mic")) {
+    const ap = (st.airplay && st.airplay.playing) ? st.airplay : null;
+    if (cfg.speaker_enabled === false) return say("speakeroff", "Speaker off", "neutral", SAT_COPY.lineSpeaker, "online");
+    if (ap) return say("playing", "Playing", "running", satText("linePlaying", { what: satPlayingWhat(ap) }), "online");
+    if (ota.state === "verified") return say("updated", "Updated", "done", satText("lineUpdated", { v }), "online");
+    return say("online", "Online", "", SAT_COPY.lineSpeaker, "online");
+  }
   if (ear.state === "off" && ear.error) {
     return say("deaf", "Not listening", "failed",
       satText("lineNotListening", { error: ear.error }), "failed");
@@ -4673,6 +4692,11 @@ function satMem() {
    line and the Wake words summary already say it once, and repeated on
    every row it was the same failure five times. Empty on a hub with no wake
    word assignment at all. */
+function satPlayingWhat(ap) {
+  const track = ap.title ? (ap.artist ? `${ap.title} by ${ap.artist}` : ap.title) : "AirPlay";
+  return ap.client ? `${track}, from ${ap.client}` : track;
+}
+
 function satListens(n, words) {
   let mine;
   if (words) mine = words.filter(w => wakeHas(w, n.id));
@@ -4736,10 +4760,10 @@ function satAdoptedMarkup(u) {
         <div><label for="${u}-vol">Volume</label>
           <div class="slider"><input type="range" id="${u}-vol" min="0" max="12" step="1" data-cfg="volume" data-steps="12">
             <output for="${u}-vol"></output></div></div>
-        <div><label for="${u}-gain">Mic gain</label>
+        <div data-hw="mic"><label for="${u}-gain">Mic gain</label>
           <div class="slider"><input type="range" id="${u}-gain" min="0" max="36" step="3" data-cfg="mic_gain_db">
             <output for="${u}-gain"></output></div></div>
-        <div><label for="${u}-bright">Light brightness</label>
+        <div data-hw="lights"><label for="${u}-bright">Light brightness</label>
           <div class="slider"><input type="range" id="${u}-bright" min="10" max="100" step="5" data-cfg="brightness">
             <output for="${u}-bright"></output></div></div>
       </div>
@@ -4755,24 +4779,32 @@ function satAdoptedMarkup(u) {
           <select id="${u}-source" data-cfg="audio_source" data-text></select></div>
       </div>
       <div class="hint sat-outhint"></div>
-      <!-- AIRPLAY, on a satellite that is a receiver (caps "airplay"): on or
-           off, and the name phones list it as, the satellite's own when
-           empty (clients/pi-satellite, airplay.py). -->
-      <div class="row sat-airplay" hidden>
-        <label class="checkline tight"><input type="checkbox" data-cfg="airplay_enabled"> AirPlay</label>
-        <div class="grow"><label for="${u}-apname">AirPlay name</label>
-          <input type="text" id="${u}-apname" maxlength="64" data-cfg="airplay_name" data-text
-                 spellcheck="false" autocomplete="off"></div>
-      </div>
-      <div class="hint sat-aphint"></div>
+
       <div class="hint sat-output"></div>
       <div class="row sat-switches">
         <label class="checkline tight"><input type="checkbox" data-cfg="speaker_enabled"> Speaker</label>
-        <label class="checkline tight"><input type="checkbox" data-cfg="mic_enabled"> Microphone</label>
-        <label class="checkline tight"><input type="checkbox" data-cfg="lights_enabled"> Lights</label>
+        <label class="checkline tight" data-hw="mic"><input type="checkbox" data-cfg="mic_enabled"> Microphone</label>
+        <label class="checkline tight" data-hw="lights"><input type="checkbox" data-cfg="lights_enabled"> Lights</label>
       </div>
       <div class="sat-note" aria-live="polite"></div>
-      <p class="sat-listens"><button class="link" type="button" data-act="wakewords">Change wake words</button></p>
+      <p class="sat-listens" data-hw="mic"><button class="link" type="button" data-act="wakewords">Change wake words</button></p>
+      <!-- AIRPLAY, on a satellite that is a receiver (caps "airplay"): on or
+           off, the name phones list it as (the satellite's own when empty),
+           and what it plays, from whom, and how (clients/pi-satellite,
+           airplay.py). -->
+      <details class="sub sat-ap" data-hw="airplay">
+        <summary>AirPlay<span class="sum-note"></span></summary>
+        <div class="body">
+          <div class="row">
+            <label class="checkline tight"><input type="checkbox" data-cfg="airplay_enabled"> On</label>
+            <div class="grow"><label for="${u}-apname">Name on phones</label>
+              <input type="text" id="${u}-apname" maxlength="64" data-cfg="airplay_name" data-text
+                     spellcheck="false" autocomplete="off"></div>
+          </div>
+          <div class="hint sat-aphint"></div>
+          <dl class="facts sat-apfacts"></dl>
+        </div>
+      </details>
       <details class="sub sat-try">
         <summary>Try it</summary>
         <div class="body">
@@ -4785,11 +4817,11 @@ function satAdoptedMarkup(u) {
           <div class="actions">
             <button class="small" type="button" data-act="identify" data-needs="online lights unmuted idle">Blink</button>
             <button class="small" type="button" data-act="tone" data-needs="online speaker">Play a tone</button>
-            <button class="small" type="button" data-act="listen" data-needs="online mic unmuted">Listen 5 s</button>
+            <button class="small" type="button" data-act="listen" data-needs="online mic unmuted" data-hw="mic">Listen 5 s</button>
             <button class="small" type="button" data-act="stop" data-needs="online">Stop</button>
           </div>
           <audio controls hidden></audio>
-          <div class="row sat-lights">
+          <div class="row sat-lights" data-hw="lights">
             <div class="tight"><label for="${u}-colour">Colour</label>
               <input type="color" id="${u}-colour" value="#d4507f"></div>
             <div class="sat-pattern"><label for="${u}-mode">Light pattern</label>
@@ -4803,7 +4835,7 @@ function satAdoptedMarkup(u) {
           <div class="sat-note" aria-live="polite"></div>
         </div>
       </details>
-      <details class="sub sat-buttons">
+      <details class="sub sat-buttons" data-hw="buttons">
         <summary>Buttons<span class="sum-note"></span></summary>
         <div class="body">
           <div class="sat-btns" role="group" aria-label="Button actions">
@@ -4828,6 +4860,7 @@ function satAdoptedMarkup(u) {
               <input type="text" id="${u}-name" maxlength="64" autocomplete="off" spellcheck="false"></div>
             <button class="small tight" type="submit">Rename</button>
           </form>
+          <div class="sat-ringparts" data-hw="lights">
           <div class="row sat-orient">
             <div><label for="${u}-top">Top of the ring</label>
               <select id="${u}-top" data-cfg="ring_top">
@@ -4855,6 +4888,7 @@ function satAdoptedMarkup(u) {
             <div class="actions"><button class="small" type="button" data-act="ring-cancel">Cancel</button></div>
           </div>
           <div class="hint">Set up the ring shows you where the volume bar starts and which way it runs.</div>
+          </div>
           <div class="actions">
             <button class="small" type="button" data-act="reboot" data-needs="online idle">Reboot</button>
             <button class="small" type="button" data-act="move" data-needs="online idle"
@@ -5030,22 +5064,92 @@ function satAudio(li, n, cfg) {
   mic.toggleAttribute("data-off", !sources.length);
 }
 
-/* AIRPLAY: whether it is on, its name, and what the satellite says of it. */
+/* WHAT THIS SATELLITE HAS, from its caps: a Korvo has a ring, buttons and
+   a microphone; a Raspberry Pi may have none of them, and a control for
+   hardware it lacks is not there at all (a switch that is off stays, greyed
+   with its reason: satNeeds). Firmware from before caps said nothing, and
+   was the Korvo. */
+function satHas(n, what) {
+  const caps = n.caps || {};
+  if (!Object.keys(caps).length) return what !== "airplay" && what !== "audio_devices";
+  const v = caps[what];
+  return Array.isArray(v) ? v.length > 0 : typeof v === "number" ? v > 0 : !!v;
+}
+
+/* Every [data-hw] part shown or hidden by what the satellite has, and the
+   parts that differ by kind: volume in the Korvo's twelve ring steps or in
+   percent, and Blink (the ring) or Chime (a speaker with no ring). */
+function satHardware(li, n) {
+  for (const el of li.querySelectorAll("[data-hw]")) {
+    const has = satHas(n, el.dataset.hw);
+    if (el.hidden === has) el.hidden = !has;
+  }
+  const vol = li.querySelector('[data-cfg="volume"]');
+  const steps = satHas(n, "lights") && !satHas(n, "audio_devices") ? "12" : "";
+  if ((vol.dataset.steps || "") !== steps) {
+    if (steps) { vol.dataset.steps = steps; vol.max = steps; }
+    else { delete vol.dataset.steps; vol.max = "100"; }
+  }
+  const blink = li.querySelector('[data-act="identify"]');
+  const lights = satHas(n, "lights");
+  const needs = lights ? "online lights unmuted idle" : "online speaker idle";
+  if (blink.dataset.needs !== needs) {
+    blink.dataset.needs = needs;
+    satSet(blink, lights ? "Blink" : "Chime");
+  }
+}
+
+/* AIRPLAY: its section's one-word summary, the line under its name, and
+   what it is playing, from the satellite's status (airplay.py). */
+function satAirPlayNote(cfg, ap) {
+  if (cfg.airplay_enabled === false) return SAT_COPY.apOff;
+  if (!ap || ap.error || ap.running === false) return SAT_COPY.apDown;
+  return ap.playing ? SAT_COPY.apPlaying : ap.session ? SAT_COPY.apPaused : SAT_COPY.apIdle;
+}
+
+function satAirPlayFacts(ap) {
+  if (!ap || !ap.session) return [];
+  const s = ap.stream || {};
+  const now = [ap.title, ap.artist].filter(Boolean).join(" · ");
+  const channels = s.channels === 2 ? "stereo" : s.channels === 1 ? "mono" : s.channels ? `${s.channels} channels` : "";
+  return [["Status", ap.playing ? "Playing" : "Paused"],
+    ["From", ap.client || ""],
+    ["Now playing", now],
+    ["Album", ap.album || ""],
+    ["Stream", s.rate ? [`${(s.rate / 1000).toFixed(1)} kHz`, s.bits ? `${s.bits}-bit` : "", channels]
+      .filter(Boolean).join(" · ") : ""],
+    ["Bit rate", s.bitrate_kbps ? satText("apBitrate", { kbps: s.bitrate_kbps.toLocaleString("en-GB") }) : ""],
+    ["Delay here", s.latency_ms ? `${s.latency_ms} ms` : ""],
+    ["Phone's volume", typeof ap.volume === "number" ? `${ap.volume}%` : ""]].filter(f => f[1]);
+}
+
 function satAirPlay(li, n, cfg) {
   const q = sel => li.querySelector(sel);
-  const has = !!(n.caps && n.caps.airplay);
-  q(".sat-airplay").hidden = !has;
-  if (!has) { satSet(q(".sat-aphint"), ""); return; }
+  if (!satHas(n, "airplay")) return;
   const on = cfg.airplay_enabled !== false;
   const box = q('[data-cfg="airplay_enabled"]');
   if (!box.dataset.held) box.checked = on;
   const name = q('[data-cfg="airplay_name"]');
   if (!name.dataset.held && name !== document.activeElement) name.value = cfg.airplay_name || "";
   name.placeholder = satName(n);
-  const st = (n.status && n.status.airplay) || {};
+  const ap = n.online ? (n.status && n.status.airplay) || null : null;
+  satSet(q(".sat-ap .sum-note"), n.online ? satAirPlayNote(cfg, ap) : "");
   satSet(q(".sat-aphint"), !on || !n.online ? ""
-    : st.error ? satText("apError", { error: st.error })
-    : st.running ? satText("apOn", { name: cfg.airplay_name || satName(n) }) : SAT_COPY.apStarting);
+    : ap && ap.error ? satText("apError", { error: ap.error })
+    : ap && ap.running ? satText("apOn", { name: cfg.airplay_name || satName(n) }) : SAT_COPY.apStarting);
+  const facts = on ? satAirPlayFacts(ap) : [];
+  const dl = q(".sat-apfacts");
+  const sig = JSON.stringify(facts);
+  if (dl.dataset.sig !== sig) {
+    dl.dataset.sig = sig;
+    dl.textContent = "";
+    for (const [term, value] of facts) {
+      const dt = document.createElement("dt"), dd = document.createElement("dd");
+      dt.textContent = term;
+      dd.textContent = value;
+      dl.append(dt, dd);
+    }
+  }
 }
 
 /* The Output chosen: another satellite, or one of its own outputs (which
@@ -5091,6 +5195,7 @@ function satelliteUpdate(li, n) {
     q(".bar-fill").style.transform = `scaleX(${Math.max(0, Math.min(1, s.bar)).toFixed(4)})`;
   }
   const cfg = n.config || {};
+  satHardware(li, n);
   satAudio(li, n, cfg);
   satAirPlay(li, n, cfg);
   satSet(q(".sat-why"), satWhy(n));
@@ -5416,6 +5521,9 @@ function satDevice(li, n, s) {
     ["Wi-Fi signal", n.online ? rssiWords(st.rssi) : ""],
     ["Reply time", satLatency(n)],
     ["Output", n.online ? satOutput(n) : ""],
+    ["Temperature", n.online && typeof st.temp_c === "number" ? `${st.temp_c} °C` : ""],
+    ["Power supply", !n.online ? "" : st.under_voltage === true ? SAT_COPY.powerLow
+      : st.under_voltage === false ? SAT_COPY.powerOk : ""],
     n.online ? ["Connected", n.connected_at ? satText("connected", { clock: satClock(n.connected_at) }) : ""]
              : ["Last seen", last ? satClock(last) : ""],
     ["ID", n.id]].filter(f => f[1]);
@@ -5424,7 +5532,7 @@ function satDevice(li, n, s) {
      dBm with most status reports and the reply time after each reply, and
      rebuilding the list for that took away a selection of the Address or
      the ID in the middle of copying it. */
-  const dl = li.querySelector(".facts");
+  const dl = li.querySelector(".sat-device .facts");
   const sig = facts.map(f => f[0]).join("|");
   if (dl.dataset.sig !== sig) {
     dl.dataset.sig = sig;

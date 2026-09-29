@@ -657,27 +657,75 @@ def test_choosing_an_output_sends_either_the_satellite_or_its_own_device(tmp_pat
                    {"output_satellite": ""}]
 
 
-def test_airplay_shows_on_a_receiver_with_its_name_or_the_satellites_and_why_it_is_not_running(tmp_path):
+def test_airplay_says_what_plays_from_whom_and_how(tmp_path):
+    """Its section's summary is one word; the facts are the track, the
+    phone, the stream as PipeWire has it (rate, bits, channels, the PCM bit
+    rate) and the phone's own volume; nothing is listed while no phone is
+    connected."""
     got = run(tmp_path, """
-      const el = () => ({ dataset: {}, hidden: false, value: "", checked: false, placeholder: "", textContent: "" });
-      const parts = { ".sat-airplay": el(), ".sat-aphint": el(), '[data-cfg="airplay_enabled"]': el(),
-                      '[data-cfg="airplay_name"]': el() };
-      const li = { querySelector: sel => parts[sel] };
-      const pi = { name: "pi-edifier", online: true, caps: { airplay: { version: 1 } },
-                   status: { airplay: { running: true } } };
-      satAirPlay(li, pi, { airplay_enabled: true, airplay_name: null });
-      const out = { hidden: parts[".sat-airplay"].hidden, hint: parts[".sat-aphint"].textContent,
-                    on: parts['[data-cfg="airplay_enabled"]'].checked,
-                    placeholder: parts['[data-cfg="airplay_name"]'].placeholder };
-      satAirPlay(li, { ...pi, status: { airplay: { running: false, error: "no PipeWire" } } },
-                 { airplay_name: "Living room" });
-      out.failed = parts[".sat-aphint"].textContent;
-      out.name = parts['[data-cfg="airplay_name"]'].value;
-      satAirPlay(li, { name: "korvo", caps: {} }, {});
-      out.korvo = parts[".sat-airplay"].hidden;
+      const ap = { running: true, session: true, playing: true, client: "Gabriel's iPhone",
+                   title: "Clair de Lune", artist: "Debussy", album: "Suite bergamasque", volume: 50,
+                   stream: { rate: 44100, bits: 16, channels: 2, bitrate_kbps: 1411, latency_ms: 200 } };
+      console.log(JSON.stringify({
+        facts: satAirPlayFacts(ap),
+        notes: [satAirPlayNote({}, ap), satAirPlayNote({}, { ...ap, playing: false }),
+                satAirPlayNote({}, { running: true, session: false }), satAirPlayNote({ airplay_enabled: false }, ap),
+                satAirPlayNote({}, { running: false, error: "no PipeWire" })],
+        idle: satAirPlayFacts({ running: true, session: false }),
+        line: satPlayingWhat(ap) }));
+    """)
+    assert got["facts"] == [["Status", "Playing"], ["From", "Gabriel's iPhone"],
+                            ["Now playing", "Clair de Lune · Debussy"], ["Album", "Suite bergamasque"],
+                            ["Stream", "44.1 kHz · 16-bit · stereo"], ["Bit rate", "1,411 kb/s"],
+                            ["Delay here", "200 ms"], ["Phone's volume", "50%"]]
+    assert got["notes"] == ["playing", "paused", "waiting", "off", "not running"]
+    assert got["idle"] == []
+    assert got["line"] == "Clair de Lune by Debussy, from Gabriel's iPhone"
+
+
+def test_a_pi_row_shows_only_the_hardware_it_has_and_its_volume_in_percent(tmp_path):
+    """A Pi with no ring, buttons or microphone: no light brightness, no
+    ring set-up, no Buttons, no mic gain or Listen; volume 0-100 %, and a
+    Chime in place of Blink. The Korvo keeps its twelve ring steps."""
+    got = run(tmp_path, """
+      const pi = { caps: { speaker: {}, audio_devices: true, airplay: { version: 1 } } };
+      const korvo = { caps: { mic: {}, speaker: {}, lights: 12, buttons: ["rec", "play"] } };
+      const old = { caps: {} };
+      const has = n => ["mic", "lights", "buttons", "airplay", "audio_devices"].filter(w => satHas(n, w));
+      const el = hw => ({ dataset: hw ? { hw } : {}, hidden: false });
+      const vol = { dataset: { cfg: "volume", steps: "12" }, max: "12" };
+      const blink = { dataset: { act: "identify", needs: "online lights unmuted idle" }, textContent: "Blink" };
+      const parts = [el("mic"), el("lights"), el("buttons"), el("airplay")];
+      const li = { querySelectorAll: () => parts,
+                   querySelector: sel => sel.includes("volume") ? vol : blink };
+      satHardware(li, pi);
+      const out = { pi: has(pi), korvo: has(korvo), old: has(old),
+                    hidden: parts.map(p => p.hidden), max: vol.max, steps: vol.dataset.steps || null,
+                    blink: blink.textContent, needs: blink.dataset.needs };
+      satHardware(li, korvo);
+      out.korvoHidden = parts.map(p => p.hidden);
+      out.korvoMax = vol.max;
+      out.korvoBlink = blink.textContent;
       console.log(JSON.stringify(out));
     """)
-    assert got["hidden"] is False and got["on"] is True and got["placeholder"] == "pi-edifier"
-    assert got["hint"] == "Phones and Macs list it as pi-edifier."
-    assert got["failed"] == "AirPlay did not start: no PipeWire" and got["name"] == "Living room"
-    assert got["korvo"] is True
+    assert got["pi"] == ["airplay", "audio_devices"]
+    assert got["korvo"] == ["mic", "lights", "buttons"] and got["old"] == ["mic", "lights", "buttons"]
+    assert got["hidden"] == [True, True, True, False]
+    assert (got["max"], got["steps"]) == ("100", None)
+    assert (got["blink"], got["needs"]) == ("Chime", "online speaker idle")
+    assert got["korvoHidden"] == [False, False, False, True]
+    assert (got["korvoMax"], got["korvoBlink"]) == ("12", "Blink")
+
+
+def test_a_speaker_with_no_microphone_is_online_or_playing_never_not_listening(tmp_path):
+    got = run(tmp_path, """
+      const pi = { id: "b827eb121359", adopted: true, online: true, caps: { speaker: {}, audio_devices: true },
+                   config: {}, listening: { state: "off", error: "it has no microphone" },
+                   status: { airplay: { playing: false } } };
+      const idle = satState(pi, satMem());
+      const playing = satState({ ...pi, status: { airplay: { playing: true, title: "Clair de Lune",
+                                                             client: "Gabriel's iPhone" } } }, satMem());
+      console.log(JSON.stringify({ idle: [idle.word, idle.line], playing: [playing.word, playing.line] }));
+    """)
+    assert got["idle"] == ["Online", "A speaker, with no microphone to listen with"]
+    assert got["playing"] == ["Playing", "Clair de Lune, from Gabriel's iPhone"]
