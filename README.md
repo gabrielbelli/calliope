@@ -9,15 +9,15 @@
 A self-hosted speech stack: transcription, speech, long documents as jobs, and
 voice cloning from a reference clip. Six containers behind one
 OpenAI-compatible port, with a web page at the same address and a macOS app
-that reads any selection aloud. Every image runs on CPU — no CUDA, nothing
-to install on the host.
+that reads any selection aloud. Every image runs on CPU, with no CUDA and
+nothing to install on the host.
 
 ![The Calliope page, on the Transcribe tab](docs/images/ui-transcribe.png)
 
 ```bash
 git clone https://github.com/gabrielbelli/calliope
 cd calliope
-$EDITOR compose.yaml      # five things belong to another machine — see Run it
+$EDITOR compose.yaml      # six things to decide first: see Run it
 docker compose up -d
 ```
 
@@ -26,26 +26,27 @@ All six images are published to `ghcr.io`, so nothing has to be built.
 up unedited; [Run it](#run-it) names every line.
 
 One port is published, **30080**, and it is both the API and the page: `/`
-redirects to `/ui`, `/v1/…` is the API, and the other four services stay on the
-internal network.
+redirects to `/ui`, `/v1/…` is the API, and the other five services stay on the
+internal network. Satellites connect through the same port.
 
 ## The page
 
-Four tabs, one HTML file, no build step.
+Five tabs, one HTML file, no build step.
 
-**Speak** — type, choose one of 54 voices, listen. Kokoro answers immediately
+**Speak.** Type, choose one of 54 voices, listen. Kokoro answers immediately
 and returns `mp3`, `opus`, `aac`, `flac`, `wav` or headerless `pcm`.
 
 ![The Speak tab: a text area, language, voice and a synthesis speed slider](docs/images/ui-speak.png)
 
-**Jobs** — everything the stack has run, where it ran and how long it took,
+**Jobs.** Everything the stack has run, where it ran and how long it took,
 playable and downloadable from the row.
 
 ![The Jobs tab: finished jobs with audio seconds, compute seconds and realtime factors](docs/images/ui-jobs.png)
 
 **Transcribe** takes a dropped file, the microphone, or a pasted link.
 **Vocabulary** edits the profiles that bias the recogniser; `dictation` and
-`tech` ship built in.
+`tech` ship built in. **Satellites** adopts satellites and sets up their wake
+words ([Around the house](#around-the-house)).
 
 ## On your Mac
 
@@ -64,7 +65,7 @@ is spoken.
 ![The capsule expanded into a reader, underlining the word being spoken](docs/images/player-reader.png)
 
 The app carries its own Kokoro model, so it speaks with nothing configured and
-no network — about 4.9× realtime on an M2 Max's CPU. It needs macOS 26, and
+no network, at about 4.9× realtime on an M2 Max's CPU. It needs macOS 26, and
 Accessibility permission to read another application's selection. A Calliope
 server is opt-in, from the menu bar: **Settings…** → *Use a Calliope server*.
 [`clients/macos-player`](clients/macos-player/README.md) has the rest,
@@ -82,15 +83,23 @@ microphones, and updates its firmware over the air. An update the satellite
 cannot bring back to the hub rolls itself back.
 
 The hub also listens. It cleans each satellite's microphones (echo
-cancellation, beamforming, noise suppression), waits for the wake words
-assigned to that satellite ("hey jarvis" on every satellite by default; the
-Satellites tab adds more and chooses which satellites hear each) or a press
-of PLAY, transcribes what follows on `stt-stack`, sends it where a rule says
-(Home Assistant, any OpenAI-compatible LLM, a webhook, or straight back as an
-echo), and speaks the answer on the satellite the rule names. Home Assistant
-can also see every satellite as a device over MQTT. None of the listening has
-run on a board yet; it is tested against fakes and a recorded voice, and
-`POST /satellites/{id}/inject` runs a clip through it with nobody in earshot.
+cancellation, beamforming, noise suppression) and waits for the wake words
+assigned to that satellite, or a press of PLAY. Every satellite hears "hey
+jarvis" at first, and the Satellites tab adds words and chooses which
+satellites hear each. The hub transcribes what follows on `stt-stack`, sends
+it where the wake word's action says (Home Assistant, any OpenAI-compatible
+LLM, a webhook, or straight back as an echo), and speaks the answer on the
+satellite the action names. A word can also hold a conversation, or be a
+trigger that Home Assistant acts on. Home Assistant sees every satellite as a device, through
+the Calliope integration
+([`clients/home-assistant`](clients/home-assistant/README.md)) or over MQTT.
+
+Listening has run live on the first board: a spoken command was answered by
+Home Assistant. Conversations, trigger words and voice barge-in are tested
+against fakes so far, and
+`POST /satellites/{id}/inject` runs a clip through the hub with nobody in
+earshot. The hub's README says
+[what has run where](services/satellites/README.md#status).
 
 The first board is Espressif's ESP32-Korvo v1.1 (three microphones, a speaker
 loopback for echo cancellation, twelve LEDs, six buttons).
@@ -126,7 +135,7 @@ names the engines a deployment loaded.
 
 **OpenAI-shaped:** `POST` on `/v1/audio/transcriptions`,
 `/v1/audio/translations`, `/v1/audio/speech` and `/v1/chat/completions`; `GET`
-on `/v1/models` and `/v1/models/{id}`. No language model runs here — a chat
+on `/v1/models` and `/v1/models/{id}`. No language model runs here: a chat
 request carrying audio is transcribed, and one without gets a fixed reply.
 
 **Native:** `POST /transcribe`, `POST /speak`, `GET /voices`; `GET
@@ -160,11 +169,16 @@ flowchart LR
     S["stt :8000<br/>Parakeet or Whisper"]
     T["tts :8001<br/>Kokoro, 54 voices"]
     L["tts-long :8002<br/>Chatterbox, a job queue"]
+    H["satellites :8003<br/>the satellite hub"]
   end
+  D["Satellites,<br/>on Wi-Fi"] -->|"wss /satellites/ws"| G
   G --> U
   G --> S
   G --> T
   G --> L
+  G --> H
+  H --> S
+  H --> T
 ```
 
 | | Image | Runs | Resident |
@@ -174,16 +188,17 @@ flowchart LR
 | [`services/tts-long`](services/tts-long/README.md) | `calliope-tts-long` | Chatterbox and Chatterbox Turbo, as jobs | 6.6 GB |
 | [`services/gateway`](services/gateway/README.md) | `calliope-gateway` | Auth, routing, one health answer | — |
 | [`services/ui`](services/ui/README.md) | `calliope-ui` | The page, and link ingestion through MeTube | — |
+| [`services/satellites`](services/satellites/README.md) | `calliope-satellites` | The satellite hub: adoption, wake words, echo cancellation, what each word does. Optional | 228 to 326 MiB, measured with 0 to 6 satellites |
 
 On the deployed NAS: Parakeet 8.5–10.4× realtime, Kokoro 1.8× at four threads
 and 2.8× at eight, Chatterbox 0.21×. The gateway hop adds 0.85 ms on a laptop over
 loopback and has not been measured on the NAS.
-**A realtime factor is a property of the machine, not of the model** — `GET
+**A realtime factor is a property of the machine, not of the model.** `GET
 /health` reports your own, with the sample count beside it.
 
 Only `tts-long` carries torch; `stt` and `tts` run on ONNX Runtime and
-CTranslate2 instead. As written `compose.yaml` asks for 31 CPUs and about
-18.9 GB across the five, which is the box it came from rather than a
+CTranslate2 instead. As written `compose.yaml` asks for 32 CPUs and about
+19.4 GB across the six, which is the box it came from rather than a
 requirement.
 
 ### Transcription
@@ -224,7 +239,7 @@ roughly three-quarters of an hour of compute and no HTTP request survives the
 wait. The queue holds 32; the model loads on first use and unloads after ten
 minutes idle. `chatterbox` clones any reference clip in 23 languages;
 `chatterbox-turbo` needs five seconds of reference and speaks English only. Two
-engines, both jobs — see
+engines, both jobs: see
 [ADR 0008](docs/adr/0008-two-engines-and-both-stay-jobs.md).
 
 > [!IMPORTANT]
@@ -236,18 +251,20 @@ engines, both jobs — see
 
 ## Run it
 
-Five things in `compose.yaml` belong to the machine it came from.
+Six things in `compose.yaml` belong to the machine it came from, or are
+optional.
 
 | In `compose.yaml` | What it is | What to do |
 |---|---|---|
-| `GATEWAY_TLS_CERT`, `GATEWAY_TLS_KEY`, the `/etc/certificates` mount | a certificate nobody else has | Point them at your own, or delete all three and serve plain HTTP. TLS is opt-in, and half-configured is a refusal to start rather than a quiet fallback |
+| `GATEWAY_TLS_CERT`, `GATEWAY_TLS_KEY`, the `/etc/certificates` mount | a certificate nobody else has | Point them at your own, or delete all three and serve plain HTTP, which satellites on release firmware cannot use unless a proxy in front adds TLS. TLS is opt-in, and half-configured is a refusal to start rather than a quiet fallback |
 | the gateway `healthcheck` and `UI_GATEWAY_URL` | both dial the gateway over `https` | Change both to `http` if you dropped TLS |
 | `TTS_RUNNER_*` and the `runner-key` bind mount | an optional GPU box on another LAN | Delete both. `tts-long` runs everything locally without it |
 | `UI_METUBE_URL` | a MeTube instance on that LAN | Delete it and the link box is not rendered. MeTube has no authentication of its own, so firewall it if you do configure one |
 | `AIV_HOST_LABEL`, `cpus:`, `mem_limit:` | a label stamped into every job record, and the size of the original box | Your own name, and limits that fit your machine |
+| `voice-satellites` and `GATEWAY_SATELLITES_URL` | the satellite hub, for devices on Wi-Fi | Delete the block and set the URL to `""` if you have no satellites. If you keep it, keep TLS: release firmware connects only to `wss://`, and trusts Let's Encrypt's roots unless it is built with your CA's ([Deploy](services/satellites/README.md#deploy)) |
 
 **First start is slow, legitimately.** No model is baked into any image; each
-downloads into its own volume — Parakeet 461 MB, Kokoro about 340 MB — and the
+downloads into its own volume (Parakeet 461 MB, Kokoro about 340 MB), and the
 healthcheck `start_period` allows 600 s for `stt` and 900 s for `tts-long`, so
 a quarter of an hour before the stack reports healthy is normal. Chatterbox
 pulls about 3 GB on the first job rather than at boot. Later starts are
@@ -256,7 +273,7 @@ immediate.
 > [!WARNING]
 > **Setting `GATEWAY_API_KEYS` takes the web page offline.** The check is
 > middleware over the whole application and `/health` is its only exemption, so
-> a browser navigating to `/` or `/ui` is answered 401 — and the page has no
+> a browser navigating to `/` or `/ui` is answered 401, and the page has no
 > box to type a key into. `UI_GATEWAY_API_KEY` signs the page container's own
 > calls back to the gateway; it cannot sign the browser's navigation, and
 > setting it makes anyone who can open the page authenticated by it. Either run
@@ -265,7 +282,7 @@ immediate.
 
 > [!CAUTION]
 > **Unset means open, for every service.** `GATEWAY_API_KEYS` ships unset, and
-> the gateway is the only process here that checks a token — `stt`, `tts` and
+> the gateway is the only process here that checks a token. `stt`, `tts` and
 > `tts-long` run with authentication off behind it. It says so at WARNING on
 > every start. A degenerate value, empty or only commas, exits at startup
 > rather than being treated as off.
@@ -273,7 +290,7 @@ immediate.
 `/health` needs no key and says a great deal: every backend's internal URL, the
 loaded recogniser and its glossary names, voice and queue counts, per-engine
 realtime factors and the GPU runner's state. It always answers 200, even when a
-backend is down, so read `status` rather than the status code — and do not
+backend is down, so read `status` rather than the status code. Do not
 publish 30080 to the internet.
 
 ## Build and test
@@ -310,20 +327,21 @@ configuration table.
 | [`services/tts-long`](services/tts-long/README.md) | The queue, both engines, cloning, the optional GPU runner |
 | [`services/gateway`](services/gateway/README.md) | Routing, authentication, `/health` |
 | [`services/ui`](services/ui/README.md) | The page and the routes behind it |
-| [`services/satellites`](services/satellites/README.md) | The satellite hub, adoption, the device protocol, OTA, wake words, routing, MQTT |
+| [`services/satellites`](services/satellites/README.md) | The satellite hub: deploy and upgrade, adoption, the device protocol, OTA, wake words, what each word does, MQTT |
 | [`packages/common`](packages/common/README.md) | Auth, the error envelope, `/health`, the entrypoint |
 | [`clients/macos-player`](clients/macos-player/README.md) | The capsule, the reader, the OpenClip action |
 | [`clients/korvo-satellite`](clients/korvo-satellite/README.md) | Satellite firmware: first flash, Wi-Fi setup, buttons, updates |
+| [`clients/home-assistant`](clients/home-assistant/README.md) | The Home Assistant integration: satellites as devices, triggers, actions, Calliope in Assist |
+| [`tools/wakeword-train`](tools/wakeword-train/README.md) | Training a wake word of your own for the satellites |
 | [`docs/architecture.md`](docs/architecture.md) | The measurements behind the shape of all this |
 | [`docs/adr/`](docs/adr/) | Decisions, dated, with what each one cost |
 
 ## Releases and licence
 
 `main` is the only branch. A release is a `v*` tag cut from it, and the
-deployment pins a version rather than a floating tag: `compose.yaml` names
-`v0.1.0` on all five images, so `git checkout v0.1.0` gives you the stack that
-is running. `v0.1.1` is a macOS client release and changed no service code,
-which is why the pin has not moved.
+deployment pins a version rather than a floating tag: `compose.yaml` names a
+version on every image, so checking out that tag gives you the stack that is
+running.
 
 BSD 2-Clause throughout. Each service and `packages/common` keep their own
 `LICENSE`; upstream terms are in
