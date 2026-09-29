@@ -794,3 +794,27 @@ def test_a_word_that_answers_on_the_same_satellite_answers_where_its_output_is()
     b2 = routing.Behaviour.model_validate({"mode": "command", "action": {
         "destination": {"type": "echo"}, "reply_to": "none"}})
     assert r.target(b2, "korvo") is None
+
+
+def test_a_pi_that_is_an_airplay_receiver_is_turned_on_off_and_named_from_the_page(client):
+    with client.websocket_connect("/satellites/ws") as ws:
+        hello = pi_hello() | {"airplay_enabled": True, "airplay_name": None}
+        hello["caps"] = hello["caps"] | {"airplay": {"version": 1}}
+        ws.send_json(hello)
+        ws.receive_json()
+        client.post(f"/satellites/{PI_MAC}/adopt", json={"name": "Lounge"})
+        ws.send_json(hello | {"token": ws.receive_json()["token"]})
+        assert ws.receive_json()["config"]["airplay_enabled"] is True
+        r = client.patch(f"/satellites/{PI_MAC}", json={"airplay_name": "Living room"})
+        assert r.status_code == 200
+        msg = ws.receive_json()
+        while msg["type"] != "config":
+            msg = ws.receive_json()
+        assert msg == {"type": "config", "airplay_name": "Living room"}
+        assert client.patch(f"/satellites/{PI_MAC}", json={"airplay_name": "bad\nname"}).status_code == 422
+        client.patch(f"/satellites/{PI_MAC}", json={"airplay_name": ""})
+        assert client.get(f"/satellites/{PI_MAC}").json()["config"]["airplay_name"] is None
+    with client.websocket_connect("/satellites/ws") as korvo:
+        adopt(client, korvo)
+        r = client.patch(f"/satellites/{NID}", json={"airplay_enabled": True})
+        assert r.status_code == 409 and r.json()["error"]["code"] == "no_airplay"

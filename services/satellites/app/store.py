@@ -100,8 +100,13 @@ REPORTED = {
     "audio_sink": _device_name,
     "audio_source": _device_name,
     "echo_reference": _flag,
+    # A satellite that is an AirPlay receiver (caps "airplay"): whether it
+    # is one, and the name phones list it as (None: the satellite's name).
+    "airplay_enabled": _flag,
+    "airplay_name": lambda v: v is None or (isinstance(v, str) and len(v) <= 64 and v.isprintable()),
 }
 AUDIO_SETTINGS = ("audio_sink", "audio_source", "echo_reference")
+AIRPLAY_SETTINGS = ("airplay_enabled", "airplay_name")
 # What the hub's record says for a switch the satellite has not reported yet:
 # off. Nothing is sent to a satellite, or heard from it, on a setting the hub
 # made up; the satellite's first status puts in the real value.

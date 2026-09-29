@@ -113,7 +113,7 @@ from . import router as routing
 from . import tools as tooling
 from .destinations import EnvName
 from .mqtt import MqttBridge
-from .store import (AUDIO_SETTINGS, DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions, keeps_a_mute,
+from .store import (AIRPLAY_SETTINGS, AUDIO_SETTINGS, DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions, keeps_a_mute,
                     reported_config, satellite_config)
 
 log = voice_logging.setup("voice-satellites", "SATELLITES")
@@ -2316,6 +2316,10 @@ class ConfigBody(BaseModel):
     # Another adopted satellite that plays what this one plays, or "" for
     # its own speaker (Hub.output_of).
     output_satellite: str | None = Field(default=None, max_length=64, pattern=r"^[0-9a-f]*$")
+    # A satellite with caps "airplay": whether it is an AirPlay receiver, and
+    # the name phones list it as ("" for the satellite's own name).
+    airplay_enabled: bool | None = None
+    airplay_name: str | None = Field(default=None, max_length=64, pattern=r"^[^\x00-\x1f\x7f]*$")
     # Replaces the whole mapping; the default is in store.py.
     buttons: dict[ButtonName, dict[Literal["press", "release"], ButtonAction]] | None = Field(
         default=None, max_length=16)
@@ -2762,12 +2766,18 @@ async def configure(nid: str, body: ConfigBody) -> dict:
     if audio and s is not None and not s.caps.get("audio_devices"):
         raise ApiError(409, f"satellite {nid} has no audio devices to choose from "
                             f"({', '.join(audio)})", code="no_audio_devices", param=audio[0])
+    air = [k for k in change if k in AIRPLAY_SETTINGS]
+    if air and s is not None and not s.caps.get("airplay"):
+        raise ApiError(409, f"satellite {nid} is not an AirPlay receiver", code="no_airplay",
+                       param=air[0])
+    if change.get("airplay_name") == "":
+        change["airplay_name"] = None
     if "output_satellite" in change:
         change["output_satellite"] = _output_satellite(nid, change["output_satellite"])
     if "name" in change:
         rec.name = change["name"]
     cfg = {k: v for k, v in change.items()
-           if k in DEFAULT_CONFIG or k in AUDIO_SETTINGS or k == "output_satellite"}
+           if k in DEFAULT_CONFIG or k in AUDIO_SETTINGS or k in AIRPLAY_SETTINGS or k == "output_satellite"}
     was_dark = not rec.config.get("lights_enabled", True)
     rec.config.update(cfg)
     # Set here, so the hub has it now: sent to the satellite below, and not
