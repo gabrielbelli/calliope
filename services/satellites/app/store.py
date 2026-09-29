@@ -104,11 +104,9 @@ REPORTED = {
     # is one, and the name phones list it as (None: the satellite's name).
     "airplay_enabled": _flag,
     "airplay_name": lambda v: v is None or (isinstance(v, str) and len(v) <= 64 and v.isprintable()),
-    # % of the phone's AirPlay slider, set when a phone connects.
-    "airplay_volume": _between(0, 100, whole=True),
 }
 AUDIO_SETTINGS = ("audio_sink", "audio_source", "echo_reference")
-AIRPLAY_SETTINGS = ("airplay_enabled", "airplay_name", "airplay_volume")
+AIRPLAY_SETTINGS = ("airplay_enabled", "airplay_name")
 # What the hub's record says for a switch the satellite has not reported yet:
 # off. Nothing is sent to a satellite, or heard from it, on a setting the hub
 # made up; the satellite's first status puts in the real value.
@@ -268,6 +266,9 @@ class Store:
                 bottom = cfg.pop("ring_bottom")
                 if "ring_top" not in n.get("config", {}) and isinstance(bottom, int):
                     cfg["ring_top"] = (bottom + 6) % 12
+            # airplay_volume, a starting volume for AirPlay, was a setting for
+            # a day on 29 Sep 2026: a phone kept its own.
+            cfg.pop("airplay_volume", None)
             self.satellites[n["id"]] = Satellite(**(n | {"config": cfg}))
         if records is not None and not f.exists():
             self.save_satellites()

@@ -215,7 +215,7 @@ class Agent:
         c = self.st.config
         return {k: c.get(k) for k in ("volume", "mic_gain_db", "mic_enabled", "speaker_enabled",
                                       "audio_sink", "audio_source", "echo_reference",
-                                      "airplay_enabled", "airplay_name", "airplay_volume")}
+                                      "airplay_enabled", "airplay_name")}
 
     def airplay_name(self) -> str:
         return self.st.config.get("airplay_name") or self.st.name or f"calliope-sat-{self.id[-4:]}"
@@ -255,8 +255,7 @@ class Agent:
         if self.devices.sources:
             await pipewire.set_source_volume(source, 10 ** (float(c.get("mic_gain_db") or 0) / 20))
         self.player.target = sink.name if sink else None
-        await self.airplay.apply(bool(c.get("airplay_enabled", True)), self.airplay_name(),
-                                 int(c.get("airplay_volume") if c.get("airplay_volume") is not None else 70))
+        await self.airplay.apply(bool(c.get("airplay_enabled", True)), self.airplay_name())
         await self.refresh_recording()
 
     # -- ducking: other streams go down while the satellite speaks, or while the hub asks --
@@ -551,29 +550,11 @@ class Agent:
 
         async def push() -> None:
             await asyncio.sleep(0.4)   # a burst of items (a new track) is one status
-            if self.metadata.new_session:
-                self.metadata.new_session = False
-                await self._starting_volume()
             self.airplay_state = await self._airplay_state()
             with contextlib.suppress(Exception):
                 await self.send(self.status())
                 await self._send_artwork()
         self._pushing = asyncio.create_task(push())
-
-    async def _starting_volume(self) -> None:
-        """A phone just connected: its slider goes to the starting volume
-        (DACP, through Shairport Sync), and it sends that volume back. A
-        phone that takes no remote control gets the output set directly."""
-        percent = self.st.config.get("airplay_volume")
-        percent = 70 if percent is None else int(percent)
-        await asyncio.sleep(1.0)   # let the phone finish connecting
-        if await airplay.set_phone_volume(percent):
-            log.info("AirPlay: the phone's volume set to %d%%", percent)
-            return
-        proc = await asyncio.create_subprocess_exec(
-            airplay.VOLUME_HOOK, str(airplay.VOLUME_RANGE_DB), f"{airplay.start_db(percent):.1f}",
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        await proc.wait()
 
     async def _send_artwork(self) -> None:
         """The cover of what plays, to the hub, once per picture: the page

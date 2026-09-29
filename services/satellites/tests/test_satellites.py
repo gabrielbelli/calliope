@@ -656,6 +656,16 @@ def test_a_ring_bottom_from_its_hour_as_a_setting_becomes_the_top_opposite(app, 
     assert config["ring_top"] == 8 and "ring_bottom" not in config
 
 
+def test_an_airplay_starting_volume_from_its_day_as_a_setting_is_dropped(app, tmp_path):
+    (tmp_path / "satellites.json").write_text(json.dumps({"satellites": [{
+        "id": NID, "name": "lounge", "model": MODEL, "token_sha256": "0" * 64,
+        "adopted_at": 1.0, "config": {"airplay_volume": 85}}]}))
+    with TestClient(app.app) as c:
+        assert "airplay_volume" not in c.get(f"/satellites/{NID}").json()["config"]
+        c.patch(f"/satellites/{NID}", json={"airplay_volume": 70})   # an unknown field: ignored
+        assert "airplay_volume" not in c.get(f"/satellites/{NID}").json()["config"]
+
+
 # ---- a Linux satellite (clients/pi-satellite) ----------------------------------
 
 PI_MAC = "b827eb123456"
@@ -812,8 +822,6 @@ def test_a_pi_that_is_an_airplay_receiver_is_turned_on_off_and_named_from_the_pa
             msg = ws.receive_json()
         assert msg == {"type": "config", "airplay_name": "Living room"}
         assert client.patch(f"/satellites/{PI_MAC}", json={"airplay_name": "bad\nname"}).status_code == 422
-        assert client.patch(f"/satellites/{PI_MAC}", json={"airplay_volume": 70}).status_code == 200
-        assert client.patch(f"/satellites/{PI_MAC}", json={"airplay_volume": 101}).status_code == 422
         client.patch(f"/satellites/{PI_MAC}", json={"airplay_name": ""})
         assert client.get(f"/satellites/{PI_MAC}").json()["config"]["airplay_name"] is None
     with client.websocket_connect("/satellites/ws") as korvo:

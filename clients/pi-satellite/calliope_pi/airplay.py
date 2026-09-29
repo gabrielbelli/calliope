@@ -56,13 +56,7 @@ def _quote(text: str) -> str:
     return '"' + clean.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def start_db(percent: int) -> float:
-    """A position of the phone's AirPlay slider, 0-100 %, as the AirPlay
-    volume Shairport Sync takes: -30 dB (the bottom) to 0 dB (the top)."""
-    return round(-30.0 + max(0, min(100, int(percent))) * 0.3, 1)
-
-
-def config(name: str, pipe: Path = PIPE, start_volume: int = 70) -> str:
+def config(name: str, pipe: Path = PIPE) -> str:
     """Shairport Sync's configuration for this satellite."""
     return "\n".join([
         "// Written by the Calliope satellite agent (calliope_pi/airplay.py).",
@@ -83,11 +77,6 @@ def config(name: str, pipe: Path = PIPE, start_volume: int = 70) -> str:
         # the agent asks whether it is playing (mpris_status).
         '  dbus_service_bus = "session";',
         '  mpris_service_bus = "session";',
-        # The volume a session starts at is set on the phone itself when it
-        # connects (set_phone_volume): Shairport Sync's own idle reset only
-        # ever lowers a loud one. This is the fallback for a phone that
-        # sends none.
-        f"  default_airplay_volume = {start_db(start_volume)};",
         "};",
         "alsa = {",
         '  output_device = "default";',
@@ -125,7 +114,7 @@ class AirPlay:
         self.conf, self.pipe = conf, pipe
         self.error: str | None = None
 
-    async def apply(self, enabled: bool, name: str, start_volume: int = 70) -> None:
+    async def apply(self, enabled: bool, name: str) -> None:
         """Running under `name` when enabled, stopped when not. Restarted
         only when its configuration changed, so a settings message that
         changes nothing else does not cut the music."""
@@ -136,7 +125,7 @@ class AirPlay:
             await _run("systemctl", "--user", "disable", "--now", UNIT)
             self.error = None
             return
-        text = config(name, self.pipe, start_volume)
+        text = config(name, self.pipe)
         make_fifo(self.pipe)
         changed = not self.conf.exists() or self.conf.read_text() != text
         if changed:
@@ -227,7 +216,6 @@ class Metadata:
                             "track": {}, "client_info": {}, "progress": None, "artwork": None}
         self.raw: dict = {}
         self.remote: dict = {}
-        self.new_session = False   # set as a phone connects; the agent sets its volume
         self.art_file = self.art_dir / "calliope-airplay-cover"
         self._thread: threading.Thread | None = None
         self._picture: bytearray | None = None
@@ -270,8 +258,6 @@ class Metadata:
             self.raw[key] = {"value": _decoded(kind, code, data), "at": round(time.time(), 3)}
         text = data.decode("utf-8", "replace").strip() or None
         if kind == "ssnc":
-            if code == "abeg":
-                self.new_session = True
             if code in ("abeg", "pbeg", "prsm"):
                 s["session"], s["playing"] = True, True
                 s["since"] = s["since"] or time.time()
@@ -338,17 +324,6 @@ class Metadata:
     def view(self) -> dict:
         """What the status carries: the decoded state, and every raw item."""
         return {"raw": dict(self.raw), "remote_control": bool(self.remote)}
-
-
-async def set_phone_volume(percent: int) -> bool:
-    """Move the phone's own AirPlay slider to `percent`, through Shairport
-    Sync's remote control (DACP): the phone then sends that volume back,
-    and calliope-airplay-volume sets the output. False where the phone does
-    not take remote control."""
-    code, _ = await _run("busctl", "--user", "call", "--", "org.gnome.ShairportSync", "/org/gnome/ShairportSync",
-                         "org.gnome.ShairportSync.RemoteControl", "SetAirplayVolume", "d",
-                         f"{start_db(percent):.1f}", timeout=5.0)
-    return code == 0
 
 
 async def mpris_metadata() -> dict:

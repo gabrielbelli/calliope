@@ -96,11 +96,10 @@ events where MPRIS is not there. The phone's remote-control token
 (`acre`) stays on the Pi: the hub's API has no key, and the token controls
 the phone's playback.
 
-**Starting volume.** When a phone connects, the agent moves the phone's own
-slider to `airplay_volume` (70 % unless the hub says otherwise) through
-Shairport Sync's remote control (`SetAirplayVolume`, over DACP), and the
-phone sends that volume back like any other move of its slider. A phone that
-takes no remote control gets the output set to the same level directly.
+**Volume.** A phone keeps its own: it sends its slider's position when it
+connects and whenever it moves, and that sets the output's volume. (Setting
+the phone's slider from here, over Shairport Sync's remote control, was
+tried on 29 Sep 2026: phones did not keep it.)
 
 **The cover** of what plays goes to the hub once per picture (`artwork`
 message, JPEG or PNG up to 2 MB, named by its SHA-256), which serves it at

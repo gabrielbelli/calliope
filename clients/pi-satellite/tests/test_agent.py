@@ -263,29 +263,3 @@ async def test_the_cover_goes_to_the_hub_once_per_picture_and_again_on_a_new_con
     assert len(sent) == 1
     assert sent[0]["sha256"] == hashlib.sha256(jpeg).hexdigest() and sent[0]["format"] == "jpeg"
     assert base64.b64decode(sent[0]["data"]) == jpeg
-
-
-async def test_a_phone_that_connects_is_moved_to_the_starting_volume(fake, monkeypatch):
-    asked, ran = [], []
-
-    async def phone(percent):
-        asked.append(percent)
-        return len(asked) == 1   # the first phone takes remote control; the second does not
-
-    class Proc:
-        async def wait(self):
-            return 0
-
-    async def run(*argv, **kw):
-        ran.append(argv)
-        return Proc()
-    monkeypatch.setattr(agentmod.airplay, "set_phone_volume", phone)
-    monkeypatch.setattr(agentmod.asyncio, "create_subprocess_exec", run)
-    nap = asyncio.sleep
-    monkeypatch.setattr(agentmod.asyncio, "sleep", lambda s: nap(0))
-    a = agent_with(hub="ws://x", token="t", name="k")
-    a.st.config["airplay_volume"] = 40
-    await a._starting_volume()
-    assert asked == [40] and ran == []
-    await a._starting_volume()
-    assert ran == [(agentmod.airplay.VOLUME_HOOK, "60", "-18.0")]

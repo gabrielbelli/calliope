@@ -178,14 +178,6 @@ def test_the_stream_says_its_format_rate_and_bit_rate():
     assert airplay.stream([si[0] | {"sample_specification": "float32le 2ch 48000Hz"}])["bitrate_kbps"] == 3072
 
 
-def test_the_starting_volume_is_the_phones_slider_in_airplay_decibels():
-    assert airplay.start_db(70) == -9.0 and airplay.start_db(0) == -30.0 and airplay.start_db(100) == 0.0
-    text = airplay.config("pi", start_volume=70)
-    assert "default_airplay_volume = -9.0;" in text
-    assert "high_volume_idle_timeout_in_minutes" not in text, "the phone's slider is set instead"
-    assert "default_airplay_volume = -15.0;" in airplay.config("pi", start_volume=50)
-
-
 def test_the_configuration_names_the_metadata_pipe(tmp_path):
     text = airplay.config("pi", tmp_path / "meta")
     assert 'enabled = "yes";' in text and f'pipe_name = "{tmp_path / "meta"}";' in text
@@ -275,29 +267,11 @@ def test_the_phones_volume_becomes_the_outputs_own_spread_over_60_db(tmp_path):
         "set-sink-mute @DEFAULT_SINK@ 1"]
 
 
-def test_a_new_phone_session_is_marked_so_its_volume_is_set():
-    m = airplay.Metadata()
-    m.feed(item("ssnc", "abeg"))
-    assert m.new_session is True
-
-
 def test_the_airplay_stream_is_found_through_alsa_too():
     through_alsa = [{"index": 7, "properties": {"application.name": "PipeWire ALSA [shairport-sync]",
                                                 "node.name": "alsa_playback.shairport-sync"},
                      "sample_specification": "s16le 2ch 44100Hz", "corked": False}]
     assert airplay.stream(through_alsa)["format"] == "s16le 2ch 44100Hz"
-
-
-async def test_the_phones_slider_is_moved_over_shairport_syncs_remote_control(monkeypatch):
-    calls = []
-
-    async def run(*argv, timeout=10.0):
-        calls.append(argv)
-        return 0, ""
-    monkeypatch.setattr(airplay, "_run", run)
-    assert await airplay.set_phone_volume(70) is True
-    assert calls == [("busctl", "--user", "call", "--", "org.gnome.ShairportSync", "/org/gnome/ShairportSync",
-                      "org.gnome.ShairportSync.RemoteControl", "SetAirplayVolume", "d", "-9.0")]
 
 
 async def test_mpris_fills_the_track_when_the_pipe_has_not_said_it(monkeypatch):

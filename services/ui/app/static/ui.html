@@ -4822,12 +4822,6 @@ function satAdoptedMarkup(u) {
               <input type="text" id="${u}-apname" maxlength="64" data-cfg="airplay_name" data-text
                      spellcheck="false" autocomplete="off"></div>
           </div>
-          <div class="grid2">
-            <div><label for="${u}-apvol">Starting volume</label>
-              <div class="slider"><input type="range" id="${u}-apvol" min="0" max="100" step="5" data-cfg="airplay_volume">
-                <output for="${u}-apvol"></output></div></div>
-          </div>
-          <div class="hint">A phone that connects starts at this volume, and its own slider moves there.</div>
           <div class="hint sat-aphint"></div>
           <img class="sat-apart" alt="Cover of what is playing" hidden>
           <dl class="facts sat-apfacts"></dl>
@@ -5272,7 +5266,6 @@ function satAirPlay(li, n, cfg) {
   const name = q('[data-cfg="airplay_name"]');
   if (!name.dataset.held && name !== document.activeElement) name.value = cfg.airplay_name || "";
   name.placeholder = satName(n);
-  satLevel(q('[data-cfg="airplay_volume"]'), typeof cfg.airplay_volume === "number" ? cfg.airplay_volume : 70);
   const ap = n.online ? (n.status && n.status.airplay) || null : null;
   satSet(q(".sat-ap .sum-note"), n.online ? satAirPlayNote(cfg, ap) : "");
   satSet(q(".sat-aphint"), !on || !n.online ? ""
