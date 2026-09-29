@@ -654,3 +654,77 @@ def test_a_ring_bottom_from_its_hour_as_a_setting_becomes_the_top_opposite(app, 
     with TestClient(app.app) as c:
         config = c.get(f"/satellites/{NID}").json()["config"]
     assert config["ring_top"] == 8 and "ring_bottom" not in config
+
+
+# ---- a Linux satellite (clients/pi-satellite) ----------------------------------
+
+PI_MAC = "b827eb123456"
+
+
+def pi_hello(token: str = "", mic: bool = False) -> dict:
+    """What calliope_pi.agent says: a speaker, maybe a microphone with the
+    output as its reference, its PipeWire devices and which ones it uses."""
+    caps = {"speaker": {"rate": 48000, "channels": 1, "format": "s16le"}, "duck": True,
+            "audio_devices": True, "bundle": "tar.gz"}
+    if mic:
+        caps["mic"] = {"rate": 16000, "channels": 2, "format": "s16le", "reference": True}
+    return {"type": "hello", "id": PI_MAC, "model": "raspberry-pi", "fw": "v0.1.2-200-gabc", "token": token,
+            "caps": caps, "volume": 55, "mic_gain_db": 0.0, "mic_enabled": True, "speaker_enabled": True,
+            "audio_sink": "alsa_output.usb-Generic.analog-stereo", "audio_source": None,
+            "echo_reference": True,
+            "audio": {"sinks": [{"name": "alsa_output.usb-Generic.analog-stereo",
+                                 "description": "USB Audio", "api": "alsa"}],
+                      "sources": [], "default_sink": "alsa_output.usb-Generic.analog-stereo",
+                      "default_source": None}}
+
+
+def test_a_satellite_with_no_microphone_is_adopted_as_a_speaker_and_not_listened_to(client, app):
+    with client.websocket_connect("/satellites/ws") as ws:
+        ws.send_json(pi_hello())
+        assert ws.receive_json() == {"type": "pending"}
+        assert client.post(f"/satellites/{PI_MAC}/adopt", json={"name": "Lounge"}).status_code == 200
+        token = ws.receive_json()["token"]
+        ws.send_json(pi_hello(token))
+        welcome = ws.receive_json()
+        assert welcome["type"] == "welcome"
+        # Its own choices, from the hello, are what the hub keeps and sends back.
+        assert welcome["config"]["audio_sink"] == "alsa_output.usb-Generic.analog-stereo"
+        assert welcome["config"]["volume"] == 55 and welcome["config"]["mic_gain_db"] == 0.0
+        s = app.hub.sessions[PI_MAC]
+        assert s.listener is None and s.listen_error == "it has no microphone"
+        got = client.get(f"/satellites/{PI_MAC}").json()
+        assert got["model"] == "raspberry-pi" and got["adopted"] and got["online"]
+
+
+def test_its_output_and_microphone_are_chosen_from_the_page(client):
+    with client.websocket_connect("/satellites/ws") as ws:
+        ws.send_json(pi_hello())
+        ws.receive_json()
+        client.post(f"/satellites/{PI_MAC}/adopt", json={"name": "Lounge"})
+        ws.send_json(pi_hello(ws.receive_json()["token"]))
+        ws.receive_json()
+        r = client.patch(f"/satellites/{PI_MAC}", json={"audio_sink": "alsa_output.platform-bcm2835.stereo",
+                                                        "echo_reference": False})
+        assert r.status_code == 200, r.json()
+        msg = ws.receive_json()
+        while msg["type"] != "config":
+            msg = ws.receive_json()
+        assert msg == {"type": "config", "audio_sink": "alsa_output.platform-bcm2835.stereo",
+                       "echo_reference": False}
+        assert client.patch(f"/satellites/{PI_MAC}",
+                            json={"audio_sink": "not a node; rm -rf"}).status_code == 422
+
+
+def test_a_korvo_has_no_audio_devices_to_choose(client):
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        r = client.patch(f"/satellites/{NID}", json={"audio_sink": "alsa_output.x"})
+        assert r.status_code == 409 and r.json()["error"]["code"] == "no_audio_devices"
+
+
+def test_a_release_bundle_is_stored_beside_esp32_images(client):
+    import gzip
+    bundle = gzip.compress(b"manifest")
+    r = client.post("/satellites/firmware", params={"model": "raspberry-pi", "version": "v1"}, content=bundle)
+    assert r.status_code == 200, r.json()
+    assert r.json()["model"] == "raspberry-pi" and r.json()["size"] == len(bundle)

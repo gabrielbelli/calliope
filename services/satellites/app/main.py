@@ -113,7 +113,7 @@ from . import router as routing
 from . import tools as tooling
 from .destinations import EnvName
 from .mqtt import MqttBridge
-from .store import (DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions, keeps_a_mute,
+from .store import (AUDIO_SETTINGS, DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions, keeps_a_mute,
                     reported_config, satellite_config)
 
 log = voice_logging.setup("voice-satellites", "SATELLITES")
@@ -323,6 +323,13 @@ class Session:
     @property
     def mic_channels(self) -> int:
         return self.caps.get("mic", {}).get("channels", 4)
+
+    @property
+    def has_mic(self) -> bool:
+        """A satellite whose caps name no microphone is a speaker only (a Pi
+        with no input). Firmware from before caps said nothing about any of
+        it, and had the Korvo's."""
+        return "mic" in self.caps or not self.caps
 
     def sound(self, start: float, end: float, pcm: bytes) -> outputs.Sound:
         """A sound played on this satellite, for OutputSense: its level, and
@@ -928,6 +935,9 @@ class Hub:
 
     def start_listening(self, s: Session) -> None:
         if s.listener is not None and not s.listener.done():
+            return
+        if not s.has_mic:
+            s.listen_error = "it has no microphone"
             return
         try:
             s.ear = listening.Ear(debug_s=DEBUG_AUDIO_S, rate=s.mic_rate, channels=s.mic_channels,
@@ -2265,6 +2275,11 @@ class ConfigBody(BaseModel):
     brightness: int | None = Field(default=None, ge=1, le=100)
     ring_top: int | None = Field(default=None, ge=0, le=11)
     ring_upside_down: bool | None = None
+    # A satellite with caps "audio_devices": a PipeWire node name from its
+    # `audio` list, or "" for PipeWire's own default.
+    audio_sink: str | None = Field(default=None, max_length=256, pattern=r"^[\w.:@+-]*$")
+    audio_source: str | None = Field(default=None, max_length=256, pattern=r"^[\w.:@+-]*$")
+    echo_reference: bool | None = None
     # Replaces the whole mapping; the default is in store.py.
     buttons: dict[ButtonName, dict[Literal["press", "release"], ButtonAction]] | None = Field(
         default=None, max_length=16)
@@ -2588,8 +2603,11 @@ async def upload_firmware(request: Request, model: str = Query(..., max_length=6
         raise ApiError(400, "empty body: send the .bin as the request body")
     if len(image) > MAX_FIRMWARE:
         raise ApiError(413, f"image is {len(image)} bytes; an OTA slot holds {MAX_FIRMWARE}")
-    if image[0] != 0xE9:  # every ESP32 app image starts with this magic byte
-        raise ApiError(400, "not an ESP32 application image (first byte is not 0xE9)")
+    # Every ESP32 app image starts with 0xE9; a Linux satellite's release
+    # bundle is a gzipped tar (clients/pi-satellite/scripts/build_bundle.py).
+    if image[0] != 0xE9 and image[:2] != b"\x1f\x8b":
+        raise ApiError(400, "neither an ESP32 application image (first byte 0xE9) nor a "
+                            "satellite release bundle (.tar.gz)")
     try:
         sig = signing.accept_upload(image, signature, FIRMWARE_KEY)
     except signing.SignatureError as e:
@@ -2703,16 +2721,20 @@ async def configure(nid: str, body: ConfigBody) -> dict:
     if rec is None:
         raise ApiError(404, "no adopted satellite with that id")
     change = body.model_dump(exclude_none=True)
+    s = hub.sessions.get(nid)
+    audio = [k for k in change if k in AUDIO_SETTINGS]
+    if audio and s is not None and not s.caps.get("audio_devices"):
+        raise ApiError(409, f"satellite {nid} has no audio devices to choose from "
+                            f"({', '.join(audio)})", code="no_audio_devices", param=audio[0])
     if "name" in change:
         rec.name = change["name"]
-    cfg = {k: v for k, v in change.items() if k in DEFAULT_CONFIG}
+    cfg = {k: v for k, v in change.items() if k in DEFAULT_CONFIG or k in AUDIO_SETTINGS}
     was_dark = not rec.config.get("lights_enabled", True)
     rec.config.update(cfg)
     # Set here, so the hub has it now: sent to the satellite below, and not
     # taken from its next status.
     rec.unreported = [k for k in rec.unreported if k not in cfg]
     hub.store.save_satellites()
-    s = hub.sessions.get(nid)
     if s is not None and s.adopted:
         to_satellite = (satellite_config(cfg) | ({"name": rec.name} if "name" in change else {})
                         | (hub.button_actions(s, cfg) if "buttons" in cfg else {}))

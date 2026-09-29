@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import re
 import hmac
 import json
 import os
@@ -63,6 +64,12 @@ def _flag(v: object) -> bool:
     return isinstance(v, bool)
 
 
+def _device_name(v: object) -> bool:
+    """A PipeWire node name (a satellite with audio_devices), or None for
+    PipeWire's own default."""
+    return v is None or (isinstance(v, str) and len(v) <= 256 and DEVICE_NAME.fullmatch(v) is not None)
+
+
 def _between(low: float, high: float, *, whole: bool = False):
     def ok(v: object) -> bool:
         # bool is an int to Python, and true is not a volume.
@@ -85,10 +92,18 @@ REPORTED = {
     "brightness": _between(1, 100, whole=True),
     "ring_top": _between(0, 11, whole=True),
     "ring_upside_down": _flag,
+    # A Linux satellite's (caps "audio_devices"): which output and microphone
+    # it uses, and whether it sends what the output plays as the echo
+    # reference. A satellite that never reports them is never sent them.
+    "audio_sink": _device_name,
+    "audio_source": _device_name,
+    "echo_reference": _flag,
 }
+AUDIO_SETTINGS = ("audio_sink", "audio_source", "echo_reference")
 # What the hub's record says for a switch the satellite has not reported yet:
 # off. Nothing is sent to a satellite, or heard from it, on a setting the hub
 # made up; the satellite's first status puts in the real value.
+DEVICE_NAME = re.compile(r"[\w.:@+-]*")
 UNREPORTED = {"mic_enabled": False, "speaker_enabled": False, "lights_enabled": False}
 
 

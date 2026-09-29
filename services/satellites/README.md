@@ -234,7 +234,7 @@ name.
 | `GET /satellites/telemetry/records?hours=&since=&until=&kind=&satellite=&word=&limit=500` | The newest `limit` records that match (up to 20000), oldest first. `kind` is comma-separated: `turn`, `wake`, `near_miss`, `session`, `device` |
 | `GET /satellites/telemetry/summary?hours=24&satellite=` | The records of the last `hours`, aggregated ([Telemetry](#telemetry)) |
 | `GET /satellites/firmware` | Uploaded images |
-| `POST /satellites/firmware?model=&version=&signature=` | The `.bin` as the raw body. It must start with the ESP32 image magic (0xE9) and fit a 4 MB slot. `signature` is base64 or base64url DER ECDSA. |
+| `POST /satellites/firmware?model=&version=&signature=` | The `.bin` as the raw body. It must start with the ESP32 image magic (0xE9), or be a Linux satellite's release bundle (a gzipped tar, `model=raspberry-pi`), and fit a 4 MB slot. `signature` is base64 or base64url DER ECDSA. |
 | `DELETE /satellites/firmware/{sha256}` | |
 | `POST /satellites/ota` | `{"satellite": "<id>|<name>|all", "sha256": "..."}`. Images are only sent to adopted, online satellites of the image's model, and not to a satellite that would refuse the signature. |
 
@@ -321,6 +321,13 @@ ignores what it does not know without a word.
 | `earcons` | `max`, `max_bytes`, `rate` of the sounds it can keep |
 | `duck` | `true`: it takes `duck` and `unduck` |
 | `ota_key` | On a signed build, the id of the key an update must be signed by |
+| `audio_devices` | A Linux satellite ([pi-satellite](../../clients/pi-satellite/README.md)): it lists PipeWire's outputs and inputs as `audio` in its hello and status, and takes `audio_sink`, `audio_source` and `echo_reference` in `welcome` and `config` |
+| `bundle` | `"tar.gz"`: its updates are signed release bundles, not ESP32 images |
+
+A satellite whose caps name no `mic` is a speaker only: it is adopted and
+plays, and the hub does not listen to it (`listening` says it has no
+microphone). A `mic` with `reference: true` has the output's monitor as
+channel 0, as the Korvo's loopback is.
 
 **Text frames, hub → satellite**
 
