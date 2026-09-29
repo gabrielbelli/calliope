@@ -1212,6 +1212,13 @@ SATELLITES_PATHS = (
     # twin, so above it as well.
     ("POST", "/satellites/llm/models"),
     ("POST", "/satellites/llm/test"),
+    # Telemetry, off until turned on: its settings, its records and their
+    # summary. Above /satellites/{nid}: PUT and DELETE have no twin there.
+    ("GET", "/satellites/telemetry"),
+    ("PUT", "/satellites/telemetry"),
+    ("DELETE", "/satellites/telemetry"),
+    ("GET", "/satellites/telemetry/records"),
+    ("GET", "/satellites/telemetry/summary"),
     ("GET", "/satellites/{nid}"),
     ("PATCH", "/satellites/{nid}"),
     ("GET", "/satellites/{nid}/listen"),
