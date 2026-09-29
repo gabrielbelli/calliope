@@ -604,3 +604,33 @@ def test_telemetry_is_read_once_with_the_satellites_and_its_switch_turns_it_on(t
     assert got["before"] == "off" and got["after"] == "recording everything"
     assert got["calls"] == [["GET", None], ["PUT", {"enabled": True}], ["GET", None]]
     assert got["size"] == "2.0 MB kept, over 1 day." and got["download"] is False
+
+
+def test_a_linux_satellites_output_and_microphone_are_listed_and_a_missing_one_kept(tmp_path):
+    """From the devices its last status listed; the system default first; an
+    output chosen before and unplugged since stays chosen and says so; a
+    satellite with no microphone says that instead of offering none."""
+    got = run(tmp_path, """
+      Option = class { constructor(text, value) { this.text = text; this.value = value; } };
+      const el = () => ({ dataset: {}, hidden: false, value: "", opts: [], attrs: {}, textContent: "",
+                          set textContent(v) { this.opts = []; }, get textContent() { return ""; },
+                          append(o) { this.opts.push([o.value, o.text]); },
+                          toggleAttribute(n, v) { this.attrs[n] = v; } });
+      const parts = { ".sat-audio": el(), '[data-cfg="audio_sink"]': el(), '[data-cfg="audio_source"]': el() };
+      const li = { querySelector: sel => parts[sel] };
+      const n = { caps: { audio_devices: true }, status: { audio: {
+        sinks: [{ name: "alsa_output.builtin", description: "Built-in Audio" }], sources: [] } } };
+      satAudio(li, n, { audio_sink: "alsa_output.usb-dac" });
+      const out = { box: parts[".sat-audio"].hidden, sink: parts['[data-cfg="audio_sink"]'].opts,
+                    chosen: parts['[data-cfg="audio_sink"]'].value,
+                    source: parts['[data-cfg="audio_source"]'].opts,
+                    off: parts['[data-cfg="audio_source"]'].attrs["data-off"] };
+      satAudio(li, { caps: {}, status: {} }, {});
+      out.korvo = parts[".sat-audio"].hidden;
+      console.log(JSON.stringify(out));
+    """)
+    assert got["box"] is False and got["korvo"] is True
+    assert got["sink"] == [["", "The system's default"], ["alsa_output.builtin", "Built-in Audio"],
+                           ["alsa_output.usb-dac", "alsa_output.usb-dac (not connected)"]]
+    assert got["chosen"] == "alsa_output.usb-dac"
+    assert got["source"] == [["", "No microphone connected"]] and got["off"] is True

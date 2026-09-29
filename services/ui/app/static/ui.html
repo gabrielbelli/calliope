@@ -4227,6 +4227,10 @@ const SAT_COPY = {
   moreReply: "replies on {name}",
   moreSilent: "replies nowhere",
   moreVoice: "voice {v}",
+  audioDefault: "The system's default",
+  audioMissing: "{name} (not connected)",
+  audioNoOutput: "No output found",
+  audioNoMic: "No microphone connected",
   tmOff: "off",
   tmOnFull: "recording everything",
   tmOnTimings: "recording timings only",
@@ -4730,6 +4734,15 @@ function satAdoptedMarkup(u) {
           <div class="slider"><input type="range" id="${u}-bright" min="10" max="100" step="5" data-cfg="brightness">
             <output for="${u}-bright"></output></div></div>
       </div>
+      <!-- A LINUX SATELLITE'S OWN DEVICES (clients/pi-satellite): which
+           output it plays to and which microphone it hears with, from the
+           PipeWire list it reports. Hidden on a satellite without them. -->
+      <div class="grid2 sat-audio" hidden>
+        <div><label for="${u}-sink">Output</label>
+          <select id="${u}-sink" data-cfg="audio_sink" data-text></select></div>
+        <div><label for="${u}-source">Microphone input</label>
+          <select id="${u}-source" data-cfg="audio_source" data-text></select></div>
+      </div>
       <div class="hint sat-output"></div>
       <div class="row sat-switches">
         <label class="checkline tight"><input type="checkbox" data-cfg="speaker_enabled"> Speaker</label>
@@ -4889,7 +4902,7 @@ function satelliteRow(n) {
   li.addEventListener("change", ev => {
     const t = ev.target;
     if (t.dataset.cfg) {
-      const value = t.type === "checkbox" ? t.checked
+      const value = t.type === "checkbox" ? t.checked : "text" in t.dataset ? t.value
         : t.dataset.steps ? Math.round(Number(t.value) * 100 / Number(t.dataset.steps)) : Number(t.value);
       t.dataset.held = "save";
       satellitePatch(li, { [t.dataset.cfg]: value }, satNoteFor(li, t), t);
@@ -4943,6 +4956,27 @@ function satNoteFor(li, from) {
    disclosure, and a value is written only into a control nobody is holding:
    a slider being dragged, a setting being saved (data-held) or a box being
    typed in keeps what the reader put there. */
+/* A LINUX SATELLITE'S OUTPUT AND MICROPHONE, from the devices its last
+   status listed. A device chosen before and not there now (a USB card
+   unplugged) stays chosen and says so, as a wake word's missing model does. */
+function satAudio(li, n, cfg) {
+  const q = sel => li.querySelector(sel);
+  const audio = n.caps && n.caps.audio_devices && n.status && n.status.audio;
+  q(".sat-audio").hidden = !audio;
+  if (!audio) return;
+  const pick = (sel, list, chosen, none) => {
+    const opts = [["", SAT_COPY.audioDefault], ...(list || []).map(d => [d.name, d.description || d.name])];
+    if (chosen && !(list || []).some(d => d.name === chosen)) {
+      opts.push([chosen, satText("audioMissing", { name: chosen })]);
+    }
+    satFillSelect(sel, list && list.length ? opts : [["", none]]);
+    if (!sel.dataset.held) sel.value = chosen || "";
+    sel.toggleAttribute("data-off", !(list && list.length));
+  };
+  pick(q('[data-cfg="audio_sink"]'), audio.sinks, cfg.audio_sink, SAT_COPY.audioNoOutput);
+  pick(q('[data-cfg="audio_source"]'), audio.sources, cfg.audio_source, SAT_COPY.audioNoMic);
+}
+
 function satelliteUpdate(li, n) {
   li._n = n;
   const q = sel => li.querySelector(sel);
@@ -4976,6 +5010,7 @@ function satelliteUpdate(li, n) {
     q(".bar-fill").style.transform = `scaleX(${Math.max(0, Math.min(1, s.bar)).toFixed(4)})`;
   }
   const cfg = n.config || {};
+  satAudio(li, n, cfg);
   satSet(q(".sat-why"), satWhy(n));
   satSet(q(".sat-output"), n.online && n.output === "jack" ? SAT_COPY.outJack : "");
   satLevel(q('[data-cfg="volume"]'), cfg.volume);
