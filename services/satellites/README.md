@@ -880,10 +880,13 @@ and "e a Roma?" (English, the prior). `app/language.py` has the rest.
 
 ### Speech-to-text
 
-The hub asks stt-stack's `/health` once a start, before its first
-transcription, for the engines it serves and what each takes
-([stt-stack](../stt/README.md#what-each-engine-can-do)). Then, for each
-command:
+The hub asks stt-stack's `/health` before its first transcription for the
+engines it serves and what each takes
+([stt-stack](../stt/README.md#what-each-engine-can-do)). It asks again every
+10 minutes, so a stack redeployed with other `STT_MODELS` is seen without a
+hub restart. A stack that does not answer (it takes no connection while it
+loads its models) is asked again after 30 s, and until then each command
+goes to its default engine. Then, for each command:
 
 - **The engine.** A word whose `language` hint is the one language an engine
   was loaded for goes to that engine by its id. With

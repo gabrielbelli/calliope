@@ -92,10 +92,11 @@ speech its autoregressive decoder looped ("falei, falei, …") for 48 s on a
 - **The Home Assistant integration** builds one speech-to-text entity from
   each entry of `models`, and keeps each entity on its engine when the
   default changes.
-- **The satellite hub** reads `models` once per start. A wake word whose
-  language hint is the one language an engine was loaded for goes to that
-  engine by its id, so with `STT_MODELS=parakeet,parakeet-pt-br` a `pt` word
-  is heard by the fine-tune. Every other command gets the default.
+- **The satellite hub** reads `models` before its first command, and again
+  every 10 minutes (every 30 s while the stack does not answer). A wake word
+  whose language hint is the one language an engine was loaded for goes to
+  that engine by its id, so with `STT_MODELS=parakeet,parakeet-pt-br` a `pt`
+  word is heard by the fine-tune. Every other command gets the default.
 - The deviation "`model` does not choose an engine", in the stack's README
   and in the root README, is replaced by this rule.
 

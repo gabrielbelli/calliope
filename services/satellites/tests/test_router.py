@@ -71,7 +71,8 @@ class Fake:
 
     def hosts(self) -> list[str]:
         """The services asked, in order; stt-stack's /health, which the hub
-        asks once a start, is not one."""
+        asks before its first transcription and when its answer is stale,
+        is not one."""
         return [r.url.host for r in self.seen if r.url.path != "/health"]
 
     def sent(self, host: str) -> httpx.Request:
@@ -680,3 +681,55 @@ async def test_a_word_in_the_language_of_a_fine_tune_is_heard_by_it(make, fake):
     assert pt["model"] == b"parakeet-pt-br" and "language" not in pt
     assert en["model"] == b"whisper-1" and none["model"] == b"whisper-1"
     assert pt["boost"] == b"true"
+
+
+@pytest.mark.parametrize("down", ["refused", "loading"])
+async def test_a_stack_that_did_not_answer_its_health_is_asked_again(make, fake, monkeypatch, down):
+    """stt-stack takes no connection while it loads its models. A hub whose
+    first command came then remembered "no engines" until it restarted, and
+    sent no word to the fine-tune. It asks again once ENGINE_RETRY_S has
+    passed, and not on every command before that."""
+    stt_with(fake, engine="parakeet", profiles={"home-assistant"}, models=[PARAKEET, PT_BR])
+    answering, up = fake.handlers["stt.test"], [False]
+
+    def handler(r: httpx.Request) -> httpx.Response:
+        if r.url.path == "/health" and not up[0]:
+            if down == "refused":
+                raise httpx.ConnectError("connection refused", request=r)
+            return httpx.Response(503, json={"status": "loading"})
+        return answering(r)
+    fake.handlers["stt.test"] = handler
+    router = make()
+    await router.transcribe(ONE_SECOND, "pt-BR")
+    up[0] = True
+    await router.transcribe(ONE_SECOND, "pt-BR")
+    assert health_asked(fake) == 1, "asked again on every command while it was down"
+
+    clock = time.monotonic() + router_module.ENGINE_RETRY_S
+    monkeypatch.setattr(router_module.time, "monotonic", lambda: clock)
+    await router.transcribe(ONE_SECOND, "pt-BR")
+    first, soon, later = transcriptions(fake)
+    assert first["model"] == soon["model"] == b"whisper-1"
+    assert later["model"] == b"parakeet-pt-br"
+    assert health_asked(fake) == 2
+
+
+async def test_a_stack_redeployed_with_a_fine_tune_is_seen_without_a_restart(make, fake, monkeypatch):
+    """An answer was kept for the hub's life, so a fine-tune added to
+    STT_MODELS (or one taken out of it) waited for the hub to restart. The
+    answer stands for ENGINE_RECHECK_S."""
+    models = [PARAKEET]
+    stt_with(fake, engine="parakeet", profiles={"home-assistant"}, models=models)
+    router = make()
+    await router.transcribe(ONE_SECOND, "pt-BR")
+    models.append(PT_BR)  # STT_MODELS=parakeet,parakeet-pt-br, redeployed
+    await router.transcribe(ONE_SECOND, "pt-BR")
+    assert health_asked(fake) == 1
+
+    clock = time.monotonic() + router_module.ENGINE_RECHECK_S
+    monkeypatch.setattr(router_module.time, "monotonic", lambda: clock)
+    await router.transcribe(ONE_SECOND, "pt-BR")
+    before, soon, after = transcriptions(fake)
+    assert before["model"] == soon["model"] == b"whisper-1"
+    assert after["model"] == b"parakeet-pt-br"
+    assert health_asked(fake) == 2

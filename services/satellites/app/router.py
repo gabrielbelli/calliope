@@ -99,8 +99,16 @@ SPEAKER_RATE = 48000   # what the Korvo plays; Session.spk_rate for others
 # long LLM answer is cut at a sentence end below that rather than lost whole.
 MAX_TTS_CHARS = 4096
 # How long to wait for stt-stack's /health, asked before the first
-# transcription of a start (Router._stt_health).
+# transcription of a start and again once its answer is stale
+# (Router._stt_health).
 ENGINE_PROBE_S = 3.0
+# How long an answer from that /health stands: a stack redeployed with other
+# STT_MODELS is seen within ENGINE_RECHECK_S. A probe that got no usable
+# answer is asked again after ENGINE_RETRY_S instead. stt-stack takes no
+# connection while it loads its models, and until it answers, every command
+# goes to its default engine, a fine-tune's words included.
+ENGINE_RECHECK_S = 600.0
+ENGINE_RETRY_S = 30.0
 # Home Assistant's own names (areas, exposed entities, their aliases), which
 # the Calliope integration keeps on stt-stack as this glossary profile
 # (clients/home-assistant/custom_components/calliope/vocabulary.py). Named to
@@ -579,9 +587,10 @@ class Router:
         # stt-stack's /health, as far as transcribing needs it: its engines
         # (id, family, languages, what each takes), whether decode-time
         # biasing is on (`hotwords`), and the glossary profiles it has. None
-        # until asked; asked once per start, and again when the vocabulary is
-        # looked for again.
+        # until asked; asked again after _stt_until, and when the vocabulary
+        # is looked for again.
         self._stt: dict | None = None
+        self._stt_until = 0.0
         # When stt-stack last refused HA_GLOSSARY, or listed it as absent, and
         # when it last refused `boost`.
         self._glossary_missing: float | None = None
@@ -672,23 +681,35 @@ class Router:
                                          + (time.monotonic() - t) * 1000, 1)
 
     async def _stt_health(self) -> dict:
-        """stt-stack's /health, asked once per start and remembered (and again
-        when the vocabulary is looked for again, _names_glossary). A stack
-        that does not answer, or answers without a `models` list, leaves the
-        engine to be learnt from the first answer's x-stt-engine."""
-        if self._stt is not None:
+        """stt-stack's /health, asked before the first transcription of a
+        start and remembered for ENGINE_RECHECK_S (and asked again when the
+        vocabulary is looked for again, _names_glossary). A stack that does
+        not answer, or answers without a `models` list, leaves the engine to
+        be learnt from the first answer's x-stt-engine.
+
+        A PROBE THAT GOT NO USABLE ANSWER IS MADE AGAIN after ENGINE_RETRY_S.
+        It was remembered as "no engines" until the hub restarted, so a hub
+        whose first command came while stt-stack was still loading its
+        models sent no word to a fine-tune (STT_MODELS=parakeet,
+        parakeet-pt-br) for the rest of its life."""
+        if self._stt is not None and time.monotonic() < self._stt_until:
             return self._stt
         self._stt = {"engines": [], "hotwords": None, "glossaries": None}
+        self._stt_until = time.monotonic() + ENGINE_RETRY_S
         if not self.stt_url:
             return self._stt
         try:
             r = await self.client.get(f"{self.stt_url}/health", timeout=ENGINE_PROBE_S)
-            body = r.json() if r.status_code == 200 else {}
-            if not isinstance(body, dict):
-                body = {}
+            body = r.json() if r.status_code == 200 else None
         except (httpx.HTTPError, ValueError) as e:
-            log.info("routing: could not ask stt-stack which engines it runs (%s); the first "
-                     "answer will say", type(e).__name__)
+            log.info("routing: could not ask stt-stack which engines it runs (%s); commands go "
+                     "to its default engine until it is asked again in %.0f s",
+                     type(e).__name__, ENGINE_RETRY_S)
+            return self._stt
+        if not isinstance(body, dict):
+            log.info("routing: stt-stack's /health answered %s, not its engines; commands go "
+                     "to its default engine until it is asked again in %.0f s",
+                     r.status_code, ENGINE_RETRY_S)
             return self._stt
         models = body.get("models")
         engines = [m for m in (models if isinstance(models, list) else [])
@@ -705,6 +726,7 @@ class Router:
                      "hotwords": body.get("hotwords") if isinstance(body.get("hotwords"), bool)
                      else None,
                      "glossaries": glossaries if isinstance(glossaries, list) else None}
+        self._stt_until = time.monotonic() + ENGINE_RECHECK_S
         default = next((e for e in engines if e.get("default")), engines[0] if engines else None)
         if default is not None and isinstance(default.get("family"), str):
             self.stt_engine = default["family"].lower()

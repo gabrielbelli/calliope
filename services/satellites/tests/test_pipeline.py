@@ -170,7 +170,8 @@ class Services:
 
     def hosts(self) -> list[str]:
         """The services asked, in order; stt-stack's /health, which the hub
-        asks once a start, is not one."""
+        asks before its first transcription and when its answer is stale,
+        is not one."""
         return [r.url.host for r in self.seen if r.url.path != "/health"]
 
 
