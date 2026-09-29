@@ -548,3 +548,19 @@ def test_rename_with_an_empty_name_says_so_and_sends_nothing(tmp_path):
     """)
     assert got == {"patches": [], "focused": True}, got
 
+
+def test_refreshes_asked_while_one_is_out_are_one_more_after_it(tmp_path):
+    """Every online, offline, update or settings event asked for the three
+    lists, so during Update every satellite dozens of refreshes overlapped
+    on a hub busy sending an image. One asked while another is out waits
+    for it, and everybody who asked meanwhile shares the one after."""
+    got = run(tmp_path, """
+      await satellitesRefresh();
+      let gets = 0;
+      const real = json;
+      json = async (path, o) => { if (path === "/satellites") gets++; return real(path, o); };
+      await Promise.all([satellitesRefresh(), satellitesRefresh(), satellitesRefresh(), satellitesRefresh()]);
+      console.log(JSON.stringify({ gets, idle: SATELLITES.polling === null && SATELLITES.next === null }));
+    """)
+    assert got == {"gets": 2, "idle": True}, got
+

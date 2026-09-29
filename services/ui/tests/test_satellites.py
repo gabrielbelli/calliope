@@ -870,7 +870,7 @@ def test_a_hub_without_wake_word_assignment_costs_the_section_and_not_the_tab():
     that costs Wake words and the Change wake words links, and a firmware
     list that fails costs Firmware; only the satellite list failing is "the
     hub did not answer"."""
-    refresh = function("satellitesRefresh")
+    refresh = function("satellitesPoll")
     assert "await Promise.allSettled([" in refresh
     assert 'if (n.status === "rejected")' in refresh
     take = function("wakeTake")

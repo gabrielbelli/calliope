@@ -4011,6 +4011,8 @@ const SATELLITES = { rows: new Map(), timer: null, events: null, list: [], firmw
                         action applied to a row (adopt, rename, a setting,
                         forget); asked and applied number the polls. */
                      writes: 0, asked: 0, applied: 0,
+                     /* The refresh out now, and the one waiting for it. */
+                     polling: null, next: null,
                      /* What the page itself saw. The hub keeps a satellite's
                         last_seen and firmware after it disconnects, but only
                         in memory, so these stand in across a hub restart.
@@ -4341,11 +4343,31 @@ function satNoteOnce(host, kind, text) {
 
 function satellitesOpen() { const p = $("tab-satellites"); return !!p && !p.hidden; }
 
+/* ONE REFRESH OUT AT A TIME. Every online, offline, update or settings event
+   asks for the three lists, and during Update every satellite that was
+   dozens of refreshes overlapping, each three requests, on a hub busy
+   sending an image. One asked while another is out waits for it and then
+   asks once for everybody who asked meanwhile, so its answer is read after
+   whatever they did; each caller's promise settles with that one. */
+function satellitesRefresh() {
+  if (!SATELLITES.polling) {
+    SATELLITES.polling = satellitesPoll().finally(() => { SATELLITES.polling = null; });
+    return SATELLITES.polling;
+  }
+  if (!SATELLITES.next) {
+    SATELLITES.next = SATELLITES.polling.catch(() => {}).then(() => {
+      SATELLITES.next = null;
+      return satellitesRefresh();
+    });
+  }
+  return SATELLITES.next;
+}
+
 /* THE THREE LISTS ARE ASKED FOR TOGETHER AND FAIL APART. allSettled, so the
    firmware list or the wake words failing costs their own section and not the
    tab; only the satellite list failing is "the hub did not answer". A hub from
    before per-satellite wake words answers that path 404 (wakeTake). */
-async function satellitesRefresh() {
+async function satellitesPoll() {
   clearTimeout(SATELLITES.timer);
   /* A WAKE WORD ANSWER THAT A SAVE OVERTOOK IS DROPPED. The hub keeps no
      version, so the page counts its own writes: a GET that left while a PUT
