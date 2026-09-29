@@ -1119,6 +1119,7 @@ def test_update_every_satellite_is_on_the_newest_image_only():
     due = function("firmwareDue")
     assert "n.adopted && n.online && n.model === fw.model" in due
     assert "satFirmware(n) !== fw.version && !satGoingTo(n)" in due
+    assert "!(update && satOlder(fw.version, satFirmware(n)))" in due
     act = function("firmwareAct")
     assert 'satellite: "all"' not in act and "for (const n of due)" in act
     assert 'const due = act === "delete" ? [] : firmwareDue(fw);' in act

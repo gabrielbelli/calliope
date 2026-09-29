@@ -477,3 +477,36 @@ def test_a_focused_slider_takes_the_satellites_own_change(tmp_path):
     """)
     assert got == {"focused": 9, "dragged": "6"}, got
 
+
+def test_an_older_image_is_never_offered_as_an_update(tmp_path):
+    """The newest image was the last one uploaded. A known-good older build
+    uploaded again after a newer one, or the only one left once the newer
+    was deleted, was offered to every satellite on the newer build as
+    "Update to", with Update every satellite beside it and a question that
+    did not say it was a downgrade."""
+    got = run(tmp_path, SAT + """
+      const img = (version, at) => ({ model: "m", version, uploaded_at: at, sha256: version });
+      const on = over => sat({ model: "m", firmware: "v0.3.1", ...over });
+      const v = x => x ? x.version : null;
+      SATELLITES.list = [on({ id: "a1" }), on({ id: "b2" })];
+      SATELLITES.firmware = [img("v0.3.1", 1), img("v0.3.0", 2)];
+      const again = { newest: v(satNewest("m")), offered: v(satImageFor(on({}))),
+                      back: firmwareDue(SATELLITES.firmware[1]).length, summary: firmwareSummary() };
+      SATELLITES.firmware = [img("v0.3.0", 1)];
+      const deleted = { offered: v(satImageFor(on({}))), due: firmwareDue(SATELLITES.firmware[0]).length,
+                        why: firmwareIdle(SATELLITES.firmware[0]), summary: firmwareSummary() };
+      // A later build, with commits since its tag, is newer; labels that are
+      // not stamped versions keep the upload order.
+      SATELLITES.firmware = [img("v0.3.1-4-g1a2b3c4", 1), img("v0.3.1", 2)];
+      const commits = v(satNewest("m"));
+      SATELLITES.firmware = [img("nightly", 1), img("custom", 2)];
+      const labels = v(satNewest("m"));
+      console.log(JSON.stringify({ again, deleted, commits, labels }));
+    """)
+    assert got["again"] == {"newest": "v0.3.1", "offered": None, "back": 2,
+                            "summary": "every satellite is up to date"}, got
+    assert got["deleted"]["offered"] is None and got["deleted"]["due"] == 0, got
+    assert got["deleted"]["why"] == "Every satellite of this model that is online runs it or a newer build."
+    assert got["deleted"]["summary"] == "1 image", got
+    assert got["commits"] == "v0.3.1-4-g1a2b3c4" and got["labels"] == "custom", got
+

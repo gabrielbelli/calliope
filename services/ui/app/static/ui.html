@@ -4118,6 +4118,7 @@ const SAT_COPY = {
   fwSkipped: "Skipped {name}: {why}.",
   fwNoneStarted: "No satellite started the update.",
   fwNoneDue: "Every satellite of this model that is online already runs it.",
+  fwNoneNewer: "Every satellite of this model that is online runs it or a newer build.",
   fwNoneBusy: "Updating {n} now.",
   fwNoneOnline: "No satellite of this model is online.",
   fwUploaded: "Uploaded {v}.",
@@ -5145,10 +5146,33 @@ async function satButtonsSave(li) {
 }
 
 /* ---- Device ----------------------------------------------------------- */
+/* A BUILD'S VERSION AS NUMBERS TO ORDER BY, when it is one the build stamps
+   (scripts/version.py, git describe: v0.3.1, v0.3.1-4-g1a2b3c4, either
+   with -dirty); null for any other label. */
+function satVersionKey(v) {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-(\d+)-g[0-9a-f]+)?(?:-dirty)?$/.exec(String(v || ""));
+  return m ? [m[1], m[2], m[3], m[4] || 0].map(Number) : null;
+}
+/* Whether version `a` is older than `b`. Never, unless both are stamped
+   versions: two other labels cannot be ordered. */
+function satOlder(a, b) {
+  const x = satVersionKey(a), y = satVersionKey(b);
+  if (!x || !y) return false;
+  for (let i = 0; i < 4; i++) if (x[i] !== y[i]) return x[i] < y[i];
+  return false;
+}
+/* THE NEWEST IMAGE FOR A MODEL IS THE HIGHEST VERSION, and the last one
+   uploaded only among versions that cannot be ordered. By upload alone, a
+   known-good older build uploaded again after a newer one became "newest",
+   and every satellite on the newer build was offered it as "Update to", with
+   Update every satellite beside it: a downgrade of the house that no
+   question called one. */
 function satNewest(model) {
   let best = null;
   for (const f of SATELLITES.firmware) {
-    if (f.model === model && (!best || f.uploaded_at > best.uploaded_at)) best = f;
+    if (f.model !== model) continue;
+    if (!best || satOlder(best.version, f.version)
+        || (!satOlder(f.version, best.version) && f.uploaded_at > best.uploaded_at)) best = f;
   }
   return best;
 }
@@ -5160,14 +5184,16 @@ function satGoingTo(n) {
   const back = !n.online && SATELLITES.restarting.get(n.id);
   return back && Date.now() - back.at < 120000 ? back.v || null : null;
 }
-/* The newest image for this satellite's model, when it is not what it runs
-   and not what it is installing now: a satellite mid-update was offered, and
-   counted in Firmware for, the very update it was taking. */
+/* The newest image for this satellite's model, when it is not what it runs,
+   not what it is installing now and not older than it: a satellite
+   mid-update was offered, and counted in Firmware for, the very update it
+   was taking; and once the image it runs was deleted (Delete says it keeps
+   it), the one left, older, was offered as its update. */
 function satImageFor(n) {
   const fw = satFirmware(n);
   if (!n.adopted || !n.model || !fw) return null;
   const img = satNewest(n.model);
-  return img && img.version !== fw && img.version !== satGoingTo(n) ? img : null;
+  return img && img.version !== fw && img.version !== satGoingTo(n) && !satOlder(img.version, fw) ? img : null;
 }
 
 function satDevice(li, n, s) {
@@ -7442,10 +7468,13 @@ function firmwareSummary() {
    already on it and not installing something now. The hub's "all" skips
    none of these, so Update every satellite reflashed every satellite of the
    model, those already current included, and with every one offline it
-   answered 404 "no satellite matches 'all'". */
+   answered 404 "no satellite matches 'all'". Update every satellite, on the
+   newest image, never takes one back to an older build either: only Roll
+   back, named as one, does. */
 function firmwareDue(fw) {
+  const update = satNewest(fw.model) === fw;
   return SATELLITES.list.filter(n => n.adopted && n.online && n.model === fw.model
-    && satFirmware(n) !== fw.version && !satGoingTo(n));
+    && satFirmware(n) !== fw.version && !satGoingTo(n) && !(update && satOlder(fw.version, satFirmware(n))));
 }
 
 /* WHY NONE IS DUE. A satellite taking an update is not due, so right after
@@ -7456,6 +7485,7 @@ function firmwareIdle(fw) {
   const mine = SATELLITES.list.filter(n => n.adopted && n.model === fw.model);
   const taking = mine.filter(n => satGoingTo(n)).length;
   return taking ? satText("fwNoneBusy", { n: satCount(taking, "satellite", "satellites") })
+    : mine.some(n => n.online && satOlder(fw.version, satFirmware(n))) ? SAT_COPY.fwNoneNewer
     : mine.some(n => n.online) ? SAT_COPY.fwNoneDue : SAT_COPY.fwNoneOnline;
 }
 
