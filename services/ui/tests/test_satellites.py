@@ -259,15 +259,23 @@ def test_open_rows_are_remembered_per_viewer():
 
 
 def test_a_poll_never_writes_into_a_control_somebody_is_holding():
-    """A slider being dragged, a box being typed in, a select being chosen
-    from: the poll leaves each alone. The guard is per control; the whole
-    row used to be skipped while anything in it had focus, so one press of
-    Blink froze every value in the row."""
-    assert "input === document.activeElement) return;" in function("satLevel")
+    """A slider being dragged, a setting being saved, a box being typed in,
+    a select being chosen from: the poll leaves each alone. The guard is per
+    control; the whole row used to be skipped while anything in it had
+    focus, so one press of Blink froze every value in the row. A slider or a
+    switch is held while dragged or saved, not while focused: a click leaves
+    the focus on it, and it never took the satellite's own change after."""
+    assert "input.dataset.held) return;" in function("satLevel")
     update = function("satelliteUpdate")
-    assert "const idle = el => el !== document.activeElement;" in update
-    assert "if (idle(box)) box.checked" in update
+    assert "if (!box.dataset.held) box.checked" in update
+    assert "const idle = el => el !== document.activeElement;" not in update
+    row = function("satelliteRow")
+    assert 't.dataset.held = "drag";' in row and 't.dataset.held = "save";' in row
+    assert 'for (const type of ["pointercancel", "focusout"])' in row
+    patch = function("satellitePatch")
+    assert patch.count("if (from) delete from.dataset.held;") == 2
     device = function("satDevice")
+    assert "if (!flip.dataset.held) flip.checked" in device
     assert "field !== document.activeElement && !field.dataset.edited" in device
     buttons = function("satButtons")
     assert "!pick.dataset.pending && pick !== document.activeElement" in buttons

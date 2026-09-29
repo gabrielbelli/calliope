@@ -458,3 +458,22 @@ def test_what_lights_the_ring_says_why_it_cannot(tmp_path):
     assert got["muted_deaf"] == "Turn Microphone on to use Listen 5 s. Muted on the device, so the ring shows red."
     assert got["updating"] == "Blink and Show wait until this update finishes.", got
 
+
+def test_a_focused_slider_takes_the_satellites_own_change(tmp_path):
+    """A click leaves the focus on a slider until the next click elsewhere,
+    and the poll skipped a focused one: Vol+ pressed three times on the
+    device left it at 6 of 12, and the next arrow key sent 7, turning the
+    satellite down from 9. Only a drag, or a save still out, holds it."""
+    got = run(tmp_path, SAT + """
+      const slider = () => ({ dataset: { cfg: "volume", steps: "12" }, value: "6", setAttribute() {},
+                              parentElement: { querySelector: () => stand() } });
+      const focused = slider();
+      document.activeElement = focused;
+      satLevel(focused, 75);
+      const dragged = slider();
+      dragged.dataset.held = "drag";
+      satLevel(dragged, 75);
+      console.log(JSON.stringify({ focused: focused.value, dragged: dragged.value }));
+    """)
+    assert got == {"focused": 9, "dragged": "6"}, got
+

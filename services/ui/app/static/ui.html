@@ -4776,11 +4776,24 @@ function satelliteRow(n) {
       : form.classList.contains("sat-moveform") ? "movego" : null;
     if (act) satelliteAct(li, act, ev.submitter || form.querySelector("button[type=submit]"));
   });
+  /* HELD, NOT FOCUSED. A poll leaves a slider alone while it is being
+     dragged ("drag") and a setting while its PATCH is out ("save"), and
+     writes the satellite's own value into it otherwise. The guard was the
+     focus, which a click leaves on a slider or a box until the next click
+     elsewhere: Vol+ pressed three times on the device left the slider at
+     "6 of 12", and the next arrow key sent 7 and turned it down from 9. A
+     drag that ends where it began fires no change, so a cancelled pointer
+     or leaving the slider ends it too. Not pointerup: a poll answered
+     between it and the change would write the old value under the thumb,
+     and the change would send that. */
   li.addEventListener("input", ev => {
     const t = ev.target;
-    if (t.type === "range" && t.dataset.cfg) satLevelSay(t);
+    if (t.type === "range" && t.dataset.cfg) { t.dataset.held = "drag"; satLevelSay(t); }
     if (t.closest(".sat-rename")) t.dataset.edited = "1";
   });
+  for (const type of ["pointercancel", "focusout"]) {
+    li.addEventListener(type, ev => { if (ev.target.dataset && ev.target.dataset.held === "drag") delete ev.target.dataset.held; });
+  }
   /* A LEVEL IS SENT ON change, NOT ON input: the release of the thumb, not
      every step it passes through on the way. */
   li.addEventListener("change", ev => {
@@ -4788,7 +4801,8 @@ function satelliteRow(n) {
     if (t.dataset.cfg) {
       const value = t.type === "checkbox" ? t.checked
         : t.dataset.steps ? Math.round(Number(t.value) * 100 / Number(t.dataset.steps)) : Number(t.value);
-      satellitePatch(li, { [t.dataset.cfg]: value }, satNoteFor(li, t));
+      t.dataset.held = "save";
+      satellitePatch(li, { [t.dataset.cfg]: value }, satNoteFor(li, t), t);
     } else if (t.dataset.btn) satButtonPicked(li, t);
     else if (t.dataset.hook) satButtonsSave(li);
   });
@@ -4837,8 +4851,8 @@ function satNoteFor(li, from) {
 
 /* EVERY POLL, IN PLACE. Nothing here rebuilds markup or opens or closes a
    disclosure, and a value is written only into a control nobody is holding:
-   a slider being dragged or a box being typed in keeps what the reader put
-   there. */
+   a slider being dragged, a setting being saved (data-held) or a box being
+   typed in keeps what the reader put there. */
 function satelliteUpdate(li, n) {
   li._n = n;
   const q = sel => li.querySelector(sel);
@@ -4877,10 +4891,9 @@ function satelliteUpdate(li, n) {
   satLevel(q('[data-cfg="volume"]'), cfg.volume);
   satLevel(q('[data-cfg="mic_gain_db"]'), cfg.mic_gain_db);
   satLevel(q('[data-cfg="brightness"]'), cfg.brightness);
-  const idle = el => el !== document.activeElement;
   for (const key of ["speaker_enabled", "mic_enabled", "lights_enabled"]) {
     const box = q(`[data-cfg="${key}"]`);
-    if (idle(box)) box.checked = cfg[key] !== false;
+    if (!box.dataset.held) box.checked = cfg[key] !== false;
   }
   const link = q('[data-act="wakewords"]');
   link.parentElement.hidden = !WAKE.server && !WAKE.failed;
@@ -4936,7 +4949,7 @@ function satTryHint(n, s) {
    (data-steps): the slider moves a step at a time, and the hub is told the
    percent that step is. */
 function satLevel(input, value) {
-  if (value === undefined || value === null || input === document.activeElement) return;
+  if (value === undefined || value === null || input.dataset.held) return;
   if (input.dataset.steps) value = Math.round(Number(value) * Number(input.dataset.steps) / 100);
   if (String(input.value) !== String(value)) input.value = value;
   satLevelSay(input);
@@ -5207,7 +5220,7 @@ function satDevice(li, n, s) {
   const top = li.querySelector('[data-cfg="ring_top"]'), flip = li.querySelector('[data-cfg="ring_upside_down"]');
   const cfg = n.config || {};
   if (top !== document.activeElement && Number.isInteger(cfg.ring_top)) top.value = String(cfg.ring_top);
-  if (flip !== document.activeElement) flip.checked = cfg.ring_upside_down === true;
+  if (!flip.dataset.held) flip.checked = cfg.ring_upside_down === true;
   /* Why Set up the ring is greyed, beside it and before it is pressed: it
      lights the ring, which Lights off leaves dark and a mute paints red.
      Offline is said once for the whole of Device, under Reboot. */
@@ -5250,17 +5263,24 @@ function satGoWakeWords() {
 
 /* The hub answers a PATCH with the whole satellite, so the row shows the
    change now rather than on the next poll: a rename used to take 3 s to
-   appear, which reads as a rename that did not work. */
-async function satellitePatch(li, change, host) {
+   appear, which reads as a rename that did not work. `from` is the control
+   that sent it, held until the answer (satelliteRow): refused, the next
+   poll puts the satellite's own value back in it. */
+async function satellitePatch(li, change, host, from) {
   host = host || satNoteFor(li, null);
   try {
     const n = await json(`/satellites/${li.dataset.id}`, { method: "PATCH", headers: JSON_BODY,
       body: JSON.stringify(change) });
     SATELLITES.writes++;
+    if (from) delete from.dataset.held;
     host.textContent = "";
     if (n && n.id) satelliteUpdate(li, n);
     return true;
-  } catch (e) { note(host, "bad", e.message); return false; }
+  } catch (e) {
+    if (from) delete from.dataset.held;
+    note(host, "bad", e.message);
+    return false;
+  }
 }
 
 function hexColour(hex) {
