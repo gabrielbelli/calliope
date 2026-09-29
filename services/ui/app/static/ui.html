@@ -4199,6 +4199,8 @@ const SAT_COPY = {
   moreReply: "replies on {name}",
   moreSilent: "replies nowhere",
   moreVoice: "voice {v}",
+  voiceElsewhere: "{v} · {lang}, not this word's language",
+  voiceUnlisted: "{v}, not a voice the stack lists",
   moreFix: "needs a fix",
   /* Home Assistant's Assist pipelines, listed by the hub with the action's
      own token (POST /satellites/ha/pipelines). */
@@ -6130,7 +6132,7 @@ function wakeMoreNote(a, voiced, fix) {
     const n = SATELLITES.list.find(x => x.id === a.reply_to);
     said.push(satText("moreReply", { name: n ? satName(n) : a.reply_to }));
   }
-  if (a.voice && voiced !== false) said.push(satText("moreVoice", { v: a.voice }));
+  if (a.voice && voiced !== false) said.push(satText("moreVoice", { v: wakeVoiceName(a.voice) }));
   return said.join(", ");
 }
 function wakeEnvHint(name) {
@@ -6143,6 +6145,41 @@ function wakeEnvHint(name) {
 function wakeVoices() {
   const kokoro = (typeof VOICES !== "undefined" && VOICES && VOICES.kokoro) || {};
   return [...new Set(Object.values(kokoro).filter(Array.isArray).flat())].sort();
+}
+/* A KOKORO VOICE AS A PERSON READS IT: pf_dora is "Dora · female", under
+   "Portuguese (Brazil)". Kokoro's id carries both: the first letter is the
+   language (PREFIX, as the Speak tab reads it), the second the voice's sex.
+   An id that follows neither is shown as it is. */
+const KOKORO_SEX = { f: "female", m: "male" };
+function wakeVoiceName(id) {
+  const m = /^([a-z])([fm])_(.+)$/.exec(id || "");
+  if (!m) return id;
+  const name = m[3].split("_").map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(" ");
+  return `${name} · ${KOKORO_SEX[m[2]]}`;
+}
+function wakeVoiceLanguage(id) {
+  const known = KOKORO_LANGS.find(([code]) => code === PREFIX[(id || "").charAt(0)]);
+  return known ? known[1] : "Other";
+}
+/* THE VOICES A WORD CAN SPEAK WITH, as [value, text, group]: the ones of its
+   language, grouped by accent (English has two), or all of them grouped by
+   language when the word detects its language. A voice saved before the
+   language changed stays chosen and says why it no longer fits, so opening
+   the row never changes what the word does. */
+function wakeVoiceOptions(language, saved) {
+  const all = wakeVoices();
+  const fits = language ? voicesForLanguage({ voices: all }, language) : all;
+  const order = KOKORO_LANGS.map(([code]) => code);
+  const rank = v => { const i = order.indexOf(PREFIX[v.charAt(0)]); return i < 0 ? order.length : i; };
+  const sorted = [...fits].sort((a, b) => rank(a) - rank(b) || wakeVoiceName(a).localeCompare(wakeVoiceName(b)));
+  const options = [["", "The language's own voice"],
+                   ...sorted.map(v => [v, wakeVoiceName(v), wakeVoiceLanguage(v)])];
+  if (saved && !fits.includes(saved)) {
+    options.push([saved, !all.length ? wakeVoiceName(saved)
+      : all.includes(saved) ? satText("voiceElsewhere", { v: wakeVoiceName(saved), lang: wakeVoiceLanguage(saved) })
+      : satText("voiceUnlisted", { v: saved })]);
+  }
+  return options;
 }
 
 /* HOME ASSISTANT'S PIPELINES, ONCE PER ADDRESS AND TOKEN VARIABLE for the
@@ -7256,10 +7293,7 @@ function wakeActionUpdate(row, w, words, moreFix) {
   if (a.reply_to && !where.some(([v]) => v === a.reply_to)) where.push([a.reply_to, a.reply_to]);
   satFillSelect(q('[data-f="a.reply_to"]'), where);
   wakeValue(q('[data-f="a.reply_to"]'), a.reply_to || "same");
-  const voices = wakeVoices();
-  const said = [["", "The language's own voice"], ...voices.map(v => [v, v])];
-  if (a.voice && !voices.includes(a.voice)) said.push([a.voice, a.voice]);
-  satFillSelect(q('[data-f="a.voice"]'), said);
+  satFillSelect(q('[data-f="a.voice"]'), wakeVoiceOptions(w.language, a.voice));
   wakeValue(q('[data-f="a.voice"]'), a.voice || "");
   satSet(q(".ww-more .sum-note"), wakeMoreNote(a, !q('[data-f="a.voice"]').parentElement.hidden, moreFix));
 }
@@ -7918,13 +7952,24 @@ function satTriggered(ev) {
 /* ============================================================ try a word == */
 /* A select keeps what was chosen in it across a rebuild, and is not rebuilt
    while it is open in somebody's hand. */
+/* An option's third element, when it has one, is the group it is listed
+   under; options of one group are consecutive. */
 function satFillSelect(select, options) {
   const sig = JSON.stringify(options);
   if (select.dataset.sig === sig || select === document.activeElement) return;
   select.dataset.sig = sig;
   const was = select.value;
   select.textContent = "";
-  for (const [value, text] of options) select.append(new Option(text, value));
+  let group = null;
+  for (const [value, text, label] of options) {
+    if (!label) { group = null; select.append(new Option(text, value)); continue; }
+    if (!group || group.label !== label) {
+      group = document.createElement("optgroup");
+      group.label = label;
+      select.append(group);
+    }
+    group.append(new Option(text, value));
+  }
   if (options.some(([value]) => value === was)) select.value = was;
 }
 

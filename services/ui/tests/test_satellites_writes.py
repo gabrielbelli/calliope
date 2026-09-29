@@ -51,6 +51,16 @@ const from = html.indexOf("const SATELLITES = {");
 const to = html.indexOf("async function loadGlossaries(");
 if (from < 0 || to < 0) throw new Error("the Satellites section's bounds moved");
 const SECTION = html.slice(from, to);
+// The Speak tab's language helpers, which a wake word's Voice reuses.
+const piece = (start, end) => {
+  const at = html.indexOf(start), stop = html.indexOf(end, at);
+  if (at < 0 || stop < 0) throw new Error("the Speak tab's " + start + " moved");
+  return html.slice(at, stop);
+};
+const SPEAK = [piece("const PREFIX = {", "const CLONE_DEFAULTS"),
+               piece("const KOKORO_LANGS = [", "const CHATTERBOX_LANGS"),
+               piece("const KOKORO_SPELLING = {", "/* Script first"),
+               piece("function voicesForLanguage(", "\n}\n") + "\n}\n"].join("\n");
 const SCENARIO = fs.readFileSync(process.argv[3], "utf8");
 
 function stand() {
@@ -246,7 +256,7 @@ function tick(name, id) {
   });
 }
 
-eval(SECTION + "\n;(async () => {\n" + SCENARIO + "\n})().catch(e => { console.error(e); process.exit(2); });");
+eval(SPEAK + "\n" + SECTION + "\n;(async () => {\n" + SCENARIO + "\n})().catch(e => { console.error(e); process.exit(2); });");
 """
 
 

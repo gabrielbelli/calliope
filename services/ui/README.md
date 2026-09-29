@@ -813,7 +813,7 @@ field is in the hub's
 | **Cooldown, seconds** | `trigger.cooldown_s` | 0 to 600 |
 | **Ends a conversation it is heard in** | `trigger.ends_conversation` | |
 | **Reply on** (under More) | `action.reply_to` | The same satellite, none, or another |
-| **Voice** (under More) | `action.voice` | A Kokoro voice, or the language's |
+| **Voice** (under More) | `action.voice` | The language's own voice, or a Kokoro voice of the word's language (every language, grouped, on auto-detect), listed by name and sex |
 | **End phrases** (under More) | `conversation.end_phrases`, comma-separated | Up to 64 |
 
 A language model word ([its fields](../satellites/README.md#language-model-destination))

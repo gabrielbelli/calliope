@@ -21,6 +21,8 @@ What they prevent:
     and that leaves the satellite's row saying Listening.
 """
 
+from pathlib import Path
+
 from test_satellites_writes import pytestmark, run  # noqa: F401
 
 # A hub from after modes: every word has its behaviour, push-to-talk has its
@@ -784,3 +786,38 @@ def test_a_hub_setting_named_as_a_token_is_a_fix_before_save(tmp_path):
     fix = "That name is one of the hub's own settings: name a variable with TOKEN or KEY in it."
     assert got["SATELLITES_MQTT_URL"] == fix and got["SATELLITES_API_KEYS"] == fix
     assert got["SATELLITES_HA_TOKEN_KITCHEN"] in ("", None), got
+
+
+def test_a_words_voice_picker_offers_its_own_language_by_name(tmp_path):
+    """A word's Voice lists only the voices of its language, as a name and a
+    sex under the language's accent, rather than every Kokoro id; a word that
+    detects its language gets every voice, grouped by language. A voice saved
+    before the language changed stays chosen, and says it no longer fits."""
+    got = run(tmp_path, """
+      VOICES = { kokoro: { voices: ["af_heart", "am_adam", "bf_emma", "ef_dora", "pf_dora",
+                                    "pm_alex", "zf_xiaobei"] }, clones: [] };
+      console.log(JSON.stringify({
+        pt: wakeVoiceOptions("pt-BR", null),
+        en: wakeVoiceOptions("en", null),
+        auto: wakeVoiceOptions(null, null).map(o => o[2] || ""),
+        other: wakeVoiceOptions("de", null),
+        kept: wakeVoiceOptions("pt-BR", "am_adam").slice(-1)[0],
+        gone: wakeVoiceOptions("pt-BR", "xx_old").slice(-1)[0],
+        note: wakeMoreNote({ reply_to: "same", voice: "pf_dora" }, true, null),
+      }));
+    """)
+    assert got["pt"] == [["", "The language's own voice"],
+                         ["pm_alex", "Alex · male", "Portuguese (Brazil)"],
+                         ["pf_dora", "Dora · female", "Portuguese (Brazil)"]], got["pt"]
+    assert got["en"] == [["", "The language's own voice"],
+                         ["am_adam", "Adam · male", "English (US)"],
+                         ["af_heart", "Heart · female", "English (US)"],
+                         ["bf_emma", "Emma · female", "English (UK)"]], got["en"]
+    assert got["auto"] == ["", "English (US)", "English (US)", "English (UK)", "Portuguese (Brazil)",
+                           "Portuguese (Brazil)", "Spanish", "Mandarin"], got["auto"]
+    assert got["other"] == [["", "The language's own voice"]], got["other"]
+    assert got["kept"] == ["am_adam", "Adam · male · English (US), not this word's language"]
+    assert got["gone"] == ["xx_old", "xx_old, not a voice the stack lists"]
+    assert "Dora · female" in got["note"] and "pf_dora" not in got["note"], got["note"]
+    page = (Path(__file__).resolve().parents[1] / "app" / "static" / "ui.html").read_text()
+    assert "satFillSelect(q('[data-f=\"a.voice\"]'), wakeVoiceOptions(w.language, a.voice))" in page
