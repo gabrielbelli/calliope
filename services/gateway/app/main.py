@@ -1221,6 +1221,8 @@ SATELLITES_PATHS = (
     ("GET", "/satellites/telemetry/summary"),
     ("GET", "/satellites/{nid}"),
     ("PATCH", "/satellites/{nid}"),
+    # An AirPlay receiver's cover, for its section on the Satellites tab.
+    ("GET", "/satellites/{nid}/airplay/artwork"),
     ("GET", "/satellites/{nid}/listen"),
     # inject is routed for scripts that verify the listening path with a
     # recorded clip, and ptt for Home Assistant's integration, behind the same

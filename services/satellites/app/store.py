@@ -104,7 +104,7 @@ REPORTED = {
     # is one, and the name phones list it as (None: the satellite's name).
     "airplay_enabled": _flag,
     "airplay_name": lambda v: v is None or (isinstance(v, str) and len(v) <= 64 and v.isprintable()),
-    # % of the phone's AirPlay slider a session starts at after a minute idle.
+    # % of the phone's AirPlay slider, set when a phone connects.
     "airplay_volume": _between(0, 100, whole=True),
 }
 AUDIO_SETTINGS = ("audio_sink", "audio_source", "echo_reference")

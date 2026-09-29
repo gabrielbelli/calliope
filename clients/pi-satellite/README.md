@@ -26,12 +26,12 @@ The best each piece of hardware takes, and no conversion that is not needed
 
 | Link | Setting | Why |
 |---|---|---|
-| PipeWire's rate | follows what plays: 44.1, 48, 88.2, 96, 176.4 or 192 kHz, where the output can | AirPlay at 44.1 kHz reaches the card at 44.1 kHz instead of being converted to 48 |
-| Conversion, when two rates mix | quality 10 of 15 (the default is 4) | A reply over music; a Pi 3 does this for stereo easily |
-| Channels | never upmixed | Stereo stays stereo |
+| PipeWire's rate | 44.1 kHz, AirPlay's own (88.2 or 176.4 kHz for a source at those); nothing at 48 kHz moves it | A reply or an earcon that starts mid-song does not switch the card to 48 kHz and convert the music. The hub's voice arrives at 44.1 kHz already |
+| Conversion, where it is needed | quality 10 of 15 (the default is 4) | An earcon at 48 kHz, or a card that cannot do 44.1 kHz at all; a Pi 3 does this for stereo easily |
+| Channels | never upmixed | Stereo stays stereo. The hub's voice is mono, as on the ESP32, and PipeWire plays it on both speakers; nothing else becomes mono |
 | Outputs | never suspended | No clipped first syllable, no click as a card wakes |
-| Sample format | 16-bit, no dither | Every source here is 16-bit (AirPlay, the voice, earcons): a 16-bit sample reaches the card as it was sent |
-| AirPlay | **bit-perfect**: Shairport Sync hands on the phone's own 16-bit, 44.1 kHz samples and applies no volume of its own | The phone's volume sets the output's own volume instead (`bin/calliope-airplay-volume`, in the same dB), in the DAC's hardware where it has a control |
+| Sample format | the widest the card takes (32 or 24 bits on a USB DAC, 16 on the Pi's own jack), no dither | AirPlay's 16-bit samples reach the card unchanged, carried in the wider word; a reply mixed over the music is mixed without rounding the music to 16 bits |
+| AirPlay | **bit-perfect**: Shairport Sync hands on the phone's own 16-bit, 44.1 kHz samples and applies no volume of its own | The phone's slider sets the output's own volume instead (`bin/calliope-airplay-volume`), in the DAC's hardware where it has a control: AirPlay's 30 dB spread over 60, so the slider's first step is quiet and its top is full volume |
 
 What is left is the hardware, and the agent says what each output is
 (`quality` on each device in `audio`, from the kernel):
@@ -69,7 +69,7 @@ output volume, so the last one moved wins.
 
 Shairport Sync from Debian runs as the `calliope` user
 (`calliope-airplay.service`, a user unit) and plays into PipeWire, through
-ALSA at 32 bits (Audio quality, above), so it
+ALSA at 16 bits, as the phone sent them (Audio quality, above), so it
 goes to the output chosen on the Satellites tab and mixes with the
 satellite's voice. The tab turns it on and off (**AirPlay**) and names it
 (**AirPlay name**, the satellite's own name when empty); the agent writes
@@ -96,10 +96,19 @@ events where MPRIS is not there. The phone's remote-control token
 (`acre`) stays on the Pi: the hub's API has no key, and the token controls
 the phone's playback.
 
-**Starting volume.** A session that starts after a minute with nothing
-playing starts at `airplay_volume` (70 % of the phone's slider unless the
-hub says otherwise), not wherever the phone left it; a pause shorter than
-that keeps the phone's volume. The status
+**Starting volume.** When a phone connects, the agent moves the phone's own
+slider to `airplay_volume` (70 % unless the hub says otherwise) through
+Shairport Sync's remote control (`SetAirplayVolume`, over DACP), and the
+phone sends that volume back like any other move of its slider. A phone that
+takes no remote control gets the output set to the same level directly.
+
+**The cover** of what plays goes to the hub once per picture (`artwork`
+message, JPEG or PNG up to 2 MB, named by its SHA-256), which serves it at
+`GET /satellites/{id}/airplay/artwork`; the Satellites tab shows it in the
+AirPlay section. The title, artist and album come from MPRIS where the
+metadata has not said them yet.
+
+The status
 carries them as `airplay` and is sent at once when they change, so the
 Satellites tab's AirPlay section says Playing as the music starts.
 

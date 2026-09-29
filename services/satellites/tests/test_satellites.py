@@ -836,3 +836,20 @@ def test_a_plug_going_in_or_out_on_a_satellites_card_is_an_event():
     assert jack_changes(status("plugged"), status("plugged")) == []
     assert jack_changes({}, status("unplugged")) == [], "the first status is not a plug"
     assert jack_changes(status("plugged"), {"audio": {"sinks": [], "sources": []}}) == [], "a card that went"
+
+
+def test_an_airplay_receivers_cover_is_kept_checked_and_served(client):
+    import base64 as b64
+    import hashlib as hl
+    jpeg = b"\xff\xd8\xff\xe0" + b"cover" * 100
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt_pi(client, ws)
+        assert client.get(f"/satellites/{PI_MAC}/airplay/artwork").status_code == 404
+        ws.send_json({"type": "artwork", "sha256": "0" * 64, "format": "jpeg",
+                      "data": b64.b64encode(jpeg).decode()})               # a hash that does not match
+        ws.send_json({"type": "artwork", "sha256": hl.sha256(jpeg).hexdigest(), "format": "jpeg",
+                      "data": b64.b64encode(jpeg).decode()})
+        ws.send_json({"type": "status", "volume": 50})                     # a round trip: both were read
+        r = client.get(f"/satellites/{PI_MAC}/airplay/artwork")
+        assert r.status_code == 200 and r.content == jpeg and r.headers["content-type"] == "image/jpeg"
+        assert r.headers["etag"] == f'"{hl.sha256(jpeg).hexdigest()}"'

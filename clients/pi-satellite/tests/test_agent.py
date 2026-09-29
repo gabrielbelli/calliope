@@ -5,6 +5,7 @@ PipeWire and calliope-root are fakes; nothing plays and nothing is installed."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import struct
@@ -113,7 +114,7 @@ async def test_a_new_satellite_says_what_it_is_waits_and_is_adopted(fake):
         assert again["token"] == "t0k" and again["name"] == "Kitchen speaker"
     got = await talk(a, hub)
     hello = got[0]
-    assert hello["caps"]["speaker"] == {"rate": 48000, "channels": 1, "format": "s16le"}
+    assert hello["caps"]["speaker"] == {"rate": 44100, "channels": 1, "format": "s16le"}
     assert "mic" not in hello["caps"], "a board with no microphone offers none"
     assert hello["caps"]["duck"] is True and hello["caps"]["audio_devices"] is True
     assert [s["name"] for s in hello["audio"]["sinks"]] == ["alsa_output.builtin", "alsa_output.usb"]
@@ -241,3 +242,50 @@ def test_the_hub_address_becomes_the_socket_url():
     assert agentmod.socket_url("wss://calliope.example.com") == "wss://calliope.example.com/satellites/ws"
     assert agentmod.socket_url("wss://h:8443/") == "wss://h:8443/satellites/ws"
     assert agentmod.socket_url("ws://h/nodes/ws") == "ws://h/nodes/ws"
+
+
+async def test_the_cover_goes_to_the_hub_once_per_picture_and_again_on_a_new_connection(fake, tmp_path):
+    a = agent_with(hub="ws://x", token="t", name="k")
+    jpeg = b"\xff\xd8\xff" + b"cover" * 10
+    a.metadata.art_dir, a.metadata.art_file = tmp_path, tmp_path / "calliope-airplay-cover"
+    a.metadata._artwork(jpeg)
+    a.airplay_state = {"artwork": dict(a.metadata.state["artwork"])}
+
+    async def hub(ws, got):
+        await recv(ws, got, "hello")
+        await ws.send(json.dumps({"type": "welcome", "name": "k", "config": {}}))
+        await recv(ws, got, "artwork")
+        await a._send_artwork()   # the same picture: not again
+        await ws.send(json.dumps({"type": "earcon_list"}))
+        await recv(ws, got, "earcons")
+    got = await talk(a, hub)
+    sent = [m for m in got if isinstance(m, dict) and m.get("type") == "artwork"]
+    assert len(sent) == 1
+    assert sent[0]["sha256"] == hashlib.sha256(jpeg).hexdigest() and sent[0]["format"] == "jpeg"
+    assert base64.b64decode(sent[0]["data"]) == jpeg
+
+
+async def test_a_phone_that_connects_is_moved_to_the_starting_volume(fake, monkeypatch):
+    asked, ran = [], []
+
+    async def phone(percent):
+        asked.append(percent)
+        return len(asked) == 1   # the first phone takes remote control; the second does not
+
+    class Proc:
+        async def wait(self):
+            return 0
+
+    async def run(*argv, **kw):
+        ran.append(argv)
+        return Proc()
+    monkeypatch.setattr(agentmod.airplay, "set_phone_volume", phone)
+    monkeypatch.setattr(agentmod.asyncio, "create_subprocess_exec", run)
+    nap = asyncio.sleep
+    monkeypatch.setattr(agentmod.asyncio, "sleep", lambda s: nap(0))
+    a = agent_with(hub="ws://x", token="t", name="k")
+    a.st.config["airplay_volume"] = 40
+    await a._starting_volume()
+    assert asked == [40] and ran == []
+    await a._starting_volume()
+    assert ran == [(agentmod.airplay.VOLUME_HOOK, "60", "-18.0")]

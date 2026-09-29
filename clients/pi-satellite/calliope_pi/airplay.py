@@ -40,6 +40,9 @@ PIPE = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "
 BINARY = "shairport-sync"   # how its stream is found in pactl, whatever the backend
 # Run with the phone's volume in dB; sets the output's own volume (bundle/bin).
 VOLUME_HOOK = "/opt/calliope/current/bin/calliope-airplay-volume"
+# The phone's 30 dB slider spread over this many dB of the output's volume,
+# as Shairport Sync's own volume control does: its first step is quiet.
+VOLUME_RANGE_DB = 60
 OURS = "Assistant"        # media.role of the agent's own streams (pipewire.Player)
 
 
@@ -73,23 +76,22 @@ def config(name: str, pipe: Path = PIPE, start_volume: int = 70) -> str:
         # device, which is PipeWire (pipewire-alsa).
         '  output_backend = "alsa";',
         '  ignore_volume_control = "yes";',
-        f'  run_this_when_volume_is_set = "{VOLUME_HOOK} ";',
+        f'  run_this_when_volume_is_set = "{VOLUME_HOOK} {VOLUME_RANGE_DB} ";',
         # Timing corrections resampled with SoX, the best of its choices.
         '  interpolation = "soxr";',
         # Its own D-Bus and MPRIS interfaces on calliope's session bus, where
         # the agent asks whether it is playing (mpris_status).
         '  dbus_service_bus = "session";',
         '  mpris_service_bus = "session";',
-        # A session that starts after a minute with nothing playing starts at
-        # the hub's starting volume, not wherever the phone left it: any
-        # volume counts as "high" (-30 dB and up), and the idle timeout is one
-        # minute. A pause shorter than that keeps the volume the phone set.
+        # The volume a session starts at is set on the phone itself when it
+        # connects (set_phone_volume): Shairport Sync's own idle reset only
+        # ever lowers a loud one. This is the fallback for a phone that
+        # sends none.
         f"  default_airplay_volume = {start_db(start_volume)};",
-        "  high_threshold_airplay_volume = -30.0;",
-        "  high_volume_idle_timeout_in_minutes = 1;",
         "};",
         "alsa = {",
         '  output_device = "default";',
+        # The phone's own samples, as it sent them: 16 bits.
         '  output_format = "S16";',
         "  output_rate = 44100;",
         "};",
@@ -225,6 +227,8 @@ class Metadata:
                             "track": {}, "client_info": {}, "progress": None, "artwork": None}
         self.raw: dict = {}
         self.remote: dict = {}
+        self.new_session = False   # set as a phone connects; the agent sets its volume
+        self.art_file = self.art_dir / "calliope-airplay-cover"
         self._thread: threading.Thread | None = None
         self._picture: bytearray | None = None
 
@@ -266,6 +270,8 @@ class Metadata:
             self.raw[key] = {"value": _decoded(kind, code, data), "at": round(time.time(), 3)}
         text = data.decode("utf-8", "replace").strip() or None
         if kind == "ssnc":
+            if code == "abeg":
+                self.new_session = True
             if code in ("abeg", "pbeg", "prsm"):
                 s["session"], s["playing"] = True, True
                 s["since"] = s["since"] or time.time()
@@ -324,7 +330,7 @@ class Metadata:
         digest = __import__("hashlib").sha256(data).hexdigest()
         try:
             self.art_dir.mkdir(parents=True, exist_ok=True)
-            (self.art_dir / "calliope-airplay-cover").write_bytes(data)
+            self.art_file.write_bytes(data)
         except OSError:
             pass
         self.state["artwork"] = {"sha256": digest, "bytes": len(data), "type": kind}
@@ -332,6 +338,38 @@ class Metadata:
     def view(self) -> dict:
         """What the status carries: the decoded state, and every raw item."""
         return {"raw": dict(self.raw), "remote_control": bool(self.remote)}
+
+
+async def set_phone_volume(percent: int) -> bool:
+    """Move the phone's own AirPlay slider to `percent`, through Shairport
+    Sync's remote control (DACP): the phone then sends that volume back,
+    and calliope-airplay-volume sets the output. False where the phone does
+    not take remote control."""
+    code, _ = await _run("busctl", "--user", "call", "--", "org.gnome.ShairportSync", "/org/gnome/ShairportSync",
+                         "org.gnome.ShairportSync.RemoteControl", "SetAirplayVolume", "d",
+                         f"{start_db(percent):.1f}", timeout=5.0)
+    return code == 0
+
+
+async def mpris_metadata() -> dict:
+    """The track as Shairport Sync's MPRIS interface has it: what fills the
+    title, artist and album when the metadata pipe has not said them (the
+    agent restarted in the middle of a track)."""
+    code, out = await _run("busctl", "--user", "--json=short", "get-property",
+                           "org.mpris.MediaPlayer2.ShairportSync", "/org/mpris/MediaPlayer2",
+                           "org.mpris.MediaPlayer2.Player", "Metadata", timeout=3.0)
+    if code:
+        return {}
+    try:
+        data = json.loads(out).get("data") or {}
+    except ValueError:
+        return {}
+
+    def value(key):
+        v = (data.get(key) or {}).get("data")
+        return ", ".join(v) if isinstance(v, list) else v
+    return {k: v for k, v in (("title", value("xesam:title")), ("artist", value("xesam:artist")),
+                              ("album", value("xesam:album")), ("art_url", value("mpris:artUrl"))) if v}
 
 
 async def mpris_status() -> str | None:

@@ -31,7 +31,9 @@ from pathlib import Path
 log = logging.getLogger("calliope.pipewire")
 
 MIC_RATE = 16000
-SPEAKER_RATE = 48000
+# The hub's voice arrives at AirPlay's rate, so the two never make the
+# output switch rates, and the music is never resampled for a reply.
+SPEAKER_RATE = 44100
 FRAME_MS = 20
 IDLE_S = 0.6          # after the last sample has played, the player is closed
 

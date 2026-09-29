@@ -95,6 +95,9 @@ from pathlib import Path
 from typing import Annotated, Any, AsyncIterator, Literal
 
 import httpx
+import base64
+import binascii
+import hashlib
 import math
 from datetime import UTC, datetime, timedelta
 
@@ -262,6 +265,9 @@ class Session:
         self.ear: listening.Ear | None = None
         self.listener: asyncio.Task | None = None
         self.listen_error: str | None = None
+        # The cover of what an AirPlay receiver plays ("artwork"): sha256,
+        # format and the image, for GET /satellites/{id}/airplay/artwork.
+        self.artwork: dict | None = None
         self.conversation: Conversation | None = None
         self.earcons: earcons.Sync | None = None
         self.earcon_asks = 0
@@ -1926,6 +1932,27 @@ class Conversation:
             self.phase = "done"
 
 
+# ---- AirPlay artwork -----------------------------------------------------------------
+
+ARTWORK_MAX = 2 * 1024 * 1024
+ARTWORK_TYPES = {"jpeg": "image/jpeg", "png": "image/png"}
+
+
+def _artwork(msg: dict) -> dict | None:
+    """The cover an AirPlay receiver sent, checked: a JPEG or PNG of at most
+    ARTWORK_MAX whose SHA-256 is the one it names. Anything else is dropped."""
+    fmt, digest = msg.get("format"), str(msg.get("sha256") or "")
+    if fmt not in ARTWORK_TYPES:
+        return None
+    try:
+        data = base64.b64decode(str(msg.get("data") or ""), validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    if not data or len(data) > ARTWORK_MAX or hashlib.sha256(data).hexdigest() != digest:
+        return None
+    return {"sha256": digest, "type": ARTWORK_TYPES[fmt], "data": data}
+
+
 # ---- jacks ------------------------------------------------------------------------
 
 
@@ -2290,6 +2317,8 @@ async def on_message(s: Session, msg: dict) -> None:
                      "action": msg.get("action"), "held_ms": msg.get("held_ms")})
         if isinstance(msg.get("button"), str) and msg.get("action") in ("press", "release"):
             await hub.on_button(s, msg["button"], msg["action"], msg.get("held_ms"))
+    elif kind == "artwork" and s.adopted:
+        s.artwork = _artwork(msg) or s.artwork
     elif kind in EARCON_MESSAGES and s.adopted and s.earcons is not None:
         await hub.on_earcons(s, msg)
     elif kind == "ota_next" and s.ota:
@@ -2837,6 +2866,17 @@ async def configure(nid: str, body: ConfigBody) -> dict:
             conv.cancel("mic_off")
     _mqtt_satellite(nid)
     return hub.describe(nid)
+
+
+@app.get("/satellites/{nid}/airplay/artwork")
+async def airplay_artwork(nid: str) -> Response:
+    """The cover of what the satellite's AirPlay receiver plays, as it sent
+    it. The page asks with ?v=<sha256>, so an answer can be kept."""
+    s = hub.sessions.get(hub.resolve(nid))
+    if s is None or not s.artwork:
+        raise ApiError(404, f"satellite {nid} has no AirPlay artwork now", code="no_artwork")
+    return Response(s.artwork["data"], media_type=s.artwork["type"],
+                    headers={"ETag": f'"{s.artwork["sha256"]}"', "Cache-Control": "private, max-age=86400"})
 
 
 @app.post("/satellites/{nid}/identify")

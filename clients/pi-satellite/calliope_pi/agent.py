@@ -22,6 +22,7 @@ the agent reconnects and says hello with the new caps."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import json
@@ -45,6 +46,7 @@ BACKOFF = (1, 2, 5, 10, 20, 30)
 EARCON_MAX, EARCON_MAX_BYTES, EARCON_RATE = 16, 512 * 1024, 48000
 ROOT = ["sudo", "-n", "/usr/local/sbin/calliope-root"]
 SPEAK_DUCK = 0.2       # other streams, while the satellite itself speaks
+ARTWORK_MAX = 2 * 1024 * 1024
 
 
 def socket_url(hub: str) -> str:
@@ -175,6 +177,7 @@ class Agent:
         self._pushing: asyncio.Task | None = None
         self.speaking = False
         self.player.on_active = self._speaking
+        self._art_sent: str | None = None
         self.airplay_state: dict | None = None
         self.playing_at: dict | None = None
 
@@ -321,6 +324,9 @@ class Agent:
                 (paths.STATE / "rolled_back.json").unlink()
             await self.apply()
             await self.send(self.status())
+            # The hub keeps a cover in memory only: a new connection sends it again.
+            self._art_sent = None
+            await self._send_artwork()
         elif kind == "config":
             if self.st.apply(msg):
                 save(self.st)
@@ -511,6 +517,10 @@ class Agent:
             return None
         meta = dict(self.metadata.state)
         stream = airplay.stream(await airplay.sink_inputs())
+        if meta["session"] and not meta["title"]:
+            # Started in the middle of a track: MPRIS has what the pipe said before.
+            md = await airplay.mpris_metadata()
+            meta.update({k: md[k] for k in ("title", "artist", "album") if md.get(k)})
         running = await self.airplay.running()
         mpris = await airplay.mpris_status() if running else None
         # The player's own word first; the metadata's events where it has none.
@@ -541,10 +551,45 @@ class Agent:
 
         async def push() -> None:
             await asyncio.sleep(0.4)   # a burst of items (a new track) is one status
+            if self.metadata.new_session:
+                self.metadata.new_session = False
+                await self._starting_volume()
             self.airplay_state = await self._airplay_state()
             with contextlib.suppress(Exception):
                 await self.send(self.status())
+                await self._send_artwork()
         self._pushing = asyncio.create_task(push())
+
+    async def _starting_volume(self) -> None:
+        """A phone just connected: its slider goes to the starting volume
+        (DACP, through Shairport Sync), and it sends that volume back. A
+        phone that takes no remote control gets the output set directly."""
+        percent = self.st.config.get("airplay_volume")
+        percent = 70 if percent is None else int(percent)
+        await asyncio.sleep(1.0)   # let the phone finish connecting
+        if await airplay.set_phone_volume(percent):
+            log.info("AirPlay: the phone's volume set to %d%%", percent)
+            return
+        proc = await asyncio.create_subprocess_exec(
+            airplay.VOLUME_HOOK, str(airplay.VOLUME_RANGE_DB), f"{airplay.start_db(percent):.1f}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await proc.wait()
+
+    async def _send_artwork(self) -> None:
+        """The cover of what plays, to the hub, once per picture: the page
+        shows it (GET /satellites/{id}/airplay/artwork)."""
+        art = (self.airplay_state or {}).get("artwork")
+        if not art or art.get("sha256") == self._art_sent:
+            return
+        try:
+            data = self.metadata.art_file.read_bytes()
+        except OSError:
+            return
+        if len(data) > ARTWORK_MAX:
+            return
+        await self.send({"type": "artwork", "sha256": art["sha256"], "format": art.get("type"),
+                         "data": base64.b64encode(data).decode()})
+        self._art_sent = art["sha256"]
 
     async def _devices_changed(self) -> None:
         """A plug went in or out, or a card came or went: the page is told

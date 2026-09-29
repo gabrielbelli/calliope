@@ -44,7 +44,7 @@ def test_the_name_is_quoted_so_a_name_cannot_break_the_configuration():
     assert 'name = "Kitchen \\"big\\" speaker\\\\ ";' in text
     assert 'output_backend = "alsa";' in text and 'output_format = "S16";' in text
     assert 'ignore_volume_control = "yes";' in text
-    assert f'run_this_when_volume_is_set = "{airplay.VOLUME_HOOK} ";' in text
+    assert f'run_this_when_volume_is_set = "{airplay.VOLUME_HOOK} 60 ";' in text
     assert 'output_device = "default";' in text and "output_rate = 44100;" in text
 
 
@@ -178,11 +178,11 @@ def test_the_stream_says_its_format_rate_and_bit_rate():
     assert airplay.stream([si[0] | {"sample_specification": "float32le 2ch 48000Hz"}])["bitrate_kbps"] == 3072
 
 
-def test_a_session_after_a_minute_idle_starts_at_the_starting_volume():
+def test_the_starting_volume_is_the_phones_slider_in_airplay_decibels():
     assert airplay.start_db(70) == -9.0 and airplay.start_db(0) == -30.0 and airplay.start_db(100) == 0.0
     text = airplay.config("pi", start_volume=70)
     assert "default_airplay_volume = -9.0;" in text
-    assert "high_threshold_airplay_volume = -30.0;" in text and "high_volume_idle_timeout_in_minutes = 1;" in text
+    assert "high_volume_idle_timeout_in_minutes" not in text, "the phone's slider is set instead"
     assert "default_airplay_volume = -15.0;" in airplay.config("pi", start_volume=50)
 
 
@@ -252,9 +252,10 @@ async def test_the_players_own_word_on_playing(shell, monkeypatch):
     assert await airplay.mpris_status() is None
 
 
-def test_the_phones_volume_becomes_the_outputs_own_in_the_same_decibels(tmp_path):
+def test_the_phones_volume_becomes_the_outputs_own_spread_over_60_db(tmp_path):
     """The hook, run as Shairport Sync runs it, with pactl recording what it
-    was asked: -15 dB stays -15 dB on the output; -144 mutes."""
+    was asked: the slider's 30 dB spread over 60, as a linear factor (the
+    pactl here refuses dB); the top is full volume; -144 mutes."""
     import os
     import subprocess
     from pathlib import Path
@@ -264,11 +265,20 @@ def test_the_phones_volume_becomes_the_outputs_own_in_the_same_decibels(tmp_path
     fake.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\n")
     fake.chmod(0o755)
     env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
-    subprocess.run([str(hook), "-15.000000"], env=env, check=True)
-    subprocess.run([str(hook), "-144.000000"], env=env, check=True)
-    assert log.read_text().splitlines() == ["set-sink-mute @DEFAULT_SINK@ 0",
-                                            "set-sink-volume @DEFAULT_SINK@ -- -15.000000dB",
-                                            "set-sink-mute @DEFAULT_SINK@ 1"]
+    for db in ("-15.000000", "0.000000", "-28.125000", "-144.000000"):
+        subprocess.run([str(hook), "60", db], env=env, check=True)
+    subprocess.run([str(hook), "60"], env=env, check=True)   # no volume: nothing
+    assert log.read_text().splitlines() == [
+        "set-sink-mute @DEFAULT_SINK@ 0", "set-sink-volume @DEFAULT_SINK@ 0.031623",   # -30 dB
+        "set-sink-mute @DEFAULT_SINK@ 0", "set-sink-volume @DEFAULT_SINK@ 1.000000",
+        "set-sink-mute @DEFAULT_SINK@ 0", "set-sink-volume @DEFAULT_SINK@ 0.001540",   # first step, -56.25 dB
+        "set-sink-mute @DEFAULT_SINK@ 1"]
+
+
+def test_a_new_phone_session_is_marked_so_its_volume_is_set():
+    m = airplay.Metadata()
+    m.feed(item("ssnc", "abeg"))
+    assert m.new_session is True
 
 
 def test_the_airplay_stream_is_found_through_alsa_too():
@@ -276,3 +286,34 @@ def test_the_airplay_stream_is_found_through_alsa_too():
                                                 "node.name": "alsa_playback.shairport-sync"},
                      "sample_specification": "s16le 2ch 44100Hz", "corked": False}]
     assert airplay.stream(through_alsa)["format"] == "s16le 2ch 44100Hz"
+
+
+async def test_the_phones_slider_is_moved_over_shairport_syncs_remote_control(monkeypatch):
+    calls = []
+
+    async def run(*argv, timeout=10.0):
+        calls.append(argv)
+        return 0, ""
+    monkeypatch.setattr(airplay, "_run", run)
+    assert await airplay.set_phone_volume(70) is True
+    assert calls == [("busctl", "--user", "call", "--", "org.gnome.ShairportSync", "/org/gnome/ShairportSync",
+                      "org.gnome.ShairportSync.RemoteControl", "SetAirplayVolume", "d", "-9.0")]
+
+
+async def test_mpris_fills_the_track_when_the_pipe_has_not_said_it(monkeypatch):
+    reply = {"type": "a{sv}", "data": {
+        "xesam:title": {"type": "s", "data": "Clair de Lune"},
+        "xesam:artist": {"type": "as", "data": ["Debussy", "Kocsis"]},
+        "xesam:album": {"type": "s", "data": ""},
+        "mpris:artUrl": {"type": "s", "data": "file:///run/user/1000/cover.jpg"}}}
+
+    async def run(*argv, timeout=10.0):
+        return 0, json.dumps(reply)
+    monkeypatch.setattr(airplay, "_run", run)
+    assert await airplay.mpris_metadata() == {"title": "Clair de Lune", "artist": "Debussy, Kocsis",
+                                              "art_url": "file:///run/user/1000/cover.jpg"}
+
+    async def gone(*argv, timeout=10.0):
+        return 1, "no such service"
+    monkeypatch.setattr(airplay, "_run", gone)
+    assert await airplay.mpris_metadata() == {}

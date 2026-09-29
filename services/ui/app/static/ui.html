@@ -1314,6 +1314,9 @@ details>summary:active{opacity:.72}
 .sat-headrow{align-items:baseline}
 #sathealth{margin:0 0 0 auto;text-align:right}
 .sat-empty{margin:0;font-weight:600}
+.sat-apart{display:block;width:120px;height:120px;object-fit:cover;margin-top:var(--s3);
+  border-radius:var(--radius-s);background:var(--line)}
+.sat-apart[hidden]{display:none}
 .sats,.wws,.fws{list-style:none;margin:0;padding:0}
 .sats>li,.wws>li,.fws>li{border-top:1px solid var(--line)}
 .sats>li:first-child,.wws>li:first-child,.fws>li:first-child{border-top:0}
@@ -4252,6 +4255,7 @@ const SAT_COPY = {
   qTakes: "It takes {bits}-bit, {rates}.",
   qNow: "Driven now at {now}.",
   jackNone: "nothing plugged in",
+  jackPlugged: "plugged in",
   jackIn: "Something is plugged into it.",
   jackOut: "Nothing is plugged into it, so what it plays reaches no one.",
   lineSpeaker: "A speaker, with no microphone to listen with",
@@ -4823,8 +4827,9 @@ function satAdoptedMarkup(u) {
               <div class="slider"><input type="range" id="${u}-apvol" min="0" max="100" step="5" data-cfg="airplay_volume">
                 <output for="${u}-apvol"></output></div></div>
           </div>
-          <div class="hint">A phone that starts playing after a minute of quiet starts at this volume.</div>
+          <div class="hint">A phone that connects starts at this volume, and its own slider moves there.</div>
           <div class="hint sat-aphint"></div>
+          <img class="sat-apart" alt="Cover of what is playing" hidden>
           <dl class="facts sat-apfacts"></dl>
         </div>
       </details>
@@ -5062,8 +5067,12 @@ function satQualityLabel(q) {
 function satDeviceLabel(d) {
   const q = d.quality, label = satQualityLabel(q);
   const name = (d.description || d.name) + (q && q.kind === "pwm" ? " *" : "");
-  const parts = [name, label, d.jack === "unplugged" ? SAT_COPY.jackNone : ""].filter(Boolean);
-  return parts.join(" · ");
+  return [name, label, satJackWord(d)].filter(Boolean).join(" · ");
+}
+/* Where the card detects its jacks: whether something is plugged in, said
+   either way. A card that cannot tell says nothing. */
+function satJackWord(d) {
+  return d.jack === "unplugged" ? SAT_COPY.jackNone : d.jack === "plugged" ? SAT_COPY.jackPlugged : "";
 }
 /* The line under Output: what the chosen output is and takes, and what it
    is driven at now; for the Pi's own jack, its limits. */
@@ -5130,7 +5139,7 @@ function satAudio(li, n, cfg) {
   const mic = q('[data-cfg="audio_source"]');
   const sources = audio.sources || [];
   const opts = [["", SAT_COPY.audioDefault],
-    ...sources.map(d => [d.name, (d.description || d.name) + (d.jack === "unplugged" ? ` · ${SAT_COPY.jackNone}` : "")])];
+    ...sources.map(d => [d.name, [d.description || d.name, satJackWord(d)].filter(Boolean).join(" · ")])];
   if (cfg.audio_source && !sources.some(d => d.name === cfg.audio_source)) {
     opts.push([cfg.audio_source, satText("audioMissing", { name: cfg.audio_source })]);
   }
@@ -5200,13 +5209,19 @@ function satPlayedAt(out) {
 }
 
 /* BIT-PERFECT OR NOT: AirPlay's 16-bit samples reach the card unchanged
-   when Shairport Sync hands them on as they came (16-bit, 44.1 kHz), the
-   card is driven at exactly that, and nothing is mixed in or turned down
-   (a reply ducks the music). The phone's volume is the output's own then
-   (calliope-airplay-volume), not a change to the samples. */
+   when Shairport Sync hands them on as they came (16-bit, 44.1 kHz) and the
+   card runs at the same rate in whole numbers of 16 bits or more: a card
+   driven at 24 or 32 bits takes each 16-bit sample with zeros below it,
+   the same value. Not when the rate differs, or the card is narrower or
+   float. Nothing is mixed in then (a reply ducks the music), and the
+   phone's volume is the output's own (calliope-airplay-volume), not a
+   change to the samples. */
 function satAirPlayPath(s, out, ap) {
   if (!s || !s.format || !out || !out.format) return "";
-  const same = s.format === out.format && /^s16/i.test(s.format) && / 44100Hz$/.test(s.format);
+  const spec = f => /^s(\d+)(?:le|be|ne)?\s+(\d+)ch\s+(\d+)Hz/i.exec(f);
+  const a = spec(s.format), b = spec(out.format);
+  const same = !!(a && b) && a[1] === "16" && a[3] === "44100" && b[3] === a[3] && a[2] === b[2]
+    && Number(b[1]) >= 16;
   if (same && ap.playing) return SAT_COPY.apBitPerfect;
   return same ? "" : satText("apConverted", { from: satFormat(s.format), to: satFormat(out.format) });
 }
@@ -5237,8 +5252,8 @@ function satAirPlayFacts(ap, out) {
     ["Original file", original],
     /* WHAT AIRPLAY SENDS, and not what the stream's container makes of it:
        classic AirPlay is always ALAC, lossless, 16-bit at 44.1 kHz, 1,411
-       kb/s. Shairport Sync hands it on at 32 bits so the phone's volume costs
-       no resolution; that is headroom, not more music. */
+       kb/s. Shairport Sync hands it on as it came, 16-bit, and leaves the
+       volume to the output. */
     ["Source", SAT_COPY.apSource],
     ["Bit rate", satText("apBitrate", { kbps: "1,411" })],
     ["Handed on as", s.format ? satFormat(s.format) : ""],
@@ -5264,6 +5279,17 @@ function satAirPlay(li, n, cfg) {
     : ap && ap.error ? satText("apError", { error: ap.error })
     : ap && ap.running ? satText("apOn", { name: cfg.airplay_name || satName(n) }) : SAT_COPY.apStarting);
   const audio = (n.status && n.status.audio) || {};
+  /* THE COVER, from the hub, which keeps the last one the Pi sent; named by
+     its SHA-256, so a new track's cover is a new address and the browser's
+     cache serves the rest. */
+  const art = q(".sat-apart"), sha = on && ap && ap.session && ap.artwork && ap.artwork.sha256;
+  if (!sha) art.hidden = true;
+  else if (art.dataset.sha !== sha) {
+    art.dataset.sha = sha;
+    art.onerror = () => { art.hidden = true; };
+    art.onload = () => { art.hidden = false; };
+    art.src = `/ui/api/satellites/${encodeURIComponent(n.id)}/airplay/artwork?v=${sha}`;
+  } else art.hidden = !art.complete || !art.naturalWidth;
   const facts = on ? satAirPlayFacts(ap, audio.playing_at) : [];
   const dl = q(".sat-apfacts");
   const sig = JSON.stringify(facts);

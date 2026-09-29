@@ -782,12 +782,58 @@ def test_an_output_says_whether_something_is_plugged_into_it(tmp_path):
                     quality: { kind: "usb", bits: [32], rates: [384000] }, jack: "unplugged" };
       console.log(JSON.stringify({
         label: satDeviceLabel(dac),
+        plugged: satDeviceLabel({ ...dac, jack: "plugged" }),
+        unknown: satDeviceLabel({ ...dac, jack: null }),
         out: satOutputQuality(dac, ""),
         in_: satOutputQuality({ ...dac, jack: "plugged" }, ""),
         event: satEventWhat({ type: "jack", device: "Realtek USB2.0 Audio", plugged: false }),
         back: satEventWhat({ type: "jack", device: "Realtek USB2.0 Audio", plugged: true }) }));
     """)
     assert got["label"] == "Realtek USB2.0 Audio · USB DAC · up to 32-bit · 384 kHz · nothing plugged in"
+    assert got["plugged"] == "Realtek USB2.0 Audio · USB DAC · up to 32-bit · 384 kHz · plugged in"
+    assert got["unknown"] == "Realtek USB2.0 Audio · USB DAC · up to 32-bit · 384 kHz"
     assert got["out"].startswith("Nothing is plugged into it, so what it plays reaches no one.")
     assert got["in_"].startswith("Something is plugged into it.")
     assert got["event"] == "Realtek USB2.0 Audio: unplugged" and got["back"] == "Realtek USB2.0 Audio: plugged in"
+
+
+def test_airplay_is_bit_perfect_on_a_wider_card_at_the_same_rate_and_not_otherwise(tmp_path):
+    """A card driven at 24 or 32 bits takes each 16-bit sample with zeros
+    below it: the same value. A different rate, a narrower card, a float
+    one or a mono one is a conversion."""
+    got = run(tmp_path, """
+      const s = { format: "s16le 2ch 44100Hz" }, on = { playing: true };
+      const path = out => satAirPlayPath(s, { format: out }, on);
+      console.log(JSON.stringify({
+        s32: path("s32le 2ch 44100Hz"), s24: path("s24le 2ch 44100Hz"),
+        rate: path("s32le 2ch 48000Hz"), float: path("float32le 2ch 44100Hz"),
+        mono: path("s16le 1ch 44100Hz"), paused: satAirPlayPath(s, { format: "s32le 2ch 44100Hz" }, {}) }));
+    """)
+    perfect = "Bit-perfect: the phone's samples reach the card unchanged"
+    assert got["s32"] == perfect and got["s24"] == perfect
+    assert got["rate"].startswith("Converted from 44.1 kHz · 16-bit · stereo to 48 kHz")
+    assert got["float"].startswith("Converted") and got["mono"].startswith("Converted")
+    assert got["paused"] == ""
+
+
+def test_the_airplay_section_shows_the_cover_the_hub_keeps(tmp_path):
+    """The cover's address carries its SHA-256, so a new track is a new
+    picture; with no session, or AirPlay off, there is none."""
+    got = run(tmp_path, """
+      const el = () => ({ dataset: {}, hidden: false, textContent: "", value: "", checked: false,
+                          append() {}, style: {}, setAttribute() {},
+                          get parentElement() { return el(); }, querySelector() { return el(); } });
+      const parts = {};
+      const li = { querySelector: sel => (parts[sel] = parts[sel] || el()) };
+      const n = { id: "b827eb121359", online: true, caps: { speaker: {}, airplay: { version: 1 } },
+                  status: { airplay: { running: true, session: true, playing: true,
+                                       artwork: { sha256: "ab12", bytes: 900, type: "jpeg" } } } };
+      satAirPlay(li, n, {});
+      const art = parts[".sat-apart"], first = art.src;
+      art.onload();
+      const shown = art.hidden;
+      satAirPlay(li, { ...n, status: { airplay: { running: true, session: false } } }, {});
+      console.log(JSON.stringify({ first, shown, gone: art.hidden }));
+    """)
+    assert got["first"] == "/ui/api/satellites/b827eb121359/airplay/artwork?v=ab12"
+    assert got["shown"] is False and got["gone"] is True
