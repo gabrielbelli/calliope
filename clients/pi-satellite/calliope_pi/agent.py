@@ -212,7 +212,7 @@ class Agent:
         c = self.st.config
         return {k: c.get(k) for k in ("volume", "mic_gain_db", "mic_enabled", "speaker_enabled",
                                       "audio_sink", "audio_source", "echo_reference",
-                                      "airplay_enabled", "airplay_name")}
+                                      "airplay_enabled", "airplay_name", "airplay_volume")}
 
     def airplay_name(self) -> str:
         return self.st.config.get("airplay_name") or self.st.name or f"calliope-sat-{self.id[-4:]}"
@@ -252,7 +252,8 @@ class Agent:
         if self.devices.sources:
             await pipewire.set_source_volume(source, 10 ** (float(c.get("mic_gain_db") or 0) / 20))
         self.player.target = sink.name if sink else None
-        await self.airplay.apply(bool(c.get("airplay_enabled", True)), self.airplay_name())
+        await self.airplay.apply(bool(c.get("airplay_enabled", True)), self.airplay_name(),
+                                 int(c.get("airplay_volume") if c.get("airplay_volume") is not None else 70))
         await self.refresh_recording()
 
     # -- ducking: other streams go down while the satellite speaks, or while the hub asks --
@@ -509,13 +510,24 @@ class Agent:
         if not airplay.available():
             return None
         meta = dict(self.metadata.state)
-        playing = airplay.stream(await airplay.sink_inputs())
+        stream = airplay.stream(await airplay.sink_inputs())
+        running = await self.airplay.running()
+        mpris = await airplay.mpris_status() if running else None
+        # The player's own word first; the metadata's events where it has none.
+        playing = mpris == "Playing" if mpris else bool(meta["playing"] and stream and not stream.get("corked"))
+        progress = dict(meta["progress"]) if meta.get("progress") else None
+        if progress and playing:   # carried on from when the phone last said
+            progress["position_s"] = round(min(progress["duration_s"] or 1e9,
+                                               progress["position_s"] + time.time() - progress.pop("at")), 1)
+        elif progress:
+            progress.pop("at", None)
         return {"enabled": bool(self.st.config.get("airplay_enabled", True)), "name": self.airplay_name(),
-                "running": await self.airplay.running(), "error": self.airplay.error,
-                "playing": bool(meta["playing"] and playing and not playing.get("corked")),
-                "session": meta["session"], "client": meta["client"], "title": meta["title"],
-                "artist": meta["artist"], "album": meta["album"], "volume": meta["volume"],
-                "since": meta["since"], "stream": playing}
+                "running": running, "error": self.airplay.error, "player": mpris,
+                "playing": playing, "session": meta["session"] or mpris in ("Playing", "Paused"),
+                "client": meta["client"], "title": meta["title"], "artist": meta["artist"],
+                "album": meta["album"], "volume": meta["volume"], "since": meta["since"],
+                "track": meta["track"], "client_info": meta["client_info"], "progress": progress,
+                "artwork": meta["artwork"], "stream": stream, **self.metadata.view()}
 
     def _airplay_changed(self) -> None:
         """From the metadata thread: send a status now, not at the next tick,

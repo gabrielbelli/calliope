@@ -51,7 +51,13 @@ def _quote(text: str) -> str:
     return '"' + clean.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def config(name: str, pipe: Path = PIPE) -> str:
+def start_db(percent: int) -> float:
+    """A position of the phone's AirPlay slider, 0-100 %, as the AirPlay
+    volume Shairport Sync takes: -30 dB (the bottom) to 0 dB (the top)."""
+    return round(-30.0 + max(0, min(100, int(percent))) * 0.3, 1)
+
+
+def config(name: str, pipe: Path = PIPE, start_volume: int = 70) -> str:
     """Shairport Sync's configuration for this satellite."""
     return "\n".join([
         "// Written by the Calliope satellite agent (calliope_pi/airplay.py).",
@@ -64,6 +70,17 @@ def config(name: str, pipe: Path = PIPE) -> str:
         '  output_backend = "alsa";',
         # Timing corrections resampled with SoX, the best of its choices.
         '  interpolation = "soxr";',
+        # Its own D-Bus and MPRIS interfaces on calliope's session bus, where
+        # the agent asks whether it is playing (mpris_status).
+        '  dbus_service_bus = "session";',
+        '  mpris_service_bus = "session";',
+        # A session that starts after a minute with nothing playing starts at
+        # the hub's starting volume, not wherever the phone left it: any
+        # volume counts as "high" (-30 dB and up), and the idle timeout is one
+        # minute. A pause shorter than that keeps the volume the phone set.
+        f"  default_airplay_volume = {start_db(start_volume)};",
+        "  high_threshold_airplay_volume = -30.0;",
+        "  high_volume_idle_timeout_in_minutes = 1;",
         "};",
         "alsa = {",
         '  output_device = "default";',
@@ -75,7 +92,7 @@ def config(name: str, pipe: Path = PIPE) -> str:
         "};",
         "metadata = {",
         '  enabled = "yes";',
-        '  include_cover_art = "no";',
+        '  include_cover_art = "yes";',
         f"  pipe_name = {_quote(str(pipe))};",
         "  pipe_timeout = 5000;",
         "};",
@@ -100,7 +117,7 @@ class AirPlay:
         self.conf, self.pipe = conf, pipe
         self.error: str | None = None
 
-    async def apply(self, enabled: bool, name: str) -> None:
+    async def apply(self, enabled: bool, name: str, start_volume: int = 70) -> None:
         """Running under `name` when enabled, stopped when not. Restarted
         only when its configuration changed, so a settings message that
         changes nothing else does not cut the music."""
@@ -111,7 +128,7 @@ class AirPlay:
             await _run("systemctl", "--user", "disable", "--now", UNIT)
             self.error = None
             return
-        text = config(name, self.pipe)
+        text = config(name, self.pipe, start_volume)
         make_fifo(self.pipe)
         changed = not self.conf.exists() or self.conf.read_text() != text
         if changed:
@@ -155,19 +172,55 @@ def _word(hexed: bytes) -> str:
         return "????"
 
 
+# DMAP items (type "core") as text, and as big-endian integers.
+CORE_TEXT = {"minm": "title", "asar": "artist", "asal": "album", "asaa": "album_artist", "asgn": "genre",
+             "ascp": "composer", "asdt": "kind", "ascm": "comment", "asct": "category", "asfm": "format"}
+CORE_INT = {"astm": "duration_ms", "astn": "track_number", "astc": "track_count", "asdn": "disc_number",
+            "asdc": "disc_count", "asyr": "year", "asbr": "bitrate_kbps", "assr": "sample_rate",
+            "caps": "play_status", "mper": "persistent_id", "asri": "artist_id", "asai": "album_id"}
+# Shairport Sync's own items (type "ssnc") as text.
+SSNC_TEXT = {"snam": "client_name", "snua": "client_agent", "clip": "client_ip", "svip": "server_ip",
+             "cmod": "client_model", "cdid": "client_device_id", "cmac": "client_mac", "styp": "stream_type",
+             "daid": "dacp_id", "ofmt": "output_format", "ofps": "output_rate", "sdsc": "stream_description"}
+# Kept on the Pi only: with it, anyone on the network could control the phone.
+PRIVATE = frozenset({"acre"})
+RTP_RATE = 44100
+
+
+def _decoded(kind: str, code: str, data: bytes):
+    """An item's value as JSON can carry it: an integer, text, or for
+    anything else its size and a base64 of its first bytes."""
+    if kind == "core" and code in CORE_INT and 0 < len(data) <= 8:
+        return int.from_bytes(data, "big")
+    try:
+        text = data.decode("utf-8")
+        if text.isprintable() or not text:
+            return text
+    except UnicodeDecodeError:
+        pass
+    return {"bytes": len(data), "base64": base64.b64encode(data[:48]).decode()}
+
+
 class Metadata:
-    """What Shairport Sync says it is playing, from its metadata pipe: the
-    session (a client connected), play and pause, the client's name, the
-    track, and the AirPlay volume. `on_change` is called from the reading
-    thread whenever something a person would see changed."""
+    """Everything Shairport Sync says through its metadata pipe, kept for the
+    page and for what comes later (Home Assistant, remote control): every
+    item raw (`raw`, by "type/code"), and the parts a person reads decoded
+    (`state`): the session, play and pause, the track and its source file,
+    progress, the phone (name, model, address, app), its volume, and the
+    cover art (kept on the Pi, named by its hash). The phone's remote-control
+    token stays in `remote` and never leaves the Pi. `on_change` is called
+    from the reading thread when something a person would see changed."""
 
-    TEXT = {"minm": "title", "asar": "artist", "asal": "album"}
-
-    def __init__(self, pipe: Path = PIPE, on_change=None):
+    def __init__(self, pipe: Path = PIPE, on_change=None, art_dir: Path | None = None):
         self.pipe, self.on_change = pipe, on_change
+        self.art_dir = art_dir or pipe.parent
         self.state: dict = {"session": False, "playing": False, "client": None, "title": None,
-                            "artist": None, "album": None, "volume": None, "since": None}
+                            "artist": None, "album": None, "volume": None, "since": None,
+                            "track": {}, "client_info": {}, "progress": None, "artwork": None}
+        self.raw: dict = {}
+        self.remote: dict = {}
         self._thread: threading.Thread | None = None
+        self._picture: bytearray | None = None
 
     def start(self) -> None:
         if self._thread is None:
@@ -179,7 +232,7 @@ class Metadata:
             try:
                 with open(self.pipe, "rb", buffering=0) as f:   # waits for Shairport Sync
                     buf = b""
-                    while chunk := f.read(4096):
+                    while chunk := f.read(65536):
                         buf = self.feed(buf + chunk)
             except OSError:
                 time.sleep(2)
@@ -195,10 +248,16 @@ class Metadata:
         if changed and self.on_change is not None:
             self.on_change()
         rest = buf[end:].lstrip()
-        return rest[-65536:]
+        return rest[-8 * 1024 * 1024:]   # a cover picture can be a few hundred KB
 
     def take(self, kind: str, code: str, data: bytes) -> bool:
-        s, before = self.state, dict(self.state)
+        s = self.state
+        before = json.dumps(s, sort_keys=True, default=str)
+        key = f"{kind}/{code}"
+        if code in PRIVATE:
+            self.remote[code] = data.decode("ascii", "replace")
+        elif code != "PICT":
+            self.raw[key] = {"value": _decoded(kind, code, data), "at": round(time.time(), 3)}
         text = data.decode("utf-8", "replace").strip() or None
         if kind == "ssnc":
             if code in ("abeg", "pbeg", "prsm"):
@@ -206,12 +265,22 @@ class Metadata:
                 s["since"] = s["since"] or time.time()
             elif code == "pfls":
                 s["playing"] = False
+            elif code == "prgr" and text:
+                # "start/current/end" RTP frames: sent as play starts, resumes or seeks.
+                try:
+                    a, b, c = (int(x) for x in text.split("/"))
+                    s["progress"] = {"position_s": round(((b - a) % 2 ** 32) / RTP_RATE, 1),
+                                     "duration_s": round(((c - a) % 2 ** 32) / RTP_RATE, 1),
+                                     "at": time.time()}
+                    s["session"], s["playing"] = True, True
+                except ValueError:
+                    pass
             elif code in ("pend", "aend"):
-                s.update(session=code == "pend" and s["session"], playing=False, since=None)
+                s.update(session=code == "pend" and s["session"], playing=False, since=None, progress=None)
                 if code == "aend":
-                    s.update(client=None, title=None, artist=None, album=None, volume=None)
-            elif code == "snam":
-                s["client"] = text
+                    s.update(client=None, title=None, artist=None, album=None, volume=None,
+                             track={}, client_info={}, artwork=None)
+                    self.remote.clear()
             elif code == "pvol" and text:
                 try:
                     db = float(text.split(",")[0])
@@ -219,10 +288,59 @@ class Metadata:
                 except ValueError:
                     pass
             elif code == "mdst":
-                s.update(title=None, artist=None, album=None)
-        elif kind == "core" and code in self.TEXT:
-            s[self.TEXT[code]] = text
-        return s != before
+                s.update(title=None, artist=None, album=None, track={})
+            elif code == "pcst":
+                self._picture = bytearray()
+            elif code == "PICT":
+                self._artwork(data)
+            elif code in SSNC_TEXT and text:
+                s["client_info"] = s["client_info"] | {SSNC_TEXT[code]: text}
+                if code == "snam":
+                    s["client"] = text
+        elif kind == "core":
+            if code in CORE_TEXT:
+                s["track"] = s["track"] | {CORE_TEXT[code]: text}
+            elif code in CORE_INT and 0 < len(data) <= 8:
+                value = int.from_bytes(data, "big")
+                s["track"] = s["track"] | {CORE_INT[code]: value}
+                if code == "caps":            # DAAP play status: 3 paused, 4 playing
+                    s["playing"] = value == 4 if value in (3, 4) else s["playing"]
+            s["title"], s["artist"], s["album"] = (s["track"].get("title"), s["track"].get("artist"),
+                                                   s["track"].get("album"))
+        return json.dumps(s, sort_keys=True, default=str) != before
+
+    def _artwork(self, data: bytes) -> None:
+        """The cover, saved beside the pipe by its hash, and named in the state."""
+        if not data:
+            self.state["artwork"] = None
+            return
+        kind = "jpeg" if data[:3] == b"\xff\xd8\xff" else "png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "bin"
+        digest = __import__("hashlib").sha256(data).hexdigest()
+        try:
+            self.art_dir.mkdir(parents=True, exist_ok=True)
+            (self.art_dir / "calliope-airplay-cover").write_bytes(data)
+        except OSError:
+            pass
+        self.state["artwork"] = {"sha256": digest, "bytes": len(data), "type": kind}
+
+    def view(self) -> dict:
+        """What the status carries: the decoded state, and every raw item."""
+        return {"raw": dict(self.raw), "remote_control": bool(self.remote)}
+
+
+async def mpris_status() -> str | None:
+    """Playing, Paused or Stopped, from Shairport Sync's own MPRIS interface
+    on calliope's session bus: what the player itself says, where the
+    metadata's events leave it unsure (a resume that sends no event)."""
+    code, out = await _run("busctl", "--user", "--json=short", "get-property",
+                           "org.mpris.MediaPlayer2.ShairportSync", "/org/mpris/MediaPlayer2",
+                           "org.mpris.MediaPlayer2.Player", "PlaybackStatus", timeout=3.0)
+    if code:
+        return None
+    try:
+        return json.loads(out).get("data")
+    except ValueError:
+        return None
 
 
 FORMAT = re.compile(r"^(\w+?)(\d+)?(le|be|ne)?\s+(\d+)ch\s+(\d+)Hz")

@@ -176,6 +176,14 @@ def test_the_stream_says_its_format_rate_and_bit_rate():
     assert airplay.stream([si[0] | {"sample_specification": "float32le 2ch 48000Hz"}])["bitrate_kbps"] == 3072
 
 
+def test_a_session_after_a_minute_idle_starts_at_the_starting_volume():
+    assert airplay.start_db(70) == -9.0 and airplay.start_db(0) == -30.0 and airplay.start_db(100) == 0.0
+    text = airplay.config("pi", start_volume=70)
+    assert "default_airplay_volume = -9.0;" in text
+    assert "high_threshold_airplay_volume = -30.0;" in text and "high_volume_idle_timeout_in_minutes = 1;" in text
+    assert "default_airplay_volume = -15.0;" in airplay.config("pi", start_volume=50)
+
+
 def test_the_configuration_names_the_metadata_pipe(tmp_path):
     text = airplay.config("pi", tmp_path / "meta")
     assert 'enabled = "yes";' in text and f'pipe_name = "{tmp_path / "meta"}";' in text
@@ -189,3 +197,54 @@ def test_the_output_says_what_the_card_is_driven_at():
         "name": "alsa_output.usb-dac", "format": "s32le 2ch 44100Hz", "state": "running"}
     assert pipewire.output_format(sinks, None)["name"] == "alsa_output.usb-dac"
     assert pipewire.output_format(sinks, "gone") is None
+
+
+def test_a_resume_that_sends_no_resume_event_is_still_playing():
+    m = airplay.Metadata()
+    m.feed(item("ssnc", "pbeg") + item("ssnc", "pfls"))
+    assert m.state["playing"] is False
+    m.feed(item("ssnc", "prgr", b"1000/45100/4411000"))   # progress: sent as it resumes
+    assert m.state["playing"] is True
+    assert m.state["progress"]["position_s"] == 1.0 and m.state["progress"]["duration_s"] == 100.0
+    m.feed(item("core", "caps", bytes([3])))
+    assert m.state["playing"] is False
+    m.feed(item("core", "caps", bytes([4])))
+    assert m.state["playing"] is True
+
+
+def test_everything_airplay_sends_is_kept_decoded_and_raw_but_the_remote_token_stays_here(tmp_path):
+    m = airplay.Metadata(pipe=tmp_path / "meta", art_dir=tmp_path)
+    jpeg = b"\xff\xd8\xff\xe0" + b"x" * 1000
+    m.feed(item("ssnc", "snam", b"Gabriel's iPhone") + item("ssnc", "snua", b"AirPlay/870.14.1")
+           + item("ssnc", "clip", b"192.0.2.44") + item("ssnc", "daid", b"ABCDEF0123456789")
+           + item("ssnc", "acre", b"1234567890") + item("core", "asgn", b"Jazz")
+           + item("core", "astm", (245000).to_bytes(4, "big")) + item("core", "asyr", (2019).to_bytes(2, "big"))
+           + item("core", "asbr", (256).to_bytes(2, "big")) + item("core", "asdt", b"AAC audio file")
+           + item("ssnc", "pcst") + item("ssnc", "PICT", jpeg) + item("ssnc", "pcen"))
+    t, c = m.state["track"], m.state["client_info"]
+    assert (t["genre"], t["duration_ms"], t["year"], t["bitrate_kbps"], t["kind"]) == (
+        "Jazz", 245000, 2019, 256, "AAC audio file")
+    assert (c["client_name"], c["client_agent"], c["client_ip"], c["dacp_id"]) == (
+        "Gabriel's iPhone", "AirPlay/870.14.1", "192.0.2.44", "ABCDEF0123456789")
+    assert m.raw["core/astm"]["value"] == 245000 and m.raw["ssnc/snam"]["value"] == "Gabriel's iPhone"
+    assert "ssnc/acre" not in m.raw and m.remote == {"acre": "1234567890"}
+    assert m.view()["remote_control"] is True and "acre" not in json.dumps(m.view())
+    art = m.state["artwork"]
+    assert art["type"] == "jpeg" and art["bytes"] == len(jpeg)
+    assert (tmp_path / "calliope-airplay-cover").read_bytes() == jpeg
+    assert "ssnc/PICT" not in m.raw, "the picture is kept once, as a file"
+    m.feed(item("ssnc", "aend"))
+    assert m.state["track"] == {} and m.state["artwork"] is None and m.remote == {}
+
+
+async def test_the_players_own_word_on_playing(shell, monkeypatch):
+    async def run(*argv, timeout=15.0):
+        if argv[0] == "busctl":
+            return 0, '{"type":"s","data":"Playing"}'
+        return 1, ""
+    monkeypatch.setattr(airplay, "_run", run)
+    assert await airplay.mpris_status() == "Playing"
+    async def gone(*argv, timeout=15.0):
+        return 1, "Unknown object"
+    monkeypatch.setattr(airplay, "_run", gone)
+    assert await airplay.mpris_status() is None

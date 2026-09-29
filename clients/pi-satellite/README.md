@@ -33,9 +33,18 @@ The best each piece of hardware takes, and no conversion that is not needed
 | Sample format | the widest the card takes | 32 or 24 bits on a USB DAC or DAC HAT, 16 on the Pi's own jack |
 | AirPlay | handed to PipeWire at 32 bits, through ALSA | The phone's volume is applied without losing resolution |
 
-What is left is the hardware. The Pi 3's own 3.5 mm jack is PWM, well below
-CD quality; a USB DAC or an I2S DAC HAT is the upgrade, and appears under
-**Output** by itself. Classic AirPlay is always ALAC, lossless, 16-bit at
+What is left is the hardware, and the agent says what each output is
+(`quality` on each device in `audio`, from the kernel):
+
+| Kind | What it is | Marked |
+|---|---|---|
+| `usb` | A USB DAC: every format and rate its interface offers, from `/proc/asound/cardN/stream0` | "USB DAC · up to 32-bit · 384 kHz" |
+| `i2s` | A DAC HAT on the Pi's I2S pins | "DAC HAT" |
+| `hdmi` | HDMI: the display's or receiver's own DAC makes the sound | "HDMI: the display's own DAC" |
+| `pwm` | **The Pi's own 3.5 mm jack: pulse-width modulation from the processor, not a DAC.** 16-bit at 48 kHz at most, with audible hiss and less detail than even a cheap USB DAC | an asterisk, and its limits under **Output** |
+
+A USB DAC or an I2S DAC HAT is the upgrade, and appears under **Output** by
+itself. Classic AirPlay is always ALAC, lossless, 16-bit at
 44.1 kHz (1,411 kb/s); AirPlay 2 adds 48 kHz.
 
 The status says what the output is driven at now (`audio.playing_at`), and
@@ -58,10 +67,24 @@ AirPlay 2, so iPhones, iPads and Macs list it, but multi-room and the Home
 app do not. AirPlay 2 needs Shairport Sync 5.5 with NQPTP, which Debian
 ships only from forky.
 
-**What it plays.** Shairport Sync writes its metadata to a pipe in
-calliope's runtime directory; the agent reads it (`airplay.Metadata`) for
-the phone's name, the track, play and pause, and the phone's volume, and
-asks PipeWire (`pactl`) for the stream's format, rate and delay. The status
+**What it plays: everything AirPlay says, kept.** Shairport Sync writes its
+metadata to a pipe in calliope's runtime directory, cover art included; the
+agent (`airplay.Metadata`) keeps every item raw (`airplay.raw`, by
+`type/code`, for integrations still to come) and decodes what a person
+reads: the track (title, artist, album, album artist, genre, composer,
+year, track and disc numbers, duration, and the phone's own file: its kind,
+bit rate and rate), progress, the phone (name, model, address, app, DACP
+id), its volume, and the cover (saved on the Pi, named by its SHA-256).
+Whether it plays comes from Shairport Sync's own MPRIS interface on
+calliope's session bus, the player's own word, and from the metadata's
+events where MPRIS is not there. The phone's remote-control token
+(`acre`) stays on the Pi: the hub's API has no key, and the token controls
+the phone's playback.
+
+**Starting volume.** A session that starts after a minute with nothing
+playing starts at `airplay_volume` (70 % of the phone's slider unless the
+hub says otherwise), not wherever the phone left it; a pause shorter than
+that keeps the phone's volume. The status
 carries them as `airplay` and is sent at once when they change, so the
 Satellites tab's AirPlay section says Playing as the music starts.
 

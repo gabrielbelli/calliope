@@ -20,6 +20,7 @@ DEFAULT_CONFIG = {
     "echo_reference": True,    # send what the output plays as channel 0
     "airplay_enabled": True,   # an AirPlay receiver (airplay.py), where shairport-sync is installed
     "airplay_name": None,      # what phones list it as; None is the satellite's own name
+    "airplay_volume": 70,      # % of the phone's slider a session starts at after a minute idle
 }
 CONFIG_KEYS = frozenset(DEFAULT_CONFIG)
 

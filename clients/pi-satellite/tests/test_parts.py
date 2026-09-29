@@ -37,7 +37,7 @@ def test_pipewires_outputs_and_inputs_are_listed_with_the_defaults_and_nothing_e
     assert [s.name for s in d.sources] == ["alsa_input.usb-Generic_USB_Audio-00.mono-fallback"]
     assert d.default_sink.startswith("alsa_output.usb") and d.sink(d.default_sink).id == 41
     assert d.view()["sinks"][0] == {"name": "alsa_output.platform-bcm2835_audio.stereo-fallback",
-                                    "description": "Built-in Audio Stereo", "api": "alsa"}
+                                    "description": "Built-in Audio Stereo", "api": "alsa", "quality": None}
     assert pipewire.parse_dump("not a list") == pipewire.NONE
 
 
@@ -129,3 +129,61 @@ def test_the_setup_network_opens_only_after_three_minutes_offline(monkeypatch, t
     assert portal.offline_long_enough(now=1000.0 + portal.OFFLINE_S) is True
     monkeypatch.setattr(portal, "online", lambda: True)
     assert portal.offline_long_enough(now=5000.0) is False and not (tmp_path / "offline-since").exists()
+
+
+REALTEK = """Realtek Realtek USB2.0 Audio at usb-3f980000.usb-1.1.3, high speed : USB Audio
+
+Playback:
+  Status: Stop
+  Interface 1
+    Altset 1
+    Format: S16_LE
+    Channels: 2
+    Rates: 44100, 48000, 96000, 192000, 384000
+    Bits: 16
+  Interface 1
+    Altset 3
+    Format: S32_LE
+    Channels: 2
+    Rates: 44100, 48000, 96000, 192000, 384000
+    Bits: 32
+
+Capture:
+  Status: Stop
+  Interface 2
+    Altset 1
+    Format: S16_LE
+    Channels: 1
+    Rates: 48000
+    Bits: 16
+"""
+
+
+def test_each_output_says_what_hardware_it_is_and_what_it_can_do(tmp_path):
+    (tmp_path / "card2").mkdir()
+    (tmp_path / "card2" / "stream0").write_text(REALTEK)
+    (tmp_path / "card0").mkdir()
+    (tmp_path / "card3").mkdir()
+    (tmp_path / "card3" / "id").write_text("sndrpihifiberry\n")
+    usb = pipewire.Device("alsa_output.usb-Realtek", "Realtek USB2.0 Audio", "alsa", 51, 2, "Realtek USB2.0 Audio")
+    jack = pipewire.Device("alsa_output.platform-mailbox", "Built-in Audio", "alsa", 40, 0, "bcm2835 Headphones")
+    hdmi = pipewire.Device("alsa_output.hdmi", "Built-in HDMI", "alsa", 41, 1, "vc4-hdmi")
+    hat = pipewire.Device("alsa_output.hat", "HiFiBerry DAC+", "alsa", 42, 3, "snd_rpi_hifiberry_dacplus")
+    bt = pipewire.Device("bluez_output.x", "Speaker", "bluez5", 43)
+    assert pipewire.quality(usb, "playback", tmp_path) == {
+        "kind": "usb", "dac": True, "formats": ["S16_LE", "S32_LE"], "bits": [16, 32],
+        "rates": [44100, 48000, 96000, 192000, 384000]}
+    assert pipewire.quality(usb, "capture", tmp_path)["rates"] == [48000]
+    assert pipewire.quality(jack, "playback", tmp_path) == {"kind": "pwm", "dac": False, "bits": [16],
+                                                            "rates": [48000]}
+    assert pipewire.quality(hdmi, "playback", tmp_path)["kind"] == "hdmi"
+    assert pipewire.quality(hat, "playback", tmp_path) == {"kind": "i2s", "dac": True}
+    assert pipewire.quality(bt, "playback", tmp_path) is None
+
+
+def test_the_card_behind_each_node_comes_from_pipewire():
+    dump = [{"id": 40, "type": "PipeWire:Interface:Node", "info": {"props": {
+        "media.class": "Audio/Sink", "node.name": "alsa_output.platform-mailbox", "device.api": "alsa",
+        "node.description": "Built-in Audio Stereo", "alsa.card": 0, "alsa.card_name": "bcm2835 Headphones"}}}]
+    [jack] = pipewire.parse_dump(dump).sinks
+    assert (jack.card, jack.card_name) == (0, "bcm2835 Headphones")

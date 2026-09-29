@@ -21,10 +21,12 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import shutil
 import time
 from array import array
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 log = logging.getLogger("calliope.pipewire")
 
@@ -40,9 +42,13 @@ class Device:
     description: str      # what a person reads
     api: str | None       # alsa, bluez5, ...
     id: int               # object.id: what wpctl takes, valid until it goes away
+    card: int | None = None        # the ALSA card behind it, for its quality
+    card_name: str | None = None
+    quality: dict | None = None    # quality(): what the hardware is and can do
 
     def view(self) -> dict:
-        return {"name": self.name, "description": self.description, "api": self.api}
+        return {"name": self.name, "description": self.description, "api": self.api,
+                "quality": self.quality}
 
 
 @dataclass(frozen=True)
@@ -92,9 +98,12 @@ def parse_dump(objects: list) -> Devices:
         name = props.get("node.name")
         if not name or media not in ("Audio/Sink", "Audio/Source"):
             continue
+        card = props.get("alsa.card")
         dev = Device(name=name,
                      description=props.get("node.description") or props.get("node.nick") or name,
-                     api=props.get("device.api"), id=int(o.get("id", -1)))
+                     api=props.get("device.api"), id=int(o.get("id", -1)),
+                     card=int(card) if isinstance(card, int | str) and str(card).isdigit() else None,
+                     card_name=props.get("alsa.card_name") or props.get("api.alsa.card.name"))
         (sinks if media == "Audio/Sink" else sources).append(dev)
     return Devices(tuple(sinks), tuple(sources), default_sink, default_source)
 
@@ -118,9 +127,68 @@ async def devices() -> Devices:
         log.debug("pw-dump failed: %s", out[:200])
         return NONE
     try:
-        return parse_dump(json.loads(out))
+        d = parse_dump(json.loads(out))
     except ValueError:
         return NONE
+    return Devices(tuple(replace(x, quality=quality(x, "playback")) for x in d.sinks),
+                   tuple(replace(x, quality=quality(x, "capture")) for x in d.sources),
+                   d.default_sink, d.default_source)
+
+
+# ---- what each output is -------------------------------------------------------
+
+ASOUND = Path("/proc/asound")
+
+
+def usb_formats(text: str, direction: str) -> dict | None:
+    """A USB audio card's own list (/proc/asound/cardN/stream0) for one
+    direction: every sample format and rate its interface offers."""
+    section = "Playback:" if direction == "playback" else "Capture:"
+    other = "Capture:" if direction == "playback" else "Playback:"
+    if section not in text:
+        return None
+    part = text.split(section, 1)[1].split(other, 1)[0]
+    formats = sorted(set(re.findall(r"Format:\s*(\S+)", part)))
+    bits = sorted({int(b) for b in re.findall(r"Bits:\s*(\d+)", part)})
+    rates: set[int] = set()
+    for line in re.findall(r"Rates:\s*([^\n]+)", part):
+        if "continuous" in line:
+            rates.update(int(r) for r in re.findall(r"\d+", line))
+        else:
+            rates.update(int(r) for r in re.findall(r"\d{4,6}", line))
+    if not formats and not rates:
+        return None
+    return {"formats": formats, "bits": bits, "rates": sorted(rates)}
+
+
+def quality(dev: Device, direction: str = "playback", asound: Path | None = None) -> dict | None:
+    """What the hardware behind an output (or input) is, and what it can do:
+    `kind` usb, pwm (the Pi's own jack: pulse-width modulation from the
+    processor, not a DAC), hdmi (the display's or receiver's DAC), i2s (a DAC
+    HAT) or other; `dac` whether a real DAC makes the sound on this board;
+    for USB, every format, bit depth and rate it offers."""
+    if dev.api != "alsa" or dev.card is None:
+        return None
+    asound = asound or ASOUND
+    name = (dev.card_name or "").lower()
+    card = asound / f"card{dev.card}"
+    try:
+        stream = (card / "stream0").read_text()
+    except OSError:
+        stream = None
+    if stream is not None:
+        return {"kind": "usb", "dac": True, **(usb_formats(stream, direction) or {})}
+    if "bcm2835" in name and "headphone" in name:
+        return {"kind": "pwm", "dac": False, "bits": [16], "rates": [48000]}
+    if "hdmi" in name:
+        return {"kind": "hdmi", "dac": None}
+    try:
+        driver = (card / "id").read_text().strip().lower()
+    except OSError:
+        driver = ""
+    if any(k in name or k in driver for k in ("hifiberry", "iqaudio", "justboom", "allo", "dac", "pcm51")):
+        return {"kind": "i2s", "dac": True}
+    return {"kind": "other", "dac": None}
 
 
 async def sinks() -> list:
