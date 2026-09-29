@@ -15,10 +15,12 @@ itself.
         └─ /ui/clips                                     ──► the shared `voices` volume
 ```
 
-Three tabs — **Transcribe**, **Speak**, **Jobs** — an easy mode that needs no
-manual, and an *Expert* `<details>` panel at the foot of each tab holding the
-real knobs beneath the controls already on screen. Opening one does not swap
-pages or lose what you typed.
+Five tabs, **Transcribe**, **Speak**, **Jobs**, **Vocabulary** and
+**Satellites**. The speech tabs have an easy mode that needs no manual, and an
+*Expert* `<details>` panel at the foot holding the real knobs beneath the
+controls already on screen. Opening one does not swap pages or lose what you
+typed. The Satellites tab is the satellite hub's page, and needs the hub
+([The Satellites tab](#the-satellites-tab)).
 
 > There used to be an **Expert** checkbox in the header as well, gating those
 > same panels. It was a second, global control over one thing, so a setting
@@ -45,7 +47,7 @@ pages or lose what you typed.
 
 ---
 
-## Why this is a fifth container, and what it costs
+## Why this is its own container, and what it costs
 
 The framework survey argued for serving the page from the gateway itself, and
 the argument was good: the page is static, the gateway is already the only
@@ -61,7 +63,7 @@ every API key also the process that spawns a subprocess on a URL a browser
 chose. Separate images keep that blast radius where it is.
 
 And the brief asked for `services/ui` with a Containerfile, a compose entry, a
-workflow matrix row and a README like its four siblings.
+workflow matrix row and a README like its siblings.
 
 **What it costs is a second `ports` entry**, and `compose.yaml` says at the top
 that one appearing means the file has stopped doing its job. That sentence was
@@ -699,6 +701,189 @@ downloading.
 
 ---
 
+## The Satellites tab
+
+The fifth tab is the satellite hub's page
+([`services/satellites`](../satellites/README.md)). It lists every satellite
+the hub has seen, and below the list it has three closed sections for the
+hub's own settings: **Wake words**, **Activity** and **Firmware**. A
+deployment without the hub shows one sentence instead. The page asks the hub
+for the lists every 3 s while the tab is open, and keeps its event stream
+open once the tab has been visited.
+
+**A first satellite, start to finish:**
+
+1. Join the Wi-Fi network a new satellite opens, `calliope-sat-XXXX`, and give
+   it your Wi-Fi and the hub's address. It turns up in the list as waiting.
+2. Type a **Name** and press **Adopt**.
+3. Open **Wake words**, add a word or open one, choose its **Mode** and its
+   **Action**, and press **Save wake words**.
+4. Under **Try a word**, type a sentence and press **Try**. The saved action
+   answers it and the reply is made, but nothing plays on any satellite.
+5. Say the wake word to the satellite, and open **Activity** to see what
+   happened.
+
+Each control writes one field on the hub. The tables name the field and link
+to where the hub's README describes it, rather than repeat it.
+
+### A satellite waiting to be adopted
+
+| Control | Hub request | |
+|---|---|---|
+| **Name**, **Adopt** | `POST /satellites/{id}/adopt` `{"name"}` | [Adoption](../satellites/README.md#adoption) |
+| **Blink** | `POST /satellites/{id}/identify` | Five seconds of light, to find which board it is |
+| **Forget** | `POST /satellites/{id}/forget` | Shown while it is offline, to clear a satellite that was only seen |
+
+### An adopted satellite
+
+Closed, a row shows the name, one state word and one line. Open, it has:
+
+| Control | Field or request | Range |
+|---|---|---|
+| **Volume** | `volume` | 12 steps; step k is k × 100 / 12 % |
+| **Mic gain** | `mic_gain_db` | 0 to 36 dB, 3 dB a step |
+| **Light brightness** | `brightness` | 10 to 100 %, 5 a step |
+| **Speaker**, **Microphone**, **Lights** | `speaker_enabled`, `mic_enabled`, `lights_enabled` | |
+| **Change wake words** | | Opens **Wake words** |
+
+Each change is one `PATCH /satellites/{id}`. A slider sends its value when
+it is let go. A change made with the satellite's own buttons shows here too.
+
+Under **Try it**, each control makes a noise or lights the ring:
+
+| Control | Request |
+|---|---|
+| **Say** | `POST /satellites/{id}/say` `{"text"}`, in the hub's default voice |
+| **Blink** | `POST /satellites/{id}/identify` |
+| **Play a tone** | `POST /satellites/{id}/tone` |
+| **Listen 5 s** | `GET /satellites/{id}/listen?seconds=5`, played back in the page |
+| **Stop** | `POST /satellites/{id}/flush`: what the satellite's Set button does |
+| **Colour**, **Light pattern** (Solid, Pulse, Spin, Off), **Show** | `POST /satellites/{id}/lights` `{"mode", "color"}` |
+
+**Buttons** is a grid: one row per button the satellite reports (Rec, Mode,
+Play, Set, Vol −, Vol +, and Side), and a **When pressed** and a **When
+released** choice for each. The choices are Nothing, Talk (`ptt`), Stop,
+Mute mic (`mute`), Volume up, Volume down, Lights on/off (`lights`), Dimmer,
+Brighter and Webhook, which asks for its address. Every change sends the
+whole mapping as `buttons` in one `PATCH`. The hub refuses a mapping with no
+mute ([Buttons](../satellites/README.md#buttons)).
+
+**Device** holds what is set once:
+
+| Control | Field or request |
+|---|---|
+| **Update** | `POST /satellites/ota` `{"satellite", "sha256"}` with the newest image for its model. Shown only when there is one |
+| **Name**, **Rename** | `name` |
+| **Top of the ring** | `ring_top`: the LED at 12 o'clock as the board is mounted, where the volume bar starts |
+| **LEDs run anticlockwise** | `ring_upside_down`. The hub's name for it is "upside down": the bar then runs the other way, so it still fills clockwise as seen |
+| **Set up the ring…** | Lights one LED (`POST …/lights` with `pixels`). Move it with ◀ and ▶ and press **That's the top**, then say which way it went, **Clockwise** or **Anticlockwise**. The answers are saved as `ring_top` and `ring_upside_down` |
+| **Reboot** | `POST /satellites/{id}/reboot`. It asks first |
+| **Move to another hub**, **New hub address**, **Move** | `POST /satellites/{id}/set-hub` `{"url"}`. The satellite saves the address, reboots and waits to be adopted there. It asks first |
+| **Forget** | `POST /satellites/{id}/forget`. It asks first |
+
+### Wake words
+
+The list edits a copy of the hub's set, and **Save wake words** sends the
+whole set with `PUT /satellites/wake-words`, because the hub checks the set as
+one. A 422 leaves the copy on screen with the reason beside the field.
+**Remove** marks a word until the save, and **Keep** takes it back. Every
+field is in the hub's
+[wake word table](../satellites/README.md#wake-words).
+
+| Control | Field | Range |
+|---|---|---|
+| **Add a wake word**, **Add** | a new entry's `name` | The names the hub can load |
+| **Mode**: Command, Conversation, Trigger | `mode` | |
+| **Threshold** | `threshold` | 0.1 to 0.95 |
+| **Satellites**: Every satellite, Chosen | `satellites`: `["*"]`, or the ids ticked | |
+| **Language**, **Language tag** | `language`: unset for Auto, or a BCP 47 tag | |
+| **Action** | `action.destination.type`: `ha_assist`, `ha_conversation`, `llm`, `webhook`, `echo` | |
+| **Address** | `action.destination.url` | |
+| **Token variable**; **Key name** for a language model | `token_env`, or `api_key_env` | A variable's name, never a value. Optional for a webhook |
+| **Assist pipeline**, **Ask again** | `pipeline`, listed by `POST /satellites/ha/pipelines` | |
+| **Conversation agent** (under More) | `agent_id` | |
+| **If not understood, continue as a conversation with** | `action.fallback` | A conversation word |
+| **Keep listening after a reply, seconds** | `conversation.follow_up_s` | 1 to 60 |
+| **Pause that ends the command, seconds** | `silence_ms`, sent in milliseconds | 0.2 to 3 s |
+| **Pause that ends a follow-up, seconds** | `conversation.silence_ms` | 0.2 to 3 s |
+| **Ring colour**, **Use the default** | `colour` (`#rrggbb`), or none for the listening blue | |
+| **When heard**: Chime and flash, Nothing | `trigger.feedback`: `earcon`, `none` | |
+| **Cooldown, seconds** | `trigger.cooldown_s` | 0 to 600 |
+| **Ends a conversation it is heard in** | `trigger.ends_conversation` | |
+| **Reply on** (under More) | `action.reply_to` | The same satellite, none, or another |
+| **Voice** (under More) | `action.voice` | A Kokoro voice, or the language's |
+| **End phrases** (under More) | `conversation.end_phrases`, comma-separated | Up to 64 |
+
+A language model word ([its fields](../satellites/README.md#language-model-destination))
+adds:
+
+| Control | Field or request | Range |
+|---|---|---|
+| **Provider** | Fills **Base URL** for a known provider | |
+| **Base URL** | `base_url` | |
+| **Model**, **List models** | `model`, from `POST /satellites/llm/models` | |
+| **API key**, **Store key**, **Clear key** | `PUT /satellites/secrets` `{"name", "value"}`, under the key variable's name. The page is never sent a key back ([Keys](../satellites/README.md#keys)) | |
+| **Tools**: Web search, Weather | `tools` ([Tools and the date](../satellites/README.md#tools-and-the-date)) | |
+| **Reply limit, tokens** (under More) | `max_tokens` | 1 to 8192 |
+| **System prompt** (under More) | `system` | Up to 8000 characters |
+| **Test** | `POST /satellites/llm/test`, with the form as it stands | |
+
+The page asks a server for its model list by itself only for the address and
+key a word was saved with, because asking sends the key. After a change,
+press **List models**.
+
+The last row, after the words, is push-to-talk's own entry: what a button set
+to Talk does. It has a mode and an action, and cannot be a trigger.
+
+**Try a word** (`POST /satellites/routing/test`) runs a typed sentence
+through a word's saved action and makes the reply, and plays nothing.
+**Custom models** uploads an openWakeWord `.onnx` under a name
+(`POST /satellites/wake-words/models`). The word is then offered under
+**Add a wake word**. **Delete** removes one no word uses.
+
+### Activity and Firmware
+
+**Activity** is the hub's event stream (`GET /satellites/events`) as a log a
+screen reader hears: buttons, wake words, conversations, triggers, updates,
+and satellites coming and going. It marks a gap while the stream was down.
+
+**Firmware** lists the uploaded images and uploads one:
+
+| Control | Field or request |
+|---|---|
+| **Image (.bin)**, **Version**, **Model**, **Signature**, **Upload** | `POST /satellites/firmware?model=&version=&signature=`. Type **Version** exactly as the build stamped it (`git describe`): the page calls a satellite up to date only when its reported firmware matches. A satellite built with a signing key refuses an image with no **Signature** ([korvo-satellite](../../clients/korvo-satellite/README.md#updates-over-the-air)) |
+| **Update every satellite** | On the newest image for a model. One `POST /satellites/ota` for each satellite that would change, after a question that counts them |
+| **Roll back every satellite** | On an older image, in place of Update. The question says the image is older |
+| **Delete** | `DELETE /satellites/firmware/{sha256}` |
+
+### The routes behind it
+
+`app/main.py` forwards these to the gateway, and nothing else under
+`/satellites`:
+
+- `GET /satellites`, `GET /satellites/events`, and `GET`, `PATCH /satellites/{id}`
+- `POST /satellites/{id}/` `adopt`, `forget`, `identify`, `reboot`,
+  `lights`, `tone`, `say`, `flush`, `set-hub`, and `GET /satellites/{id}/listen`
+- `GET` and `PUT /satellites/wake-words`, `POST /satellites/wake-words/models`
+  and `DELETE /satellites/wake-words/models/{name}`
+- `GET` and `PUT /satellites/routing`, and `POST /satellites/routing/test`
+- `POST /satellites/ha/pipelines`, `POST /satellites/llm/models`,
+  `POST /satellites/llm/test`, `PUT /satellites/secrets`
+- `GET` and `POST /satellites/firmware`, `DELETE /satellites/firmware/{sha256}`
+  and `POST /satellites/ota`
+
+Two hub routes are left out on purpose. `POST /satellites/{id}/inject` runs a
+recorded clip through a satellite's real actions, which is a script's job: a
+button for it would be one press from Home Assistant acting on a clip.
+`POST /satellites/{id}/ptt` is Home Assistant's way to start listening, and
+the page has the satellites' own Talk buttons. The device socket
+`/satellites/ws` is not here either, because a browser never opens it. A
+firmware image or a wake word model is held whole by the hub before it can
+refuse it, so this service refuses either upload over 8 MB before it
+forwards a byte.
+
+---
+
 ## What the page hides, and why each one is right
 
 - **`language`, in either mode.** It is a 400 `unsupported_parameter` on `/v1`
@@ -900,7 +1085,7 @@ docker run -p 30081:8090 \
 — which is **not** in the Containerfile, and that is not an oversight:
 `HEALTHCHECK` is not a field in the OCI image spec, so an OCI-format build
 drops it silently, and OCI is buildah's default format, which is what CI runs.
-The four sibling images have none for the same reason.
+The sibling images have none for the same reason.
 
 ### Tests
 
@@ -923,14 +1108,29 @@ bytes in that file, and a headless browser would add a dependency to the one
 service whose whole claim is that it has none. The inline script's syntax is
 checked separately with `node --check` over the extracted `<script>` block.
 
+The Satellites tab has its own suites:
+
+| File | What it checks |
+|---|---|
+| `tests/test_satellites.py` | The tab read as text: which control sits in which section, and what a poll may write |
+| `tests/test_satellites_writes.py` | The page's own Satellites script, run in Node against a fake hub that answers in the order a network does. The other three below use its harness |
+| `tests/test_satellites_ordering.py` | The same, with events and polls that arrive before or after a save |
+| `tests/test_satellites_modes.py` | A wake word's mode, language hint and action, set and saved |
+| `tests/test_satellites_llm.py` | A language model word: its provider, model list, key and Test |
+| `tests/test_satellites_states.py` | The state word, chip and line each satellite row shows, over every case |
+| `tests/test_wake_words_contract.py` | The wake word fields the page sends against the names the hub's own code reads |
+
+The Node suites skip without `node` on PATH. None starts a server or reaches
+the network.
+
 ---
 
 ## Layout
 
 | File | |
 |---|---|
-| `app/static/ui.html` | The whole UI. Inline CSS and JS, no build step, no external request of any kind — it works on a NAS with no internet |
-| `app/main.py` | The forwarding allowlist, the key check, the upload ceiling, the clip routes |
+| `app/static/ui.html` | The whole UI, the Satellites tab included. Inline CSS and JS, no build step, no external request of any kind — it works on a NAS with no internet |
+| `app/main.py` | The forwarding allowlist, the `/satellites` routes among it, the key check, the upload ceilings, the clip routes |
 | `app/ingest.py` | Resolve, commit, abandon, progress, fetch |
 | `app/metube.py` | A narrow client, with every verified trap written down |
 | `app/probe.py` | Five scalars out of a URL, and not one byte of media |
