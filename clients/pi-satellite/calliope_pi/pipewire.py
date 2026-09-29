@@ -45,10 +45,11 @@ class Device:
     card: int | None = None        # the ALSA card behind it, for its quality
     card_name: str | None = None
     quality: dict | None = None    # quality(): what the hardware is and can do
+    jack: str | None = None        # "plugged", "unplugged", or None where the card cannot tell
 
     def view(self) -> dict:
         return {"name": self.name, "description": self.description, "api": self.api,
-                "quality": self.quality}
+                "quality": self.quality, "jack": self.jack}
 
 
 @dataclass(frozen=True)
@@ -130,9 +131,57 @@ async def devices() -> Devices:
         d = parse_dump(json.loads(out))
     except ValueError:
         return NONE
-    return Devices(tuple(replace(x, quality=quality(x, "playback")) for x in d.sinks),
-                   tuple(replace(x, quality=quality(x, "capture")) for x in d.sources),
+    plugs = jacks(await _pactl_list("sinks")) | jacks(await _pactl_list("sources"))
+    return Devices(tuple(replace(x, quality=quality(x, "playback"), jack=plugs.get(x.name)) for x in d.sinks),
+                   tuple(replace(x, quality=quality(x, "capture"), jack=plugs.get(x.name)) for x in d.sources),
                    d.default_sink, d.default_source)
+
+
+async def _pactl_list(what: str) -> list:
+    code, out = await _run("pactl", "-f", "json", "list", what)
+    if code:
+        return []
+    try:
+        return json.loads(out)
+    except ValueError:
+        return []
+
+
+AVAILABILITY = {"available": "plugged", "not available": "unplugged"}
+
+
+def jacks(listed: list) -> dict:
+    """Whether something is plugged into each device's active port, from the
+    card's own jack detection (the kernel's "... Jack" controls, which
+    PipeWire reads): "plugged", "unplugged", or None where the card cannot
+    tell (the Pi's own jack)."""
+    out = {}
+    for d in listed if isinstance(listed, list) else []:
+        active = d.get("active_port")
+        port = next((p for p in d.get("ports") or [] if p.get("name") == active), None)
+        out[d.get("name")] = AVAILABILITY.get(str((port or {}).get("availability") or ""))
+    return out
+
+
+async def watch(on_change) -> None:
+    """Call `on_change` whenever a card, output or input changes (a plug
+    going in or out, a USB DAC arriving): pactl subscribe, restarted if it
+    ends."""
+    while True:
+        if shutil.which("pactl") is None:
+            return
+        proc = await asyncio.create_subprocess_exec("pactl", "subscribe", stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.DEVNULL)
+        try:
+            while line := await proc.stdout.readline():
+                if re.search(rb"'(change|new|remove)' on (card|sink|source) #", line):
+                    await on_change()
+        finally:
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                await proc.wait()
+        await asyncio.sleep(5)
 
 
 # ---- what each output is -------------------------------------------------------

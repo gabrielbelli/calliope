@@ -37,7 +37,8 @@ def test_pipewires_outputs_and_inputs_are_listed_with_the_defaults_and_nothing_e
     assert [s.name for s in d.sources] == ["alsa_input.usb-Generic_USB_Audio-00.mono-fallback"]
     assert d.default_sink.startswith("alsa_output.usb") and d.sink(d.default_sink).id == 41
     assert d.view()["sinks"][0] == {"name": "alsa_output.platform-bcm2835_audio.stereo-fallback",
-                                    "description": "Built-in Audio Stereo", "api": "alsa", "quality": None}
+                                    "description": "Built-in Audio Stereo", "api": "alsa", "quality": None,
+                                    "jack": None}
     assert pipewire.parse_dump("not a list") == pipewire.NONE
 
 
@@ -187,3 +188,15 @@ def test_the_card_behind_each_node_comes_from_pipewire():
         "node.description": "Built-in Audio Stereo", "alsa.card": 0, "alsa.card_name": "bcm2835 Headphones"}}}]
     [jack] = pipewire.parse_dump(dump).sinks
     assert (jack.card, jack.card_name) == (0, "bcm2835 Headphones")
+
+
+def test_a_card_that_detects_its_jack_says_whether_something_is_plugged_in():
+    listed = [{"name": "alsa_output.usb-Realtek", "active_port": "analog-output-headphones",
+               "ports": [{"name": "analog-output-headphones", "availability": "available"}]},
+              {"name": "alsa_output.usb-other", "active_port": "analog-output-headphones",
+               "ports": [{"name": "analog-output-headphones", "availability": "not available"}]},
+              {"name": "alsa_output.platform-mailbox", "active_port": "analog-output",
+               "ports": [{"name": "analog-output", "availability": "availability unknown"}]}]
+    assert pipewire.jacks(listed) == {"alsa_output.usb-Realtek": "plugged", "alsa_output.usb-other": "unplugged",
+                                      "alsa_output.platform-mailbox": None}
+    assert pipewire.jacks("nonsense") == {}

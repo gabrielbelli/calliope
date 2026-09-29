@@ -44,7 +44,17 @@ What is left is the hardware, and the agent says what each output is
 | `pwm` | **The Pi's own 3.5 mm jack: pulse-width modulation from the processor, not a DAC.** 16-bit at 48 kHz at most, with audible hiss and less detail than even a cheap USB DAC | an asterisk, and its limits under **Output** |
 
 A USB DAC or an I2S DAC HAT is the upgrade, and appears under **Output** by
-itself. Classic AirPlay is always ALAC, lossless, 16-bit at
+itself.
+
+**Jack detection.** A card that detects its jacks (the kernel's `... Jack`
+controls; many USB DACs, not the Pi's own jack) says whether something is
+plugged into each output and input: `jack` on each device, `plugged`,
+`unplugged`, or `null` where it cannot tell. The agent follows PipeWire's
+events (`pactl subscribe`) and sends its status within a second of a plug
+going in or out; the hub publishes a `jack` event. A combo headset socket
+often reports a microphone for any plug, a speaker cable included, so the
+microphone's jack does not decide whether the satellite has one: its
+**Microphone** switch does. Classic AirPlay is always ALAC, lossless, 16-bit at
 44.1 kHz (1,411 kb/s); AirPlay 2 adds 48 kHz.
 
 The status says what the output is driven at now (`audio.playing_at`), and

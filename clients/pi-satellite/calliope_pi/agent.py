@@ -546,10 +546,28 @@ class Agent:
                 await self.send(self.status())
         self._pushing = asyncio.create_task(push())
 
+    async def _devices_changed(self) -> None:
+        """A plug went in or out, or a card came or went: the page is told
+        now (debounced, as pactl reports one change as several events)."""
+        if self._pushing is not None and not self._pushing.done():
+            return
+
+        async def push() -> None:
+            await asyncio.sleep(0.5)
+            before = {d["name"]: d.get("jack") for d in self.devices.view()["sinks"] + self.devices.view()["sources"]}
+            self.devices = await pipewire.devices()
+            after = {d["name"]: d.get("jack") for d in self.devices.view()["sinks"] + self.devices.view()["sources"]}
+            if after != before:
+                self.playing_at = pipewire.output_format(await pipewire.sinks(), self.devices.default_sink)
+                with contextlib.suppress(Exception):
+                    await self.send(self.status())
+        self._pushing = asyncio.create_task(push())
+
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
         if airplay.available():
             self.metadata.start()
+        self._watcher = asyncio.create_task(pipewire.watch(self._devices_changed))
         tries = 0
         while True:
             if not self.st.hub:
