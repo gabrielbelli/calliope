@@ -1314,8 +1314,9 @@ details>summary:active{opacity:.72}
 .sat-headrow{align-items:baseline}
 #sathealth{margin:0 0 0 auto;text-align:right}
 .sat-empty{margin:0;font-weight:600}
-.sat-apart{display:block;width:120px;height:120px;object-fit:cover;margin-top:var(--s3);
-  border-radius:var(--radius-s);background:var(--line)}
+/* A cover at its own shape, whole: a square album, or a video's 16:9. */
+.sat-apart{display:block;width:auto;height:auto;max-width:min(100%,320px);max-height:180px;
+  margin-top:var(--s3);border-radius:var(--radius-s)}
 .sat-apart[hidden]{display:none}
 .sats,.wws,.fws{list-style:none;margin:0;padding:0}
 .sats>li,.wws>li,.fws>li{border-top:1px solid var(--line)}
