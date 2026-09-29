@@ -389,6 +389,7 @@ def test_two_ring_presses_at_once_leave_one_idle_timer_and_draw_in_turn(tmp_path
       };
       await satellitesRefresh();
       const li = SATELLITES.rows.get("aaaaaaaaaaaa");
+      li._ring = null;                                  // a stand-in has every property; a row starts with none
       const b = stand();
       await satRingSetup(li, "ring", b);
       await Promise.all([satRingSetup(li, "ring-next", b), satRingSetup(li, "ring-next", b)]);
@@ -399,3 +400,43 @@ def test_two_ring_presses_at_once_leave_one_idle_timer_and_draw_in_turn(tmp_path
     assert got["during"] == 1 and got["after"] == 0, got
     assert got["most"] == 1, "two lights requests were out at once"
     assert got["lights"][-1] == "off" and got["lights"][-2] == 2, got
+
+
+def test_the_ring_answers_are_saved_even_when_putting_the_ring_out_fails(tmp_path):
+    """The ring was put out before the answers were saved, so a satellite
+    that dropped, or Lights switched off meanwhile (409), threw both answers
+    away. And Set up the ring pressed again, which says the panel is open,
+    started again from the top rather than shutting it."""
+    got = run(tmp_path, r"""
+      const patches = [], lights = [];
+      const real = json;
+      json = async (path, options) => {
+        const method = (options && options.method) || "GET";
+        if (method === "POST" && path === "/satellites/aaaaaaaaaaaa/lights") {
+          const b = JSON.parse(options.body);
+          lights.push(b.mode);
+          if (b.mode === "off") { const e = new Error("409 its lights are off"); e.status = 409; throw e; }
+          return null;
+        }
+        if (method === "PATCH") { patches.push(JSON.parse(options.body)); return null; }
+        return real(path, options);
+      };
+      await satellitesRefresh();
+      const li = SATELLITES.rows.get("aaaaaaaaaaaa");
+      li._ring = null;                                  // a stand-in has every property; a row starts with none
+      const b = stand();
+      await satRingSetup(li, "ring", b);
+      await satRingSetup(li, "ring-next", b);
+      await satRingSetup(li, "ring-top", b);
+      await satRingSetup(li, "ring-ccw", b);
+      await new Promise(r => setTimeout(r, 10));
+      const saved = patches.slice();
+      await satRingSetup(li, "ring", b);
+      const open = !!li._ring;
+      await satRingSetup(li, "ring", b);
+      console.log(JSON.stringify({ saved, open, shut: li._ring === null, lights }));
+    """)
+    assert got["saved"] == [{"ring_top": 1, "ring_upside_down": True}], got
+    assert got["open"] is True and got["shut"] is True, "a second press did not shut the set-up"
+    assert got["lights"][-1] == "off", got
+

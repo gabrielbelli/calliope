@@ -473,6 +473,9 @@ def test_setting_up_the_ring_keeps_the_focus_with_its_steps():
     # Every step goes through satRingShow, which is what moves the focus.
     setup = function("satRingSetup")
     assert setup.count("satRingShow(li, null);") == 3 and "satRingShow(li, li._ring.step);" in setup
+    # Its button shuts it again, and Escape does, as Move's does.
+    assert 'if (act === "ring" && li._ring) act = "ring-cancel";' in setup
+    assert 'satRingSetup(li, "ring-cancel", li.querySelector(\'[data-act="ring"]\'));' in function("satelliteRow")
     # The box names what the wizard asks, and the panel's rows do not touch.
     assert "> LEDs run anticlockwise</label>" in DEVICE and "Upside down" not in DEVICE
     assert ".sat-ringsay{margin:0}" in BARE_CSS and ".sat-ringset>*+*{margin-top:var(--s2)}" in BARE_CSS

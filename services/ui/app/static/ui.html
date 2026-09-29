@@ -4792,6 +4792,13 @@ function satelliteRow(n) {
       ev.preventDefault();
       satMoveOpen(li, false, true);
     }
+    /* Escape shuts the ring's set-up too, from inside it or from its button;
+       satRingShow hands the focus back to the button. */
+    if (ev.key === "Escape" && li._ring
+        && (ev.target.closest(".sat-ringset") || ev.target.dataset.act === "ring")) {
+      ev.preventDefault();
+      satRingSetup(li, "ring-cancel", li.querySelector('[data-act="ring"]'));
+    }
   });
   /* toggle does not bubble; captured here, it still arrives. */
   li.addEventListener("toggle", ev => {
@@ -5396,6 +5403,9 @@ function satRingShow(li, step) {
 async function satRingSetup(li, act, button) {
   const host = satNoteFor(li, button), n = li._n || {}, cfg = n.config || {};
   clearTimeout(li._ringIdle);
+  /* The button says the panel is open (aria-expanded), so pressed again it
+     shuts it, as Move does; it used to start again from the top. */
+  if (act === "ring" && li._ring) act = "ring-cancel";
   try {
     if (act === "ring") {
       if ((n.status || {}).muted) { note(host, "bad", SAT_COPY.ringMuted); return; }
@@ -5407,12 +5417,17 @@ async function satRingSetup(li, act, button) {
     } else if (act === "ring-top") {
       li._ring.step = "way";
     } else if (act === "ring-cw" || act === "ring-ccw") {
+      /* THE ANSWERS ARE SAVED FIRST, and the ring put out after, whatever that
+         answers. Put out first, a satellite that dropped, or Lights switched
+         off meanwhile (the hub's 409), threw away both answers the owner had
+         just given, with the panel shut. */
       const done = { ring_top: li._ring.led, ring_upside_down: act === "ring-ccw" };
       li._ring = null;
       satRingShow(li, null);
-      await satRingSend(li, () => json(`/satellites/${li.dataset.id}/lights`, {
-        method: "POST", headers: JSON_BODY, body: JSON.stringify({ mode: "off" }) }));
-      if (await satellitePatch(li, done, host)) satSaid(host, SAT_COPY.ringSaved);
+      const saved = await satellitePatch(li, done, host);
+      satRingSend(li, () => json(`/satellites/${li.dataset.id}/lights`, {
+        method: "POST", headers: JSON_BODY, body: JSON.stringify({ mode: "off" }) })).catch(() => {});
+      if (saved) satSaid(host, SAT_COPY.ringSaved);
       return;
     } else if (act === "ring-cancel") {
       li._ring = null;
