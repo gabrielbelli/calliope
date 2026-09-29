@@ -119,6 +119,31 @@ def test_activity_opens_its_stream_again_after_the_hub_restarts(tmp_path):
     assert got["cleared"] == "" and got["sum"] == "", got
 
 
+def test_activity_marks_the_gap_while_its_stream_was_down(tmp_path):
+    """The hub's stream has no replay, so what happened while it was down
+    never arrives, and the log ran on as if unbroken. Once it is back, one
+    plain line says so; the first connection says nothing."""
+    got = run(tmp_path, """
+      const sources = [], lines = [];
+      globalThis.EventSource = window.EventSource = class {
+        constructor(url) { this.url = url; this.readyState = 0; sources.push(this); } };
+      const line = satEventLine;
+      satEventLine = (li, ev, who, what) => { lines.push([ev.type, who, what, satEventBad(ev)]); return line(li, ev, who, what); };
+      await satellitesRefresh();
+      sources[0].onopen();
+      const first = lines.length;
+      sources[0].readyState = 2;
+      sources[0].onerror();
+      await satellitesRefresh();
+      sources[1].onopen();
+      sources[1].onopen();                              // said once per gap
+      console.log(JSON.stringify({ first, lines }));
+    """)
+    assert got["first"] == 0, "the first connection was logged as a gap"
+    assert got["lines"] == [["reconnected", "Hub", "reconnected; anything in between is not in this log",
+                             False]], got
+
+
 def test_an_update_is_one_line_in_activity_and_asks_the_hub_nothing_per_ten_per_cent(tmp_path):
     """The firmware reports progress every 10%, and each report was a line
     of its own (about fifteen of the fifty kept per update) and a refresh of

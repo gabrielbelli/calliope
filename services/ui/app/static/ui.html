@@ -4005,7 +4005,7 @@ function chosenGlossaries() {
    markup is rebuilt only when the satellite is adopted or forgotten, because a
    pending row and an adopted one are different things. */
 const SATELLITES = { rows: new Map(), timer: null, events: null, list: [], firmware: [],
-                     fwFailed: null, seq: 0, seeded: false,
+                     fwFailed: null, seq: 0, seeded: false, evGap: false,
                      /* The satellites' own write counter and poll numbers,
                         for satellitesRefresh: writes counts the answers an
                         action applied to a row (adopt, rename, a setting,
@@ -4126,6 +4126,8 @@ const SAT_COPY = {
   routeEmpty: "Type something to send to the word's action.",
   evLost: "Not receiving activity from the hub; it reconnects when the hub answers.",
   sumEvLost: "not connected",
+  evHub: "Hub",
+  evGap: "reconnected; anything in between is not in this log",
   noHub: "This deployment has no satellite hub: voice-satellites is not running.",
   hubError: "The satellite hub did not answer: {message}",
   hubLost: "The hub stopped answering, so this may be out of date: {message}",
@@ -7506,8 +7508,23 @@ function satellitesListen() {
   if (SATELLITES.events || !window.EventSource) return;
   const source = new EventSource("/ui/api/satellites/events");
   SATELLITES.events = source;
-  source.onopen = () => satEventsSay("");
+  /* A GAP IS SAID WHERE IT IS. The hub's stream has no replay, so what
+     happened while it was down (a hub restart, the Wi-Fi) never arrives, and
+     the log ran on as if unbroken: "did my press arrive?" could not tell a
+     press that never came from one sent while the page was deaf. Once it is
+     back, one plain line marks the gap; not .bad, since nothing failed. On
+     SATELLITES and not the source, because a closed stream is replaced by
+     another, which is the one that opens. */
+  source.onopen = () => {
+    satEventsSay("");
+    if (!SATELLITES.evGap) return;
+    SATELLITES.evGap = false;
+    satEventAdd(satEventLine(document.createElement("li"), { type: "reconnected", at: Date.now() / 1000 },
+                             SAT_COPY.evHub, SAT_COPY.evGap));
+    $("evnone").hidden = true;
+  };
   source.onerror = () => {
+    SATELLITES.evGap = true;
     /* 2 is EventSource.CLOSED: it will not try again by itself. */
     if (source.readyState === 2 && SATELLITES.events === source) SATELLITES.events = null;
     satEventsSay(SAT_COPY.evLost);
