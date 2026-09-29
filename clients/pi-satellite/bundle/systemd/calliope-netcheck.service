@@ -1,0 +1,8 @@
+[Unit]
+Description=Open the Wi-Fi setup network after three minutes offline
+ConditionPathExists=/var/lib/calliope/firstboot.done
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/calliope/current
+ExecStart=/usr/bin/python3 -m calliope_pi.portal --if-offline

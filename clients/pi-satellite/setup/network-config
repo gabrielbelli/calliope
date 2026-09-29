@@ -1,0 +1,9 @@
+# Ethernet if a cable is in; Wi-Fi is chosen on the setup network
+# (calliope-sat-XXXX), as on the ESP32 satellite.
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    eth0:
+      dhcp4: true
+      optional: true

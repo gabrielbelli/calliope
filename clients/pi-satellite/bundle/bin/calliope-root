@@ -1,0 +1,5 @@
+#!/bin/sh
+# The agent's only way to root (sudoers.d/calliope). Runs the code of the
+# release that is current, which only root can write.
+cd /opt/calliope/current || exit 1
+exec /usr/bin/python3 -m calliope_pi.root "$@"

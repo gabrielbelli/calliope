@@ -1,0 +1,6 @@
+[Unit]
+Description=Put the previous Calliope release back if the new one never reached the hub
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/calliope-root rollback-check

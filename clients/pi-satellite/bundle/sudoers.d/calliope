@@ -1,0 +1,2 @@
+# The satellite agent may run calliope-root, and nothing else, as root.
+calliope ALL=(root) NOPASSWD: /usr/local/sbin/calliope-root
