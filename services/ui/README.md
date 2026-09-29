@@ -745,7 +745,8 @@ Closed, a row shows the name, one state word and one line. Open, it has:
 | **Mic gain** | `mic_gain_db` | 0 to 36 dB, 3 dB a step |
 | **Light brightness** | `brightness` | 10 to 100 %, 5 a step |
 | **Speaker**, **Microphone**, **Lights** | `speaker_enabled`, `mic_enabled`, `lights_enabled` | |
-| **Output**, **Microphone input** | `audio_sink`, `audio_source` | A Linux satellite only (caps `audio_devices`): the devices its last status listed, and the system's default. One chosen before and gone now stays chosen, marked not connected |
+| **Output** | `audio_sink` or `output_satellite` | Its own outputs first (a Linux satellite's devices from its last status and the system's default; the Korvo's speaker), then every other adopted satellite with a speaker. One chosen before and gone now stays chosen and says so. Chosen another satellite, the hint names where it plays, or that it plays on its own speaker while that one is offline |
+| **Microphone input** | `audio_source` | A Linux satellite only (caps `audio_devices`) |
 | **Change wake words** | | Opens **Wake words** |
 
 Each change is one `PATCH /satellites/{id}`. A slider sends its value when

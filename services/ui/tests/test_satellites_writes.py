@@ -606,31 +606,52 @@ def test_telemetry_is_read_once_with_the_satellites_and_its_switch_turns_it_on(t
     assert got["size"] == "2.0 MB kept, over 1 day." and got["download"] is False
 
 
-def test_a_linux_satellites_output_and_microphone_are_listed_and_a_missing_one_kept(tmp_path):
-    """From the devices its last status listed; the system default first; an
-    output chosen before and unplugged since stays chosen and says so; a
-    satellite with no microphone says that instead of offering none."""
+def test_the_output_lists_its_own_devices_then_the_other_satellites_that_can_speak(tmp_path):
+    """A Linux satellite's own outputs (the system default first, one
+    unplugged since kept and said), then every other adopted satellite with a
+    speaker; the Korvo's own is its speaker. A satellite it plays through
+    that is no longer adopted stays chosen and says so."""
     got = run(tmp_path, """
-      Option = class { constructor(text, value) { this.text = text; this.value = value; } };
-      const el = () => ({ dataset: {}, hidden: false, value: "", opts: [], attrs: {}, textContent: "",
-                          set textContent(v) { this.opts = []; }, get textContent() { return ""; },
-                          append(o) { this.opts.push([o.value, o.text]); },
-                          toggleAttribute(n, v) { this.attrs[n] = v; } });
-      const parts = { ".sat-audio": el(), '[data-cfg="audio_sink"]': el(), '[data-cfg="audio_source"]': el() };
-      const li = { querySelector: sel => parts[sel] };
-      const n = { caps: { audio_devices: true }, status: { audio: {
-        sinks: [{ name: "alsa_output.builtin", description: "Built-in Audio" }], sources: [] } } };
-      satAudio(li, n, { audio_sink: "alsa_output.usb-dac" });
-      const out = { box: parts[".sat-audio"].hidden, sink: parts['[data-cfg="audio_sink"]'].opts,
-                    chosen: parts['[data-cfg="audio_sink"]'].value,
-                    source: parts['[data-cfg="audio_source"]'].opts,
-                    off: parts['[data-cfg="audio_source"]'].attrs["data-off"] };
-      satAudio(li, { caps: {}, status: {} }, {});
-      out.korvo = parts[".sat-audio"].hidden;
-      console.log(JSON.stringify(out));
+      const pi = { id: "b827eb121359", adopted: true, online: true, name: "pi-edifier",
+                   caps: { speaker: {}, audio_devices: true }, status: { audio: {
+                     sinks: [{ name: "alsa_output.builtin", description: "Built-in Audio" }], sources: [] } } };
+      const korvo = { id: "020000000001", adopted: true, online: true, name: "korvo",
+                      caps: { speaker: {}, mic: {} }, status: {} };
+      const mute = { id: "020000000002", adopted: true, online: false, name: "hall",
+                     caps: { mic: {} }, status: {} };
+      const pending = { id: "020000000003", adopted: false, online: true, caps: { speaker: {} } };
+      const list = [pi, korvo, mute, pending];
+      console.log(JSON.stringify({
+        pi: satOutputOptions(pi, { audio_sink: "alsa_output.usb-dac" }, list),
+        korvo: satOutputOptions(korvo, { output_satellite: "b827eb121359" }, list),
+        gone: satOutputOptions(korvo, { output_satellite: "0000000000ff" }, list).chosen,
+        goneLabel: satOutputOptions(korvo, { output_satellite: "0000000000ff" }, list).options.slice(-1)[0] }));
     """)
-    assert got["box"] is False and got["korvo"] is True
-    assert got["sink"] == [["", "The system's default"], ["alsa_output.builtin", "Built-in Audio"],
-                           ["alsa_output.usb-dac", "alsa_output.usb-dac (not connected)"]]
-    assert got["chosen"] == "alsa_output.usb-dac"
-    assert got["source"] == [["", "No microphone connected"]] and got["off"] is True
+    assert got["pi"]["options"] == [
+        ["dev:", "The system's default", "On this satellite"],
+        ["dev:alsa_output.builtin", "Built-in Audio", "On this satellite"],
+        ["dev:alsa_output.usb-dac", "alsa_output.usb-dac (not connected)", "On this satellite"],
+        ["sat:020000000001", "korvo", "On another satellite"]]
+    assert got["pi"]["chosen"] == "dev:alsa_output.usb-dac"
+    assert got["korvo"]["options"] == [
+        ["dev:", "Its own speaker", "On this satellite"],
+        ["sat:b827eb121359", "pi-edifier", "On another satellite"]]
+    assert got["korvo"]["chosen"] == "sat:b827eb121359"
+    assert got["gone"] == "sat:0000000000ff"
+    assert got["goneLabel"] == ["sat:0000000000ff", "0000000000ff (no longer adopted)", "On another satellite"]
+
+
+def test_choosing_an_output_sends_either_the_satellite_or_its_own_device(tmp_path):
+    got = run(tmp_path, """
+      const sent = [];
+      satellitePatch = async (li, change) => { sent.push(change); return true; };
+      satNoteFor = () => ({});
+      const li = { _n: { caps: { audio_devices: true } } };
+      satOutputPicked(li, { value: "sat:020000000001", dataset: {} });
+      satOutputPicked(li, { value: "dev:alsa_output.builtin", dataset: {} });
+      satOutputPicked({ _n: { caps: { mic: {} } } }, { value: "dev:", dataset: {} });
+      console.log(JSON.stringify(sent));
+    """)
+    assert got == [{"output_satellite": "020000000001"},
+                   {"output_satellite": "", "audio_sink": "alsa_output.builtin"},
+                   {"output_satellite": ""}]

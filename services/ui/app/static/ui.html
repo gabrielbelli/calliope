@@ -4229,7 +4229,13 @@ const SAT_COPY = {
   moreVoice: "voice {v}",
   audioDefault: "The system's default",
   audioMissing: "{name} (not connected)",
-  audioNoOutput: "No output found",
+  outOwn: "Its own speaker",
+  outHere: "On this satellite",
+  outThere: "On another satellite",
+  outOffline: " (offline)",
+  outGone: "{id} (no longer adopted)",
+  outVia: "Replies, earcons, Say and tones play on {name}.",
+  outFallback: "{name} is offline, so it plays on its own speaker until it is back.",
   audioNoMic: "No microphone connected",
   tmOff: "off",
   tmOnFull: "recording everything",
@@ -4734,15 +4740,18 @@ function satAdoptedMarkup(u) {
           <div class="slider"><input type="range" id="${u}-bright" min="10" max="100" step="5" data-cfg="brightness">
             <output for="${u}-bright"></output></div></div>
       </div>
-      <!-- A LINUX SATELLITE'S OWN DEVICES (clients/pi-satellite): which
-           output it plays to and which microphone it hears with, from the
-           PipeWire list it reports. Hidden on a satellite without them. -->
-      <div class="grid2 sat-audio" hidden>
-        <div><label for="${u}-sink">Output</label>
-          <select id="${u}-sink" data-cfg="audio_sink" data-text></select></div>
-        <div><label for="${u}-source">Microphone input</label>
+      <!-- WHERE IT PLAYS: one of its own outputs (a Linux satellite lists
+           PipeWire's; the Korvo has its speaker), or another satellite,
+           which then plays its replies, earcons, Say and tones
+           (Hub.output_of). The microphone input is a Linux satellite's
+           only. -->
+      <div class="grid2">
+        <div><label for="${u}-out">Output</label>
+          <select id="${u}-out" data-output></select></div>
+        <div class="sat-audio" hidden><label for="${u}-source">Microphone input</label>
           <select id="${u}-source" data-cfg="audio_source" data-text></select></div>
       </div>
+      <div class="hint sat-outhint"></div>
       <div class="hint sat-output"></div>
       <div class="row sat-switches">
         <label class="checkline tight"><input type="checkbox" data-cfg="speaker_enabled"> Speaker</label>
@@ -4906,7 +4915,8 @@ function satelliteRow(n) {
         : t.dataset.steps ? Math.round(Number(t.value) * 100 / Number(t.dataset.steps)) : Number(t.value);
       t.dataset.held = "save";
       satellitePatch(li, { [t.dataset.cfg]: value }, satNoteFor(li, t), t);
-    } else if (t.dataset.btn) satButtonPicked(li, t);
+    } else if ("output" in t.dataset) satOutputPicked(li, t);
+    else if (t.dataset.btn) satButtonPicked(li, t);
     else if (t.dataset.hook) satButtonsSave(li);
   });
   li.addEventListener("keydown", ev => {
@@ -4956,25 +4966,65 @@ function satNoteFor(li, from) {
    disclosure, and a value is written only into a control nobody is holding:
    a slider being dragged, a setting being saved (data-held) or a box being
    typed in keeps what the reader put there. */
-/* A LINUX SATELLITE'S OUTPUT AND MICROPHONE, from the devices its last
-   status listed. A device chosen before and not there now (a USB card
-   unplugged) stays chosen and says so, as a wake word's missing model does. */
+/* WHERE A SATELLITE PLAYS, AND WHAT A LINUX ONE HEARS WITH. The Output
+   lists its own outputs (a Linux satellite's from the devices its last
+   status listed; the Korvo's speaker), then every other adopted satellite
+   with a speaker. Values are "dev:<node name>" and "sat:<id>". A device or
+   satellite chosen before and not there now stays chosen and says so, as a
+   wake word's missing model does. */
+function satOutputOptions(n, cfg, list) {
+  const audio = n.caps && n.caps.audio_devices && n.status && n.status.audio;
+  const sinks = (audio && audio.sinks) || [];
+  const own = audio
+    ? [["dev:", SAT_COPY.audioDefault, SAT_COPY.outHere],
+       ...sinks.map(d => ["dev:" + d.name, d.description || d.name, SAT_COPY.outHere])]
+    : [["dev:", SAT_COPY.outOwn, SAT_COPY.outHere]];
+  if (audio && cfg.audio_sink && !sinks.some(d => d.name === cfg.audio_sink)) {
+    own.push(["dev:" + cfg.audio_sink, satText("audioMissing", { name: cfg.audio_sink }), SAT_COPY.outHere]);
+  }
+  const speaks = o => !o.caps || !Object.keys(o.caps).length || !!o.caps.speaker;
+  const others = list.filter(o => o.adopted && o.id !== n.id && speaks(o))
+    .map(o => ["sat:" + o.id, satName(o) + (o.online ? "" : SAT_COPY.outOffline), SAT_COPY.outThere]);
+  const chosen = cfg.output_satellite ? "sat:" + cfg.output_satellite
+    : "dev:" + (audio ? cfg.audio_sink || "" : "");
+  if (cfg.output_satellite && !others.some(o => o[0] === chosen)) {
+    others.push([chosen, satText("outGone", { id: cfg.output_satellite }), SAT_COPY.outThere]);
+  }
+  return { options: [...own, ...others], chosen };
+}
+
 function satAudio(li, n, cfg) {
   const q = sel => li.querySelector(sel);
+  const out = satOutputOptions(n, cfg, SATELLITES.list);
+  const sel = q("[data-output]");
+  satFillSelect(sel, out.options);
+  if (!sel.dataset.held) sel.value = out.chosen;
+  const via = cfg.output_satellite && SATELLITES.list.find(o => o.id === cfg.output_satellite);
+  satSet(q(".sat-outhint"), !cfg.output_satellite ? ""
+    : via && via.online ? satText("outVia", { name: satName(via) })
+    : satText("outFallback", { name: via ? satName(via) : cfg.output_satellite }));
   const audio = n.caps && n.caps.audio_devices && n.status && n.status.audio;
   q(".sat-audio").hidden = !audio;
   if (!audio) return;
-  const pick = (sel, list, chosen, none) => {
-    const opts = [["", SAT_COPY.audioDefault], ...(list || []).map(d => [d.name, d.description || d.name])];
-    if (chosen && !(list || []).some(d => d.name === chosen)) {
-      opts.push([chosen, satText("audioMissing", { name: chosen })]);
-    }
-    satFillSelect(sel, list && list.length ? opts : [["", none]]);
-    if (!sel.dataset.held) sel.value = chosen || "";
-    sel.toggleAttribute("data-off", !(list && list.length));
-  };
-  pick(q('[data-cfg="audio_sink"]'), audio.sinks, cfg.audio_sink, SAT_COPY.audioNoOutput);
-  pick(q('[data-cfg="audio_source"]'), audio.sources, cfg.audio_source, SAT_COPY.audioNoMic);
+  const mic = q('[data-cfg="audio_source"]');
+  const sources = audio.sources || [];
+  const opts = [["", SAT_COPY.audioDefault], ...sources.map(d => [d.name, d.description || d.name])];
+  if (cfg.audio_source && !sources.some(d => d.name === cfg.audio_source)) {
+    opts.push([cfg.audio_source, satText("audioMissing", { name: cfg.audio_source })]);
+  }
+  satFillSelect(mic, sources.length ? opts : [["", SAT_COPY.audioNoMic]]);
+  if (!mic.dataset.held) mic.value = cfg.audio_source || "";
+  mic.toggleAttribute("data-off", !sources.length);
+}
+
+/* The Output chosen: another satellite, or one of its own outputs (which
+   also ends a delegation). */
+function satOutputPicked(li, sel) {
+  const v = sel.value, n = li._n || {};
+  const change = v.startsWith("sat:") ? { output_satellite: v.slice(4) }
+    : { output_satellite: "", ...(n.caps && n.caps.audio_devices ? { audio_sink: v.slice(4) } : {}) };
+  sel.dataset.held = "save";
+  satellitePatch(li, change, satNoteFor(li, sel), sel);
 }
 
 function satelliteUpdate(li, n) {
