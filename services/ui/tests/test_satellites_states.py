@@ -440,3 +440,21 @@ def test_the_ring_answers_are_saved_even_when_putting_the_ring_out_fails(tmp_pat
     assert got["open"] is True and got["shut"] is True, "a second press did not shut the set-up"
     assert got["lights"][-1] == "off", got
 
+
+def test_what_lights_the_ring_says_why_it_cannot(tmp_path):
+    """Lights off leaves the ring dark and a mute paints it red, over Blink
+    and Show; a pending satellite reports both in its own status."""
+    got = run(tmp_path, SAT + """
+      const updating = { dataState: "updating" }, calm = { dataState: "online" };
+      console.log(JSON.stringify({
+        dark: satTryHint(sat({ config: { lights_enabled: false } }), calm),
+        muted: satTryHint(sat({ status: { muted: true } }), calm),
+        muted_deaf: satTryHint(sat({ status: { muted: true }, config: { mic_enabled: false } }), calm),
+        updating: satTryHint(sat({}), updating),
+      }));
+    """)
+    assert got["dark"] == "Turn Lights on to use Blink and Show.", got
+    assert got["muted"] == "Muted on the device, so the ring shows red and Listen 5 s hears nothing.", got
+    assert got["muted_deaf"] == "Turn Microphone on to use Listen 5 s. Muted on the device, so the ring shows red."
+    assert got["updating"] == "Blink and Show wait until this update finishes.", got
+

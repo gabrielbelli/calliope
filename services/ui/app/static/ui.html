@@ -4035,6 +4035,8 @@ const JSON_BODY = { "Content-Type": "application/json" };
 const SAT_COPY = {
   pendBlink: "Blink lights its ring for five seconds, so you can tell identical boxes apart.",
   pendOffline: "It has to be online to be adopted.",
+  pendDark: "Its lights are off, so Blink shows nothing; tell them apart by ID.",
+  pendMuted: "It is muted, so its ring stays red through Blink; tell them apart by ID.",
   whyOffline: "It is offline, so settings you change here are sent when it reconnects.",
   /* Named from the saved mapping: mute can be on any button, and Rec can be
      set to something else. The one way out of a mute is a press on the
@@ -4047,11 +4049,13 @@ const SAT_COPY = {
   tryOffline: "Offline, so nothing here reaches it.",
   trySpeaker: "Turn Speaker on to use Say and Play a tone.",
   tryMic: "Turn Microphone on to use Listen 5 s.",
-  tryLights: "Turn Lights on to show a pattern.",
+  tryLights: "Turn Lights on to use Blink and Show.",
   tryMany: "Turn {list} on to use everything here.",
-  tryMuted: "Muted on the device, so Listen 5 s hears nothing.",
+  tryMuted: "Muted on the device, so the ring shows red and Listen 5 s hears nothing.",
+  tryMutedRing: "Muted on the device, so the ring shows red.",
+  tryUpdating: "Blink and Show wait until this update finishes.",
   devOffline: "Offline, so Reboot, Move and Update wait for it to reconnect.",
-  devUpdating: "Reboot, Move and Update wait until this update finishes.",
+  devUpdating: "Reboot, Move, Update and the ring's set-up wait until this update finishes.",
   btnNoMute: "Keep Mute mic on one button at least, or a muted satellite could never be unmuted.",
   sideNeeds: "Needs R37 fitted and R50 removed on the board.",
   ringTop: "Move the lit LED with ◀ ▶ until it is at 12 o'clock, then press That's the top.",
@@ -4598,7 +4602,7 @@ function satPendingMarkup(u) {
     <div class="sat-newname"><label for="${u}-newname">Name</label>
       <input type="text" id="${u}-newname" maxlength="64" placeholder="e.g. kitchen" autocomplete="off"></div>
     <button class="primary small tight" type="submit" data-needs="online">Adopt</button>
-    <button class="small tight" type="button" data-act="identify" data-needs="online">Blink</button>
+    <button class="small tight" type="button" data-act="identify" data-needs="online lights unmuted">Blink</button>
     <button class="small tight danger end" type="button" data-act="dismiss" hidden>Forget</button>
   </form>
   <div class="hint sat-pendhint"></div>
@@ -4653,7 +4657,7 @@ function satAdoptedMarkup(u) {
             <button class="small tight" type="submit" data-needs="online speaker">Say</button>
           </form>
           <div class="actions">
-            <button class="small" type="button" data-act="identify" data-needs="online">Blink</button>
+            <button class="small" type="button" data-act="identify" data-needs="online lights unmuted idle">Blink</button>
             <button class="small" type="button" data-act="tone" data-needs="online speaker">Play a tone</button>
             <button class="small" type="button" data-act="listen" data-needs="online mic unmuted">Listen 5 s</button>
             <button class="small" type="button" data-act="stop" data-needs="online">Stop</button>
@@ -4667,7 +4671,7 @@ function satAdoptedMarkup(u) {
                 <option value="solid">Solid</option><option value="pulse" selected>Pulse</option>
                 <option value="spin">Spin</option><option value="off">Off</option>
               </select></div>
-            <button class="small tight" type="button" data-act="lights" data-needs="online lights">Show</button>
+            <button class="small tight" type="button" data-act="lights" data-needs="online lights unmuted idle">Show</button>
           </div>
           <div class="hint sat-last"></div>
           <div class="sat-note" aria-live="polite"></div>
@@ -4707,7 +4711,7 @@ function satAdoptedMarkup(u) {
             <label class="checkline tight"><input type="checkbox" data-cfg="ring_upside_down"> LEDs run anticlockwise</label>
           </div>
           <div class="actions">
-            <button class="small" type="button" data-act="ring" data-needs="online lights unmuted"
+            <button class="small" type="button" data-act="ring" data-needs="online lights unmuted idle"
                     aria-expanded="false" aria-controls="${u}-ringset">Set up the ring…</button>
           </div>
           <div class="hint sat-ringwhy"></div>
@@ -4855,7 +4859,9 @@ function satelliteUpdate(li, n) {
        keeps no field for it: the row is a word, a reason and Forget. */
     const named = q(".sat-newname");
     if (!named.contains(document.activeElement)) named.hidden = !n.online;
-    satSet(q(".sat-pendhint"), n.online ? SAT_COPY.pendBlink : SAT_COPY.pendOffline);
+    const st = n.status || {};
+    satSet(q(".sat-pendhint"), !n.online ? SAT_COPY.pendOffline : st.lights_enabled === false ? SAT_COPY.pendDark
+      : st.muted ? SAT_COPY.pendMuted : SAT_COPY.pendBlink);
     return;
   }
   const bar = q(".bar-track");
@@ -4877,7 +4883,7 @@ function satelliteUpdate(li, n) {
   const link = q('[data-act="wakewords"]');
   link.parentElement.hidden = !WAKE.server && !WAKE.failed;
   link.setAttribute("aria-label", `Change wake words for ${name}`);
-  satSet(q(".sat-tryhint"), satTryHint(n));
+  satSet(q(".sat-tryhint"), satTryHint(n, s));
   satSet(q(".sat-last"), li._last || "");
   satButtons(li, n);
   satDevice(li, n, s);
@@ -4888,19 +4894,28 @@ function satelliteUpdate(li, n) {
    (satTryHint, .sat-devhint, .sat-pendhint). A control is never hidden for
    being unavailable. Settings are not in here at all: offline, they are
    saved and handed over when it reconnects (the hub's greet()). A button
-   mid-request is left as busy() set it. */
+   mid-request is left as busy() set it.
+
+   WHAT LIGHTS THE RING NEEDS A RING THAT CAN SHOW IT. The firmware draws
+   Lights off as dark, then a mute's red, then an update's progress, and
+   only under those Blink, Show and the ring's set-up; the hub sends them
+   whatever it shows. So Blink said "Blinking white for five seconds" over
+   a dark or red ring, and a pending satellite moved from another hub with
+   its lights off sent its owner looking for a box that never lit. A
+   pending satellite has no config, so its own status says. */
 function satNeeds(li, n, s) {
   const cfg = n.config || {}, st = n.status || {};
   const have = { online: !!n.online, speaker: cfg.speaker_enabled !== false,
                  mic: cfg.mic_enabled !== false, unmuted: !st.muted,
-                 lights: cfg.lights_enabled !== false, idle: s.dataState !== "updating" };
+                 lights: (n.adopted ? cfg.lights_enabled : st.lights_enabled) !== false,
+                 idle: s.dataState !== "updating" };
   for (const b of li.querySelectorAll("[data-needs]")) {
     if (b.getAttribute("aria-busy") === "true") continue;
     b.disabled = !b.dataset.needs.split(" ").every(need => have[need]);
   }
 }
 
-function satTryHint(n) {
+function satTryHint(n, s) {
   if (!n.online) return SAT_COPY.tryOffline;
   const cfg = n.config || {}, st = n.status || {};
   const off = [["Speaker", "trySpeaker", cfg.speaker_enabled === false],
@@ -4908,7 +4923,8 @@ function satTryHint(n) {
                ["Lights", "tryLights", cfg.lights_enabled === false]].filter(x => x[2]);
   const said = off.length > 1 ? [satText("tryMany", { list: satList(off.map(x => x[0])) })]
     : off.map(x => SAT_COPY[x[1]]);
-  if (st.muted && cfg.mic_enabled !== false) said.push(SAT_COPY.tryMuted);
+  if (st.muted) said.push(cfg.mic_enabled !== false ? SAT_COPY.tryMuted : SAT_COPY.tryMutedRing);
+  if (s && s.dataState === "updating") said.push(SAT_COPY.tryUpdating);
   return said.join(" ");
 }
 

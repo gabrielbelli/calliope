@@ -341,18 +341,20 @@ def test_what_needs_the_satellite_is_greyed_with_its_reason_and_never_hidden():
     refuses Show with the lights off and Listen while muted (409), and a
     silent satellite is sent no sound."""
     needs = dict(re.findall(r'data-act="(\w+)" data-needs="([^"]+)"', ADOPTED))
-    assert needs["lights"] == "online lights"
     assert needs["tone"] == "online speaker"
     assert needs["listen"] == "online mic unmuted"
     assert needs["reboot"] == needs["move"] == needs["update"] == "online idle"
-    # Set up the ring lights the ring, which a mute paints red: greyed with
-    # its reason before the press, not refused after it.
-    assert needs["ring"] == "online lights unmuted"
+    # What lights the ring needs a ring that can show it: the firmware draws
+    # Lights off (dark), a mute (red) and an update's progress over Blink,
+    # Show and the ring's set-up. Greyed with the reason before the press.
+    assert needs["lights"] == needs["identify"] == needs["ring"] == "online lights unmuted idle"
+    assert 'data-act="identify" data-needs="online lights unmuted">Blink' in PENDING
     assert '<div class="hint sat-ringwhy"></div>' in DEVICE
     assert 'li.querySelector(".sat-ringwhy")' in function("satDevice")
     assert 'type="submit" data-needs="online speaker">Say' in ADOPTED
     body = function("satNeeds")
-    assert "lights: cfg.lights_enabled !== false" in body and "unmuted: !st.muted" in body
+    assert "lights: (n.adopted ? cfg.lights_enabled : st.lights_enabled) !== false" in body
+    assert "unmuted: !st.muted" in body
     assert "b.disabled = " in body and ".hidden" not in body
     # Settings are not in data-needs at all: offline, they are saved and sent
     # when the satellite reconnects.
