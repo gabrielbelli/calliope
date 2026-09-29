@@ -170,6 +170,9 @@ class Agent:
         self.welcomed = False
         self.airplay = airplay.AirPlay()
         self.ducker = airplay.Ducker()
+        self.metadata = airplay.Metadata(on_change=self._airplay_changed)
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self._pushing: asyncio.Task | None = None
         self.speaking = False
         self.player.on_active = self._speaking
         self.airplay_state: dict | None = None
@@ -497,12 +500,41 @@ class Agent:
                 await self.refresh_recording()
 
     async def _airplay_state(self) -> dict | None:
+        """What the page shows under AirPlay: on or off, its name, whether it
+        runs, what it plays and from whom (its metadata), and the stream as
+        PipeWire has it (format, rate, bit rate, paused)."""
         if not airplay.available():
             return None
+        meta = dict(self.metadata.state)
+        playing = airplay.stream(await airplay.sink_inputs())
         return {"enabled": bool(self.st.config.get("airplay_enabled", True)), "name": self.airplay_name(),
-                "running": await self.airplay.running(), "error": self.airplay.error}
+                "running": await self.airplay.running(), "error": self.airplay.error,
+                "playing": bool(meta["playing"] and playing and not playing.get("corked")),
+                "session": meta["session"], "client": meta["client"], "title": meta["title"],
+                "artist": meta["artist"], "album": meta["album"], "volume": meta["volume"],
+                "since": meta["since"], "stream": playing}
+
+    def _airplay_changed(self) -> None:
+        """From the metadata thread: send a status now, not at the next tick,
+        so the page says Playing when the music starts."""
+        if self.loop is not None:
+            self.loop.call_soon_threadsafe(self._push_status)
+
+    def _push_status(self) -> None:
+        if self._pushing is not None and not self._pushing.done():
+            return
+
+        async def push() -> None:
+            await asyncio.sleep(0.4)   # a burst of items (a new track) is one status
+            self.airplay_state = await self._airplay_state()
+            with contextlib.suppress(Exception):
+                await self.send(self.status())
+        self._pushing = asyncio.create_task(push())
 
     async def run(self) -> None:
+        self.loop = asyncio.get_running_loop()
+        if airplay.available():
+            self.metadata.start()
         tries = 0
         while True:
             if not self.st.hub:

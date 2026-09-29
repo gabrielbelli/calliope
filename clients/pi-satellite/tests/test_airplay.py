@@ -46,7 +46,7 @@ def test_the_name_is_quoted_so_a_name_cannot_break_the_configuration():
 
 
 async def test_it_runs_as_a_user_service_and_restarts_only_when_its_name_changed(shell, tmp_path):
-    ap = airplay.AirPlay(conf=tmp_path / "shairport-sync.conf")
+    ap = airplay.AirPlay(conf=tmp_path / "shairport-sync.conf", pipe=tmp_path / "metadata")
     await ap.apply(True, "pi-edifier")
     assert ("systemctl", "--user", "restart", airplay.UNIT) in shell["ran"]
     assert 'name = "pi-edifier";' in (tmp_path / "shairport-sync.conf").read_text()
@@ -133,3 +133,47 @@ async def test_the_player_says_when_a_voice_starts_and_ends(monkeypatch):
     await p.write(b"\x00\x00" * 480)       # 10 ms
     await asyncio.sleep(0.2)
     assert seen == [True, False]
+
+
+def item(kind: str, code: str, data: bytes = b"") -> bytes:
+    import base64
+    head = (f"<item><type>{kind.encode().hex()}</type><code>{code.encode().hex()}</code>"
+            f"<length>{len(data)}</length>").encode()
+    if data:
+        return head + b'\n<data encoding="base64">\n' + base64.b64encode(data) + b"</data></item>\n"
+    return head + b"</item>\n"
+
+
+def test_the_metadata_pipe_says_who_plays_what_and_when_it_pauses():
+    changes = []
+    m = airplay.Metadata(on_change=lambda: changes.append(1))
+    stream = (item("ssnc", "abeg") + item("ssnc", "snam", b"Gabriel's iPhone") + item("ssnc", "pbeg")
+              + item("ssnc", "mdst") + item("core", "minm", b"Clair de Lune") + item("core", "asar", b"Debussy")
+              + item("core", "asal", b"Suite bergamasque") + item("ssnc", "pvol", b"-15.00,0.00,-30.00,0.00"))
+    rest = m.feed(stream[:-20])            # a read that ends mid-item keeps the rest
+    rest = m.feed(rest + stream[-20:])
+    assert rest == b""
+    s = m.state
+    assert (s["session"], s["playing"], s["client"]) == (True, True, "Gabriel's iPhone")
+    assert (s["title"], s["artist"], s["album"], s["volume"]) == ("Clair de Lune", "Debussy", "Suite bergamasque", 50)
+    m.feed(item("ssnc", "pfls"))
+    assert m.state["playing"] is False and m.state["session"] is True
+    m.feed(item("ssnc", "aend"))
+    assert m.state["session"] is False and m.state["client"] is None and m.state["title"] is None
+    assert changes, "the page is told at once"
+
+
+def test_the_stream_says_its_format_rate_and_bit_rate():
+    si = [{"index": 5, "properties": {"application.name": "AirPlay"}, "sample_specification": "s16le 2ch 44100Hz",
+           "corked": False, "buffer_latency_usec": 180000, "sink_latency_usec": 20000},
+          {"index": 6, "properties": {"application.name": "pw-cat", "media.role": "Assistant"},
+           "sample_specification": "s16le 1ch 48000Hz"}]
+    assert airplay.stream(si) == {"format": "s16le 2ch 44100Hz", "corked": False, "bits": 16, "channels": 2,
+                                  "rate": 44100, "bitrate_kbps": 1411, "latency_ms": 200}
+    assert airplay.stream(si[1:]) is None
+    assert airplay.stream([si[0] | {"sample_specification": "float32le 2ch 48000Hz"}])["bitrate_kbps"] == 3072
+
+
+def test_the_configuration_names_the_metadata_pipe(tmp_path):
+    text = airplay.config("pi", tmp_path / "meta")
+    assert 'enabled = "yes";' in text and f'pipe_name = "{tmp_path / "meta"}";' in text

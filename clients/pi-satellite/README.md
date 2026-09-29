@@ -35,6 +35,13 @@ AirPlay 2, so iPhones, iPads and Macs list it, but multi-room and the Home
 app do not. AirPlay 2 needs Shairport Sync 5.5 with NQPTP, which Debian
 ships only from forky.
 
+**What it plays.** Shairport Sync writes its metadata to a pipe in
+calliope's runtime directory; the agent reads it (`airplay.Metadata`) for
+the phone's name, the track, play and pause, and the phone's volume, and
+asks PipeWire (`pactl`) for the stream's format, rate and delay. The status
+carries them as `airplay` and is sent at once when they change, so the
+Satellites tab's AirPlay section says Playing as the music starts.
+
 **Ducking.** While the satellite plays a reply, and while the hub holds a
 duck (someone is speaking to it, or to a satellite that plays through it),
 every other stream goes down to 20% of its own volume, and back afterwards.
