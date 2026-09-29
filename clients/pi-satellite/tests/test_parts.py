@@ -95,6 +95,14 @@ def test_readings_are_none_where_the_board_has_no_such_thing(tmp_path, monkeypat
     (tmp_path / "class" / "net" / "wlan0").mkdir(parents=True)
     (tmp_path / "class" / "net" / "wlan0" / "address").write_text("b8:27:eb:12:34:56\n")
     assert system.satellite_id() == "b827eb123456"
+    assert system.under_voltage() is None
+    hw = tmp_path / "class" / "hwmon" / "hwmon0"
+    hw.mkdir(parents=True)
+    (hw / "name").write_text("rpi_volt\n")
+    (hw / "in0_lcrit_alarm").write_text("0\n")
+    assert system.under_voltage() is False
+    (hw / "in0_lcrit_alarm").write_text("1\n")
+    assert system.under_voltage() is True
 
 
 def test_the_wifi_password_goes_into_a_keyfile_and_an_open_network_has_none():

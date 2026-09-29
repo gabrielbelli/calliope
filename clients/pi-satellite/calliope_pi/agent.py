@@ -213,7 +213,8 @@ class Agent:
     def status(self) -> dict:
         return {"type": "status", "uptime_s": system.uptime_s(), "rssi": system.rssi(),
                 "heap": system.memory_available(), "temp_c": system.temperature_c(),
-                "throttled": system.throttled(), "load": round(os.getloadavg()[0], 2),
+                "throttled": system.throttled(), "under_voltage": system.under_voltage(),
+                "load": round(os.getloadavg()[0], 2),
                 "muted": False, "mic_dropped": self.mic_dropped, "spk_dropped": self.player.dropped,
                 "spk_buffered_ms": self.player.buffered_ms(), "duck": self.duck, "earcons_ready": True,
                 "audio": self.devices.view(), **self.settings()}

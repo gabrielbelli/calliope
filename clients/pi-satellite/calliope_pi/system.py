@@ -87,6 +87,18 @@ def throttled() -> int | None:
         return None
 
 
+def under_voltage() -> bool | None:
+    """Whether the supply is below what the board needs now, from the
+    firmware's hwmon (rpi_volt, in0_lcrit_alarm): the kernels without
+    get_throttled have this. A Pi 3 on a weak supply browns out Wi-Fi and
+    USB audio first; None where the board has no such sensor."""
+    for hw in sorted((SYS / "class" / "hwmon").glob("hwmon*")):
+        if (_read(hw / "name") or "").strip() == "rpi_volt":
+            alarm = _read(hw / "in0_lcrit_alarm")
+            return alarm.strip() == "1" if alarm else None
+    return None
+
+
 class Clock:
     """Microseconds since the agent started, for the mic frames' capture time."""
 
