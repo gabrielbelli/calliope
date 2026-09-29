@@ -655,3 +655,29 @@ def test_choosing_an_output_sends_either_the_satellite_or_its_own_device(tmp_pat
     assert got == [{"output_satellite": "020000000001"},
                    {"output_satellite": "", "audio_sink": "alsa_output.builtin"},
                    {"output_satellite": ""}]
+
+
+def test_airplay_shows_on_a_receiver_with_its_name_or_the_satellites_and_why_it_is_not_running(tmp_path):
+    got = run(tmp_path, """
+      const el = () => ({ dataset: {}, hidden: false, value: "", checked: false, placeholder: "", textContent: "" });
+      const parts = { ".sat-airplay": el(), ".sat-aphint": el(), '[data-cfg="airplay_enabled"]': el(),
+                      '[data-cfg="airplay_name"]': el() };
+      const li = { querySelector: sel => parts[sel] };
+      const pi = { name: "pi-edifier", online: true, caps: { airplay: { version: 1 } },
+                   status: { airplay: { running: true } } };
+      satAirPlay(li, pi, { airplay_enabled: true, airplay_name: null });
+      const out = { hidden: parts[".sat-airplay"].hidden, hint: parts[".sat-aphint"].textContent,
+                    on: parts['[data-cfg="airplay_enabled"]'].checked,
+                    placeholder: parts['[data-cfg="airplay_name"]'].placeholder };
+      satAirPlay(li, { ...pi, status: { airplay: { running: false, error: "no PipeWire" } } },
+                 { airplay_name: "Living room" });
+      out.failed = parts[".sat-aphint"].textContent;
+      out.name = parts['[data-cfg="airplay_name"]'].value;
+      satAirPlay(li, { name: "korvo", caps: {} }, {});
+      out.korvo = parts[".sat-airplay"].hidden;
+      console.log(JSON.stringify(out));
+    """)
+    assert got["hidden"] is False and got["on"] is True and got["placeholder"] == "pi-edifier"
+    assert got["hint"] == "Phones and Macs list it as pi-edifier."
+    assert got["failed"] == "AirPlay did not start: no PipeWire" and got["name"] == "Living room"
+    assert got["korvo"] is True

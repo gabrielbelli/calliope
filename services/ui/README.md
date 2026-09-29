@@ -747,6 +747,7 @@ Closed, a row shows the name, one state word and one line. Open, it has:
 | **Speaker**, **Microphone**, **Lights** | `speaker_enabled`, `mic_enabled`, `lights_enabled` | |
 | **Output** | `audio_sink` or `output_satellite` | Its own outputs first (a Linux satellite's devices from its last status and the system's default; the Korvo's speaker), then every other adopted satellite with a speaker. One chosen before and gone now stays chosen and says so. Chosen another satellite, the hint names where it plays, or that it plays on its own speaker while that one is offline |
 | **Microphone input** | `audio_source` | A Linux satellite only (caps `audio_devices`) |
+| **AirPlay**, **AirPlay name** | `airplay_enabled`, `airplay_name` | A satellite with caps `airplay` only. The name is the satellite's when empty; the hint says how phones list it, or why it did not start |
 | **Change wake words** | | Opens **Wake words** |
 
 Each change is one `PATCH /satellites/{id}`. A slider sends its value when

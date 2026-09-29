@@ -4229,6 +4229,9 @@ const SAT_COPY = {
   moreVoice: "voice {v}",
   audioDefault: "The system's default",
   audioMissing: "{name} (not connected)",
+  apOn: "Phones and Macs list it as {name}.",
+  apStarting: "AirPlay is starting.",
+  apError: "AirPlay did not start: {error}",
   outOwn: "Its own speaker",
   outHere: "On this satellite",
   outThere: "On another satellite",
@@ -4752,6 +4755,16 @@ function satAdoptedMarkup(u) {
           <select id="${u}-source" data-cfg="audio_source" data-text></select></div>
       </div>
       <div class="hint sat-outhint"></div>
+      <!-- AIRPLAY, on a satellite that is a receiver (caps "airplay"): on or
+           off, and the name phones list it as, the satellite's own when
+           empty (clients/pi-satellite, airplay.py). -->
+      <div class="row sat-airplay" hidden>
+        <label class="checkline tight"><input type="checkbox" data-cfg="airplay_enabled"> AirPlay</label>
+        <div class="grow"><label for="${u}-apname">AirPlay name</label>
+          <input type="text" id="${u}-apname" maxlength="64" data-cfg="airplay_name" data-text
+                 spellcheck="false" autocomplete="off"></div>
+      </div>
+      <div class="hint sat-aphint"></div>
       <div class="hint sat-output"></div>
       <div class="row sat-switches">
         <label class="checkline tight"><input type="checkbox" data-cfg="speaker_enabled"> Speaker</label>
@@ -5017,6 +5030,24 @@ function satAudio(li, n, cfg) {
   mic.toggleAttribute("data-off", !sources.length);
 }
 
+/* AIRPLAY: whether it is on, its name, and what the satellite says of it. */
+function satAirPlay(li, n, cfg) {
+  const q = sel => li.querySelector(sel);
+  const has = !!(n.caps && n.caps.airplay);
+  q(".sat-airplay").hidden = !has;
+  if (!has) { satSet(q(".sat-aphint"), ""); return; }
+  const on = cfg.airplay_enabled !== false;
+  const box = q('[data-cfg="airplay_enabled"]');
+  if (!box.dataset.held) box.checked = on;
+  const name = q('[data-cfg="airplay_name"]');
+  if (!name.dataset.held && name !== document.activeElement) name.value = cfg.airplay_name || "";
+  name.placeholder = satName(n);
+  const st = (n.status && n.status.airplay) || {};
+  satSet(q(".sat-aphint"), !on || !n.online ? ""
+    : st.error ? satText("apError", { error: st.error })
+    : st.running ? satText("apOn", { name: cfg.airplay_name || satName(n) }) : SAT_COPY.apStarting);
+}
+
 /* The Output chosen: another satellite, or one of its own outputs (which
    also ends a delegation). */
 function satOutputPicked(li, sel) {
@@ -5061,6 +5092,7 @@ function satelliteUpdate(li, n) {
   }
   const cfg = n.config || {};
   satAudio(li, n, cfg);
+  satAirPlay(li, n, cfg);
   satSet(q(".sat-why"), satWhy(n));
   satSet(q(".sat-output"), n.online && n.output === "jack" ? SAT_COPY.outJack : "");
   satLevel(q('[data-cfg="volume"]'), cfg.volume);
