@@ -1249,6 +1249,21 @@ for _method, _path in SATELLITES_PATHS:
 SATELLITES_SOCKET = "/satellites/ws"
 LEGACY_SATELLITES_SOCKET = "/nodes/ws"
 
+# The close codes RFC 6455 lets an endpoint put in a close frame (section
+# 7.4): the defined ones apart from 1004, 1005, 1006 and 1015, and the
+# 3000-4999 range for libraries and applications. websockets reports 1006 for
+# a hub that went without a close frame (it crashed, was OOM-killed, the
+# network dropped) and 1005 for an empty one. Neither may be sent, and
+# uvicorn's websockets implementation raises ProtocolError on either, which is
+# no RuntimeError: it escaped as a traceback, and the device saw 1006.
+SENDABLE_CLOSE_CODES = frozenset((1000, 1001, 1002, 1003, *range(1007, 1015),
+                                  *range(3000, 5000)))
+
+
+def _close_code_for_device(code: int | None) -> int:
+    """The hub's close code, if the device may be sent it, else a plain 1000."""
+    return code if code in SENDABLE_CLOSE_CODES else 1000
+
 
 @app.websocket(SATELLITES_SOCKET)
 @app.websocket(LEGACY_SATELLITES_SOCKET)
@@ -1312,9 +1327,10 @@ async def satellites_socket(client: WebSocket) -> None:
         await upstream.close()
         # The hub's own close code goes on to the device: 1008 (a bad token,
         # or a connection refused its place) and 1012 (replaced by a newer
-        # one) reached it as a plain 1000.
+        # one) reached it as a plain 1000. A hub that left without a close
+        # frame gives 1006, which may not be sent, and the device gets 1000.
         try:
-            await client.close(code=upstream.close_code or 1000)
+            await client.close(code=_close_code_for_device(upstream.close_code))
         except RuntimeError:
             pass  # already closed by the device
 

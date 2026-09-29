@@ -1941,7 +1941,9 @@ def test_a_hub_that_answers_but_not_with_a_socket_is_try_again_later(monkeypatch
 def test_the_relay_carries_frames_both_ways_and_the_hubs_close_code(monkeypatch):
     """The relay, end to end, against a hub on a local port: a binary and a
     text frame each way, the device's leaving closing the hub's side, and the
-    hub's close code reaching the device (1008 and 1012 arrived as 1000)."""
+    hub's close code reaching the device (1008 and 1012 arrived as 1000). A
+    hub gone without a close frame (crashed, OOM-killed, the network dropped)
+    is 1006 to websockets, which may not be sent: the device gets 1000."""
     import asyncio
     import threading
 
@@ -1960,6 +1962,9 @@ def test_the_relay_carries_frames_both_ways_and_the_hubs_close_code(monkeypatch)
                     await conn.send(msg[::-1])
                 elif msg == "refuse":
                     await conn.close(1008, "bad token")
+                elif msg == "drop":
+                    conn.transport.abort()  # no close frame
+                    return
                 else:
                     await conn.send(msg.upper())
         finally:
@@ -1997,10 +2002,37 @@ def test_the_relay_carries_frames_both_ways_and_the_hubs_close_code(monkeypatch)
                 with pytest.raises(WebSocketDisconnect) as refused:
                     ws.receive_text()
             assert refused.value.code == 1008
+
+            with client.websocket_connect("/satellites/ws") as ws:
+                ws.send_text("drop")
+                with pytest.raises(WebSocketDisconnect) as dropped:
+                    ws.receive_text()
+            assert dropped.value.code == 1000
     finally:
         loop.call_soon_threadsafe(task.cancel)
         loop.call_soon_threadsafe(loop.stop)
         thread.join(5)
+
+
+def test_the_device_is_only_sent_a_close_code_a_close_frame_may_carry():
+    """Checked against websockets' own rule, which uvicorn's websockets
+    implementation applies to the relay's close: 1005 (an empty close frame)
+    and 1006 (none at all) raised ProtocolError there, a traceback in the log
+    and 1006 at the device, where a plain 1000 is what it used to get."""
+    from websockets.frames import Close
+
+    from app.main import _close_code_for_device
+
+    for code in (None, *range(0, 5100)):
+        sent = _close_code_for_device(code)
+        Close(sent, "").check()  # raises ProtocolError on a code it refuses
+        try:
+            Close(code, "").check()
+        except Exception:
+            assert sent == 1000, code
+        else:
+            assert sent == code, "a code that may be sent was not passed on"
+    assert _close_code_for_device(1005) == _close_code_for_device(1006) == 1000
 
 
 @pytest.mark.parametrize("method,path", [
