@@ -4249,6 +4249,9 @@ const SAT_COPY = {
   qPwmBetter: "For music, choose a USB DAC or a DAC HAT.",
   qTakes: "It takes {bits}-bit, {rates}.",
   qNow: "Driven now at {now}.",
+  jackNone: "nothing plugged in",
+  jackIn: "Something is plugged into it.",
+  jackOut: "Nothing is plugged into it, so what it plays reaches no one.",
   lineSpeaker: "A speaker, with no microphone to listen with",
   linePlaying: "{what}",
   powerOk: "Good",
@@ -5057,13 +5060,15 @@ function satQualityLabel(q) {
 function satDeviceLabel(d) {
   const q = d.quality, label = satQualityLabel(q);
   const name = (d.description || d.name) + (q && q.kind === "pwm" ? " *" : "");
-  return label ? `${name} · ${label}` : name;
+  const parts = [name, label, d.jack === "unplugged" ? SAT_COPY.jackNone : ""].filter(Boolean);
+  return parts.join(" · ");
 }
 /* The line under Output: what the chosen output is and takes, and what it
    is driven at now; for the Pi's own jack, its limits. */
 function satOutputQuality(d, now) {
   const q = d && d.quality;
-  if (!q) return "";
+  const jack = !d ? "" : d.jack === "unplugged" ? SAT_COPY.jackOut : d.jack === "plugged" ? SAT_COPY.jackIn : "";
+  if (!q) return jack;
   if (q.kind === "pwm") return [SAT_COPY.qPwmWhy, SAT_COPY.qPwmLimits, SAT_COPY.qPwmBetter].join(" ");
   const bits = [...new Set(q.bits || [])].sort((a, b) => a - b);
   const rates = [...new Set(q.rates || [])].sort((a, b) => a - b);
@@ -5075,6 +5080,7 @@ function satOutputQuality(d, now) {
         : `${satKhz(rates[0])} kHz` }));
   }
   if (now) said.push(satText("qNow", { now }));
+  if (jack) said.unshift(jack);
   return said.join(" ");
 }
 
@@ -5121,7 +5127,8 @@ function satAudio(li, n, cfg) {
   if (!audio) return;
   const mic = q('[data-cfg="audio_source"]');
   const sources = audio.sources || [];
-  const opts = [["", SAT_COPY.audioDefault], ...sources.map(d => [d.name, d.description || d.name])];
+  const opts = [["", SAT_COPY.audioDefault],
+    ...sources.map(d => [d.name, (d.description || d.name) + (d.jack === "unplugged" ? ` · ${SAT_COPY.jackNone}` : "")])];
   if (cfg.audio_source && !sources.some(d => d.name === cfg.audio_source)) {
     opts.push([cfg.audio_source, satText("audioMissing", { name: cfg.audio_source })]);
   }
@@ -8315,6 +8322,7 @@ function satEventWhat(ev, going) {
     : ev.type === "triggered" ? satTriggered(ev)
     : ev.type === "settings" ? `set on the device: ${satSettingsSaid(ev.settings || {})}`
     : ev.type === "output" ? (ev.output === "jack" ? "playing through its jack (aux)" : "playing through its speaker")
+    : ev.type === "jack" ? `${ev.device || ev.name}: ${ev.plugged ? "plugged in" : "unplugged"}`
     : ev.type;
 }
 const SAT_WOKE_ENDS = ["routed", "turn", "conversation_ended", "triggered"];

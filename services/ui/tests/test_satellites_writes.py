@@ -769,3 +769,20 @@ def test_each_output_says_its_quality_and_the_pis_own_jack_is_starred_with_its_l
     assert got["pwm"] == ("* The Pi's own jack is PWM from the processor, not a DAC. It plays 16-bit at 48 kHz "
                           "only, with audible hiss and less detail than a DAC. For music, choose a USB DAC or a "
                           "DAC HAT.")
+
+
+def test_an_output_says_whether_something_is_plugged_into_it(tmp_path):
+    got = run(tmp_path, """
+      const dac = { name: "alsa_output.usb-Realtek", description: "Realtek USB2.0 Audio",
+                    quality: { kind: "usb", bits: [32], rates: [384000] }, jack: "unplugged" };
+      console.log(JSON.stringify({
+        label: satDeviceLabel(dac),
+        out: satOutputQuality(dac, ""),
+        in_: satOutputQuality({ ...dac, jack: "plugged" }, ""),
+        event: satEventWhat({ type: "jack", device: "Realtek USB2.0 Audio", plugged: false }),
+        back: satEventWhat({ type: "jack", device: "Realtek USB2.0 Audio", plugged: true }) }));
+    """)
+    assert got["label"] == "Realtek USB2.0 Audio · USB DAC · up to 32-bit · 384 kHz · nothing plugged in"
+    assert got["out"].startswith("Nothing is plugged into it, so what it plays reaches no one.")
+    assert got["in_"].startswith("Something is plugged into it.")
+    assert got["event"] == "Realtek USB2.0 Audio: unplugged" and got["back"] == "Realtek USB2.0 Audio: plugged in"
