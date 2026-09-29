@@ -42,7 +42,9 @@ def shell(monkeypatch):
 def test_the_name_is_quoted_so_a_name_cannot_break_the_configuration():
     text = airplay.config('Kitchen "big" speaker\\ \n')
     assert 'name = "Kitchen \\"big\\" speaker\\\\ ";' in text
-    assert 'output_backend = "alsa";' in text and 'output_format = "S32";' in text
+    assert 'output_backend = "alsa";' in text and 'output_format = "S16";' in text
+    assert 'ignore_volume_control = "yes";' in text
+    assert f'run_this_when_volume_is_set = "{airplay.VOLUME_HOOK} ";' in text
     assert 'output_device = "default";' in text and "output_rate = 44100;" in text
 
 
@@ -248,3 +250,22 @@ async def test_the_players_own_word_on_playing(shell, monkeypatch):
         return 1, "Unknown object"
     monkeypatch.setattr(airplay, "_run", gone)
     assert await airplay.mpris_status() is None
+
+
+def test_the_phones_volume_becomes_the_outputs_own_in_the_same_decibels(tmp_path):
+    """The hook, run as Shairport Sync runs it, with pactl recording what it
+    was asked: -15 dB stays -15 dB on the output; -144 mutes."""
+    import os
+    import subprocess
+    from pathlib import Path
+    hook = Path(__file__).resolve().parent.parent / "bundle" / "bin" / "calliope-airplay-volume"
+    log = tmp_path / "pactl.log"
+    fake = tmp_path / "pactl"
+    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\n")
+    fake.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    subprocess.run([str(hook), "-15.000000"], env=env, check=True)
+    subprocess.run([str(hook), "-144.000000"], env=env, check=True)
+    assert log.read_text().splitlines() == ["set-sink-mute @DEFAULT_SINK@ 0",
+                                            "set-sink-volume @DEFAULT_SINK@ -- -15.000000dB",
+                                            "set-sink-mute @DEFAULT_SINK@ 1"]

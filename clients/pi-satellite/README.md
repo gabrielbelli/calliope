@@ -30,8 +30,8 @@ The best each piece of hardware takes, and no conversion that is not needed
 | Conversion, when two rates mix | quality 10 of 15 (the default is 4) | A reply over music; a Pi 3 does this for stereo easily |
 | Channels | never upmixed | Stereo stays stereo |
 | Outputs | never suspended | No clipped first syllable, no click as a card wakes |
-| Sample format | the widest the card takes | 32 or 24 bits on a USB DAC or DAC HAT, 16 on the Pi's own jack |
-| AirPlay | handed to PipeWire at 32 bits, through ALSA | The phone's volume is applied without losing resolution |
+| Sample format | 16-bit, no dither | Every source here is 16-bit (AirPlay, the voice, earcons): a 16-bit sample reaches the card as it was sent |
+| AirPlay | **bit-perfect**: Shairport Sync hands on the phone's own 16-bit, 44.1 kHz samples and applies no volume of its own | The phone's volume sets the output's own volume instead (`bin/calliope-airplay-volume`, in the same dB), in the DAC's hardware where it has a control |
 
 What is left is the hardware, and the agent says what each output is
 (`quality` on each device in `audio`, from the kernel):
@@ -58,7 +58,12 @@ microphone's jack does not decide whether the satellite has one: its
 44.1 kHz (1,411 kb/s); AirPlay 2 adds 48 kHz.
 
 The status says what the output is driven at now (`audio.playing_at`), and
-the Satellites tab shows it under Device and in the AirPlay section.
+the Satellites tab shows it under Device and in the AirPlay section, whose
+**Path** says "Bit-perfect" when the phone's samples reach the card unchanged,
+or what they were converted from and to. Two things are never bit-perfect by
+design: a reply ducks the music while it speaks, and a reply mixed over music
+is mixed. The phone's volume and the satellite's **Volume** set the same
+output volume, so the last one moved wins.
 
 ## AirPlay
 

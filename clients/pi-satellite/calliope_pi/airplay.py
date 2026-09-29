@@ -38,6 +38,8 @@ CONF = Path.home() / ".config" / "calliope" / "shairport-sync.conf"
 # own runtime directory, where only calliope can read it.
 PIPE = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "calliope-airplay-metadata"
 BINARY = "shairport-sync"   # how its stream is found in pactl, whatever the backend
+# Run with the phone's volume in dB; sets the output's own volume (bundle/bin).
+VOLUME_HOOK = "/opt/calliope/current/bin/calliope-airplay-volume"
 OURS = "Assistant"        # media.role of the agent's own streams (pipewire.Player)
 
 
@@ -63,11 +65,15 @@ def config(name: str, pipe: Path = PIPE, start_volume: int = 70) -> str:
         "// Written by the Calliope satellite agent (calliope_pi/airplay.py).",
         "general = {",
         f"  name = {_quote(name[:50] or 'Calliope')};",
-        # ALSA's default device is PipeWire (pipewire-alsa). Through it, and
-        # not the PulseAudio backend, Shairport Sync can hand over 32-bit
-        # samples: the phone's volume is applied without losing the bits a
-        # 16-bit stream would, and PipeWire does the rest in float.
+        # BIT-PERFECT. The samples leave Shairport Sync as the phone sent
+        # them, 16-bit at 44.1 kHz: it applies no volume of its own
+        # (ignore_volume_control), and hands the phone's volume, in dB, to
+        # calliope-airplay-volume, which sets the output's own volume (in the
+        # DAC's hardware where it has a control). Through ALSA's default
+        # device, which is PipeWire (pipewire-alsa).
         '  output_backend = "alsa";',
+        '  ignore_volume_control = "yes";',
+        f'  run_this_when_volume_is_set = "{VOLUME_HOOK} ";',
         # Timing corrections resampled with SoX, the best of its choices.
         '  interpolation = "soxr";',
         # Its own D-Bus and MPRIS interfaces on calliope's session bus, where
@@ -84,7 +90,7 @@ def config(name: str, pipe: Path = PIPE, start_volume: int = 70) -> str:
         "};",
         "alsa = {",
         '  output_device = "default";',
-        '  output_format = "S32";',
+        '  output_format = "S16";',
         "  output_rate = 44100;",
         "};",
         "sessioncontrol = {",

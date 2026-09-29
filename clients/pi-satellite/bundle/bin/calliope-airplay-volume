@@ -1,0 +1,15 @@
+#!/bin/sh
+# Shairport Sync runs this whenever the phone's AirPlay volume changes, with
+# that volume as its last argument: -30.0 (the bottom of the slider) to 0.0
+# (the top), in dB, or -144.0 for mute (calliope_pi/airplay.py). Shairport
+# Sync itself leaves the samples untouched (ignore_volume_control), so the
+# volume is the output's own, in the same dB: on a DAC with a volume control
+# PipeWire sets it in the hardware, and the music reaches it bit for bit.
+db=""
+for a in "$@"; do db="$a"; done
+case "$db" in
+  "") exit 0 ;;
+  -144*) exec pactl set-sink-mute @DEFAULT_SINK@ 1 ;;
+esac
+pactl set-sink-mute @DEFAULT_SINK@ 0
+exec pactl set-sink-volume @DEFAULT_SINK@ -- "${db}dB"
