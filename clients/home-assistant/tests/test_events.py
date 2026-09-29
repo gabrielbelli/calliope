@@ -281,7 +281,7 @@ async def test_adopted_later_and_forgotten(
 
     devices = dr.async_get(hass)
     del fake.satellites[BEDROOM_ID]
-    fake.push({"type": "pending", "satellite": BEDROOM_ID, "address": "192.168.1.51"})
+    fake.push({"type": "pending", "satellite": BEDROOM_ID, "address": "192.0.2.51"})
     await until(
         hass,
         lambda: devices.async_get_device(identifiers={(DOMAIN, BEDROOM_ID)}) is None,
@@ -301,7 +301,7 @@ async def test_forgotten_and_adopted_again_gets_its_device_back(
 
     devices = dr.async_get(hass)
     del fake.satellites[BEDROOM_ID]
-    fake.push({"type": "pending", "satellite": BEDROOM_ID, "address": "192.168.1.51"})
+    fake.push({"type": "pending", "satellite": BEDROOM_ID, "address": "192.0.2.51"})
     await until(
         hass,
         lambda: devices.async_get_device(identifiers={(DOMAIN, BEDROOM_ID)}) is None,

@@ -43,7 +43,7 @@ def satellite(
         "online": online,
         "model": "korvo-v1.1",
         "firmware": "0.4.2",
-        "address": "192.168.1.50" if online else None,
+        "address": "192.0.2.50" if online else None,
         "connected_at": 1_700_000_000.0 if online else None,
         "last_seen": None,
         "config": cfg if adopted else None,
