@@ -22,6 +22,12 @@ Arguments pass straight through to openwakeword/train.py (the pinned commit in
    that sounds identical to the wake word, labelled negative, teaches the
    model to reject the wake word. The wrapper drops any generated phrase whose
    pronunciation equals a target phrase's, and logs how many it dropped.
+   Near-homophones are not equal and stay: for "alexa" the generator draws
+   "alexis", "alexia", "alexei" and "olexa". The config key
+   `adversarial_exclude` (a list of regular expressions, matched against
+   the spelling of each generated phrase, case ignored) drops those as well,
+   and can keep the evaluation's held-out near misses out of training. It
+   applies to the generated phrases only, not to `custom_negative_phrases`.
 
 3. LOGGING. train.py never configures logging; the first module to do so is
    piper-sample-generator, at DEBUG, which floods the log. INFO is set here
@@ -79,22 +85,32 @@ def _sounds(text: str) -> set[str] | None:
     return {" ".join(combo) for combo in itertools.product(*per_word)}
 
 
-def _filter_homophones(targets: list[str]) -> None:
+def _filter_homophones(targets: list[str], exclude: list[str] | None = None) -> None:
     import openwakeword.data as owd
 
     original = owd.generate_adversarial_texts
     target_sounds: set[str] = set()
     for t in targets:
         target_sounds |= _sounds(t) or set()
+    patterns = [re.compile(p, re.IGNORECASE) for p in exclude or []]
 
     def generate_adversarial_texts(*args, **kwargs):
         texts = original(*args, **kwargs)
-        kept, dropped = [], []
+        kept, dropped, excluded = [], [], []
         for t in texts:
-            (dropped if (_sounds(t) or set()) & target_sounds else kept).append(t)
+            if (_sounds(t) or set()) & target_sounds:
+                dropped.append(t)
+            elif any(p.search(t) for p in patterns):
+                excluded.append(t)
+            else:
+                kept.append(t)
         if dropped:
             log.info("dropped %d of %d adversarial phrases that sound like the target, e.g. %s",
                      len(dropped), len(texts), sorted(set(dropped))[:8])
+        if excluded:
+            words = sorted(set(excluded))
+            log.info("dropped %d of %d adversarial phrases matching adversarial_exclude (%d distinct): %s",
+                     len(excluded), len(texts), len(words), words[:40])
         return kept
 
     # train.py does `from openwakeword.data import generate_adversarial_texts`
@@ -107,7 +123,7 @@ def main() -> None:
     argv = sys.argv[1:]
     config = yaml.safe_load(open(_config_path(argv)))
     _add_pronunciations(config.get("extra_pronunciations") or {})
-    _filter_homophones(list(config["target_phrase"]))
+    _filter_homophones(list(config["target_phrase"]), config.get("adversarial_exclude"))
     sys.argv = [TRAIN_PY, *argv]
     runpy.run_path(TRAIN_PY, run_name="__main__")
 

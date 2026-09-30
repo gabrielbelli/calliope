@@ -166,6 +166,61 @@ and feeds it 16-bit 16 kHz audio in 1,280-sample frames, as
 Results go to `reports/<profile>-<name>.json` (with every clip's score) and
 `.txt`, and the summary into `run.log`.
 
+### False accepts on your own recordings
+
+The validation set is mostly English. A model can stay quiet on it and still
+wake to a television in another language. `--false-accept DIR` measures that
+on real recordings. Give it speech that has no wake word in it and that no
+model trained on, such as the test split of an open corpus in your language.
+Repeat the option for more directories:
+
+```bash
+ev() {
+  sudo docker run --rm --cpus 4 --user "$(id -u):$(id -g)" \
+    -v /srv/wakeword-train:/srv/wakeword-train --entrypoint python wakeword-train:1 \
+    /opt/wakeword-train/evaluate.py "$@"
+}
+ev /srv/wakeword-train/models/lumos.onnx \
+  --false-accept /srv/wakeword-train/data/falseaccept/pt-fleurs \
+  --false-accept /srv/wakeword-train/data/falseaccept/pt-mtedx \
+  --json /srv/wakeword-train/reports/lumos-pt.json --text /srv/wakeword-train/reports/lumos-pt.txt
+```
+
+For Brazilian Portuguese, the `pt_br` test split of FLEURS
+(`google/fleurs`, CC BY 4.0) is 3.2 hours of read speech. The test split of
+`dominguesm/mTEDx-ptbr` (CC BY-NC 4.0) is 1.8 hours of TEDx talks, which are
+closer to television. Two of its 13 talks are from Portugal ("estou a
+trabalhar"). Without them it is 1.4 hours of Brazilian speech.
+
+evaluate.py plays the `.wav` files of a directory, at any sample rate, back
+to back in name order as one stream. The stream goes through
+`Model.predict` 1,280 samples at a time, as the hub feeds a satellite. There
+is one reset at the start, no score during the warm-up, and then the hub's
+count. Nothing is precomputed, so openWakeWord's streaming feature code runs
+as it does in the hub. On a stream of Portuguese speech with "Alexa" clips
+mixed in, the detections matched the hub's `WakeWords.feed` frame for frame,
+at every threshold from 0.1 to 0.95.
+
+The report gives false activations per hour at 0.5, 0.7, 0.8, 0.85, 0.9 and
+0.95. It also lists the 20 highest-scoring detections at 0.5, each with its
+file, the second into that file and the peak score, so you can listen to
+what woke the model. A detection comes about 0.8 s after the word. One near
+the start of a file can belong to the end of the file before it. Each hour
+of audio takes about 1.6 minutes of one core of a Ryzen 5 5600G.
+
+Keep these directories out of training. Once a model has trained on them,
+the number stops measuring speech the model has not heard.
+
+`--heldout-set NAME` scores a model on the held-out clips of another name.
+The held-out directory is normally the stem of the model file, and the stock
+`alexa_v0.1.onnx` from openWakeWord's v0.5.1 release has no directory of its
+own. To compare it with a retrained `alexa_ptbr` on the same clips:
+
+```bash
+ev /srv/wakeword-train/models/stock/alexa_v0.1.onnx --heldout-set alexa_ptbr \
+  --false-accept /srv/wakeword-train/data/falseaccept/pt-fleurs
+```
+
 ## Known limitation: accents
 
 Every positive clip comes from LibriTTS-R (American audiobook readers) through
@@ -252,7 +307,10 @@ v2.0.0:
   words that sound exactly like the target, but compares a string with a list,
   so it drops none: "clawed" became a negative for "claude", "gee pea tea" for
   "g p t". Phrases whose pronunciation equals a target's are now dropped, and
-  the log says how many.
+  the log says how many. Near-homophones stay: for "alexa" the generator
+  draws "alexis", "alexia" and "olexa". A model's `adversarial_exclude` in
+  `phrases.yaml` (regular expressions matched against the spelling) drops
+  those too, and can keep its held-out near misses out of training.
 - **Logging.** `train.py` configures none, and piper-sample-generator then sets
   DEBUG for everything. INFO is set first.
 

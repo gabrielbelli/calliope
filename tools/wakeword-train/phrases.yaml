@@ -7,6 +7,9 @@
 # full` with neither trains every model below, about 85 minutes each on a
 # 4 GB GPU. hey_chat_gpt shows letters spelt out, gemini a second reading,
 # and grok and lumos the `pronunciations` a word missing from CMUdict needs.
+# alexa_ptbr, the tenth, shows `adversarial_exclude`; it also needs clips that
+# train.py does not make (see its comment), so a run of every model trains it
+# on its English half only.
 #
 #   phrases         What the LibriTTS-R generator says (openWakeWord's
 #                   target_phrase). Spell it the way espeak-ng should read it:
@@ -26,6 +29,10 @@
 #   eval_negatives  Confusable phrases kept OUT of training, for measuring how
 #                   often the model accepts a near miss it has never seen.
 #   train           Optional overrides of the training profile for this model.
+#                   Any key of openWakeWord's config goes here (layer_size,
+#                   batch_n_per_class), and adversarial_exclude: regular
+#                   expressions for the generated adversarial phrases that must
+#                   not become negatives (see oww_train.py).
 
 # ARPAbet for words CMUdict lacks (see oww_train.py for why this matters).
 pronunciations:
@@ -110,3 +117,79 @@ models:
     eval: [Lumos]
     eval_negatives: [lummox, lupus, nimbus, cosmos, lima]
     train: *single_word
+
+  # "Alexa" as Brazilians and English speakers say it, which should fire far
+  # less on ordinary Portuguese speech (television, videos) than openWakeWord's
+  # stock alexa_v0.1. It is a separate model: the stock one is kept as it is.
+  # train.py makes only the English half. The Portuguese half is added to the
+  # work directory after --generate_clips and before --augment_clips (a
+  # directory seeded earlier is only topped up to n_samples, so the
+  # Portuguese clips would replace English ones instead of adding to them).
+  # That half is 22,748 positives from Piper and Kokoro Portuguese voices,
+  # with "Alexa" respelt "Aléksa" because a Portuguese voice reads "Alexa" as
+  # a-LÉ-sha. It also has 4,793 negatives: everyday speech, and rhymes with
+  # another onset (deixa, a caixa, puxa). Train it only with a script that
+  # adds that half; without it the model is English only.
+  alexa_ptbr:
+    # One English spelling. CMUdict has ALEXA (AH0 L EH1 K S AH0) and espeak-ng
+    # en-us reads it the same way (ɐlˈɛksə), so it needs no pronunciation. The
+    # Brazilian a-LÉK-sa comes from the Portuguese voices, not from a respelt
+    # English phrase, which an American voice would say with its own accent.
+    phrases: [alexa]
+    # English confusables, never near-homophones. Each shares at most one part
+    # of uh-LEK-suh: the uh-LE onset (a letter, a lecture, Allegra, a lot of)
+    # or the EK-suh rhyme after another onset (Texas, extra, Rebecca, Jessica).
+    # Left out: words that share both (Alex, Alexis, Alexia, Alexandra, Lexus,
+    # "a lexa"), the a-LESS-a and a-LEE-sha readings a Brazilian may give the
+    # word (Alessa, Alicia), "a necklace" (too near the "anexa" that the
+    # Portuguese list leaves out), and the held-out near misses below with
+    # their inflections. As for the other models, one line is only one or
+    # two clips of 50,000. The generated adversarial phrases and the
+    # Portuguese negatives carry the weight.
+    negatives: [a letter, a lecture, a legend, allegra, a lot of, texas, a taxi, extra, excellent,
+                mexico, nexus, rebecca, jessica, elsa, alpha]
+    # As written. The macOS English voices say "Alexa". The held-out
+    # Portuguese voices were given "Aléksa", "Alécsa" and "Alékça" instead,
+    # for the reason above.
+    eval: [Alexa]
+    # The near misses of the held-out sets, kept out of every training list
+    # (adversarial_exclude below keeps them out of the generated phrases too).
+    # English: the nine of the say-en set. Portuguese: the 20 rhymes that the
+    # Portuguese training lists leave out, as spoken in the say-ptbr and
+    # say-ptbr-robotic sets and by the Piper voice that training leaves out.
+    # train.py heldout also has held-out LibriTTS-R voices say every line, so
+    # there the Portuguese ones have an American accent: still near misses the
+    # model has never heard.
+    eval_negatives: [election, relax a, Alaska, collect a, Electra, Melissa, perplexed, a Tesla, electric,
+                     a gueixa, a trouxa, rebaixa, a mexerica, o feixe, a peixada, a princesa, a surpresa,
+                     a despesa, a empresa, o complexo, o reflexo, a condessa, a sobremesa, confesso,
+                     o sucesso, o acesso, o excesso, o processo, a fechadura]
+    train:
+      # A single word, three syllables: the single-word settings (a 64-wide
+      # layer, 100 adversarial negatives per batch), as lumos had when its
+      # Portuguese retrain worked. The rest is the full profile: 50,000
+      # English positives, so the Portuguese ones are 31% of all positives,
+      # close to lumos's third. Upstream sizes the clips from the median test
+      # positive plus 0.75 s, and at least 2 s. The Portuguese clips have a
+      # median of 0.9 s, so the clips stay 2 s and the model sees 16 frames
+      # (1.28 s), as the stock model does.
+      <<: *single_word
+      # The generated adversarial phrases for "alexa" come from about 12,000
+      # CMUdict words, chosen by phoneme overlap. One draw the size of a full
+      # run's (40,010 phrases) held near-homophones, 1.5% of it: alexia,
+      # alexi, alexei, alexis, oleksy, olexa, alexandre, alessio, dyslexia. A
+      # clip that sounds like the wake word, labelled negative, teaches the
+      # model to reject the wake word; Portuguese near-homophones among its
+      # negatives are why the first Portuguese retrain of lumos failed. The
+      # draw also held the English near misses of the evaluation and their
+      # inflections (1.2%: election, alaskan, relaxing, perplexed, collected),
+      # which must stay unheard. Both go. Matched against the spelling, case
+      # ignored. elixir, galaxy, flexible and collection are kept: they differ
+      # from uh-LEK-suh in more than one sound.
+      adversarial_exclude:
+        - '\b[aeo]le(x|ks|kz|cs|ss|sk|sh)'     # alexis, alexia, alexei, alessio, elexis, olexa, oleksy
+        - '\b[aeo]l[iy](ci|si|sa|sh)'          # alicia, alysia, elisa: a-LEE-sha
+        - '\b(dal[ei]ss|mel[ei]ss|dyslexi)'    # dalessio, melessa, dyslexia
+        - '\b(alaska|melissa|perplex|relax|tesla|ele[ck]tra)'           # held-out near misses and
+        - '\b(collect(s|ed|ing|ors?)?|elections?|electrics?)\b'         # their inflections
+        - '\blenexa'                           # luh-NEK-suh, a Kansas town in CMUdict
