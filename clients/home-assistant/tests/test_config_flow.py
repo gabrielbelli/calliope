@@ -1,4 +1,4 @@
-"""The config flow, the options flow and reauth, against the fake gateway."""
+"""The config flow, the reconfigure flow and reauth, against the fake gateway."""
 
 from __future__ import annotations
 
@@ -116,32 +116,65 @@ async def test_already_configured(
     assert result["reason"] == "already_configured"
 
 
-async def test_options_flow_changes_the_key(
+async def test_reconfigure_changes_the_url_key_tls_and_unique_id(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:
     """The key is validated, saved to the entry and the entry reloads. The
-    speech-to-text engine that keeps the first entity's id stays with it."""
-    fake.api_key = "sk-new"
-    result = await hass.config_entries.options.async_init(loaded.entry_id)
+    entry's unique id follows the host, so the old one can be added again;
+    the speech-to-text engine that keeps the first entity's id stays with
+    it."""
+    moved = FakeCalliope()  # the gateway, moved to another port
+    await moved.start()
+    moved.api_key = "sk-new"
+    result = await loaded.start_reconfigure_flow(hass)
     assert result["type"] is FlowResultType.FORM
-    result = await hass.config_entries.options.async_configure(
+    assert result["step_id"] == "reconfigure"
+    result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
-        {CONF_URL: fake.url, CONF_API_KEY: "wrong", CONF_VERIFY_SSL: True},
+        {CONF_URL: moved.url, CONF_API_KEY: "wrong", CONF_VERIFY_SSL: True},
     )
     assert result["errors"] == {"base": "invalid_auth"}
-    result = await hass.config_entries.options.async_configure(
+    result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
-        {CONF_URL: fake.url, CONF_API_KEY: "sk-new", CONF_VERIFY_SSL: False},
+        {CONF_URL: moved.url, CONF_API_KEY: "sk-new", CONF_VERIFY_SSL: False},
     )
-    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
     await hass.async_block_till_done()
     assert loaded.data == {
-        CONF_URL: fake.url,
+        CONF_URL: moved.url,
         CONF_API_KEY: "sk-new",
         CONF_VERIFY_SSL: False,
         CONF_LEGACY_STT: "parakeet",
     }
+    assert loaded.unique_id == moved.url.split("//", 1)[1]
+    assert loaded.unique_id != fake.url.split("//", 1)[1]
     assert loaded.state is config_entries.ConfigEntryState.LOADED
+    await hass.config_entries.async_unload(loaded.entry_id)
+    await hass.async_block_till_done()
+    await moved.stop()
+
+
+async def test_reconfigure_to_a_gateway_already_set_up_aborts(
+    hass: HomeAssistant, fake: FakeCalliope, entry: MockConfigEntry
+) -> None:
+    """Two entries for one gateway would show every satellite twice."""
+    other = MockConfigEntry(
+        domain=DOMAIN,
+        title="calliope.test",
+        unique_id="calliope.test:30080",
+        data={CONF_URL: "https://calliope.test:30080", CONF_VERIFY_SSL: True},
+    )
+    other.add_to_hass(hass)
+    with patch("custom_components.calliope.async_setup_entry", return_value=True):
+        result = await other.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_URL: fake.url, CONF_VERIFY_SSL: True}
+        )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert other.data[CONF_URL] == "https://calliope.test:30080"
+    assert other.unique_id == "calliope.test:30080"
 
 
 async def test_reauth(

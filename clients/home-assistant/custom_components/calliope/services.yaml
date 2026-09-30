@@ -1,7 +1,10 @@
 say:
   target:
+    device:
+      integration: calliope
     entity:
       integration: calliope
+      domain: media_player
   fields:
     text:
       required: true
@@ -16,8 +19,11 @@ say:
 
 tone:
   target:
+    device:
+      integration: calliope
     entity:
       integration: calliope
+      domain: media_player
   fields:
     frequency:
       default: 440
@@ -39,8 +45,13 @@ tone:
 
 push_to_talk:
   target:
+    device:
+      integration: calliope
     entity:
       integration: calliope
+      domain:
+        - assist_satellite
+        - event
   fields:
     wake_word:
       example: "hey_jarvis"

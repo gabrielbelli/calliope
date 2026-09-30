@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_capture_events,
@@ -12,7 +13,7 @@ from pytest_homeassistant_custom_component.common import (
 from custom_components.calliope.const import DOMAIN, EVENT_CALLIOPE
 
 from .conftest import until
-from .fake_calliope import BEDROOM_ID, KITCHEN_ID, FakeCalliope, satellite
+from .fake_calliope import BEDROOM_ID, KITCHEN_ID, LOUNGE_ID, FakeCalliope, korvo
 
 
 def _state(hass: HomeAssistant, entity_id: str) -> str:
@@ -121,16 +122,14 @@ async def test_command(
     assert _state(hass, "sensor.kitchen_last_command") == "What time is it?"
 
 
-async def test_buttons_and_conversations(
+async def test_conversations(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:
-    """Every happening type reaches the event entity."""
+    """A conversation's start, turns and end reach the Voice event entity."""
     bus = async_capture_events(hass, EVENT_CALLIOPE)
     seen: list[str] = []
     for n, event in enumerate(
         (
-            {"type": "button", "button": "play", "action": "press", "held_ms": 0},
-            {"type": "button", "button": "play", "action": "release", "held_ms": 240},
             {
                 "type": "conversation_started",
                 "wake_word": "hey_jarvis",
@@ -149,16 +148,77 @@ async def test_buttons_and_conversations(
         fake.push({"satellite": KITCHEN_ID} | event)
         await until(hass, lambda n=n: len(bus) == n)
         seen.append(hass.states.get("event.kitchen_voice").attributes["event_type"])
-    assert seen == [
-        "button_press",
-        "button_release",
-        "conversation_started",
-        "command",
-        "conversation_ended",
-    ]
+    assert seen == ["conversation_started", "command", "conversation_ended"]
     assert [e.data["kind"] for e in bus] == seen
     assert hass.states.get("event.kitchen_voice").attributes["turns"] == 2
     assert _state(hass, "sensor.kitchen_last_command") == "and tomorrow?"
+
+
+async def test_button_event_entities_fire_press_and_release(
+    hass: HomeAssistant, fake: FakeCalliope, entry: MockConfigEntry
+) -> None:
+    """Each button is its own event entity (off by default, here turned on):
+    PLAY's gets PLAY's press and release, and nothing of SET's."""
+    er.async_get(hass).async_get_or_create(
+        "event",
+        DOMAIN,
+        f"{KITCHEN_ID}_button_play",
+        suggested_object_id="kitchen_play_button",
+        config_entry=entry,
+    )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await until(hass, lambda: entry.runtime_data.coordinator.connected)
+    await hass.async_block_till_done()
+    play = hass.states.get("event.kitchen_play_button")
+    assert play.name == "kitchen PLAY button"
+    assert play.attributes["device_class"] == "button"
+    assert play.attributes["event_types"] == ["press", "release"]
+
+    bus = async_capture_events(hass, EVENT_CALLIOPE)
+    seen: list[str] = []
+    for n, event in enumerate(
+        (
+            {"button": "play", "action": "press", "held_ms": 0},
+            {"button": "play", "action": "release", "held_ms": 240},
+            {"button": "set", "action": "press", "held_ms": 0},
+        ),
+        start=1,
+    ):
+        fake.push({"type": "button", "satellite": KITCHEN_ID} | event)
+        await until(hass, lambda n=n: len(bus) == n)
+        seen.append(
+            hass.states.get("event.kitchen_play_button").attributes["event_type"]
+        )
+    assert seen == ["press", "release", "release"]
+    assert hass.states.get("event.kitchen_play_button").attributes["held_ms"] == 240
+    assert [e.data["kind"] for e in bus] == [
+        "button_press",
+        "button_release",
+        "button_press",
+    ]
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+async def test_the_voice_event_has_no_button_types(
+    hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
+) -> None:
+    """Buttons are not something a satellite heard: the Voice entity offers
+    only the five voice types, and a press leaves it as it was."""
+    voice = hass.states.get("event.kitchen_voice")
+    assert voice.attributes["event_types"] == [
+        "wake_word",
+        "trigger_word",
+        "command",
+        "conversation_started",
+        "conversation_ended",
+    ]
+    bus = async_capture_events(hass, EVENT_CALLIOPE)
+    fake.push(
+        {"type": "button", "satellite": KITCHEN_ID, "button": "play", "action": "press"}
+    )
+    await until(hass, lambda: bus)
+    assert _state(hass, "event.kitchen_voice") == "unknown"
 
 
 async def test_quiet_and_injected_events(
@@ -221,24 +281,50 @@ async def test_offline_and_online(
 async def test_change_made_elsewhere(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:
-    """A PATCH from the Satellites page shows up through the satellite's
-    next status: the settings it reports changed, so the record is read."""
+    """A PATCH from the Satellites page is published as config, with the
+    names of what changed: the record is read at once, whatever the setting,
+    and the event is not fired on the bus."""
+    bus = async_capture_events(hass, EVENT_CALLIOPE)
     fake.satellites[KITCHEN_ID]["config"]["speaker_enabled"] = False
+    fake.satellites[KITCHEN_ID]["config"]["brightness"] = 20
     fake.push(
         {
-            "type": "status",
+            "type": "config",
             "satellite": KITCHEN_ID,
-            "status": {
-                "rssi": -58,
-                "volume": 60,
-                "mic_enabled": True,
-                "speaker_enabled": False,
-                "lights_enabled": False,
-            },
+            "changed": ["brightness", "speaker_enabled"],
         }
     )
     await until(hass, lambda: _state(hass, "switch.kitchen_speaker") == "off")
+    assert _state(hass, "number.kitchen_ring_brightness") == "20.0"
     assert fake.calls("GET", f"/satellites/{KITCHEN_ID}")
+    assert bus == []
+
+
+async def test_a_media_event_reads_the_satellite_that_plays_and_the_one_addressed(
+    hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
+) -> None:
+    """The kitchen answers through the lounge's speaker: a stream sent to
+    the kitchen plays in the lounge, and both records describe it."""
+    fake.satellites[KITCHEN_ID]["config"]["output_satellite"] = LOUNGE_ID
+    playing = {"id": "ab" * 16, "source": KITCHEN_ID, "since": 1_700_000_100.0}
+    fake.satellites[KITCHEN_ID]["playing"] = playing
+    fake.satellites[LOUNGE_ID]["playing"] = playing
+    fake.push(
+        {
+            "type": "media",
+            "satellite": LOUNGE_ID,
+            "source": KITCHEN_ID,
+            "id": "ab" * 16,
+            "announce": False,
+            "state": "playing",
+            "reason": None,
+            "played_s": None,
+        }
+    )
+    await until(hass, lambda: _state(hass, "media_player.kitchen") == "playing")
+    await until(hass, lambda: _state(hass, "media_player.lounge") == "playing")
+    assert fake.calls("GET", f"/satellites/{KITCHEN_ID}")
+    assert fake.calls("GET", f"/satellites/{LOUNGE_ID}")
 
 
 async def test_reconnect_reads_what_was_missed(
@@ -254,10 +340,10 @@ async def test_reconnect_reads_what_was_missed(
     )
     assert _state(hass, "binary_sensor.kitchen_online") == "unavailable"
 
-    fake.satellites[KITCHEN_ID]["config"]["volume"] = 35
+    fake.satellites[KITCHEN_ID]["config"]["brightness"] = 35
     fake.events_status = None
     await fake.wait_streams(2)
-    await until(hass, lambda: _state(hass, "number.kitchen_volume") == "35.0")
+    await until(hass, lambda: _state(hass, "number.kitchen_ring_brightness") == "35.0")
     assert len(fake.calls("GET", "/satellites")) > reads
     assert _state(hass, "switch.kitchen_microphone") == "on"
 
@@ -267,7 +353,7 @@ async def test_adopted_later_and_forgotten(
 ) -> None:
     """A satellite adopted while running gets its entities; one forgotten
     loses its device."""
-    fake.satellites[BEDROOM_ID] = satellite(BEDROOM_ID, "bedroom")
+    fake.satellites[BEDROOM_ID] = korvo(BEDROOM_ID, "bedroom")
     fake.push(
         {
             "type": "online",
@@ -295,7 +381,7 @@ async def test_forgotten_and_adopted_again_gets_its_device_back(
     """Each platform remembered every satellite it had added, forgotten or
     not, so a board forgotten and adopted again had no device and no
     entities until a reload."""
-    fake.satellites[BEDROOM_ID] = satellite(BEDROOM_ID, "bedroom")
+    fake.satellites[BEDROOM_ID] = korvo(BEDROOM_ID, "bedroom")
     fake.push({"type": "online", "satellite": BEDROOM_ID, "name": "bedroom"})
     await until(hass, lambda: hass.states.get("switch.bedroom_microphone") is not None)
 
@@ -306,11 +392,13 @@ async def test_forgotten_and_adopted_again_gets_its_device_back(
         hass,
         lambda: devices.async_get_device(identifiers={(DOMAIN, BEDROOM_ID)}) is None,
     )
-    fake.satellites[BEDROOM_ID] = satellite(BEDROOM_ID, "bedroom")
+    fake.satellites[BEDROOM_ID] = korvo(BEDROOM_ID, "bedroom")
     fake.push({"type": "online", "satellite": BEDROOM_ID, "name": "bedroom"})
     await until(
         hass,
-        lambda: devices.async_get_device(identifiers={(DOMAIN, BEDROOM_ID)}) is not None,
+        lambda: (
+            devices.async_get_device(identifiers={(DOMAIN, BEDROOM_ID)}) is not None
+        ),
     )
     await until(hass, lambda: hass.states.get("switch.bedroom_microphone") is not None)
     assert _state(hass, "binary_sensor.bedroom_online") == "on"

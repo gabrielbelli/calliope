@@ -25,6 +25,12 @@ REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 # Transcription and synthesis are measured in seconds of audio; a long
 # announcement through the hub's /say waits for Kokoro before it answers.
 AUDIO_TIMEOUT = aiohttp.ClientTimeout(total=120)
+# A media upload lasts as long as the music: the hub answers only when the
+# stream ends or is stopped, so neither the whole request nor a read has a
+# limit. The gateway ends an upload that stalls (GATEWAY_SATELLITES_TIMEOUT).
+STREAM_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=None)
+# The hub waits up to 6 s for the phone to answer an AirPlay command.
+AIRPLAY_TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 
 class CalliopeError(Exception):
@@ -98,6 +104,42 @@ class CalliopeClient:
             raise CalliopeAuthError(message)
         raise CalliopeApiError(resp.status, message, code)
 
+    @asynccontextmanager
+    async def _open(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Any = None,
+        data: Any = None,
+        headers: dict[str, str] | None = None,
+        timeout: aiohttp.ClientTimeout = REQUEST_TIMEOUT,
+    ) -> AsyncIterator[aiohttp.ClientResponse]:
+        """One request, its error answered with the gateway's reason, and a
+        failure to reach it as CalliopeConnectionError, also while the body is
+        read."""
+        try:
+            async with self._session.request(
+                method,
+                f"{self.url}{path}",
+                json=json_body,
+                data=data,
+                headers={**self._headers, **(headers or {})},
+                timeout=timeout,
+            ) as resp:
+                await self._check(resp)
+                yield resp
+        except CalliopeError:
+            raise
+        except TimeoutError as err:
+            # A stream has no overall limit: only its connect can time out.
+            limit = timeout.total or timeout.sock_connect
+            raise CalliopeConnectionError(
+                f"{method} {path} timed out after {limit:.0f} s"
+            ) from err
+        except (aiohttp.ClientError, ValueError) as err:
+            raise CalliopeConnectionError(f"{method} {path}: {err}") from err
+
     async def _request(
         self,
         method: str,
@@ -105,32 +147,23 @@ class CalliopeClient:
         *,
         json_body: Any = None,
         data: Any = None,
+        headers: dict[str, str] | None = None,
         timeout: aiohttp.ClientTimeout = REQUEST_TIMEOUT,
         raw: bool = False,
     ) -> Any:
-        try:
-            async with self._session.request(
-                method,
-                f"{self.url}{path}",
-                json=json_body,
-                data=data,
-                headers=self._headers,
-                timeout=timeout,
-            ) as resp:
-                await self._check(resp)
-                if raw:
-                    return await resp.read()
-                if resp.status == 204 or resp.content_length == 0:
-                    return None
-                return await resp.json(content_type=None)
-        except CalliopeError:
-            raise
-        except TimeoutError as err:
-            raise CalliopeConnectionError(
-                f"{method} {path} timed out after {timeout.total:.0f} s"
-            ) from err
-        except (aiohttp.ClientError, ValueError) as err:
-            raise CalliopeConnectionError(f"{method} {path}: {err}") from err
+        async with self._open(
+            method,
+            path,
+            json_body=json_body,
+            data=data,
+            headers=headers,
+            timeout=timeout,
+        ) as resp:
+            if raw:
+                return await resp.read()
+            if resp.status == 204 or resp.content_length == 0:
+                return None
+            return await resp.json(content_type=None)
 
     # -- the stack -------------------------------------------------------------
 
@@ -219,12 +252,87 @@ class CalliopeClient:
     async def action(
         self, satellite_id: str, action: str, body: dict[str, Any] | None = None
     ) -> None:
-        """POST /satellites/{id}/{action}: identify, say, tone, flush, ptt."""
+        """POST /satellites/{id}/{action}: identify, say, tone, flush, ptt,
+        reboot."""
         await self._request(
             "POST",
             f"/satellites/{satellite_id}/{action}",
             json_body=body if body is not None else {},
             timeout=AUDIO_TIMEOUT if action == "say" else REQUEST_TIMEOUT,
+        )
+
+    async def media(
+        self,
+        satellite_id: str,
+        chunks: AsyncIterator[bytes],
+        *,
+        announce: bool,
+    ) -> dict[str, Any]:
+        """POST /satellites/{id}/media: a WAV in the format the satellite's
+        media block names, streamed as it is made. The hub answers when the
+        music ends or is stopped, or once an announcement has played.
+
+        When making the WAV fails, that error is raised rather than the broken
+        connection it caused: aiohttp reports a body that raised only as a
+        failure to send bytes."""
+        broke: list[BaseException] = []
+
+        async def body() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in chunks:
+                    yield chunk
+            except Exception as err:
+                broke.append(err)
+                raise
+
+        try:
+            return await self._request(
+                "POST",
+                f"/satellites/{satellite_id}/media?announce={int(announce)}",
+                data=body(),
+                headers={"Content-Type": "audio/wav"},
+                timeout=STREAM_TIMEOUT,
+            )
+        except CalliopeError:
+            if broke:
+                raise broke[0] from None
+            raise
+
+    async def media_stop(self, satellite_id: str) -> None:
+        """POST /satellites/{id}/media/stop: ends the stream that plays on the
+        satellite's speaker, whether or not one does."""
+        await self._request("POST", f"/satellites/{satellite_id}/media/stop")
+
+    async def airplay(self, satellite_id: str, command: str) -> dict[str, Any]:
+        """POST /satellites/{id}/airplay/{command}: asks the phone, through the
+        satellite; the answer says whether the phone acted on it."""
+        return await self._request(
+            "POST",
+            f"/satellites/{satellite_id}/airplay/{command}",
+            timeout=AIRPLAY_TIMEOUT,
+        )
+
+    async def airplay_artwork(
+        self, satellite_id: str, sha256: str
+    ) -> tuple[bytes | None, str | None]:
+        """GET /satellites/{id}/airplay/artwork?v=: the cover, and its type.
+        (None, None) when the hub holds no cover or another one: an old
+        picture is never taken for the one asked for."""
+        path = f"/satellites/{satellite_id}/airplay/artwork?v={sha256}"
+        try:
+            async with self._open("GET", path) as resp:
+                return await resp.read(), resp.content_type
+        except CalliopeApiError as err:
+            if err.status == 404:
+                return None, None
+            raise
+
+    async def start_ota(self, satellite_id: str, sha256: str) -> dict[str, Any]:
+        """POST /satellites/ota: "started" and "skipped" (id to reason)."""
+        return await self._request(
+            "POST",
+            "/satellites/ota",
+            json_body={"satellite": satellite_id, "sha256": sha256},
         )
 
     @asynccontextmanager

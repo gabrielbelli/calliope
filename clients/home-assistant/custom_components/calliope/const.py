@@ -35,31 +35,48 @@ KIND_BUTTON_RELEASE: Final = "button_release"
 KIND_CONVERSATION_STARTED: Final = "conversation_started"
 KIND_CONVERSATION_ENDED: Final = "conversation_ended"
 
+# What a satellite heard or said, as the Voice event entity's event types.
+# Button presses are not among them: each button is an event entity of its own
+# (BUTTON_EVENT_TYPES), made only for the buttons the satellite has.
 VOICE_EVENT_TYPES: Final = [
     KIND_WAKE_WORD,
     KIND_TRIGGER_WORD,
     KIND_COMMAND,
-    KIND_BUTTON_PRESS,
-    KIND_BUTTON_RELEASE,
     KIND_CONVERSATION_STARTED,
     KIND_CONVERSATION_ENDED,
 ]
+# A device trigger's type: the voice kinds and a button's two edges.
+TRIGGER_TYPES: Final = [*VOICE_EVENT_TYPES, KIND_BUTTON_PRESS, KIND_BUTTON_RELEASE]
+# A button event entity's event types.
+BUTTON_EVENT_TYPES: Final = ["press", "release"]
+# How a button is named where it is printed on the board. A button a later
+# firmware adds is named by its id in capitals.
+BUTTON_LABELS: Final = {
+    "play": "PLAY",
+    "set": "SET",
+    "mode": "MODE",
+    "rec": "REC",
+    "vol_up": "VOL+",
+    "vol_down": "VOL-",
+    "key1": "KEY1",
+}
 
 # Hub events that are state, not happenings: kept off the bus. A status
-# arrives every 10 s from every satellite.
-QUIET_HUB_EVENTS: Final = frozenset({"status"})
+# arrives every 10 s from every satellite; a config event carries only the
+# names of the settings that changed, and the record read after it is what
+# the entities show.
+QUIET_HUB_EVENTS: Final = frozenset({"status", "config"})
 
-# The buttons of the ESP32-Korvo, which the firmware lists in hello.caps. Used
-# for a satellite whose caps are not known (offline since HA started).
-KORVO_BUTTONS: Final = ("play", "set", "mode", "rec", "vol_up", "vol_down")
-
-# The settings a satellite's switches and slider change with PATCH.
-SETTING_KEYS: Final = (
-    "volume",
-    "mic_enabled",
-    "speaker_enabled",
-    "lights_enabled",
-)
+# The hub's range for mic_gain_db, for a satellite that does not say its own
+# (caps.mic.max_gain_db): the Korvo's codec takes all of it.
+MIC_GAIN_MAX_DB: Final = 37.5
+# What volume_up and volume_down move the media player by: 5 of the hub's
+# 100 steps.
+VOLUME_STEP: Final = 0.05
+# The media player's app_name: what plays, the phone's AirPlay or a stream
+# Home Assistant sent.
+APP_AIRPLAY: Final = "AirPlay"
+APP_CALLIOPE: Final = "Calliope"
 
 # Reconnect backoff for the event stream, in seconds.
 BACKOFF_MIN: Final = 1.0

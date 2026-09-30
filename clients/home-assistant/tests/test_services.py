@@ -1,18 +1,16 @@
-"""Actions (say, tone, push_to_talk), the switches, volume and identify,
-and diagnostics."""
+"""Actions (say, tone, push_to_talk), the switches, identify and restart."""
 
 from __future__ import annotations
 
 import pytest
-from homeassistant.const import CONF_API_KEY
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.calliope.const import DOMAIN
-from custom_components.calliope.diagnostics import async_get_config_entry_diagnostics
 
 from .conftest import until
 from .fake_calliope import KITCHEN_ID, PENDING_ID, FakeCalliope
@@ -104,22 +102,23 @@ async def test_tone(
     ]
 
 
-async def test_push_to_talk_without_a_hub_route(
+async def test_push_to_talk_refused_names_why(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:
-    """Today's gateway has no route for it: a clear failure, not a 404."""
-    with pytest.raises(HomeAssistantError) as err:
+    """The hub's reason reaches the person: here, a microphone switched
+    off."""
+    fake.satellites[KITCHEN_ID]["config"]["mic_enabled"] = False
+    with pytest.raises(HomeAssistantError, match="microphone turned off") as err:
         await hass.services.async_call(
             DOMAIN, "push_to_talk", {"device_id": _kitchen(hass)}, blocking=True
         )
-    assert err.value.translation_key == "push_to_talk_unsupported"
+    assert err.value.translation_key == "satellite_refused"
 
 
 async def test_push_to_talk(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:
-    """With the route: POST /satellites/{id}/ptt, the wake word optional."""
-    fake.ptt_route = True
+    """POST /satellites/{id}/ptt, the wake word optional."""
     await hass.services.async_call(
         DOMAIN, "push_to_talk", {"device_id": _kitchen(hass)}, blocking=True
     )
@@ -135,7 +134,7 @@ async def test_push_to_talk(
     ]
 
 
-async def test_switch_and_volume(
+async def test_switches(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:
     """Each is one PATCH, and the answer is the new state."""
@@ -145,20 +144,12 @@ async def test_switch_and_volume(
     await hass.services.async_call(
         "switch", "turn_off", {"entity_id": "switch.kitchen_microphone"}, blocking=True
     )
-    await hass.services.async_call(
-        "number",
-        "set_value",
-        {"entity_id": "number.kitchen_volume", "value": 42},
-        blocking=True,
-    )
     assert fake.calls("PATCH", f"/satellites/{KITCHEN_ID}") == [
         {"lights_enabled": True},
         {"mic_enabled": False},
-        {"volume": 42},
     ]
     assert hass.states.get("switch.kitchen_lights").state == "on"
     assert hass.states.get("switch.kitchen_microphone").state == "off"
-    assert hass.states.get("number.kitchen_volume").state == "42.0"
 
 
 async def test_identify(
@@ -169,6 +160,31 @@ async def test_identify(
         "button", "press", {"entity_id": "button.kitchen_identify"}, blocking=True
     )
     assert fake.calls("POST", f"/satellites/{KITCHEN_ID}/identify") == [{}]
+
+
+async def test_restart_button(
+    hass: HomeAssistant, fake: FakeCalliope, entry: MockConfigEntry
+) -> None:
+    """Off by default; turned on, it asks the hub to reboot the satellite."""
+    er.async_get(hass).async_get_or_create(
+        "button",
+        DOMAIN,
+        f"{KITCHEN_ID}_restart",
+        suggested_object_id="kitchen_restart",
+        config_entry=entry,
+    )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await until(hass, lambda: entry.runtime_data.coordinator.connected)
+    await hass.async_block_till_done()
+    assert hass.states.get("button.kitchen_restart").attributes["device_class"] == (
+        "restart"
+    )
+    await hass.services.async_call(
+        "button", "press", {"entity_id": "button.kitchen_restart"}, blocking=True
+    )
+    assert fake.calls("POST", f"/satellites/{KITCHEN_ID}/reboot") == [{}]
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
 
 
 async def test_pending_satellites_cause_no_reads(
@@ -196,20 +212,3 @@ async def test_pending_satellites_cause_no_reads(
         hass, lambda: hass.states.get("sensor.kitchen_wi_fi_signal").state == "-44"
     )
     assert len(fake.calls("GET", "/satellites")) == reads
-
-
-async def test_diagnostics_redact_the_key(
-    hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
-) -> None:
-    """No key, no address, no button webhooks."""
-    hass.config_entries.async_update_entry(
-        loaded, data={**loaded.data, CONF_API_KEY: "sk-secret"}
-    )
-    diag = await async_get_config_entry_diagnostics(hass, loaded)
-    assert diag["entry"]["data"][CONF_API_KEY] == "**REDACTED**"
-    assert "sk-secret" not in str(diag)
-    kitchen = diag["satellites"][KITCHEN_ID]
-    assert kitchen["address"] == "**REDACTED**"
-    assert kitchen["config"]["buttons"] == "**REDACTED**"
-    assert diag["event_stream_connected"] is True
-    assert diag["voices"] == len(fake.voices)

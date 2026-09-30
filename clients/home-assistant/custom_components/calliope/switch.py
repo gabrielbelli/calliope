@@ -1,29 +1,31 @@
-"""A satellite's microphone, speaker and lights, switched through the hub."""
+"""A satellite's speaker, microphone, lights, echo reference and AirPlay
+receiver, switched through the hub."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.const import EntityCategory, Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .api import CalliopeError
-from .const import DOMAIN
 from .coordinator import CalliopeConfigEntry, CalliopeCoordinator
-from .entity import CalliopeSatelliteEntity, add_per_satellite
+from .entity import CalliopeSatelliteEntity, add_for_caps
 
 PARALLEL_UPDATES = 1
 
-# (translation key, config field). The switches show the hub's config, not
-# the satellite's status, as the Satellites page and the MQTT bridge do: the
-# config changes the moment PATCH answers.
-SWITCHES = (
-    ("microphone", "mic_enabled"),
-    ("speaker", "speaker_enabled"),
-    ("lights", "lights_enabled"),
-)
+# key (the translation key too): the setting it PATCHes, its entity category,
+# and whether it is on by default. The echo reference is off by default: it
+# is a Pi's USB card setting that needs a card with a loopback input, and the
+# wrong choice is heard only in the transcripts.
+SWITCHES: dict[str, tuple[str, EntityCategory | None, bool]] = {
+    "speaker": ("speaker_enabled", None, True),
+    "microphone": ("mic_enabled", None, True),
+    "lights": ("lights_enabled", None, True),
+    "echo_reference": ("echo_reference", EntityCategory.CONFIG, False),
+    "airplay": ("airplay_enabled", EntityCategory.CONFIG, True),
+}
 
 
 async def async_setup_entry(
@@ -31,12 +33,12 @@ async def async_setup_entry(
     entry: CalliopeConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Three switches per satellite."""
+    """The switches a satellite's caps want."""
 
-    def build(coordinator: CalliopeCoordinator, sid: str) -> list[CalliopeSwitch]:
-        return [CalliopeSwitch(coordinator, sid, key, field) for key, field in SWITCHES]
+    def build(coordinator: CalliopeCoordinator, sid: str, key: str) -> CalliopeSwitch:
+        return CalliopeSwitch(coordinator, sid, key)
 
-    add_per_satellite(entry, async_add_entities, build)
+    add_for_caps(entry, async_add_entities, Platform.SWITCH, build)
 
 
 class CalliopeSwitch(CalliopeSatelliteEntity, SwitchEntity):
@@ -46,37 +48,28 @@ class CalliopeSwitch(CalliopeSatelliteEntity, SwitchEntity):
     # the next welcome, so a change is taken while it is offline.
     available_offline = True
 
-    def __init__(
-        self, coordinator: CalliopeCoordinator, sid: str, key: str, field: str
-    ) -> None:
+    def __init__(self, coordinator: CalliopeCoordinator, sid: str, key: str) -> None:
         """Keyed by what it switches."""
         super().__init__(coordinator, sid, key)
+        self._field, self._attr_entity_category, enabled = SWITCHES[key]
         self._attr_translation_key = key
-        self._field = field
+        self._attr_entity_registry_enabled_default = enabled
 
     @property
     def is_on(self) -> bool | None:
-        """The hub's config; unknown until the satellite has reported it."""
+        """The hub's config, as the Satellites page shows it: it changes the
+        moment PATCH answers. A setting the hub has never stored (a Pi's
+        AirPlay, which starts on) shows what the satellite reports; unknown
+        until it has."""
         value = self.config.get(self._field)
+        if value is None:
+            value = self.status.get(self._field)
         return None if value is None else bool(value)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """PATCH it on."""
-        await self._set(True)
+        await self._patch(**{self._field: True})
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """PATCH it off."""
-        await self._set(False)
-
-    async def _set(self, value: bool) -> None:
-        try:
-            sat = await self.coordinator.client.configure(
-                self.satellite_id, **{self._field: value}
-            )
-        except CalliopeError as err:
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="hub_refused",
-                translation_placeholders={"error": str(err)},
-            ) from err
-        self.coordinator.async_set_satellite(sat)
+        await self._patch(**{self._field: False})

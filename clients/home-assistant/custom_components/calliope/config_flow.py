@@ -8,14 +8,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import voluptuous as vol
-from homeassistant.config_entries import (
-    ConfigEntry,
-    ConfigFlow,
-    ConfigFlowResult,
-    OptionsFlow,
-)
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_API_KEY, CONF_URL, CONF_VERIFY_SSL
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import CalliopeAuthError, CalliopeClient, CalliopeError
@@ -122,40 +117,33 @@ class CalliopeConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
-        """The same three fields, changed after setup."""
-        return CalliopeOptionsFlow()
-
-
-class CalliopeOptionsFlow(OptionsFlow):
-    """Change the URL, key or TLS checking. They live in the entry's data,
-    so a reauth and this flow edit the same values; the entry reloads."""
-
-    async def async_step_init(
+    async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Show the current values."""
+        """Change the URL, key or TLS checking. The entry is one gateway, so
+        its unique id follows the host: moving it to a gateway that is set up
+        already is refused, and the old host is free to be added again."""
+        entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
         if user_input is not None:
             data = _normalise(user_input)
             if (error := await _validate(self.hass, data)) is None:
+                new_uid = urlsplit(data[CONF_URL]).netloc.lower()
+                if new_uid != entry.unique_id:
+                    await self.async_set_unique_id(new_uid)
+                    self._abort_if_unique_id_configured()
                 # The engine that keeps the first entity's id stays with it.
-                kept = {
-                    k: v for k, v in self.config_entry.data.items() if k == CONF_LEGACY_STT
-                }
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry, data=data | kept
+                kept = {k: v for k, v in entry.data.items() if k == CONF_LEGACY_STT}
+                return self.async_update_reload_and_abort(
+                    entry,
+                    unique_id=new_uid,
+                    title=urlsplit(data[CONF_URL]).hostname or "Calliope",
+                    data=data | kept,
                 )
-                self.hass.config_entries.async_schedule_reload(
-                    self.config_entry.entry_id
-                )
-                return self.async_create_entry(data={})
             errors["base"] = error
         return self.async_show_form(
-            step_id="init",
-            data_schema=_schema(user_input or self.config_entry.data),
+            step_id="reconfigure",
+            data_schema=_schema(user_input or entry.data),
             errors=errors,
             description_placeholders={"example_url": EXAMPLE_URL},
         )

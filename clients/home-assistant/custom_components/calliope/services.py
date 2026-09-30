@@ -25,7 +25,7 @@ from homeassistant.helpers.target import (
     async_extract_referenced_entity_ids,
 )
 
-from .api import CalliopeApiError, CalliopeClient, CalliopeError
+from .api import CalliopeClient, CalliopeError
 from .const import (
     ATTR_FREQUENCY,
     ATTR_SECONDS,
@@ -104,22 +104,6 @@ async def _each(
     for client, sid, name in _targets(hass, call):
         try:
             await client.action(sid, action, body)
-        except CalliopeApiError as err:
-            if (
-                action == "ptt"
-                and err.status in (404, 405)
-                and err.code != "satellite_not_found"
-            ):
-                # The gateway answers 404 for a route it does not route.
-                raise HomeAssistantError(
-                    translation_domain=DOMAIN,
-                    translation_key="push_to_talk_unsupported",
-                ) from err
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="satellite_refused",
-                translation_placeholders={"satellite": name, "error": err.message},
-            ) from err
         except CalliopeError as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,

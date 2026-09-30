@@ -2,13 +2,20 @@
 
 One long-lived GET /satellites/events per config entry. GET /satellites is
 read when the stream opens (at start and after every reconnect), so nothing is
-missed while it was down; after that every change arrives as an event and
-nothing is polled.
+missed while it was down; after that every change arrives as an event, and
+one satellite is read again (GET /satellites/{id}) when an event says its
+record changed.
+
+Each satellite has a revision, bumped whenever anything about it changes. An
+entity writes its state only when its satellite's revision (or the stream's
+health) moved, so the status every satellite sends every 10 s rewrites that
+satellite's entities and nobody else's.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,11 +23,19 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import CalliopeApiError, CalliopeAuthError, CalliopeClient, CalliopeError
+from .api import (
+    CalliopeApiError,
+    CalliopeAuthError,
+    CalliopeClient,
+    CalliopeConnectionError,
+    CalliopeError,
+)
+from .capabilities import caps_of, known, wanted
 from .const import (
     BACKOFF_MAX,
     BACKOFF_MIN,
@@ -34,7 +49,6 @@ from .const import (
     KIND_TRIGGER_WORD,
     KIND_WAKE_WORD,
     QUIET_HUB_EVENTS,
-    SETTING_KEYS,
 )
 from .vocabulary import Vocabulary
 
@@ -67,13 +81,12 @@ def signal_removed(entry_id: str) -> str:
 
 
 def classify(event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
-    """A hub event as (kind, attributes) for the event entity and device
-    triggers, or None when it is not a happening a person would automate.
-
-    Written for the events the hub publishes today (wake, routed, button) and
-    those it is gaining (triggered, turn, conversation_started,
-    conversation_ended). Unknown fields are passed through, so a field the
-    hub adds later reaches automations without a release here."""
+    """A hub event as (kind, attributes) for the event entities and device
+    triggers, or None when it is not a happening a person would automate:
+    wake, triggered, routed and turn (with a transcript), button,
+    conversation_started and conversation_ended. Unknown fields are passed
+    through, so a field the hub adds later reaches automations without a
+    release here."""
     kind = event.get("type")
     extra = {
         k: v
@@ -132,15 +145,19 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
         # on hubs from 2026-09-25 each word's mode (command, conversation or
         # trigger).
         self.words: list[dict[str, Any]] = []
-        # A satellite's buttons from its caps, remembered while it is offline
-        # (the hub reports caps only for a connected satellite).
-        self.buttons: dict[str, list[str]] = {}
         # Satellites the hub lists but nobody has adopted. They publish status
         # too, and must not cause a read every 10 s.
         self.pending: set[str] = set()
+        # Bumped each time something about a satellite changes; its entities
+        # write their state when it moves (entity.py).
+        self.revision: dict[str, int] = {}
+        # Each satellite's caps as sorted JSON, the last time they were known.
+        # A change removes the entities of what it no longer has.
+        self._fingerprint: dict[str, str] = {}
         self._task: asyncio.Task[None] | None = None
         self._backoff = BACKOFF_MIN
         self._refreshing: set[str] = set()
+        self._reread: set[str] = set()
 
     # -- reading -----------------------------------------------------------
 
@@ -168,14 +185,90 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
         satellites = {s["id"]: s for s in listed if s.get("adopted") and s.get("id")}
         self.pending = {s["id"] for s in listed if s.get("id") and not s.get("adopted")}
         for sid, sat in satellites.items():
-            self._remember_caps(sid, sat)
+            self._reconcile(sid, sat)
+        for sid in set(self.revision) - set(satellites):
+            del self.revision[sid]
+            self._fingerprint.pop(sid, None)
         self._remove_forgotten(satellites)
         return satellites
 
-    def _remember_caps(self, sid: str, sat: dict[str, Any]) -> None:
-        buttons = (sat.get("caps") or {}).get("buttons")
-        if isinstance(buttons, list) and buttons:
-            self.buttons[sid] = [str(b) for b in buttons]
+    # -- keeping the registries in step with the hub -------------------------
+
+    def _bump(self, sid: str) -> None:
+        self.revision[sid] = self.revision.get(sid, 0) + 1
+
+    @callback
+    def _reconcile(self, sid: str, sat: dict[str, Any]) -> None:
+        """A satellite as the hub now describes it: its entities write their
+        state, its device follows the hub, and once its caps are known and
+        have changed, the entities of what it no longer has are removed."""
+        self._bump(sid)
+        self._sync_device(sid, sat)
+        if not known(sat):
+            # Unknown is not absent: nothing is removed on a guess.
+            return
+        fingerprint = json.dumps(caps_of(sat), sort_keys=True, default=str)
+        if self._fingerprint.get(sid) != fingerprint:
+            self._fingerprint[sid] = fingerprint
+            self._prune(sid, sat)
+
+    @callback
+    def _sync_device(self, sid: str, sat: dict[str, Any]) -> None:
+        """The device registry as the hub has it: a rename on the Satellites
+        page, a new firmware after OTA. Written only when something differs,
+        as every write is an event."""
+        registry = dr.async_get(self.hass)
+        device = registry.async_get_device(identifiers={(DOMAIN, sid)})
+        if device is None:
+            return  # its first entity creates it, from the same record
+        model = sat.get("model")
+        wanted_fields = {
+            "name": device_name(sid, sat),
+            "model": model,
+            "sw_version": sat.get("firmware"),
+            "manufacturer": manufacturer_of(model),
+            "configuration_url": self.client.url + "/ui",
+        }
+        changes = {
+            k: v
+            for k, v in wanted_fields.items()
+            # An unknown value (a firmware the hub forgot at its restart) never
+            # replaces a known one.
+            if v is not None and getattr(device, k) != v
+        }
+        if changes:
+            registry.async_update_device(device.id, **changes)
+
+    @callback
+    def _prune(self, sid: str, sat: dict[str, Any]) -> None:
+        """Remove from the entity registry every entity of this satellite
+        that its caps no longer want: a Lights switch on a satellite without a
+        ring, the volume slider the media player replaced, a microphone that
+        was unplugged. Disabled entities too. Home Assistant removes a loaded
+        entity with its registry entry."""
+        device = dr.async_get(self.hass).async_get_device(identifiers={(DOMAIN, sid)})
+        if device is None:
+            return
+        want = wanted(sat)
+        registry = er.async_get(self.hass)
+        prefix = f"{sid}_"
+        removed = []
+        for entry in er.async_entries_for_device(
+            registry, device.id, include_disabled_entities=True
+        ):
+            if entry.config_entry_id != self.config_entry.entry_id or not (
+                entry.unique_id.startswith(prefix)
+            ):
+                continue
+            if want.get(entry.unique_id[len(prefix) :]) != entry.domain:
+                registry.async_remove(entry.entity_id)
+                removed.append(entry.entity_id)
+        if removed:
+            _LOGGER.info(
+                "Removed %s: %s does not have what they were for",
+                ", ".join(removed),
+                device_name(sid, sat),
+            )
 
     @callback
     def _remove_forgotten(self, satellites: Satellites) -> None:
@@ -224,8 +317,12 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
                         _LOGGER.info("Connected to the Calliope event stream")
                     self.connected = True
                     self._backoff = BACKOFF_MIN
-                    # Whatever changed while the stream was down.
+                    # Whatever changed while the stream was down. A read that
+                    # fails leaves every entity unavailable, and nothing on the
+                    # stream would read again: reconnect, with backoff.
                     await self.async_refresh()
+                    if not self.last_update_success:
+                        raise CalliopeConnectionError("could not read the satellites")
                     async for event in stream:
                         try:
                             self._on_event(event)
@@ -266,7 +363,8 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
             # MQTT so they cannot fire the household's automations; so does
             # this.
             return
-        if kind == "wake_words":
+        if kind in ("wake_words", "firmware"):
+            # Hub-wide: the words assigned, or the images an update can offer.
             self.hass.async_create_task(self.async_request_refresh())
             return
         if not isinstance(sid, str) or not sid:
@@ -287,16 +385,12 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
     def _apply(self, sid: str, sat: dict[str, Any], event: dict[str, Any]) -> None:
         kind = event.get("type")
         if kind == "status":
-            status = event.get("status") or {}
-            before = {k: (sat.get("status") or {}).get(k) for k in SETTING_KEYS}
-            after = {k: status.get(k) for k in SETTING_KEYS}
+            status = event.get("status")
+            if not isinstance(status, dict):
+                _LOGGER.debug("Skipping a status of %s that is not an object", sid)
+                return
             sat["status"] = status
             sat["online"] = True
-            # The satellite reports after every config it is sent, so a change
-            # made on the Satellites page shows here first. Read the hub's
-            # record then, rather than every 10 s.
-            if any(v is not None for v in before.values()) and before != after:
-                self._refresh_one(sid)
         elif kind == "online":
             sat["online"] = True
             if event.get("name"):
@@ -305,19 +399,49 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
                 sat["firmware"] = event["firmware"]
             self._refresh_one(sid)  # caps, address and config come with it
         elif kind == "offline":
+            # The caps stay: the hub keeps them for an offline satellite too.
             sat["online"] = False
             sat["status"] = {}
+        elif kind in ("config", "settings"):
+            # A PATCH from the page, or a setting the satellite changed itself
+            # (a button, the phone's AirPlay volume): the hub's record changed.
+            self._refresh_one(sid)
+            return
+        elif kind == "ota":
+            ota = dict(sat.get("ota") or {})
+            ota.update(
+                {
+                    k: event[k]
+                    for k in ("state", "pct", "version", "error")
+                    if k in event and (k != "version" or event[k] is not None)
+                }
+            )
+            sat["ota"] = ota
+            if event.get("state") in ("verified", "failed"):
+                self._refresh_one(sid)  # the update on offer changes
+        elif kind == "media":
+            # The stream plays on one satellite and was addressed to another
+            # (an Output set on the page): both describe it.
+            self._refresh_one(sid)
+            source = event.get("source")
+            if isinstance(source, str) and source != sid and source in self.data:
+                self._refresh_one(source)
+            return
         elif kind == "pending":
             # Forgotten, or its token no longer matches: not ours any more.
             self.hass.async_create_task(self.async_request_refresh())
             return
         else:
             return
+        self._bump(sid)
         self.async_update_listeners()
 
     @callback
     def _refresh_one(self, sid: str) -> None:
         if sid in self._refreshing:
+            # The read under way may have been answered before this change:
+            # read once more when it is done.
+            self._reread.add(sid)
             return
         self._refreshing.add(sid)
         self.config_entry.async_create_background_task(
@@ -329,22 +453,33 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
             sat = await self.client.satellite(sid)
         except CalliopeError as err:
             _LOGGER.debug("Could not read satellite %s: %s", sid, err)
-            return
+            sat = None
         finally:
             self._refreshing.discard(sid)
-        self.async_set_satellite(sat)
+        # Not reached when cancelled: the entry is unloading, and a read
+        # started now would outlive it (Home Assistant cancels only the
+        # tasks it had when the unload began).
+        if sid in self._reread:
+            self._reread.discard(sid)
+            self._refresh_one(sid)
+        if sat is not None:
+            self.async_set_satellite(sat)
 
     @callback
     def async_set_satellite(self, sat: dict[str, Any]) -> None:
-        """A satellite as the hub describes it (GET or PATCH answer)."""
+        """A satellite as the hub describes it (GET or PATCH answer). Only
+        its own entities are written, and a full read that is pending, or a
+        failed one, is left as it is: async_set_updated_data would cancel the
+        one and paper over the other."""
         sid = sat.get("id")
         if not sid or not self.data or sid not in self.data:
             return
         if not sat.get("adopted"):
             self.hass.async_create_task(self.async_request_refresh())
             return
-        self._remember_caps(sid, sat)
-        self.async_set_updated_data({**self.data, sid: sat})
+        self.data[sid] = sat
+        self._reconcile(sid, sat)
+        self.async_update_listeners()
 
     @callback
     def _fire(self, sid: str, sat: dict[str, Any], event: dict[str, Any]) -> None:
@@ -369,6 +504,21 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
                 attributes,
             )
         self.hass.bus.async_fire(EVENT_CALLIOPE, data)
+
+
+def device_name(sid: str, sat: dict[str, Any]) -> str:
+    """The satellite's name on the hub, or one made from its id."""
+    return sat.get("name") or f"satellite-{sid[-4:]}"
+
+
+def manufacturer_of(model: str | None) -> str | None:
+    """Who made the board, from the model the firmware reports."""
+    model = str(model or "")
+    if model.startswith("esp32-korvo"):
+        return "Espressif"
+    if model == "raspberry-pi":
+        return "Raspberry Pi"
+    return None
 
 
 def satellite_id_of(device: dr.DeviceEntry) -> str | None:

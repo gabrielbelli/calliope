@@ -4,6 +4,10 @@ Each trigger listens for calliope_event with the satellite's device_id and
 the matching "kind" (and word or button), so a trigger fires exactly when the
 event entity does. The event is in the trigger data:
 {{ trigger.event.data.transcript }}, {{ trigger.event.data.wake_word }}.
+
+Only what the satellite has is offered: words, commands and conversations
+with a microphone, and the buttons its caps list. A satellite whose caps are
+not known yet gets none, rather than another model's.
 """
 
 from __future__ import annotations
@@ -34,9 +38,9 @@ from .const import (
     KIND_CONVERSATION_STARTED,
     KIND_TRIGGER_WORD,
     KIND_WAKE_WORD,
-    KORVO_BUTTONS,
-    VOICE_EVENT_TYPES,
+    TRIGGER_TYPES,
 )
+from .capabilities import buttons_of, caps_of, has
 from .coordinator import CalliopeCoordinator, satellite_id_of
 
 CONF_SUBTYPE = "subtype"
@@ -46,7 +50,7 @@ BUTTON_TYPES = (KIND_BUTTON_PRESS, KIND_BUTTON_RELEASE)
 
 TRIGGER_SCHEMA = DEVICE_TRIGGER_BASE_SCHEMA.extend(
     {
-        vol.Required(CONF_TYPE): vol.In(VOICE_EVENT_TYPES),
+        vol.Required(CONF_TYPE): vol.In(TRIGGER_TYPES),
         # A word or a button. Not checked against the hub's current list:
         # words are reassigned at any time, and an automation for a word that
         # comes back later should still work.
@@ -72,16 +76,12 @@ def _find(
     return None
 
 
-def _word_kinds(coordinator: CalliopeCoordinator, word: str) -> tuple[str, ...]:
+def _word_kind(coordinator: CalliopeCoordinator, word: str) -> str:
     """A trigger word (mode "trigger") fires trigger_word; a command or
-    conversation word fires wake_word. A hub that does not say a word's mode
-    gets both offered."""
-    mode = coordinator.word_mode(word)
-    if mode == "trigger":
-        return (KIND_TRIGGER_WORD,)
-    if mode is not None:
-        return (KIND_WAKE_WORD,)
-    return WORD_TYPES
+    conversation word, or one whose mode the hub does not say, wake_word."""
+    if coordinator.word_mode(word) == "trigger":
+        return KIND_TRIGGER_WORD
+    return KIND_WAKE_WORD
 
 
 async def async_get_triggers(
@@ -94,16 +94,18 @@ async def async_get_triggers(
         return []
     coordinator, sid = found
     sat = (coordinator.data or {}).get(sid) or {}
+    caps = caps_of(sat)
     base = {CONF_PLATFORM: "device", CONF_DOMAIN: DOMAIN, CONF_DEVICE_ID: device_id}
     triggers: list[dict[str, Any]] = []
-    for word in sat.get("wake_words") or []:
-        for kind in _word_kinds(coordinator, word):
+    if has(caps, "mic"):
+        for word in sat.get("wake_words") or []:
+            kind = _word_kind(coordinator, word)
             triggers.append({**base, CONF_TYPE: kind, CONF_SUBTYPE: word})
-    for button in coordinator.buttons.get(sid) or KORVO_BUTTONS:
+        for kind in (KIND_COMMAND, KIND_CONVERSATION_STARTED, KIND_CONVERSATION_ENDED):
+            triggers.append({**base, CONF_TYPE: kind})
+    for button in buttons_of(caps):
         for kind in BUTTON_TYPES:
             triggers.append({**base, CONF_TYPE: kind, CONF_SUBTYPE: button})
-    for kind in (KIND_COMMAND, KIND_CONVERSATION_STARTED, KIND_CONVERSATION_ENDED):
-        triggers.append({**base, CONF_TYPE: kind})
     return triggers
 
 

@@ -20,24 +20,14 @@
         "description": "Enter a key that the gateway's GATEWAY_API_KEYS accepts.",
         "data": {
           "api_key": "API key"
+        },
+        "data_description": {
+          "api_key": "The new key. Leave it empty if the gateway no longer needs one."
         }
-      }
-    },
-    "error": {
-      "cannot_connect": "Calliope did not answer at that address.",
-      "invalid_auth": "Calliope refused the API key.",
-      "invalid_url": "Enter a URL that starts with http:// or https://.",
-      "not_calliope": "Something answered, but it is not a Calliope gateway."
-    },
-    "abort": {
-      "already_configured": "This Calliope gateway is already set up.",
-      "reauth_successful": "The new key works."
-    }
-  },
-  "options": {
-    "step": {
-      "init": {
+      },
+      "reconfigure": {
         "title": "Calliope connection",
+        "description": "Change the gateway's address, the key or TLS checking. The integration reloads with them.",
         "data": {
           "url": "URL",
           "api_key": "API key",
@@ -55,6 +45,11 @@
       "invalid_auth": "Calliope refused the API key.",
       "invalid_url": "Enter a URL that starts with http:// or https://.",
       "not_calliope": "Something answered, but it is not a Calliope gateway."
+    },
+    "abort": {
+      "already_configured": "This Calliope gateway is already set up.",
+      "reauth_successful": "The new key works.",
+      "reconfigure_successful": "The connection is updated."
     }
   },
   "device_automation": {
@@ -74,18 +69,24 @@
       "rec": "REC button",
       "vol_up": "VOL+ button",
       "vol_down": "VOL- button",
+      "key1": "KEY1 button",
       "hey_jarvis": "Hey Jarvis",
       "hey_mycroft": "Hey Mycroft",
       "hey_rhasspy": "Hey Rhasspy",
       "alexa": "Alexa",
-      "weather": "Weather",
-      "ptt": "push-to-talk"
+      "weather": "Weather"
     }
   },
   "entity": {
     "binary_sensor": {
       "online": {
         "name": "Online"
+      },
+      "privacy_mute": {
+        "name": "Privacy mute"
+      },
+      "under_voltage": {
+        "name": "Under-voltage"
       }
     },
     "event": {
@@ -97,23 +98,61 @@
               "wake_word": "Wake word",
               "trigger_word": "Trigger word",
               "command": "Command",
-              "button_press": "Button pressed",
-              "button_release": "Button released",
               "conversation_started": "Conversation started",
               "conversation_ended": "Conversation ended"
+            }
+          }
+        }
+      },
+      "button": {
+        "name": "{button} button",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "press": "Pressed",
+              "release": "Released"
             }
           }
         }
       }
     },
     "number": {
-      "volume": {
-        "name": "Volume"
+      "mic_gain": {
+        "name": "Microphone gain"
+      },
+      "brightness": {
+        "name": "Ring brightness"
+      }
+    },
+    "select": {
+      "output_satellite": {
+        "name": "Plays through",
+        "state": {
+          "own": "Its own speaker"
+        }
+      },
+      "output_device": {
+        "name": "Output",
+        "state": {
+          "default": "System default"
+        }
+      },
+      "input_device": {
+        "name": "Microphone input",
+        "state": {
+          "default": "System default"
+        }
       }
     },
     "sensor": {
       "wifi_signal": {
         "name": "Wi-Fi signal"
+      },
+      "uptime": {
+        "name": "Uptime"
+      },
+      "cpu_temperature": {
+        "name": "CPU temperature"
       },
       "last_command": {
         "name": "Last command"
@@ -139,6 +178,17 @@
       },
       "lights": {
         "name": "Lights"
+      },
+      "echo_reference": {
+        "name": "Echo reference"
+      },
+      "airplay": {
+        "name": "AirPlay"
+      }
+    },
+    "text": {
+      "airplay_name": {
+        "name": "AirPlay name"
       }
     },
     "tts": {
@@ -157,14 +207,29 @@
     "no_satellites": {
       "message": "The target contains no Calliope satellite."
     },
-    "push_to_talk_unsupported": {
-      "message": "This Calliope hub has no push-to-talk route yet (POST /satellites/ID/ptt). Press PLAY on the satellite, or update the hub."
-    },
     "tts_failed": {
       "message": "Calliope could not synthesise the speech: {error}"
     },
     "no_voice": {
       "message": "Calliope has no voice for {language}."
+    },
+    "speaker_off": {
+      "message": "{satellite} has its speaker turned off."
+    },
+    "unsupported_url": {
+      "message": "Calliope plays Home Assistant's media and http or https URLs only."
+    },
+    "hub_cannot_play": {
+      "message": "This Calliope hub cannot play media: update it."
+    },
+    "play_failed": {
+      "message": "Calliope could not play that on {satellite}: {error}"
+    },
+    "no_update": {
+      "message": "There is no firmware for {satellite} to update to."
+    },
+    "update_skipped": {
+      "message": "The hub did not start the update: {reason}"
     }
   },
   "services": {
@@ -198,7 +263,7 @@
     },
     "push_to_talk": {
       "name": "Push to talk",
-      "description": "Starts listening on satellites, as a press of PLAY does.",
+      "description": "Starts listening on satellites, as their push-to-talk button does.",
       "fields": {
         "wake_word": {
           "name": "Wake word",

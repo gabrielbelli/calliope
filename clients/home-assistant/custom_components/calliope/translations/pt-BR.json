@@ -20,24 +20,14 @@
         "description": "Informe uma chave aceita pelo GATEWAY_API_KEYS do gateway.",
         "data": {
           "api_key": "Chave de API"
+        },
+        "data_description": {
+          "api_key": "A nova chave. Deixe vazio se o gateway não exigir mais uma."
         }
-      }
-    },
-    "error": {
-      "cannot_connect": "O Calliope não respondeu nesse endereço.",
-      "invalid_auth": "O Calliope recusou a chave de API.",
-      "invalid_url": "Informe uma URL que comece com http:// ou https://.",
-      "not_calliope": "Algo respondeu, mas não é um gateway do Calliope."
-    },
-    "abort": {
-      "already_configured": "Este gateway do Calliope já está configurado.",
-      "reauth_successful": "A nova chave funciona."
-    }
-  },
-  "options": {
-    "step": {
-      "init": {
+      },
+      "reconfigure": {
         "title": "Conexão com o Calliope",
+        "description": "Altere o endereço do gateway, a chave ou a verificação de TLS. A integração é recarregada com eles.",
         "data": {
           "url": "URL",
           "api_key": "Chave de API",
@@ -55,6 +45,11 @@
       "invalid_auth": "O Calliope recusou a chave de API.",
       "invalid_url": "Informe uma URL que comece com http:// ou https://.",
       "not_calliope": "Algo respondeu, mas não é um gateway do Calliope."
+    },
+    "abort": {
+      "already_configured": "Este gateway do Calliope já está configurado.",
+      "reauth_successful": "A nova chave funciona.",
+      "reconfigure_successful": "A conexão foi atualizada."
     }
   },
   "device_automation": {
@@ -74,18 +69,24 @@
       "rec": "Botão REC",
       "vol_up": "Botão VOL+",
       "vol_down": "Botão VOL-",
+      "key1": "Botão KEY1",
       "hey_jarvis": "Hey Jarvis",
       "hey_mycroft": "Hey Mycroft",
       "hey_rhasspy": "Hey Rhasspy",
       "alexa": "Alexa",
-      "weather": "Weather",
-      "ptt": "apertar para falar"
+      "weather": "Weather"
     }
   },
   "entity": {
     "binary_sensor": {
       "online": {
         "name": "Conectado"
+      },
+      "privacy_mute": {
+        "name": "Mudo de privacidade"
+      },
+      "under_voltage": {
+        "name": "Subtensão"
       }
     },
     "event": {
@@ -97,23 +98,61 @@
               "wake_word": "Palavra de ativação",
               "trigger_word": "Palavra de gatilho",
               "command": "Comando",
-              "button_press": "Botão pressionado",
-              "button_release": "Botão solto",
               "conversation_started": "Conversa iniciada",
               "conversation_ended": "Conversa encerrada"
+            }
+          }
+        }
+      },
+      "button": {
+        "name": "Botão {button}",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "press": "Pressionado",
+              "release": "Solto"
             }
           }
         }
       }
     },
     "number": {
-      "volume": {
-        "name": "Volume"
+      "mic_gain": {
+        "name": "Ganho do microfone"
+      },
+      "brightness": {
+        "name": "Brilho do anel"
+      }
+    },
+    "select": {
+      "output_satellite": {
+        "name": "Reproduz em",
+        "state": {
+          "own": "No próprio alto-falante"
+        }
+      },
+      "output_device": {
+        "name": "Saída",
+        "state": {
+          "default": "Padrão do sistema"
+        }
+      },
+      "input_device": {
+        "name": "Entrada do microfone",
+        "state": {
+          "default": "Padrão do sistema"
+        }
       }
     },
     "sensor": {
       "wifi_signal": {
         "name": "Sinal do Wi-Fi"
+      },
+      "uptime": {
+        "name": "Tempo de atividade"
+      },
+      "cpu_temperature": {
+        "name": "Temperatura da CPU"
       },
       "last_command": {
         "name": "Último comando"
@@ -139,6 +178,17 @@
       },
       "lights": {
         "name": "Luzes"
+      },
+      "echo_reference": {
+        "name": "Referência de eco"
+      },
+      "airplay": {
+        "name": "AirPlay"
+      }
+    },
+    "text": {
+      "airplay_name": {
+        "name": "Nome no AirPlay"
       }
     },
     "tts": {
@@ -157,14 +207,29 @@
     "no_satellites": {
       "message": "O alvo não contém nenhum satélite do Calliope."
     },
-    "push_to_talk_unsupported": {
-      "message": "Este hub do Calliope ainda não tem a rota de apertar para falar (POST /satellites/ID/ptt). Pressione PLAY no satélite ou atualize o hub."
-    },
     "tts_failed": {
       "message": "O Calliope não conseguiu sintetizar a fala: {error}"
     },
     "no_voice": {
       "message": "O Calliope não tem voz para {language}."
+    },
+    "speaker_off": {
+      "message": "{satellite} está com o alto-falante desligado."
+    },
+    "unsupported_url": {
+      "message": "O Calliope reproduz apenas a mídia do Home Assistant e URLs http ou https."
+    },
+    "hub_cannot_play": {
+      "message": "Este hub do Calliope não consegue reproduzir mídia: atualize-o."
+    },
+    "play_failed": {
+      "message": "O Calliope não conseguiu reproduzir isso em {satellite}: {error}"
+    },
+    "no_update": {
+      "message": "Não há firmware para atualizar {satellite}."
+    },
+    "update_skipped": {
+      "message": "O hub não iniciou a atualização: {reason}"
     }
   },
   "services": {
@@ -198,7 +263,7 @@
     },
     "push_to_talk": {
       "name": "Apertar para falar",
-      "description": "Começa a ouvir nos satélites, como um toque em PLAY.",
+      "description": "Começa a ouvir nos satélites, como faz o botão de apertar para falar deles.",
       "fields": {
         "wake_word": {
           "name": "Palavra de ativação",

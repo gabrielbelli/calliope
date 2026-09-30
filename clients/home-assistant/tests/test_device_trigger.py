@@ -18,7 +18,9 @@ from pytest_homeassistant_custom_component.common import (
 from custom_components.calliope.const import DOMAIN
 
 from .conftest import until
-from .fake_calliope import KITCHEN_ID, FakeCalliope
+from .fake_calliope import BEDROOM_ID, KITCHEN_ID, LOUNGE_ID, FakeCalliope, korvo, pi
+
+OFFICE_ID = "0a1b2c3d4e60"
 
 
 def _kitchen(hass: HomeAssistant) -> dr.DeviceEntry:
@@ -29,45 +31,46 @@ def _listed(triggers: list[dict[str, Any]]) -> set[tuple[str, str | None]]:
     return {(t["type"], t.get("subtype")) for t in triggers if t["domain"] == DOMAIN}
 
 
-async def test_triggers_offered(
-    hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
-) -> None:
-    """hey_jarvis (a command word) is a wake word, lumos (a trigger word) a
-    trigger word; the satellite's six buttons; commands and conversations."""
-    triggers = await async_get_device_automations(
-        hass, DeviceAutomationType.TRIGGER, _kitchen(hass).id
-    )
-    buttons = {"play", "set", "mode", "rec", "vol_up", "vol_down"}
-    assert _listed(triggers) == (
-        {("wake_word", "hey_jarvis"), ("trigger_word", "lumos")}
-        | {("button_press", b) for b in buttons}
-        | {("button_release", b) for b in buttons}
-        | {
-            ("command", None),
-            ("conversation_started", None),
-            ("conversation_ended", None),
-        }
+async def _offered(hass: HomeAssistant, sid: str) -> set[tuple[str, str | None]]:
+    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, sid)})
+    return _listed(
+        await async_get_device_automations(
+            hass, DeviceAutomationType.TRIGGER, device.id
+        )
     )
 
 
-async def test_hub_without_word_modes_offers_both(
+WORDS_AND_COMMANDS = {
+    ("wake_word", "hey_jarvis"),
+    ("trigger_word", "lumos"),
+    ("command", None),
+    ("conversation_started", None),
+    ("conversation_ended", None),
+}
+
+
+async def test_triggers_are_the_satellites_own(
     hass: HomeAssistant, fake: FakeCalliope, entry: MockConfigEntry
 ) -> None:
-    """A hub from before word modes: each word is offered both ways."""
-    for word in fake.words:
-        del word["mode"]
+    """The Korvo: its words (hey_jarvis a command word, lumos a trigger
+    word), commands, conversations and its seven buttons. A Pi with a
+    microphone: words and commands, no buttons. A Pi without one, and a
+    satellite whose caps are not known: nothing, rather than a guess."""
+    fake.satellites[BEDROOM_ID] = pi(BEDROOM_ID, "bedroom", mic=False)
+    fake.satellites[OFFICE_ID] = korvo(OFFICE_ID, "office", online=False)
+    fake.satellites[OFFICE_ID]["caps"] = {}
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    triggers = await async_get_device_automations(
-        hass, DeviceAutomationType.TRIGGER, _kitchen(hass).id
+
+    buttons = {"play", "set", "mode", "rec", "vol_up", "vol_down", "key1"}
+    assert await _offered(hass, KITCHEN_ID) == (
+        WORDS_AND_COMMANDS
+        | {("button_press", b) for b in buttons}
+        | {("button_release", b) for b in buttons}
     )
-    words = {t for t in _listed(triggers) if t[0] in ("wake_word", "trigger_word")}
-    assert words == {
-        ("wake_word", "hey_jarvis"),
-        ("trigger_word", "hey_jarvis"),
-        ("wake_word", "lumos"),
-        ("trigger_word", "lumos"),
-    }
+    assert await _offered(hass, LOUNGE_ID) == WORDS_AND_COMMANDS
+    assert await _offered(hass, BEDROOM_ID) == set()
+    assert await _offered(hass, OFFICE_ID) == set()
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
 

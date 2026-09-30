@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from homeassistant.const import CONF_URL, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
+from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.calliope.api import wav_bytes
 from custom_components.calliope.const import DOMAIN
 
 from .fake_calliope import FakeCalliope
@@ -51,8 +54,11 @@ async def fake(
 
 
 @pytest.fixture
-def entry(hass: HomeAssistant, fake: FakeCalliope) -> MockConfigEntry:
-    """An entry pointed at the fake, not yet set up."""
+async def entry(hass: HomeAssistant, fake: FakeCalliope) -> MockConfigEntry:
+    """An entry pointed at the fake, not yet set up. Home Assistant's own
+    core component is set up first, as it always is outside tests: the Assist
+    satellite platform needs conversation, which needs its exposed entities."""
+    assert await async_setup_component(hass, "homeassistant", {})
     config_entry = MockConfigEntry(
         domain=DOMAIN,
         title="127.0.0.1",
@@ -74,6 +80,9 @@ async def loaded(
     await until(hass, lambda: entry.runtime_data.coordinator.connected)
     await hass.async_block_till_done()
     yield entry
+    # A test that failed while the fake held an upload's answer would
+    # otherwise wait for it here for ever.
+    fake.media_hold.set()
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
 
@@ -86,3 +95,32 @@ async def until(
         while not condition():
             await asyncio.sleep(0.01)
             await hass.async_block_till_done()
+
+
+@pytest.fixture
+def converted(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """What ffmpeg was asked to convert, and in which format. No ffmpeg
+    runs and nothing plays: each conversion is 20 ms of silence in the
+    format asked for."""
+    calls: list[dict[str, Any]] = []
+
+    async def wav_chunks(
+        hass: HomeAssistant,
+        sources: list[str],
+        rate: int,
+        channels: int,
+        *,
+        satellite: str,
+    ) -> AsyncIterator[bytes]:
+        calls.append(
+            {
+                "sources": sources,
+                "rate": rate,
+                "channels": channels,
+                "satellite": satellite,
+            }
+        )
+        yield wav_bytes(b"\x00\x00" * channels * (rate // 50), rate, channels)
+
+    monkeypatch.setattr("custom_components.calliope.media.wav_chunks", wav_chunks)
+    return calls

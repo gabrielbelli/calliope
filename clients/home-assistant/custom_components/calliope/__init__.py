@@ -1,4 +1,5 @@
-"""Calliope: satellites, triggers and speech for Assist, from a Calliope hub."""
+"""Calliope: satellites, their speakers, triggers and speech for Assist, from a
+Calliope hub."""
 
 from __future__ import annotations
 
@@ -28,14 +29,19 @@ from .stt import stt_engines, stt_ready
 from .vocabulary import Vocabulary
 
 PLATFORMS = [
+    Platform.ASSIST_SATELLITE,
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
     Platform.EVENT,
+    Platform.MEDIA_PLAYER,
     Platform.NUMBER,
+    Platform.SELECT,
     Platform.SENSOR,
     Platform.STT,
     Platform.SWITCH,
+    Platform.TEXT,
     Platform.TTS,
+    Platform.UPDATE,
 ]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)

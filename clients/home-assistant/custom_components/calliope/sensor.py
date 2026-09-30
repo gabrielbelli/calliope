@@ -1,7 +1,9 @@
-"""Wi-Fi signal, the last command transcribed and the last wake word heard."""
+"""Wi-Fi signal, uptime, the Pi's temperature, the last command transcribed
+and the last wake word heard."""
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -10,19 +12,29 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import SIGNAL_STRENGTH_DECIBELS_MILLIWATT, EntityCategory
+from homeassistant.const import (
+    SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
+    EntityCategory,
+    Platform,
+    UnitOfTemperature,
+)
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .const import KIND_COMMAND, KIND_TRIGGER_WORD, KIND_WAKE_WORD
 from .coordinator import CalliopeConfigEntry, CalliopeCoordinator, signal_voice
-from .entity import CalliopeSatelliteEntity, add_per_satellite
+from .entity import CalliopeSatelliteEntity, add_for_caps
 
 PARALLEL_UPDATES = 0
 
 # A state is at most 255 characters; the whole transcript is an attribute.
 MAX_STATE = 255
+# Now less the uptime moves by a second or so between two statuses: uptime
+# is whole seconds, and each status arrives a little late. A start this far
+# from the last one shown is a new start.
+UPTIME_SLACK = timedelta(seconds=60)
 
 
 async def async_setup_entry(
@@ -30,16 +42,21 @@ async def async_setup_entry(
     entry: CalliopeConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Three sensors per satellite."""
+    """Signal and uptime for every satellite; the rest as its caps say."""
+    classes: dict[str, type[CalliopeSatelliteEntity]] = {
+        "rssi": CalliopeRssi,
+        "uptime": CalliopeUptime,
+        "cpu_temperature": CalliopeCpuTemperature,
+        "last_command": CalliopeLastCommand,
+        "last_wake_word": CalliopeLastWakeWord,
+    }
 
-    def build(coordinator: CalliopeCoordinator, sid: str) -> list[SensorEntity]:
-        return [
-            CalliopeRssi(coordinator, sid),
-            CalliopeLastCommand(coordinator, sid),
-            CalliopeLastWakeWord(coordinator, sid),
-        ]
+    def build(
+        coordinator: CalliopeCoordinator, sid: str, key: str
+    ) -> CalliopeSatelliteEntity:
+        return classes[key](coordinator, sid, key)
 
-    add_per_satellite(entry, async_add_entities, build)
+    add_for_caps(entry, async_add_entities, Platform.SENSOR, build)
 
 
 class CalliopeRssi(CalliopeSatelliteEntity, SensorEntity):
@@ -51,15 +68,60 @@ class CalliopeRssi(CalliopeSatelliteEntity, SensorEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "wifi_signal"
 
-    def __init__(self, coordinator: CalliopeCoordinator, sid: str) -> None:
-        """Keyed "rssi"."""
-        super().__init__(coordinator, sid, "rssi")
-
     @property
     def native_value(self) -> int | None:
-        """Unknown until the first status after a connect."""
-        rssi = ((self.satellite or {}).get("status") or {}).get("rssi")
+        """Unknown until the first status after a connect, and for good on a
+        Pi wired to Ethernet."""
+        rssi = self.status.get("rssi")
         return rssi if isinstance(rssi, (int, float)) else None
+
+
+class CalliopeUptime(CalliopeSatelliteEntity, SensorEntity):
+    """When the satellite last started, from the uptime in its status. Off by
+    default, as uptime sensors are: it matters only when chasing restarts."""
+
+    _attr_device_class = SensorDeviceClass.UPTIME
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+    _attr_translation_key = "uptime"
+    _attr_native_value: datetime | None = None
+    _uptime: float | None = None
+
+    def _on_update(self) -> None:
+        """Now less the uptime, kept while each status agrees with it to
+        within UPTIME_SLACK: recomputed every time, it would be a new state,
+        and a recorder row, every other status. A smaller uptime than the
+        last is a restart, however soon after the last start."""
+        uptime = self.status.get("uptime_s")
+        if not isinstance(uptime, (int, float)) or isinstance(uptime, bool):
+            self._attr_native_value = self._uptime = None
+            return
+        started = dt_util.utcnow() - timedelta(seconds=uptime)
+        shown = self._attr_native_value
+        if (
+            shown is None
+            or self._uptime is None
+            or uptime < self._uptime
+            or abs(started - shown) > UPTIME_SLACK
+        ):
+            self._attr_native_value = started
+        self._uptime = uptime
+
+
+class CalliopeCpuTemperature(CalliopeSatelliteEntity, SensorEntity):
+    """The Pi's SoC temperature. It throttles itself at 80 °C."""
+
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "cpu_temperature"
+
+    @property
+    def native_value(self) -> float | None:
+        """From the satellite's status."""
+        temp = self.status.get("temp_c")
+        return temp if isinstance(temp, (int, float)) else None
 
 
 class _LastHeard(CalliopeSatelliteEntity, RestoreSensor):
@@ -105,10 +167,6 @@ class CalliopeLastCommand(_LastHeard):
     kinds = (KIND_COMMAND,)
     attribute_keys = ("transcript", "wake_word", "reply", "error")
 
-    def __init__(self, coordinator: CalliopeCoordinator, sid: str) -> None:
-        """Keyed "last_command"."""
-        super().__init__(coordinator, sid, "last_command")
-
     def _take(self, kind: str, attributes: dict[str, Any]) -> None:
         transcript = str(attributes.get("transcript") or "")
         self._attr_native_value = transcript[:MAX_STATE]
@@ -126,10 +184,6 @@ class CalliopeLastWakeWord(_LastHeard):
     _attr_translation_key = "last_wake_word"
     kinds = (KIND_WAKE_WORD, KIND_TRIGGER_WORD)
     attribute_keys = ("score", "trigger")
-
-    def __init__(self, coordinator: CalliopeCoordinator, sid: str) -> None:
-        """Keyed "last_wake_word"."""
-        super().__init__(coordinator, sid, "last_wake_word")
 
     def _take(self, kind: str, attributes: dict[str, Any]) -> None:
         self._attr_native_value = attributes.get("wake_word")
