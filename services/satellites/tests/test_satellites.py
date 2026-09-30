@@ -861,3 +861,135 @@ def test_an_airplay_receivers_cover_is_kept_checked_and_served(client):
         r = client.get(f"/satellites/{PI_MAC}/airplay/artwork")
         assert r.status_code == 200 and r.content == jpeg and r.headers["content-type"] == "image/jpeg"
         assert r.headers["etag"] == f'"{hl.sha256(jpeg).hexdigest()}"'
+
+
+# ---- what the hub remembers, and tells Home Assistant ---------------------------
+
+
+def published_by(app) -> list[dict]:
+    """Every event the hub publishes from now on."""
+    events: list[dict] = []
+    publish = app.hub.publish
+    app.hub.publish = lambda e: (events.append(e), publish(e))
+    return events
+
+
+def test_an_offline_satellite_keeps_its_caps_across_a_restart_of_the_hub(app, tmp_path):
+    """Offline, a satellite used to have no caps at all, and Home Assistant
+    took a Pi that was switched off for a Korvo: a ring and seven buttons."""
+    with TestClient(app.app) as c, c.websocket_connect("/satellites/ws") as ws:
+        adopt_pi(c, ws)
+        # Adopted and not greeted since: its caps are {}, and are no more a
+        # key of its record than the Pi's are.
+        app.hub.store.adopt(NID, "kitchen", MODEL)
+    saved = json.loads((tmp_path / "satellites.json").read_text())
+    # A hub from before this builds a record from every key in it, and would
+    # not start on "caps": kept beside the records, going back to it is safe.
+    assert [set(r) for r in saved["satellites"]] == 2 * [
+        {"id", "name", "model", "token_sha256", "adopted_at", "config", "unreported"}]
+    assert saved["caps"] == {PI_MAC: pi_hello()["caps"]}
+    fresh = importlib.reload(app)
+    with TestClient(fresh.app) as c:
+        got = c.get(f"/satellites/{PI_MAC}").json()
+    assert got["online"] is False and got["caps"] == pi_hello()["caps"]
+
+
+def test_settings_for_hardware_a_remembered_satellite_lacks_are_refused_while_it_is_offline(client, app):
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+    r = client.patch(f"/satellites/{NID}", json={"audio_sink": "alsa_output.x"})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "no_audio_devices"
+    r = client.patch(f"/satellites/{NID}", json={"airplay_enabled": True})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "no_airplay"
+    # One not seen since the hub began to keep caps is not known to lack them.
+    app.hub.store.satellites[NID].caps = {}
+    assert client.patch(f"/satellites/{NID}", json={"audio_sink": "alsa_output.x"}).status_code == 200
+
+
+def test_a_patch_publishes_the_names_of_what_changed_and_never_the_values(client, app):
+    """Home Assistant reads the values back; a webhook's address in a button
+    mapping is not for everything that listens to the event stream."""
+    events = published_by(app)
+    hook = "webhook:https://ha.test/api/webhook/s3cret-hook"
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        r = client.patch(f"/satellites/{NID}", json={"volume": 30, "buttons": {
+            "rec": {"press": "mute"}, "play": {"press": hook}}})
+        assert r.status_code == 200
+    assert [e for e in events if e["type"] == "config"] == [
+        {"type": "config", "satellite": NID, "changed": ["buttons", "volume"]}]
+    assert "s3cret" not in json.dumps(events)
+
+
+def test_a_setting_the_satellite_reported_is_published_as_config(client, app):
+    events = published_by(app)
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt_before_any_status(client, ws)
+        ws.send_json(status(**SETTINGS | {"lights_enabled": False}))
+        until(lambda: config_of(client)["mic_enabled"] is True, "the status")
+    # lights_enabled was held as off until it was reported, and is off.
+    assert [e for e in events if e["type"] == "config"] == [
+        {"type": "config", "satellite": NID, "changed": ["mic_enabled", "speaker_enabled"]}]
+
+
+def test_a_volume_the_satellite_set_itself_becomes_the_hubs(client, app):
+    """A phone's AirPlay slider moves the Pi's output volume, and the Pi
+    reports it as its own change ("local"), as a button's is: the hub takes
+    it, so that the page, Home Assistant and the next welcome have it."""
+    events = published_by(app)
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt_pi(client, ws)
+        ws.send_json({"type": "status", "volume": 32, "cause": "local", "rssi": -50})
+        until(lambda: client.get(f"/satellites/{PI_MAC}").json()["config"]["volume"] == 32,
+              "the phone's volume")
+    assert [(e["satellite"], e["settings"]) for e in events if e["type"] == "settings"] == [
+        (PI_MAC, {"volume": 32})]
+
+
+def test_firmware_uploads_and_deletions_are_events(client, app):
+    events = published_by(app)
+    image = bytes([0xE9]) + bytes(100)
+    fw = client.post("/satellites/firmware", params={"model": MODEL, "version": "v1.0.0"},
+                     content=image).json()
+    assert client.delete(f"/satellites/firmware/{fw['sha256']}").status_code == 204
+    assert [e for e in events if e["type"] == "firmware"] == [
+        {"type": "firmware", "action": "added", "sha256": fw["sha256"], "model": MODEL,
+         "version": "v1.0.0"},
+        {"type": "firmware", "action": "deleted", "sha256": fw["sha256"]}]
+
+
+def test_the_update_offered_is_the_image_ota_would_send(client, app):
+    """Home Assistant offers `update` as it is: the page's own rule, and only
+    an image the satellite would take."""
+    store = app.hub.store
+
+    def image(version: str, at: float, signed: bool = True):
+        fw = store.add_firmware(bytes([0xE9]) + version.encode(), MODEL, version,
+                                "c2ln" if signed else None)
+        fw.uploaded_at = at
+        return fw
+
+    def update(fw: str, **caps) -> dict | None:
+        with client.websocket_connect("/satellites/ws") as ws:
+            ws.send_json(hello(token) | SETTINGS | {"fw": fw, "caps": hello()["caps"] | caps})
+            assert ws.receive_json()["type"] == "welcome"
+            return client.get(f"/satellites/{NID}").json()["update"]
+
+    with client.websocket_connect("/satellites/ws") as ws:
+        token = adopt(client, ws)
+    newest = image("v0.2.0", at=1.0)
+    image("v0.1.5", at=2.0)                        # uploaded later, and older
+    assert update("v0.1.0") == {"sha256": newest.sha256, "version": "v0.2.0", "uploaded_at": 1.0}
+    assert update("v0.2.0") is None, "installed"
+    assert update("v0.3.0") is None, "older than what it runs"
+    assert client.get(f"/satellites/{NID}").json()["update"] is None, "offline, it ran v0.3.0"
+    image("v0.4.0", at=3.0, signed=False)
+    assert update("v0.1.0")["version"] == "v0.4.0"
+    assert update("v0.1.0", ota_key="0123456789abcdef")["version"] == "v0.2.0", "unsigned is skipped"
+    with client.websocket_connect("/satellites/ws") as ws:
+        ws.send_json(hello(token) | SETTINGS | {"fw": "v0.1.0", "caps": hello()["caps"] | {
+            "ota_key": "0123456789abcdef"}})
+        assert ws.receive_json()["type"] == "welcome"
+        r = client.post("/satellites/ota", json={"satellite": NID, "sha256": newest.sha256})
+        assert r.json()["started"] == [NID]
+        assert client.get(f"/satellites/{NID}").json()["update"] is None, "already installing it"

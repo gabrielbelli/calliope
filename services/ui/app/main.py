@@ -238,6 +238,8 @@ PROXIED: tuple[tuple[str, str], ...] = (
     ("PATCH", "/satellites/{nid}"),
     # An AirPlay receiver's cover, for its section on the Satellites tab.
     ("GET", "/satellites/{nid}/airplay/artwork"),
+    # The AirPlay section's controls.
+    ("POST", "/satellites/{nid}/airplay/{command}"),
     ("GET", "/satellites/{nid}/listen"),
     ("POST", "/satellites/{nid}/adopt"),
     ("POST", "/satellites/{nid}/forget"),

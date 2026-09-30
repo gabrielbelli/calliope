@@ -9,7 +9,8 @@ one does once it is heard.
                            "voice": null, "fallback": null},
                 "silence_ms": 800,
                 "conversation": {"follow_up_s": 8, "silence_ms": 600, "end_phrases": null},
-                "trigger": {"feedback": "earcon", "cooldown_s": 3, "ends_conversation": false}},
+                "trigger": {"feedback": "earcon", "cooldown_s": 3, "ends_conversation": false},
+                "verify": {"mode": "log", "spellings": []}},
                {"name": "lumos", "threshold": 0.7, "satellites": ["020000000001"],
                 "mode": "trigger", "action": null, ...}],
      "ptt": {"mode": "command", "language": null, "action": {...}, ...}}
@@ -37,9 +38,15 @@ shape, and gets what the hub has always done: a command, echoed. An entry
 that names a mode says everything that mode needs, or is refused: a command
 or a conversation needs an action, a trigger must have none.
 
-A TRIGGER WORD ACTS ON NOTHING BUT ITS OWN DETECTION, with no second step to
-catch a false one, so it is stricter by default: threshold 0.7 rather than
-0.5, and a cooldown (3 s) during which the same word does not fire again.
+A TRIGGER WORD ACTS ON NOTHING BUT ITS OWN DETECTION, with no command after
+it to catch a false one, so it is stricter by default: threshold 0.7 rather
+than 0.5, and a cooldown (3 s) during which the same word does not fire again.
+
+ANY WORD CAN BE DOUBLE-CHECKED (`verify`, router.VerifySettings): the audio
+that held it is transcribed, and the hub answers only when the word is in the
+transcript (verify.py, main.Hub.on_wake). Every word starts at "log", which
+blocks nothing and records what "on" would have done, so that turning it on
+for a word is decided from what it would have dropped.
 
 MIGRATION FROM rules.json. A file written before words carried an action
 (no "version") gets, for each word and for push-to-talk, the rule that word
@@ -99,7 +106,8 @@ DEFAULT_TRIGGER_THRESHOLD = 0.7
 # Every word assigned to a satellite is one more ONNX session run on each of
 # its 80 ms frames. openWakeWord ships five; the rest would be custom models.
 MAX_WORDS = 16
-BEHAVIOUR_FIELDS = ("mode", "language", "action", "silence_ms", "colour", "conversation", "trigger")
+BEHAVIOUR_FIELDS = ("mode", "language", "action", "silence_ms", "colour", "conversation", "trigger",
+                    "verify")
 
 
 def default_behaviour() -> routing.Behaviour:

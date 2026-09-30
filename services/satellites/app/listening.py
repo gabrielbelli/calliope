@@ -40,6 +40,11 @@ in its thread:
   * triggers: words that are the whole command. Heard is reported and the
     Ear listens for nothing after them.
 
+A WAKE WORD COMES WITH ITS OWN AUDIO (Heard.clip): the VERIFY_WINDOW_S of
+output up to where it was detected, which is what the model scored, after
+the front-end. main.py has it transcribed to double-check the word (verify.py)
+while the Ear carries on capturing the command; push-to-talk has none.
+
 Barge-in by voice needs the front-end: without echo cancellation there is no
 telling the satellite's own voice from the talker's, so with
 SATELLITES_FRONTEND=0, or one channel, only a wake word interrupts. Nor with a
@@ -80,6 +85,9 @@ class Heard:
     score: float | None       # None for push-to-talk
     direction: float | None   # FrontEnd.direction at the time, degrees, or None
     at_s: float               # stream position of the end of the wake word, s
+    # Mono s16le at the Ear's rate, from at_s - VERIFY_WINDOW_S to at_s: the
+    # word itself, for the hub's double-check. None for push-to-talk.
+    clip: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -105,8 +113,14 @@ class BargeIn:
     capturing: bool
 
 
-# Enough to rewind by any detector's latency (wakeword.WakeWords.latency_s).
-HISTORY_S = 2.0
+# THE WAKE WORD'S OWN AUDIO, for the hub's double-check (verify.py): the
+# VERIFY_WINDOW_S up to the sample the detector fired on. A real model fires
+# up to about a second after the word ends (wakeword.WakeWords.latency_s), so
+# the window holds the word and what followed it, and a "hey" or a name of two
+# syllables before it. The Ear keeps VERIFY_KEEP_S of its output (_history),
+# which also covers rewinding by any detector's latency.
+VERIFY_WINDOW_S = 2.0
+VERIFY_KEEP_S = 3.0
 
 # BARGE-IN, on the front-end's own decision for each 16 ms block (FrontEnd.
 # blocks): voiced, whether the satellite's speaker is playing, and the
@@ -195,8 +209,9 @@ class Ear:
         self.state = "idle"
         self.endpointer: Endpointer | None = None
         self.samples = 0          # mono samples produced since this Ear was made
-        # The last HISTORY_S of output, for rewinding to where a late
-        # detector's word actually ended (WakeWords.latency_s).
+        # The last VERIFY_KEEP_S of output, before the chunk being processed:
+        # for rewinding to where a late detector's word actually ended
+        # (WakeWords.latency_s), and for the wake word's clip (Heard.clip).
         self._history = np.zeros(0, np.int16)
         self._ptt: str | None = None
         # SATELLITES_DEBUG_AUDIO: the last debug_s of output and of the first
@@ -338,7 +353,8 @@ class Ear:
                 # The word is the whole command. A follow-up that was
                 # listening starts again, so the word is not its next turn.
                 events.append(Heard(d.name, round(d.score, 3), self._direction(),
-                                    round((start + len(mono)) / self.rate, 3)))
+                                    round((start + len(mono)) / self.rate, 3),
+                                    self._clip(mono)))
                 if self.state == "listening" and self._turn_settings is not None:
                     self.endpointer = self._turn(self._turn_settings)
             else:
@@ -351,7 +367,8 @@ class Ear:
                 rewind = int(getattr(self.wake, "latency_s", 0.0) * self.rate)
                 before = np.concatenate((self._history, mono[:len(mono) - after]))[-rewind:] \
                     if rewind else np.zeros(0, np.int16)
-                events.append(self._listen(d.name, d.score, start + len(mono) - after))
+                events.append(self._listen(d.name, d.score, start + len(mono) - after,
+                                           self._clip(mono[:len(mono) - after])))
                 if len(before) and self.endpointer is not None:
                     self.endpointer.preroll(before)
                 self._endpoint(mono[len(mono) - after:], events)
@@ -377,7 +394,7 @@ class Ear:
                 mono = self._after_guard(frames, mono)
             if len(mono):
                 self._endpoint(mono, events)
-        self._history = np.concatenate((self._history, mono_all))[-int(HISTORY_S * self.rate):]
+        self._history = np.concatenate((self._history, mono_all))[-int(VERIFY_KEEP_S * self.rate):]
         return events
 
     def _after_guard(self, frames: np.ndarray, mono: np.ndarray) -> np.ndarray:
@@ -402,6 +419,12 @@ class Ear:
     def _direction(self) -> float | None:
         return None if self.direction is None else round(self.direction, 1)
 
+    def _clip(self, upto: np.ndarray) -> bytes:
+        """The VERIFY_WINDOW_S of output that ends with `upto`, the part of
+        this chunk up to the wake word's detection: shorter only in the
+        first seconds of a stream."""
+        return np.concatenate((self._history, upto))[-int(VERIFY_WINDOW_S * self.rate):].tobytes()
+
     def _turn(self, settings: tuple[int, float]) -> Endpointer:
         """An endpointer for a turn with no wake word before it."""
         self._turn_settings = settings
@@ -411,7 +434,7 @@ class Ear:
     def _feed_wake(self, mono: np.ndarray) -> list:
         return self.wake.feed(mono) if self.wake is not None else []
 
-    def _listen(self, word: str, score: float | None, at: int) -> Heard:
+    def _listen(self, word: str, score: float | None, at: int, clip: bytes | None = None) -> Heard:
         self.state = "listening"
         self._turn_settings = None
         silence_ms = self.silence_for(word) if self.silence_for is not None else None
@@ -419,7 +442,7 @@ class Ear:
                            else Endpointer(rate=self.rate))
         return Heard(word, None if score is None else round(score, 3),
                      None if self.direction is None else round(self.direction, 1),
-                     round(at / self.rate, 3))
+                     round(at / self.rate, 3), clip)
 
     def _endpoint(self, mono: np.ndarray, events: list) -> None:
         ep = self.endpointer

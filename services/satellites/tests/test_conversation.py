@@ -15,12 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import io
 import json
 import struct
 import threading
 import time
-import wave
 from collections import deque
 
 import httpx
@@ -32,7 +30,8 @@ from app import audio, wakeword
 from app.wakeword import Detection
 from test_frontend import dbfs, echo, echo_paths, plane_wave, sensor_noise, speechlike
 from test_pipeline import (EARCON_CAPS, FRAME, MAC2, NID, NID2, RATE, EarconStore, FakeWakeWords,
-                           Satellite, Services, adopt, floor, hello, of, route_to_fakes, voiced, wait)
+                           Satellite, Services, adopt, floor, hello, of, route_to_fakes, sent_audio,
+                           voiced, wait)
 from test_pipeline import env  # noqa: F401  (a fixture)
 
 MARKS = {30000: "hey_jarvis", -30000: "lumos", 20000: "alexa"}
@@ -77,7 +76,11 @@ def sse(pieces: list[str], delay: float = 0.0, done: list | None = None) -> http
 
 class Fakes(Services):
     """test_pipeline's STT and TTS, plus a streaming LLM and Home Assistant.
-    `transcripts` and `answers` are taken one per call, in order."""
+    `transcripts` and `answers` are taken one per call, in order: a wake
+    word's double-check is answered apart (Services.checks), and takes
+    neither."""
+
+    SAID = {30000: "Hey Jarvis.", -30000: "Lumos.", 20000: "Alexa."}
 
     def __init__(self):
         super().__init__()
@@ -658,7 +661,10 @@ def test_a_trigger_word_publishes_one_event_and_nothing_else_happens(client, app
     [fired] = of(events, "triggered")  # the second, 0.5 s later, is inside the cooldown
     assert {k: fired[k] for k in ("satellite", "satellite_name", "wake_word", "score")} == {
         "satellite": NID, "satellite_name": "kitchen", "wake_word": "lumos", "score": 0.9}
-    assert services.seen == [] and of(events, "wake") == [] and of(events, "routed") == []
+    # No command, so nothing transcribed or routed: STT heard only the word
+    # itself, twice, for its double-check.
+    assert services.hosts() == [] and of(events, "wake") == [] and of(events, "routed") == []
+    assert len(services.checks) == 2
 
 
 def test_a_trigger_fires_again_once_its_cooldown_is_over(client, app, events, plug):
@@ -977,16 +983,6 @@ def frames(capture: np.ndarray, seq0: int = 0):
         yield struct.pack("<BBBBIQ", 1, 0, 4, 0, seq0 + i, 0) + capture[off:off + FRAME].tobytes()
 
 
-def wav_samples(request: httpx.Request) -> np.ndarray:
-    from email.parser import BytesParser
-    from email.policy import HTTP
-    head = b"Content-Type: " + request.headers["content-type"].encode() + b"\r\n\r\n"
-    msg = BytesParser(policy=HTTP).parsebytes(head + request.content)
-    part = next(p for p in msg.iter_parts() if p.get_param("name", header="content-disposition") == "file")
-    with wave.open(io.BytesIO(part.get_payload(decode=True))) as w:
-        return np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float64)
-
-
 @pytest.mark.parametrize("mode", ["conversation", "command"])
 def test_with_the_jack_in_its_own_voice_is_not_taken_for_an_interruption(
         client, app, events, services, plug, monkeypatch, mode):
@@ -1108,7 +1104,7 @@ def test_speech_over_the_reply_stops_it_and_its_own_voice_does_not(
     assert first["interrupted"] is True and "interrupted by voice" in first["note"]
     assert after <= 30  # the second reply (0.2 s) at most; the 9 s reply was cut
     if mode == "conversation":
-        captured = wav_samples(services.sent("stt.test", "/v1/audio/transcriptions")[1])
+        captured = sent_audio(services.sent("stt.test", "/v1/audio/transcriptions")[1]).astype(np.float64)
         loud = np.sqrt(np.mean(captured[int(0.5 * RATE):int(1.5 * RATE)] ** 2))
         lead = np.sqrt(np.mean(captured[:int(0.15 * RATE)] ** 2))
         # From its first syllable: the capture holds all 2 s of it, and starts

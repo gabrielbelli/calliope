@@ -1307,6 +1307,17 @@ NOT_ON_PAGE: dict[tuple[str, str, str], str] = {
         "from an automation or a dashboard. On the page the satellite's own "
         "PLAY button is the push-to-talk, and a remote one would open a "
         "microphone in a room the person pressing it is not in.",
+    ("satellites", "POST", "/satellites/{nid}/media"):
+        "Home Assistant's play_media and announcements, converted by its own "
+        "ffmpeg to the satellite's format before they are sent. The page has "
+        "Say and Stop, and nothing to convert with.",
+    ("satellites", "POST", "/satellites/{nid}/media/stop"):
+        "Home Assistant's media_stop. The page's Stop is /flush, which stops "
+        "the media as well.",
+    ("satellites", "GET", "/satellites/telemetry/clips/{name}"):
+        "for tuning and retraining; not shown on the page. The audio of a wake "
+        "word the hub's double-check did not hear, named in a wake record, for "
+        "whoever retrains that word's model from the records.",
 }
 
 # What this service answers itself, with no backend behind it. Without these
@@ -1852,6 +1863,37 @@ async def test_the_wake_word_routes_reach_the_hub_and_are_not_taken_for_a_satell
     assert [(r["method"], r["path"]) for r in hub.seen] == [
         ("GET", "/satellites/wake-words"), ("PUT", "/satellites/wake-words")]
     assert json.loads(hub.seen[1]["body"]) == body
+
+
+class Clocked(httpx.AsyncBaseTransport):
+    """voice-satellites, keeping the timeouts each request was sent under."""
+
+    def __init__(self) -> None:
+        self.timeouts: dict[str, dict] = {}
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.timeouts[request.url.path.rsplit("/", 1)[-1]] = request.extensions["timeout"]
+        await request.aread()
+        return httpx.Response(200, headers={"content-type": "application/json"},
+                              stream=httpx.ByteStream(b"{}"))
+
+
+async def test_an_announcement_has_until_it_has_played_to_be_answered_but_a_stalled_upload_does_not(
+        monkeypatch):
+    """An announcement is answered once it has been heard, after whatever the
+    satellite already had queued: up to the hub's 120 s of its own, behind a
+    reply or another. Under the 120 s every other satellite route has, a long
+    one would be a 504 while it still played, and Home Assistant would call
+    it failed.
+    Its writes keep the 120 s, so an upload the hub stops taking still ends."""
+    hub = Clocked()
+    async with gateway(monkeypatch, satellites=hub) as (client, main):
+        media = await client.post("/satellites/020000000002/media?announce=1", content=b"RIFF")
+        say = await client.post("/satellites/020000000002/say", json={"text": "Hello."})
+    assert (media.status_code, say.status_code) == (200, 200)
+    assert hub.timeouts["media"]["read"] == main.SATELLITES_MEDIA_TIMEOUT == 300
+    assert hub.timeouts["media"]["write"] == main.SATELLITES.read_timeout == 120
+    assert hub.timeouts["say"]["read"] == hub.timeouts["say"]["write"] == 120
 
 
 def test_a_board_on_firmware_from_before_the_rename_is_still_relayed_to_the_hub(

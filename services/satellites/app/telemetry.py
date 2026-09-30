@@ -14,7 +14,10 @@ WHAT IS KEPT, one JSON object per line in <data>/telemetry/YYYY-MM-DD.jsonl
              (speech-to-text attempts, the language model's rounds and tool
              calls, Home Assistant's pipeline events and its agent's tool
              calls, each text-to-speech call), timed from the end of speech
-  wake       a wake word the hub acted on, or chose not to, and why
+  wake       a wake word the hub acted on, or chose not to, and why; with
+             `verify` when the word is double-checked (main.Hub.on_wake):
+             its mode, the decision, what STT `heard` in the word's audio,
+             the spelling it `matched`, the STT's `ms`, and `clip`
   near_miss  a wake word's score that rose towards its threshold and fell
              back without firing: the words people say that are not heard
   session    a satellite connecting or going away, with the close code
@@ -25,10 +28,18 @@ LEVELS. `full` keeps what was said and answered, tool arguments and results
 (each cut to PREVIEW characters). `timings` keeps everything else and none of
 the words: the keys in CONTENT are dropped as a record is written.
 
+CLIPS, at `full` only: the audio of a wake word the double-check did not hear
+(rejected, or would_reject while it only records), as a 16-bit mono WAV in
+<data>/telemetry/clips/<yyyymmddThhmmssZ>-<satellite>-<word>.wav, named in its
+wake record's verify.clip and served by GET /satellites/telemetry/clips/{name}.
+They are the hard negatives a wake word model is retrained on: a TV, a video,
+someone saying something like the word. A clip belongs to its UTC day, which
+is kept, counted and deleted with that day's records.
+
 Records are written by one background thread, so a turn never waits on the
 disk. Files older than `retention_days`, and the oldest beyond `max_mb`, are
-deleted. GET /satellites/telemetry/records reads them back and
-GET /satellites/telemetry/summary aggregates them (summarise())."""
+deleted, clips with them. GET /satellites/telemetry/records reads them back
+and GET /satellites/telemetry/summary aggregates them (summarise())."""
 
 from __future__ import annotations
 
@@ -54,11 +65,14 @@ MAX_MB = (10, 5000)
 PREVIEW = 400
 # What the `timings` level drops, wherever it appears in a record.
 CONTENT = frozenset({"transcript", "reply_text", "spoken_text", "text", "said", "speech",
-                     "args", "result", "query", "input", "content", "prompt", "reply"})
+                     "args", "result", "query", "input", "content", "prompt", "reply", "heard"})
 DEVICE_EVERY_S = 60.0
 NEAR_MISS_EVERY_S = 2.0
 PRUNE_EVERY = 200     # records between two prunes
 FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl$")
+# A clip's name: when (UTC), the satellite's id and the word, which is how
+# GET /satellites/telemetry/clips/{name} takes it and nothing else.
+CLIP = re.compile(r"^[0-9TZ]{16}-[0-9a-f]{1,32}-[a-z0-9_]{1,64}\.wav$")
 
 
 def preview(value: object, limit: int = PREVIEW) -> object:
@@ -276,27 +290,30 @@ class Recorder:
 
     def prune(self) -> list[str]:
         """Delete the days past retention, then the oldest while the total is
-        over max_mb. Today's file is never deleted. The names deleted."""
-        files = self.files()
+        over max_mb. A day is its records and the clips kept that day. Today
+        is never deleted. The days deleted."""
+        days: dict[str, list[tuple[Path, int]]] = defaultdict(list)
+        for f in self.files():
+            days[f["date"]].append((self.dir / f"{f['date']}.jsonl", f["bytes"]))
+        for c in self.clips():
+            days[c["date"]].append((self.dir / "clips" / c["name"], c["bytes"]))
         cutoff = (datetime.now(UTC) - timedelta(days=self._settings["retention_days"])).date()
-        gone = []
-        for f in files:
-            if datetime.fromisoformat(f["date"]).date() < cutoff:
-                gone.append(f)
-        total = sum(f["bytes"] for f in files if f not in gone)
+        gone = [d for d in sorted(days) if datetime.fromisoformat(d).date() < cutoff]
+        total = sum(n for d in days if d not in gone for _, n in days[d])
         cap = self._settings["max_mb"] * 1024 * 1024
-        for f in files:
-            if total <= cap or f["date"] == _today():
+        for d in sorted(days):
+            if total <= cap or d == _today():
                 break
-            if f not in gone:
-                gone.append(f)
-                total -= f["bytes"]
-        for f in gone:
-            try:
-                (self.dir / f"{f['date']}.jsonl").unlink()
-            except OSError:
-                pass
-        return [f["date"] for f in gone]
+            if d not in gone:
+                gone.append(d)
+                total -= sum(n for _, n in days[d])
+        for d in gone:
+            for path, _ in days[d]:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        return gone
 
     def files(self) -> list[dict]:
         """The day files, oldest first, with their sizes."""
@@ -312,20 +329,66 @@ class Recorder:
                     pass
         return out
 
+    def clips(self) -> list[dict]:
+        """The clips kept (see CLIPS above), oldest first: name, UTC day and
+        size."""
+        folder = self.dir / "clips"
+        if not folder.is_dir():
+            return []
+        out = []
+        for p in sorted(folder.iterdir()):
+            if CLIP.match(p.name):
+                try:
+                    out.append({"name": p.name, "date": f"{p.name[:4]}-{p.name[4:6]}-{p.name[6:8]}",
+                                "bytes": p.stat().st_size})
+                except OSError:
+                    pass
+        return out
+
+    def save_clip(self, satellite: str, word: str, wav: bytes) -> str | None:
+        """Keep a wake word's audio as <when>-<satellite>-<word>.wav, and
+        say its name; None, and nothing kept, for a satellite whose id is not
+        a MAC's hex digits, which no clip name takes. A word may have
+        capitals and hyphens and a clip's name may not, so they become lower
+        case and underscores. Blocking: the hub calls it from a thread."""
+        name = (f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{satellite}-"
+                f"{re.sub(r'[^a-z0-9_]', '_', word.lower())}.wav")
+        if not CLIP.match(name):
+            return None
+        folder = self.dir / "clips"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_bytes(wav)
+        return name
+
+    def clip(self, name: str) -> bytes | None:
+        """A kept clip's WAV, or None."""
+        if not CLIP.match(name):
+            return None
+        try:
+            return (self.dir / "clips" / name).read_bytes()
+        except OSError:
+            return None
+
     def wipe(self) -> int:
+        """Delete every day file and every clip; how many files went."""
         self.flush()
         n = 0
-        for f in self.files():
+        for path in ([self.dir / f"{f['date']}.jsonl" for f in self.files()]
+                     + [self.dir / "clips" / c["name"] for c in self.clips()]):
             try:
-                (self.dir / f"{f['date']}.jsonl").unlink()
+                path.unlink()
                 n += 1
             except OSError:
                 pass
         return n
 
     def status(self) -> dict:
-        files = self.files()
-        return self.settings() | {"files": files, "bytes": sum(f["bytes"] for f in files)}
+        """The settings, the day files, and `bytes`: everything kept, clips
+        included, which is what max_mb bounds."""
+        files, clips = self.files(), self.clips()
+        kept = sum(c["bytes"] for c in clips)
+        return self.settings() | {"files": files, "bytes": sum(f["bytes"] for f in files) + kept,
+                                  "clips": {"count": len(clips), "bytes": kept}}
 
     # -- reading --
 
@@ -534,6 +597,10 @@ def summarise(records: list[dict], hours: float) -> dict:
         wake_words[word] = {
             "heard": len(heard),
             "decisions": dict(Counter(r.get("decision") or "?" for r in heard)),
+            # The double-check's own decisions (accepted, rejected,
+            # would_reject, error): what turning it on would have dropped.
+            "verify": dict(Counter(r["verify"].get("decision") or "?" for r in heard
+                                   if isinstance(r.get("verify"), dict))),
             "score": _spread([r["score"] for r in heard if isinstance(r.get("score"), int | float)]),
             "threshold": next((r.get("threshold") for r in reversed(heard + missed)
                                if r.get("threshold") is not None), None),

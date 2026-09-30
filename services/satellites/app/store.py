@@ -16,6 +16,7 @@ import os
 import secrets
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -181,6 +182,12 @@ class Satellite:
     # the record holds UNREPORTED for them and the welcome leaves them out, so
     # the satellite keeps its own. Empty in a file from before this existed.
     unreported: list[str] = field(default_factory=list)
+    # The caps of the last hello that proved the adoption. GET /satellites
+    # shows them while the satellite is offline, so a Pi that is off is not
+    # taken for a board with a ring and seven buttons by Home Assistant or
+    # the page after a restart of either. Empty until the hub has seen it
+    # since this existed: not known, which is not the same as having nothing.
+    caps: dict = field(default_factory=dict)
 
     def accepts(self, token: str | None) -> bool:
         return bool(token) and hmac.compare_digest(token_hash(token), self.token_sha256)
@@ -198,6 +205,27 @@ class Firmware:
     # satellite does the checking (signing.py). Absent from an index.json
     # written before signatures existed, hence the default.
     signature: str | None = None
+
+
+# A version as the firmware builds stamp it: a release tag, or git describe's
+# commits since it and hash, and -dirty for a build from a tree with changes.
+# The same expression as satVersionKey in services/ui/app/static/ui.html, so the
+# update the hub offers (main.Hub.available_update) is the one the page would.
+FIRMWARE_VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-(\d+)-g[0-9a-f]+)?(?:-dirty)?$")
+
+
+def firmware_version_key(v: object) -> tuple[int, int, int, int] | None:
+    """(major, minor, patch, commits since the tag) for a stamped version, or
+    None for anything else, which cannot be ordered."""
+    m = FIRMWARE_VERSION.fullmatch(str(v or ""))
+    return (int(m[1]), int(m[2]), int(m[3]), int(m[4] or 0)) if m else None
+
+
+def firmware_older(a: object, b: object) -> bool:
+    """Whether version `a` is older than `b`: never, unless both are stamped
+    versions (satOlder in ui.html)."""
+    x, y = firmware_version_key(a), firmware_version_key(b)
+    return x is not None and y is not None and x < y
 
 
 def write_atomic(path: Path, data: str, mode: int | None = None) -> None:
@@ -248,8 +276,10 @@ class Store:
     def _load(self) -> None:
         f = self.root / FILE
         legacy = self.root / LEGACY_FILE
+        caps: dict = {}
         if f.exists():
-            records = json.loads(f.read_text()).get("satellites", [])
+            saved = json.loads(f.read_text())
+            records, caps = saved.get("satellites", []), saved.get("caps") or {}
         elif legacy.exists():
             # Migrated once, on the first start after the rename: read and
             # written again under the new name. The old file is left where it
@@ -269,7 +299,9 @@ class Store:
             # airplay_volume, a starting volume for AirPlay, was a setting for
             # a day on 29 Sep 2026: a phone kept its own.
             cfg.pop("airplay_volume", None)
-            self.satellites[n["id"]] = Satellite(**(n | {"config": cfg}))
+            known = caps.get(n["id"])
+            self.satellites[n["id"]] = Satellite(**(n | {"config": cfg,
+                                                           "caps": known if isinstance(known, dict) else {}}))
         if records is not None and not f.exists():
             self.save_satellites()
         idx = self.fw_dir / "index.json"
@@ -279,7 +311,15 @@ class Store:
                     self.firmware[fw["sha256"]] = Firmware(**fw)
 
     def save_satellites(self) -> None:
-        body = {"satellites": [asdict(n) for n in self.satellites.values()]}
+        # The caps beside the records, not in them. A hub from before caps were
+        # kept builds each record from every key it holds and will not start
+        # on one it does not know, which would make going back to it take
+        # every satellite with it. Beside them, it reads past them. Taken out
+        # of every record, empty or not: one adopted and not greeted since has
+        # {} and would stop the older hub as surely as one with caps.
+        records = [asdict(n) for n in self.satellites.values()]
+        caps = {r["id"]: c for r in records if (c := r.pop("caps", None))}
+        body = {"satellites": records, "caps": caps}
         write_atomic(self.root / FILE, json.dumps(body, indent=2))
 
     def adopt(self, satellite_id: str, name: str, model: str,
@@ -347,6 +387,17 @@ class Store:
         self.save_satellites()
         return True
 
+    def remember_caps(self, satellite_id: str, caps: object) -> bool:
+        """Keep an adopted satellite's caps from a hello that proved its
+        adoption. Written only when they changed, which is at an update or a
+        plug-in microphone, not at every reconnect. True when they did."""
+        rec = self.satellites.get(satellite_id)
+        if rec is None or not isinstance(caps, dict) or rec.caps == caps:
+            return False
+        rec.caps = copy.deepcopy(caps)
+        self.save_satellites()
+        return True
+
     def forget(self, satellite_id: str) -> bool:
         gone = self.satellites.pop(satellite_id, None) is not None
         self.save_satellites()
@@ -362,6 +413,23 @@ class Store:
         self.firmware[sha] = fw
         self._save_index()
         return fw
+
+    def newest_firmware(self, model: str, usable: Callable[[Firmware], bool]) -> Firmware | None:
+        """The newest usable image for `model`, by the page's own rule
+        (satNewest in ui.html): the highest version, and the last uploaded
+        among versions that cannot be ordered. Read in the order the page
+        reads GET /satellites/firmware, newest upload first, because with
+        versions that cannot be ordered the rule depends on it. By upload
+        alone, an older build uploaded again after a newer one would be the
+        "update" of every satellite running the newer one."""
+        best = None
+        for f in sorted(self.firmware.values(), key=lambda f: -f.uploaded_at):
+            if f.model != model or not usable(f):
+                continue
+            if best is None or firmware_older(best.version, f.version) or (
+                    not firmware_older(f.version, best.version) and f.uploaded_at > best.uploaded_at):
+                best = f
+        return best
 
     def firmware_bytes(self, sha: str) -> bytes:
         return (self.fw_dir / f"{sha}.bin").read_bytes()

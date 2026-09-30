@@ -211,6 +211,35 @@ class TriggerSettings(BaseModel):
     ends_conversation: bool = False
 
 
+Spelling = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]
+
+
+class VerifySettings(BaseModel):
+    """Whether a wake word is double-checked by speech-to-text before the
+    hub answers it (verify.py, main.Hub.on_wake). Push-to-talk has the block
+    too, and it is ignored there: a button is never a TV."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # "on": nothing is seen or heard until STT has heard the word, and a wake
+    # it did not hear is dropped. "log": the wake goes ahead as if "off", and
+    # what "on" would have done is recorded (Activity, telemetry): the
+    # evidence for turning it on. "off": the model's word alone.
+    mode: Literal["off", "log", "on"] = "log"
+    # What else counts as the word in a transcript, beyond the spellings
+    # verify.SPELLINGS knows: a custom model's name, or what STT was seen
+    # writing for it.
+    spellings: list[Spelling] = Field(default_factory=list, max_length=12)
+
+    @field_validator("spellings")
+    @classmethod
+    def _printable(cls, v: list[str]) -> list[str]:
+        for spelling in v:
+            if not spelling.isprintable():
+                raise ValueError(f"{spelling!r} is not a spelling: printable characters only")
+        return v
+
+
 class Action(BaseModel):
     """Where a wake word's words go, and where the answer is played."""
 
@@ -252,6 +281,7 @@ class Behaviour(BaseModel):
     colour: str | None = Field(default=None, pattern=COLOUR)
     conversation: ConversationSettings = Field(default_factory=ConversationSettings)
     trigger: TriggerSettings = Field(default_factory=TriggerSettings)
+    verify: VerifySettings = Field(default_factory=VerifySettings)
 
     @field_validator("language")
     @classmethod
@@ -767,7 +797,8 @@ class Router:
         self._stt = None
         return True
 
-    async def transcribe(self, pcm: bytes, hint: str | None = None) -> str:
+    async def transcribe(self, pcm: bytes, hint: str | None = None, *,
+                         timeout: float | None = None) -> str:
         """The transcript. `hint` (a wake word's language) is sent only to an
         engine that takes one: Whisper does, and Parakeet refuses the field
         with a 400 and detects the language itself. A word whose language an
@@ -782,7 +813,12 @@ class Router:
         the profile (a hub without the integration). The vocabulary must
         never cost a transcription: a refused `boost` is sent again with the
         names and without it, and any other 400 on a request that named them
-        (no such profile) is sent again without them."""
+        (no such profile) is sent again without them.
+
+        `timeout` bounds each request instead of stt_timeout: a wake word's
+        double-check stops waiting after verify.VERIFY_TIMEOUT_S, and a
+        transcription nobody waits for must not run on for 30 s on an STT
+        that is already slow, where the commands would queue behind it."""
         if not self.stt_url:
             raise DestinationError("SATELLITES_STT_URL is not set, so nothing can be transcribed")
         pcm = pcm[:len(pcm) & ~1]  # whole samples only
@@ -810,19 +846,19 @@ class Router:
                     or time.monotonic() - self._boost_refused >= GLOSSARY_RETRY_S):
                 data["boost"] = "true"
         wav = audio.wav(pcm, MIC_RATE, 1)
-        r = await self._post_stt(data, wav, hint=hint)
+        r = await self._post_stt(data, wav, hint=hint, timeout=timeout)
         if "boost" in data and r.status_code == 400 and _refuses_boost(r):
             log.warning("routing: stt-stack refused to boost the %s vocabulary, so its names go "
                         "without the boost for %.0f min: %s", HA_GLOSSARY, GLOSSARY_RETRY_S / 60,
                         r.text[:300].strip())
             self._boost_refused = time.monotonic()
             del data["boost"]
-            r = await self._post_stt(data, wav, retry="boost_refused")
+            r = await self._post_stt(data, wav, retry="boost_refused", timeout=timeout)
         if "glossary" in data and r.status_code == 400:
             log.warning("routing: stt-stack refused the %s vocabulary, transcribing without it "
                         "for %.0f min: %s", HA_GLOSSARY, GLOSSARY_RETRY_S / 60, r.text[:300].strip())
             self._glossary_missing = time.monotonic()
-            r = await self._post_stt(plain, wav, retry="glossary_refused")
+            r = await self._post_stt(plain, wav, retry="glossary_refused", timeout=timeout)
         answered = r.headers.get("x-stt-engine")
         if answered and (engine is None or engine.get("default")):
             self.stt_engine = answered.lower()
@@ -837,10 +873,11 @@ class Router:
         return text.strip()
 
     async def _post_stt(self, data: dict, wav: bytes, *, retry: str | None = None,
-                        hint: str | None = None) -> httpx.Response:
+                        hint: str | None = None, timeout: float | None = None) -> httpx.Response:
         t0 = time.monotonic()
         r = await self.client.post(
-            f"{self.stt_url}/v1/audio/transcriptions", data=data, timeout=self.stt_timeout,
+            f"{self.stt_url}/v1/audio/transcriptions", data=data,
+            timeout=self.stt_timeout if timeout is None else timeout,
             files={"file": ("utterance.wav", wav, "audio/wav")})
         telemetry.note("stt", "request", engine=(r.headers.get("x-stt-engine") or "").lower()
                        or data.get("model"), model=data.get("model"), glossary=data.get("glossary"),

@@ -33,6 +33,11 @@ an assistant, and is the one place audio and firmware reach them from.
     GET   /satellites/{id}/listen?seconds=5   a WAV of the raw microphone channels
     POST  /satellites/{id}/inject?play=0      a 16 kHz mono WAV through the wake
                                        word, endpoint and routing path, as if heard
+    POST  /satellites/{id}/media?announce=0   a WAV in the satellite's own format
+                                       (its `media`), played; answered when it ends
+    POST  /satellites/{id}/media/stop         end the media stream playing there
+    POST  /satellites/{id}/airplay/{command}  play, pause, next... to the phone
+                                       playing to its AirPlay receiver
 
 EVERYTHING IS UNDER /satellites, INCLUDING THE SOCKET, because the gateway
 mounts backend paths flat and never rewrites them. The gateway relays
@@ -55,7 +60,10 @@ counted); one task per satellite drains it and runs listening.Ear (front-end,
 wake words, endpointer, barge-in) in a thread pool, so the event loop never
 does signal work. Each satellite listens only for the wake words assigned to
 it, and each word says what it does (wake_words.json: see Voice and
-wakewords_config.py). A trigger word publishes "triggered" and that is all
+wakewords_config.py). A word may be double-checked first: the audio that held
+it is transcribed, and the hub answers only when the word is in the
+transcript, so a TV saying something like it is ignored (Hub.on_wake,
+verify.py). A trigger word publishes "triggered" and that is all
 (Hub.trigger). Any other word starts a Conversation: the "wake" earcon if the
 satellite holds it, the ring pointed at the talker, the satellite ducked,
 then the command, streamed through dialogue.run_turn, and the reply on
@@ -74,6 +82,15 @@ refuse.
 A SATELLITE WITH ITS SPEAKER OFF IS SENT NOTHING AUDIBLE, on the same terms:
 earcons and replies read speaker_enabled when they are sent, /tone and /say
 answer 409, and turning the speaker off drops whatever was still playing.
+
+TWO LANES PER SPEAKER. The voice lane (Session.speaker) carries replies,
+earcons, Say, tones and announcements, one after another. The media lane
+(Session.media) carries one stream of music from Home Assistant at a time,
+already converted to the satellite's own format. A satellite that says it
+has one (caps "media") takes it as frame kind 5 and ducks it under the voice
+itself; any other (the Korvo) takes it as its usual speaker frames, only
+while the voice lane is idle, so a reply pauses the music instead of queuing
+behind it or flushing it (Hub.stream_media).
 """
 
 from __future__ import annotations
@@ -86,6 +103,7 @@ import re
 import statistics
 import struct
 import time
+import uuid
 import wave
 from collections import deque
 from collections.abc import Callable
@@ -105,19 +123,21 @@ import numpy as np
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from starlette.requests import ClientDisconnect
 from voice_common import auth, errors, health
 from voice_common import logging as voice_logging
 from voice_common.errors import ApiError
 
-from . import audio, dialogue, earcons, listening, secret_store, signing, telemetry, wakeword, wakewords_config
+from . import (audio, dialogue, earcons, listening, secret_store, signing, telemetry, verify, wakeword,
+               wakewords_config)
 from . import output as outputs
 from . import language as lang
 from . import router as routing
 from . import tools as tooling
 from .destinations import EnvName
 from .mqtt import MqttBridge
-from .store import (AIRPLAY_SETTINGS, AUDIO_SETTINGS, DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions, keeps_a_mute,
-                    reported_config, satellite_config)
+from .store import (AIRPLAY_SETTINGS, AUDIO_SETTINGS, DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions,
+                    firmware_older, keeps_a_mute, reported_config, satellite_config)
 
 log = voice_logging.setup("voice-satellites", "SATELLITES")
 
@@ -145,6 +165,9 @@ BAKED_MODELS = Path(__file__).resolve().parent.parent / "models"
 MAX_FIRMWARE = 4 * 1024 * 1024  # one OTA slot on the Korvo
 
 FRAME_MIC, FRAME_SPEAKER, FRAME_FIRMWARE = 1, 2, 3
+# Music on its own lane, for a satellite whose caps say "media" (the Pi
+# agent): the speaker frame's header, then its interleaved channels.
+FRAME_MEDIA = 5
 HEADER = 16
 # Under the satellite's own ceiling: the Arduino WebSockets library drops the
 # whole connection on any frame over 15 KB (WEBSOCKETS_MAX_DATA_SIZE, not
@@ -154,6 +177,18 @@ OTA_CHUNK = 8 * 1024
 OUTPUT_HOPS = 4
 SPEAKER_CHUNK_MS = 20
 SPEAKER_LEAD_S = 0.3  # how far ahead of real time playback is kept
+# The media lane runs further ahead: music drops out on a Wi-Fi hiccup that
+# speech rides over, and the Pi buffers it (its own media stream) where the
+# Korvo's 300 ms of buffer is all it has, so a Korvo's media keeps the voice's.
+MEDIA_LEAD_S = 1.0
+# An announcement is read whole before it is queued, as one sentence of a reply
+# is: this bounds what that holds in memory (10 MB at 44.1 kHz mono).
+ANNOUNCE_MAX_S = 120
+# How long POST /satellites/{id}/airplay/{command} waits for the satellite's
+# answer. The Pi asks Shairport, which asks the phone (5 s at most), and
+# watches for 1.5 s whether the phone did it.
+AIRPLAY_WAIT_S = 6.0
+AIRPLAY_COMMANDS = ("play", "pause", "play_pause", "next", "previous", "stop", "disconnect")
 # A press that ran an action on the satellite is answered by its status in
 # milliseconds; a status later than this is a heartbeat, not the answer.
 # Current firmware marks that status (cause "button"); this is for firmware
@@ -207,6 +242,10 @@ CAPTURE_WAIT_S = CAPTURE_START_S + 10.0 + FOLLOW_UP_SLACK_S
 # Turns kept for the latency summary in GET /satellites/{id}.
 LATENCY_TURNS = 20
 TRIGGER_FLASH_S = 0.3
+# What of the double-check's transcript a wake record and a wake_rejected
+# event carry: two seconds of speech is well under it, and a runaway
+# transcript of noise is cut.
+VERIFY_HEARD_CHARS = 120
 
 FIRMWARE_KEY: Any | None = None
 EXECUTOR: ThreadPoolExecutor | None = None
@@ -237,6 +276,72 @@ class Clip:
             self.done.set_result(played)
 
 
+class MediaStream:
+    """One upload to POST /satellites/{id}/media playing on the media lane
+    (Hub.stream_media), as Session.media of the satellite that plays it.
+    `source` is the satellite it was sent to, which differs when that one's
+    Output is another. `stopped` is why it was ended from outside (stopped,
+    superseded, muted, unadopted, disconnected, cancelled), set once, and
+    None while nothing has; `played_s` is how much of it has been sent."""
+
+    __slots__ = ("id", "source", "since", "stopped", "played_s")
+
+    def __init__(self, source: str):
+        self.id = uuid.uuid4().hex
+        self.source = source
+        self.since = time.time()
+        self.stopped: str | None = None
+        self.played_s = 0.0
+
+    def stop(self, reason: str) -> None:
+        if self.stopped is None:
+            self.stopped = reason
+
+    def view(self) -> dict:
+        return {"id": self.id, "source": self.source, "since": self.since}
+
+
+class WakeCheck:
+    """One wake word being double-checked (verify.py, Hub.on_wake): the Heard,
+    the word's verify settings, and, once STT has answered, what it made of
+    the word's audio.
+
+    In mode "on" it is Session.checking from the wake until it is decided,
+    and `held` keeps the commands the Ear ends meanwhile: they are the wake
+    word's, and go wherever it does. `captures` is false for a trigger, which
+    the Ear listens for nothing after.
+
+    Its telemetry record says both what STT heard and what the hub did
+    (`acted`, Hub.record_wake's decision), so it is written once both are
+    known, in whichever order they come: in mode "on" the check decides
+    first, in mode "log" the hub acts first."""
+
+    __slots__ = ("heard", "mode", "spellings", "captures", "held", "decision", "transcript",
+                 "matched", "ms", "clip", "acted")
+
+    def __init__(self, heard: listening.Heard, settings: routing.VerifySettings, captures: bool):
+        self.heard, self.mode, self.spellings = heard, settings.mode, list(settings.spellings)
+        self.captures = captures
+        self.held: list[listening.Command] = []
+        # accepted, rejected (mode "on"), would_reject (mode "log"), or error:
+        # STT failed or took too long, and the wake went ahead. None until
+        # STT has answered.
+        self.decision: str | None = None
+        self.transcript: str | None = None
+        self.matched: str | None = None
+        self.ms: float | None = None
+        self.clip: str | None = None     # the kept clip's name (telemetry.py)
+        self.acted: str | None = None
+
+    def view(self) -> dict:
+        """The wake record's `verify`."""
+        return {"mode": self.mode, "decision": self.decision, "heard": self.heard_text(),
+                "matched": self.matched, "ms": self.ms, "clip": self.clip}
+
+    def heard_text(self) -> str | None:
+        return None if self.transcript is None else self.transcript[:VERIFY_HEARD_CHARS]
+
+
 class Session:
     """One connected device. Starlette sockets are not safe to send on from two
     coroutines at once, and the speaker loop, the OTA pump, conversations and
@@ -256,6 +361,17 @@ class Session:
         self.speaker: asyncio.Queue[bytes | Clip] = asyncio.Queue()
         self.speaker_gen = 0      # bumped by a flush; the loop drops the item in hand
         self.playing = False
+        # The sequence number of the next speaker frame (kind 2). The
+        # session's and not the speaker loop's, because a Korvo's media is
+        # sent as speaker frames too, between two replies, and the firmware
+        # counts one stream of them.
+        self.spk_seq = 0
+        # The media stream playing on this satellite's speaker, whichever
+        # satellite it was sent to (Hub.stream_media).
+        self.media: MediaStream | None = None
+        # AirPlay commands sent and not answered yet, by their id: resolved
+        # by the satellite's airplay_result, or by the socket closing.
+        self.replies: dict[str, asyncio.Future] = {}
         # time.monotonic() at which what has been sent will have played out
         # on the satellite, as far as the pacing knows.
         self.play_until = 0.0
@@ -269,6 +385,9 @@ class Session:
         # format and the image, for GET /satellites/{id}/airplay/artwork.
         self.artwork: dict | None = None
         self.conversation: Conversation | None = None
+        # A wake word whose double-check (mode "on") is under way, or was
+        # rejected and still owns what the Ear captured after it (Hub.on_wake).
+        self.checking: WakeCheck | None = None
         self.earcons: earcons.Sync | None = None
         self.earcon_asks = 0
         self.lit = False          # the hub's own layer is showing something
@@ -299,21 +418,31 @@ class Session:
             await self.ws.send_bytes(data)
 
     async def send_if(self, allowed: Callable[[], bool], obj: dict | None = None,
-                      data: bytes | None = None) -> bool:
+                      data: bytes | Callable[[], bytes] | None = None) -> bool:
         """Send `obj` as JSON, or `data` as a binary frame, only if allowed()
         still holds once the lock is ours. Checked inside the lock and not
         before it: the speaker loop holds the lock for every 20 ms frame, and a
         PATCH that turns the lights or the speaker off while a send waits for
         it must stop that send, not let it out just after the setting said
-        no."""
+        no. `data` may be a function that makes the frame, which is then made
+        inside the lock as well (speaker_frame)."""
         async with self.lock:
             if not allowed():
                 return False
             if obj is not None:
                 await self.ws.send_text(json.dumps(obj))
             else:
-                await self.ws.send_bytes(data)
+                await self.ws.send_bytes(data() if callable(data) else data)
             return True
+
+    def speaker_frame(self, pcm: bytes) -> bytes:
+        """The next speaker frame (kind 2) with `pcm`, taking the next
+        sequence number. Made inside the socket's lock (send_if), so the voice
+        lane and a Korvo's media, which share the numbers, never send one
+        twice or out of order."""
+        frame = struct.pack("<BBBBIQ", FRAME_SPEAKER, 0, 1, 0, self.spk_seq, 0) + pcm
+        self.spk_seq = (self.spk_seq + 1) & 0xFFFFFFFF
+        return frame
 
     def reported(self) -> dict:
         """The settings this satellite has said it has: its hello (firmware
@@ -323,6 +452,18 @@ class Session:
     @property
     def spk_rate(self) -> int:
         return self.caps.get("speaker", {}).get("rate", 48000)
+
+    @property
+    def media_format(self) -> tuple[int, int] | None:
+        """(rate, channels) of the media lane, for a satellite that takes
+        media as frame kind 5 (caps "media"), or None for one that takes it
+        as speaker frames, mono at spk_rate."""
+        m = self.caps.get("media")
+        if not isinstance(m, dict):
+            return None
+        rate, channels = m.get("rate"), m.get("channels")
+        ok = all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in (rate, channels))
+        return (rate, channels) if ok else None
 
     @property
     def mic_rate(self) -> int:
@@ -379,8 +520,11 @@ class Session:
         reply handed over just as the speaker was turned off, a tone playing
         when the satellite was forgotten -- goes nowhere once it says no. The
         callers check too, but each check before a queue is a moment before
-        the audio plays."""
-        seq = 0
+        the audio plays.
+
+        The item in hand is finished whatever the way out: cancelled with its
+        socket, a Clip still resolves `done` (False), or an announcement
+        waiting on it would wait for ever."""
         chunk = self.spk_rate * 2 * SPEAKER_CHUNK_MS // 1000
         while True:
             item = await self.speaker.get()
@@ -392,30 +536,32 @@ class Session:
             # the audio still buffered on the satellite rather than starting
             # the clock again, or every sentence would add another
             # SPEAKER_LEAD_S to what the satellite holds (300 ms of buffer).
-            base, sent, played = max(time.monotonic(), self.play_until), 0.0, True
+            base, sent, played = max(time.monotonic(), self.play_until), 0.0, False
             first = time.monotonic()
-            for off in range(0, len(pcm), chunk):
-                # Checked per chunk: a reply is one item, and a flush that only
-                # emptied the queue would let a two-minute answer play on.
-                piece = pcm[off:off + chunk]
-                frame = struct.pack("<BBBBIQ", FRAME_SPEAKER, 0, 1, 0, seq, 0) + piece
-                if not await self.send_if(lambda: self.speaker_gen == gen and allowed(),
-                                          data=frame):
-                    played = False
-                    break
+            try:
+                for off in range(0, len(pcm), chunk):
+                    # Checked per chunk: a reply is one item, and a flush that
+                    # only emptied the queue would let a two-minute answer
+                    # play on.
+                    piece = pcm[off:off + chunk]
+                    if not await self.send_if(lambda: self.speaker_gen == gen and allowed(),
+                                              data=lambda: self.speaker_frame(piece)):
+                        break
+                    if clip is not None:
+                        clip.started = True
+                    sent += len(piece) / 2 / self.spk_rate
+                    self.play_until = base + sent
+                    ahead = self.play_until - time.monotonic()
+                    if ahead > SPEAKER_LEAD_S:
+                        await asyncio.sleep(ahead - SPEAKER_LEAD_S)
+                else:
+                    played = True
+            finally:
+                self.playing = False
                 if clip is not None:
-                    clip.started = True
-                seq = (seq + 1) & 0xFFFFFFFF
-                sent += len(piece) / 2 / self.spk_rate
-                self.play_until = base + sent
-                ahead = self.play_until - time.monotonic()
-                if ahead > SPEAKER_LEAD_S:
-                    await asyncio.sleep(ahead - SPEAKER_LEAD_S)
-            self.playing = False
+                    clip.finish(played)
             if played and sent and self.sense is not None:
                 self.sense.played(self.sound(first, self.play_until, pcm))
-            if clip is not None:
-                clip.finish(played)
 
 
 async def _quietly(coro) -> bool:
@@ -427,6 +573,15 @@ async def _quietly(coro) -> bool:
     except Exception as e:  # a closed socket raises several different things
         log.debug("send failed: %s", e)
         return False
+
+
+async def _outcome(coro) -> Any:
+    """What `coro` returns, or the exception it raised: for a task whose
+    failure is an answer (Hub._check's STT call), not a crash to log."""
+    try:
+        return await coro
+    except Exception as e:
+        return e
 
 
 async def _sent(coro) -> bool:
@@ -701,17 +856,28 @@ class Hub:
         if self.telemetry is not None:
             self.telemetry.write(record)
 
-    def record_wake(self, s: Session, heard: listening.Heard, decision: str) -> None:
+    def record_wake(self, s: Session, heard: listening.Heard, decision: str,
+                    check: WakeCheck | None = None) -> None:
         """What the hub did with a wake word, for telemetry: `decision` is
-        started, carried_on, interrupted, ignored_busy, trigger or
-        trigger_cooldown."""
+        started, carried_on, interrupted, ignored_busy, trigger,
+        trigger_cooldown, rejected (the double-check did not hear the word)
+        or superseded (another wake word, the stop button, a mute, the
+        satellite going away or its listener starting again after a fault
+        came before its check was done).
+        A word being double-checked is recorded once STT has answered too,
+        with `verify` (WakeCheck)."""
+        if check is not None:
+            check.acted = decision
+            if check.decision is None:
+                return  # Hub._check writes it
         if self.telemetry is None or not self.telemetry.enabled:
             return
         self.record({"kind": "wake", "satellite": s.id, "word": heard.wake_word,
                      "score": heard.score,
                      "threshold": self.voice.assignment.thresholds().get(heard.wake_word),
                      "direction": heard.direction, "decision": decision,
-                     "ptt": heard.score is None or None})
+                     "ptt": heard.score is None or None,
+                     "verify": check.view() if check is not None else None})
 
     def publish(self, event: dict) -> None:
         event = {"at": time.time()} | event
@@ -763,7 +929,9 @@ class Hub:
             "last_seen": seen.get("last_seen"),
             "config": rec.config if rec else None,
             "status": s.status if s else {},
-            "caps": s.caps if s else {},
+            # Offline, the caps it last proved its adoption with: what it is
+            # does not change when it is switched off. {} is never seen.
+            "caps": s.caps if s else (rec.caps if rec else {}),
             # "speaker", "jack", or None: not known until something has
             # played since it connected (output.py).
             "output": s.sense.output if s and s.sense else None,
@@ -777,7 +945,56 @@ class Hub:
             # /satellites/wake-words has each word's state.
             "wake_words": self.voice.assignment.effective(nid),
             "latency": self.latency_summary(nid),
+            "media": self.media_view(nid),
+            "update": self.available_update(nid),
         }
+
+    def media_view(self, nid: str) -> dict | None:
+        """What POST /satellites/{id}/media takes for this satellite, and what
+        it plays: the satellite whose speaker plays it (`through`, its Output),
+        the format of music and of an announcement there, and the stream
+        playing there for this satellite. None when it cannot play media now:
+        offline, not adopted, or playing through a satellite with no speaker.
+        Home Assistant converts to exactly these, so the hub never decodes or
+        resamples anything."""
+        s = self.sessions.get(nid)
+        if s is None or not s.adopted:
+            return None
+        t = self.speaker_for(s)
+        if t.caps and "speaker" not in t.caps:
+            return None
+        rate, channels = t.media_format or (t.spk_rate, 1)
+        playing = t.media is not None and (t is s or t.media.source == s.id)
+        return {"through": t.id, "music": {"rate": rate, "channels": channels},
+                "announce": {"rate": t.spk_rate, "channels": 1},
+                "playing": t.media.view() if playing else None}
+
+    def available_update(self, nid: str) -> dict | None:
+        """The image POST /satellites/ota would install on this satellite now,
+        when it would be an update: the newest for its model by the page's
+        own rule (satNewest in ui.html), among those the satellite would take
+        (signing.skip_reason), and neither what it runs, nor older, nor what
+        an update in progress is installing. Home Assistant offers exactly
+        this, because only the hub knows the keys, and git describe versions
+        do not compare as Home Assistant compares versions."""
+        rec = self.store.satellites.get(nid)
+        if rec is None:
+            return None
+        s = self.sessions.get(nid)
+        if not self.speaks_for(s):
+            s = None
+        model = s.model if s else rec.model
+        caps = s.caps if s else rec.caps
+        installed = s.fw if s else self.seen.get(nid, {}).get("fw")
+        if not installed or installed == "unknown":
+            return None
+        going_to = (s.ota.get("version") if s is not None and s.ota
+                    and s.ota.get("state") in ("requested", "started", "progress", "rebooting") else None)
+        fw = self.store.newest_firmware(
+            model, lambda f: signing.skip_reason(caps, f.signature, FIRMWARE_KEY) is None)
+        if fw is None or fw.version in (installed, going_to) or firmware_older(fw.version, installed):
+            return None
+        return {"sha256": fw.sha256, "version": fw.version, "uploaded_at": fw.uploaded_at}
 
     def record_latency(self, nid: str, timeline: dict) -> None:
         if timeline.get("first_audio") is not None:
@@ -881,9 +1098,15 @@ class Hub:
     def take_report(self, s: Session, msg: dict) -> None:
         """Settings the hub had not had from this satellite, from its hello or
         status (Store.take_report). Home Assistant shows the record, so it is
-        told."""
+        told: over MQTT, and by a "config" event naming what changed, never
+        the values (it reads them back)."""
+        before = dict(self.config(s))
         if self.store.take_report(s.id, msg):
-            log.info("satellite %s reported %s", s.id, satellite_config(self.config(s)))
+            after = self.config(s)
+            log.info("satellite %s reported %s", s.id, satellite_config(after))
+            changed = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
+            if changed:
+                self.publish({"type": "config", "satellite": s.id, "changed": changed})
             if self.bridge is not None:
                 self.bridge.publish_satellite(self.describe(s.id))
 
@@ -894,10 +1117,16 @@ class Hub:
         tone still playing and the conversation cancelled here stop at their
         next send instead of streaming on to a pending satellite.
 
-        Then the satellite is told to drop what it has buffered and to lift a
-        duck the hub was holding. Both go out ahead of the "forget" or
-        "pending" the caller sends next, which the satellite reads in order,
-        so it takes them while it still counts itself adopted."""
+        Then the satellite is told to drop what it has buffered, its media
+        included, and to lift a duck the hub was holding. All of it goes out
+        ahead of the "forget" or "pending" the caller sends next, which the
+        satellite reads in order, so it takes them while it still counts
+        itself adopted.
+
+        The media stops before the first send. While one waited on the
+        socket, the upload playing found the speaker no longer allowed and
+        ended as speaker_off on its own, and with nothing left to stop, a Pi
+        was never sent its media_flush."""
         was = s.adopted
         s.adopted = False
         had_audio = s.flush_speaker()
@@ -905,6 +1134,7 @@ class Hub:
         s.duck_holds = 0
         self.stop_listening(s, "unadopted")
         s.earcons = None
+        await self.stop_media(s, "unadopted")
         if was and had_audio:
             await _quietly(s.send_json({"type": "flush"}))
         if was and ducked:
@@ -919,6 +1149,9 @@ class Hub:
             # satellite adopted before its first status is welcomed with all
             # of them; older firmware keeps the ones it has not reported.
             self.take_report(s, s.hello)
+            # Only from a hello that proves the adoption: anyone can say
+            # anything in a hello under a MAC that is no secret.
+            self.store.remember_caps(s.id, s.caps)
             s.adopted = True
             await s.send_json({"type": "welcome", "name": rec.name,
                                "config": satellite_config(rec.config, rec.unreported)
@@ -964,36 +1197,168 @@ class Hub:
             s.listener = None
         if s.conversation is not None:
             s.conversation.cancel(reason)
+        s.checking = None
         s.ear = None
         while not s.mic.empty():
             s.mic.get_nowait()
 
-    def heard(self, s: Session, heard: listening.Heard) -> None:
-        """A wake word (or push-to-talk). A trigger word fires and that is
-        all. Otherwise it starts a conversation, one per satellite at a time:
-        heard while one is listening for its command or routing it, it is
-        dropped (the Ear already drops those unless told otherwise); heard
-        while a reply plays, or a conversation waits for its next turn, it
-        interrupts. The same wake word carries the conversation on; another
-        one ends it and starts its own."""
+    # -- the double-check (verify.py) ---------------------------------------------
+
+    def on_wake(self, s: Session, heard: listening.Heard) -> None:
+        """Every wake word the listener reports, before heard() acts on it:
+        the double-check, as the word's `verify` says (router.VerifySettings).
+
+          off  heard() at once, the model's word alone;
+          log  heard() at once, and the check alongside it, which only
+               records what "on" would have done;
+          on   nothing anyone can see or hear -- no earcon, duck, ring or
+               conversation -- until STT has heard the word (_check). The Ear
+               keeps capturing the command meanwhile, and the check holds
+               what it captures (listen_loop).
+
+        Push-to-talk has no clip and is never checked. A newer wake word on
+        the same satellite supersedes a check still under way there: that
+        one's result is recorded and not acted on, and what it held goes."""
+        s.checking = None
+        behaviour = self.voice.assignment.behaviour(heard.wake_word)
+        settings = behaviour.verify if behaviour is not None else routing.VerifySettings()
+        if heard.clip is None or settings.mode == "off" or not s.adopted:
+            self.heard(s, heard)
+            return
+        check = WakeCheck(heard, settings, captures=behaviour is None or behaviour.mode != "trigger")
+        if check.mode == "on":
+            s.checking = check
+        self.spawn(self._check(s, check), name=f"verify-{s.id}")
+        if check.mode == "log":
+            self.heard(s, heard, check)
+
+    async def _check(self, s: Session, check: WakeCheck) -> None:
+        """STT on the wake word's own audio, the word looked for in what it
+        heard (verify.matches), and then what the word's mode says. A check
+        STT could not answer lets the wake through (`error`): the model has
+        already fired, and a hub whose STT is down must still answer.
+
+        In a task, never on the listener: the Ear keeps processing the
+        microphones while STT works. The STT call is a task of its own, and
+        one the check stops waiting for is left to finish rather than
+        cancelled: cut off while it asked stt-stack which engines it runs,
+        it left the router believing it runs none, and the next command went
+        to the default engine whatever its word's language (router.Router.
+        _stt_health). Its transcription is bounded by VERIFY_TIMEOUT_S all
+        the same, not the router's 30 s: every word is checked by default,
+        and a slow STT given a TV's wakes to transcribe for nobody would
+        make the commands wait behind them.
+
+        A check in mode "on" that something superseded is recorded as such
+        and nothing more, whatever STT said: nothing came of that wake, so
+        nothing says it was ignored and no clip of it is kept."""
+        heard = check.heard
+        t0 = time.monotonic()
+        stt = routing.current().transcribe(heard.clip, timeout=verify.VERIFY_TIMEOUT_S)
+        call = self.spawn(_outcome(stt), name=f"verify-stt-{s.id}")
+        try:
+            said = await asyncio.wait_for(asyncio.shield(call), verify.VERIFY_TIMEOUT_S)
+        except TimeoutError:
+            said = TimeoutError(f"no answer within {verify.VERIFY_TIMEOUT_S:g} s")
+        if isinstance(said, Exception):  # no answer in time, an STT error, no STT at all
+            check.decision = "error"
+            log.info("satellite %s: %s let through unchecked: %s", s.id, heard.wake_word,
+                     str(said) if isinstance(said, (TimeoutError, routing.DestinationError))
+                     else type(said).__name__)
+        else:
+            check.transcript = said
+            check.matched = verify.matches(check.transcript,
+                                           verify.spellings(heard.wake_word, check.spellings))
+            check.decision = ("accepted" if check.matched is not None
+                              else "rejected" if check.mode == "on" else "would_reject")
+        check.ms = round((time.monotonic() - t0) * 1000, 1)
+        # Mode "on", and no newer wake word or stop has taken the satellite
+        # since: this check's to act on. A check in mode "log" never is.
+        current = s.checking is check
+        if current and check.decision != "rejected":
+            s.checking = None
+            self.heard(s, heard, check)
+            if s.conversation is not None:
+                for command in check.held:
+                    s.conversation.deliver(command)
+            return
+        if check.mode == "on" and not current:
+            self.record_wake(s, heard, "superseded", check)
+            return
+        if check.decision in ("rejected", "would_reject"):
+            log.info("satellite %s: %s (score %s) %s: STT did not hear the word", s.id,
+                     heard.wake_word, heard.score,
+                     "ignored" if check.decision == "rejected" else "would have been ignored")
+            log.debug("satellite %s: STT heard %r for %s", s.id, check.transcript, heard.wake_word)
+            self.publish({"type": "wake_rejected", "satellite": s.id, "word": heard.wake_word,
+                          "score": heard.score, "heard": check.heard_text(), "mode": check.mode})
+            check.clip = await self._keep_clip(s, heard)
+        if check.mode == "log":
+            if check.acted is not None:
+                self.record_wake(s, heard, check.acted, check)
+        else:
+            # Rejected, the check stays Session.checking until listen_loop
+            # has undone what the wake word started (drop_rejected).
+            self.record_wake(s, heard, "rejected", check)
+
+    async def _keep_clip(self, s: Session, heard: listening.Heard) -> str | None:
+        """The audio of a wake word STT did not hear, kept as a hard negative
+        for retraining the word's model: at telemetry level full only, as
+        what was said is. Its name, or None."""
+        rec = self.telemetry
+        if rec is None or not rec.enabled or rec.level != "full":
+            return None
+        try:
+            return await asyncio.to_thread(rec.save_clip, s.id, heard.wake_word,
+                                           audio.wav(heard.clip, listening.RATE, 1))
+        except OSError as e:
+            log.warning("telemetry: a clip of %s could not be kept: %s", heard.wake_word,
+                        e.strerror or type(e).__name__)
+            return None
+
+    def drop_rejected(self, s: Session, ear: listening.Ear) -> None:
+        """Undo what a wake word STT did not hear had the Ear start, from the
+        listener, between two process() calls: the Ear goes back to wake
+        words, and the command it captured is dropped. Except in a
+        conversation waiting for its next turn, which was listening anyway:
+        what was said is that turn, as if the word had never been detected.
+        A trigger started nothing."""
+        check, s.checking = s.checking, None
+        conv = s.conversation
+        if conv is not None and conv.phase == "listening":
+            for command in check.held:
+                conv.deliver(command)
+        elif check.captures:
+            ear.release()
+
+    def heard(self, s: Session, heard: listening.Heard, check: WakeCheck | None = None) -> None:
+        """A wake word (or push-to-talk), once on_wake lets it through. A
+        trigger word fires and that is all. Otherwise it starts a
+        conversation, one per satellite at a time: heard while one is
+        listening for its command or routing it, it is dropped (the Ear
+        already drops those unless told otherwise); heard while a reply
+        plays, or a conversation waits for its next turn, it interrupts. The
+        same wake word carries the conversation on; another one ends it and
+        starts its own. `check` is the word's double-check, which its
+        telemetry record waits for."""
         if not s.adopted:
             return
         behaviour = self.voice.assignment.behaviour(heard.wake_word)
         if behaviour is not None and behaviour.mode == "trigger":
-            self.trigger(s, heard, behaviour)
+            self.trigger(s, heard, behaviour, check)
             return
         conv = s.conversation
         if conv is not None:
             if conv.takes(heard):
-                self.record_wake(s, heard, "carried_on")
+                self.record_wake(s, heard, "carried_on", check)
                 return
             if not conv.interruptible:
-                self.record_wake(s, heard, "ignored_busy")
+                self.record_wake(s, heard, "ignored_busy", check)
                 return
             conv.supersede()
-            self.record_wake(s, heard, "interrupted")
+            self.record_wake(s, heard, "interrupted", check)
         else:
-            self.record_wake(s, heard, "started")
+            self.record_wake(s, heard, "started", check)
         rec = self.store.satellites.get(s.id)
         conv = Conversation(self, s.id, rec.name if rec else "", heard, session=s)
         s.conversation = conv
@@ -1002,7 +1367,8 @@ class Hub:
             s.ear.set_silence(conv.route.behaviour.silence_ms)
         conv.start()
 
-    def trigger(self, s: Session, heard: listening.Heard, behaviour: routing.Behaviour) -> None:
+    def trigger(self, s: Session, heard: listening.Heard, behaviour: routing.Behaviour,
+                check: WakeCheck | None = None) -> None:
         """A trigger word: the word is the command, and Home Assistant's
         automation decides what it does. The hub publishes "triggered" once
         per cooldown and, if asked, shows it heard: the "done" earcon and a
@@ -1011,10 +1377,10 @@ class Hub:
         if now < self.cooldown.get(key, 0.0):
             log.debug("satellite %s: trigger %s again within its cooldown; ignored",
                       s.id, heard.wake_word)
-            self.record_wake(s, heard, "trigger_cooldown")
+            self.record_wake(s, heard, "trigger_cooldown", check)
             return
         self.cooldown[key] = now + behaviour.trigger.cooldown_s
-        self.record_wake(s, heard, "trigger")
+        self.record_wake(s, heard, "trigger", check)
         rec = self.store.satellites.get(s.id)
         self.publish({"type": "triggered", "satellite": s.id,
                       "satellite_name": rec.name if rec else "", "wake_word": heard.wake_word,
@@ -1046,6 +1412,10 @@ class Hub:
         sentence), or None when it can."""
         if s.conversation is not None:
             return "satellite_busy", f"satellite {s.id} is in a conversation already"
+        if s.checking is not None:
+            # The Ear is capturing what followed a wake word, and would take
+            # no push-to-talk until it is done.
+            return "satellite_busy", f"satellite {s.id} is checking a wake word it heard"
         if s.status.get("muted"):
             return ("satellite_muted", f"satellite {s.id} is muted at the device; only its REC "
                                        "button unmutes it")
@@ -1072,9 +1442,13 @@ class Hub:
 
     async def stop(self, s: Session) -> None:
         """What the "stop" button and POST /satellites/{id}/flush do:
-        silence the satellite now and drop whatever it was in the middle of."""
+        silence the satellite now and drop whatever it was in the middle of,
+        music included, here and on the satellite that plays for it."""
         s.flush_speaker()
         await s.send_json({"type": "flush"})
+        for t in dict.fromkeys((s, self.speaker_for(s))):
+            await self.stop_media(t, "stopped")
+        s.checking = None
         if s.conversation is not None:
             s.conversation.cancel("stop")
 
@@ -1094,6 +1468,7 @@ class Hub:
                 ended += 1
         played = s.flush_speaker()
         await _quietly(s.send_json({"type": "flush"}))
+        await self.stop_media(s, "muted")
         # Every conversation that held a duck here was cancelled above, and
         # finds nothing to lift when it closes; a hold left over from anything
         # else goes too.
@@ -1103,6 +1478,7 @@ class Hub:
                 await _sent(s.send_if(lambda: s.adopted, {"type": "unduck"}))
         if s.lit:
             await self.send_lights(s, {"mode": "off"})
+        s.checking = None
         s.ear_reset = True
         s.volume_press_until = 0.0
         log.info("satellite %s muted: %d conversation(s) ended%s", s.id, ended,
@@ -1149,6 +1525,132 @@ class Hub:
         """The session that plays what `s` plays (output_of)."""
         other = self.sessions.get(self.output_of(s.id))
         return other if other is not None else s
+
+    # -- the media lane ---------------------------------------------------------
+
+    def replying_on(self, s: Session) -> bool:
+        """A conversation's reply is under way on `s`, from its first sentence
+        until it is over, with its next sentence perhaps still being
+        synthesised and nothing of it queued."""
+        return any(c is not None and c.phase == "replying" and c.player is not None
+                   and c.player.session() is s
+                   for c in (o.conversation for o in self.sessions.values()))
+
+    async def stop_media(self, s: Session, reason: str) -> bool:
+        """End the media stream playing on `s`, for `reason`, and have the
+        satellite drop what it holds of it when it has a media lane of its
+        own. True when there was one. The upload playing it sees the stream
+        stopped at its next frame, and answers with the reason."""
+        stream, s.media = s.media, None
+        if stream is None:
+            return False
+        stream.stop(reason)
+        if s.media_format is not None and self.sessions.get(s.id) is s:
+            await _quietly(s.send_json({"type": "media_flush"}))
+        return True
+
+    async def stream_media(self, s: Session, stream: MediaStream, pcm: AsyncIterator[bytes],
+                           rate: int, channels: int) -> str:
+        """Play `pcm` (the upload's audio, `rate` and `channels` as the
+        satellite takes them) on `s` as `stream`, at real time, and say why
+        it ended: ended, or stream.stopped, or speaker_off, disconnected,
+        cancelled (the upload broke off).
+
+        A SATELLITE WITH A MEDIA LANE (caps "media") gets frame kind 5, kept
+        MEDIA_LEAD_S ahead, and plays it on a stream of its own, which it
+        ducks under the voice itself.
+
+        ANY OTHER (the Korvo, an older Pi agent) gets its speaker frames, one
+        stream of them shared with the voice, so media is sent only while
+        the voice lane is idle: nothing queued, nothing playing, and no reply
+        under way. A reply, an earcon, Say or an announcement that arrives
+        pauses the music at the next frame, and it carries on after them.
+        Its firmware is unchanged: to it this is a long reply.
+
+        A reply is queued a sentence at a time, as each is synthesised, so
+        its lane can be empty between two of them; music there would be
+        heard in the middle of the answer (replying_on)."""
+        lane = s.media_format is not None
+        whole = 2 * channels                     # the bytes of one sample of every channel
+        frame_bytes = max(1, rate * SPEAKER_CHUNK_MS // 1000) * whole
+        seq, until = 0, 0.0
+
+        def voice() -> bool:
+            return s.playing or not s.speaker.empty() or self.replying_on(s)
+
+        def ended() -> str | None:
+            if self.sessions.get(s.id) is not s:
+                return "disconnected"
+            if stream.stopped or s.media is not stream:
+                return stream.stopped or "stopped"
+            if not self.speaker_allowed(s):
+                return "speaker_off"
+            return None
+
+        async def send(frame: bytes) -> str | None:
+            nonlocal seq, until
+            if lane:
+                header = struct.pack("<BBBBIQ", FRAME_MEDIA, 0, channels, 0, seq, 0)
+                if not await _sent(s.send_if(lambda: self.speaker_allowed(s) and s.media is stream,
+                                             data=header + frame)):
+                    return ended() or "disconnected"
+                seq = (seq + 1) & 0xFFFFFFFF
+                # From now when the upload fell behind (Home Assistant
+                # still reading the stream), rather than a burst to catch up.
+                until = max(until, time.monotonic()) + len(frame) / whole / rate
+                lead = MEDIA_LEAD_S
+            else:
+                while True:
+                    while voice():
+                        if why := ended():
+                            return why
+                        await asyncio.sleep(SPEAKER_CHUNK_MS / 1000)
+                    if await _sent(s.send_if(
+                            lambda: self.speaker_allowed(s) and s.media is stream and not voice(),
+                            data=lambda: s.speaker_frame(frame))):
+                        break
+                    # Refused: the voice took the lane in between, or the
+                    # stream is over. Only the second is an end.
+                    if why := ended():
+                        return why
+                s.play_until = until = max(s.play_until, time.monotonic()) + len(frame) / whole / rate
+                lead = SPEAKER_LEAD_S
+            stream.played_s += len(frame) / whole / rate
+            ahead = until - time.monotonic()
+            if ahead > lead:
+                await asyncio.sleep(ahead - lead)
+            return None
+
+        carry = b""
+        while True:
+            if why := ended():
+                return why
+            try:
+                chunk = await anext(pcm)
+            except StopAsyncIteration:
+                break
+            except ClientDisconnect:
+                if s.media is stream:
+                    await self.stop_media(s, "cancelled")
+                stream.stop("cancelled")
+                return "cancelled"
+            carry += chunk
+            end = len(carry) // frame_bytes * frame_bytes
+            for off in range(0, end, frame_bytes):
+                if why := ended() or await send(carry[off:off + frame_bytes]):
+                    return why
+            carry = carry[end:]
+        tail = carry[:len(carry) // whole * whole]
+        if tail and (why := ended() or await send(tail)):
+            return why
+        # Answered once it has been heard, not once it has been sent: a stop
+        # in the last second still stops it, and Home Assistant's player does
+        # not say idle while the music plays on.
+        while (left := until - time.monotonic()) > 0:
+            if why := ended():
+                return why
+            await asyncio.sleep(min(left, 0.1))
+        return ended() or "ended"
 
     async def earcon(self, s: Session | None, eid: str) -> bool:
         if s is not None:
@@ -1287,6 +1789,8 @@ async def listen_loop(h: Hub, s: Session) -> None:
             s.ear_reset = False
             ear.cancel_ptt()
             ear.release()
+        if s.checking is not None and s.checking.decision == "rejected":
+            h.drop_rejected(s, ear)
         if not h.may_listen(s):
             ear.cancel_ptt()
             continue
@@ -1304,7 +1808,10 @@ async def listen_loop(h: Hub, s: Session) -> None:
                 ear.wake = None
             ear.wake_key = key
         ear.triggers = h.voice.assignment.triggers()
-        if ear.state != "idle" and s.conversation is None:
+        # Nothing waits for what the Ear is capturing: its conversation is
+        # over, or never started. A wake word being double-checked owns it
+        # until it is decided.
+        if ear.state != "idle" and s.conversation is None and s.checking is None:
             ear.release()
         data = b"".join(c for c in chunks if len(c) % step == 0)
         if not data:
@@ -1319,6 +1826,10 @@ async def listen_loop(h: Hub, s: Session) -> None:
                                   silence_for=lambda word: silence_for(s.id, word))
             if s.conversation is not None:
                 s.conversation.cancel("listening failed")
+            # A wake word still being checked went with the old Ear and the
+            # command it was capturing: heard now, it would start a
+            # conversation with nothing to listen to.
+            s.checking = None
             continue
         near = ear.near_misses()
         if near and h.telemetry is not None and h.telemetry.enabled:
@@ -1339,16 +1850,24 @@ async def listen_loop(h: Hub, s: Session) -> None:
                         dropped = True
                     continue
                 dropped = False
-                h.heard(s, ev)
+                h.on_wake(s, ev)
             elif isinstance(ev, listening.BargeIn):
                 if s.conversation is not None:
                     s.conversation.barge_in(ev)
             elif dropped:
                 continue  # the command after a dropped wake word
-            elif s.conversation is not None:
+            else:
+                # The command after a wake word still being checked, or
+                # rejected, is that word's, whatever conversation is running.
+                check = s.checking if s.checking is not None and s.checking.captures else None
+                if check is None and s.conversation is None:
+                    continue
                 if isinstance(ev, listening.Command) and ev.debug:
                     loop.run_in_executor(EXECUTOR, _save_debug, s.id, ev)
-                s.conversation.deliver(ev)
+                if check is not None:
+                    check.held.append(ev)
+                else:
+                    s.conversation.deliver(ev)
         if s.conversation is not None and s.conversation.phase == "listening":
             await s.conversation.point(ear.direction)
 
@@ -2249,7 +2768,10 @@ async def satellite_socket(ws: WebSocket) -> None:
                         q.put_nowait(pcm)
                     if s.listener is not None:
                         s.offer_mic(pcm)
-                    if s.sense is not None and s.sense.feed(pcm, time.monotonic(), s.playing):
+                    # Music playing is not the silence the loopback's idle
+                    # level is learnt from.
+                    if s.sense is not None and s.sense.feed(pcm, time.monotonic(),
+                                                            s.playing or s.media is not None):
                         hub.on_output(s)
             elif msg.get("text") is not None:
                 await on_message(s, json.loads(msg["text"]))
@@ -2264,6 +2786,17 @@ async def satellite_socket(ws: WebSocket) -> None:
                     "superseded": hub.sessions.get(s.id) is not s or None})
         player.cancel()
         hub.stop_listening(s)
+        # Nothing that waits on this satellite waits for ever: the upload
+        # playing here ends "disconnected", an AirPlay command is answered
+        # offline, and an announcement still queued is dropped.
+        if s.media is not None:
+            s.media.stop("disconnected")
+            s.media = None
+        for reply in s.replies.values():
+            if not reply.done():
+                reply.set_result({"ok": False, "error": "disconnected"})
+        s.replies.clear()
+        s.flush_speaker()
         if s.ota and s.ota.get("state") in ("requested", "started", "progress"):
             s.ota.update(state="failed", error="disconnected mid-transfer")
             hub.publish({"type": "ota", "satellite": s.id, "state": "failed",
@@ -2297,9 +2830,21 @@ async def on_message(s: Session, msg: dict) -> None:
             # the firmware applies the rest and reports at once: this is where
             # the record gets them.
             hub.take_report(s, s.status)
-            if msg.get("cause") == "button" or time.monotonic() <= s.volume_press_until:
+            # "local": the satellite changed it itself, as a button does (a
+            # phone's AirPlay slider moving the Pi's output volume).
+            if msg.get("cause") in ("button", "local") or time.monotonic() <= s.volume_press_until:
                 s.volume_press_until = 0.0
                 hub.take_own(s)
+        # The cover goes with the music: a status that no longer names the
+        # picture held (the session ended, the track has another) drops it,
+        # so neither the page nor Home Assistant shows the cover of what has
+        # stopped. The satellite sends a picture before the status that names
+        # it. A satellite that is no AirPlay receiver says nothing of it.
+        air = s.status.get("airplay")
+        if isinstance(air, dict) and s.artwork is not None:
+            art = air.get("artwork")
+            if not isinstance(art, dict) or art.get("sha256") != s.artwork["sha256"]:
+                s.artwork = None
         if hub.speaks_for(s):
             hub.publish({"type": "status", "satellite": s.id, "status": s.status})
             if hub.telemetry is not None:
@@ -2319,6 +2864,10 @@ async def on_message(s: Session, msg: dict) -> None:
             await hub.on_button(s, msg["button"], msg["action"], msg.get("held_ms"))
     elif kind == "artwork" and s.adopted:
         s.artwork = _artwork(msg) or s.artwork
+    elif kind == "airplay_result" and s.adopted:
+        reply = s.replies.pop(str(msg.get("id")), None)
+        if reply is not None and not reply.done():
+            reply.set_result(msg)
     elif kind in EARCON_MESSAGES and s.adopted and s.earcons is not None:
         await hub.on_earcons(s, msg)
     elif kind == "ota_next" and s.ota:
@@ -2441,6 +2990,7 @@ class WakeWordBody(BaseModel):
     colour: str | None = None
     conversation: dict | None = None
     trigger: dict | None = None
+    verify: dict | None = None
 
 
 class WakeWordsBody(BaseModel):
@@ -2615,11 +3165,25 @@ async def put_telemetry(body: TelemetryBody) -> dict:
 
 @app.delete("/satellites/telemetry")
 async def delete_telemetry() -> dict:
-    """Delete every telemetry record. The settings stay as they are."""
+    """Delete every telemetry record, and every clip kept with them. The
+    settings stay as they are."""
     rec = _telemetry()
     n = await asyncio.to_thread(rec.wipe)
-    log.info("telemetry: %d day files deleted", n)
+    log.info("telemetry: %d files deleted", n)
     return await asyncio.to_thread(rec.status) | {"deleted": n}
+
+
+@app.get("/satellites/telemetry/clips/{name}")
+async def telemetry_clip(name: str) -> Response:
+    """The audio of a wake word the double-check did not hear, as its wake
+    record's verify.clip names it: the hard negatives a wake word model is
+    retrained on. Kept at telemetry level full only (telemetry.py). A name
+    that is not a clip's (telemetry.CLIP) is a 404 like a clip that is gone,
+    and never reaches the file system."""
+    wav = await asyncio.to_thread(_telemetry().clip, name)
+    if wav is None:
+        raise ApiError(404, f"no clip {name}", code="clip_not_found")
+    return Response(wav, media_type="audio/wav")
 
 
 @app.get("/satellites/telemetry/records")
@@ -2714,6 +3278,9 @@ async def upload_firmware(request: Request, model: str = Query(..., max_length=6
     fw = hub.store.add_firmware(image, model, version, sig)
     log.info("firmware %s stored: %s %s, %d bytes, %s", fw.sha256[:12], model, version, fw.size,
              "signed" if sig else "unsigned")
+    # Every satellite of that model may have an update now (`update`).
+    hub.publish({"type": "firmware", "action": "added", "sha256": fw.sha256, "model": fw.model,
+                 "version": fw.version})
     return vars(fw)
 
 
@@ -2738,6 +3305,7 @@ async def _body_within(request: Request, limit: int, says: str) -> bytes:
 async def delete_firmware(sha256: str) -> Response:
     if not hub.store.delete_firmware(sha256):
         raise ApiError(404, "no such firmware")
+    hub.publish({"type": "firmware", "action": "deleted", "sha256": sha256})
     return Response(status_code=204)
 
 
@@ -2821,12 +3389,18 @@ async def configure(nid: str, body: ConfigBody) -> dict:
         raise ApiError(404, "no adopted satellite with that id")
     change = body.model_dump(exclude_none=True)
     s = hub.sessions.get(nid)
+    # Offline, the caps it last proved its adoption with: a Korvo that is
+    # switched off still has no audio devices. Refused only on what is known,
+    # so a satellite the hub has not seen since saving caps can still be set
+    # up before it comes back.
+    caps = s.caps if s is not None else (rec.caps or {})
+    known = s is not None or bool(caps)
     audio = [k for k in change if k in AUDIO_SETTINGS]
-    if audio and s is not None and not s.caps.get("audio_devices"):
+    if audio and known and not caps.get("audio_devices"):
         raise ApiError(409, f"satellite {nid} has no audio devices to choose from "
                             f"({', '.join(audio)})", code="no_audio_devices", param=audio[0])
     air = [k for k in change if k in AIRPLAY_SETTINGS]
-    if air and s is not None and not s.caps.get("airplay"):
+    if air and known and not caps.get("airplay"):
         raise ApiError(409, f"satellite {nid} is not an AirPlay receiver", code="no_airplay",
                        param=air[0])
     if change.get("airplay_name") == "":
@@ -2844,6 +3418,16 @@ async def configure(nid: str, body: ConfigBody) -> dict:
     rec.unreported = [k for k in rec.unreported if k not in cfg]
     hub.store.save_satellites()
     if s is not None and s.adopted:
+        # Off means off now, not after the reply in hand has played out: the
+        # rest of it would still be streamed to a satellite being told to be
+        # silent. The music too, and before anything here waits on the
+        # socket: meanwhile its upload found the speaker off, ended on its
+        # own, and left a Pi playing the second of it that it holds.
+        if cfg.get("speaker_enabled") is False:
+            had_audio = s.flush_speaker()
+            await hub.stop_media(s, "speaker_off")
+            if had_audio:
+                await s.send_json({"type": "flush"})
         to_satellite = (satellite_config(cfg) | ({"name": rec.name} if "name" in change else {})
                         | (hub.button_actions(s, cfg) if "buttons" in cfg else {}))
         if to_satellite:
@@ -2852,28 +3436,31 @@ async def configure(nid: str, body: ConfigBody) -> dict:
         # out, because nothing may be sent to a dark satellite. Now it may.
         if was_dark and cfg.get("lights_enabled") and s.lit and s.conversation is None:
             await hub.send_lights(s, {"mode": "off"})
-        # Off means off now, not after the reply in hand has played out: the
-        # rest of it would still be streamed to a satellite that was just
-        # told to be silent.
-        if cfg.get("speaker_enabled") is False and s.flush_speaker():
-            await s.send_json({"type": "flush"})
         # Nothing more will be heard: a conversation waiting for its next turn
         # ends, and a command already said still gets its answer.
         conv = s.conversation
         if cfg.get("mic_enabled") is False and conv is not None and (
                 conv.phase == "listening" or conv.memory is not None):
             conv.cancel("mic_off")
+    # What changed, by name: Home Assistant reads the values back, and a
+    # webhook in a button mapping is not for the event stream.
+    if change:
+        hub.publish({"type": "config", "satellite": nid, "changed": sorted(change)})
     _mqtt_satellite(nid)
     return hub.describe(nid)
 
 
 @app.get("/satellites/{nid}/airplay/artwork")
-async def airplay_artwork(nid: str) -> Response:
+async def airplay_artwork(nid: str, v: str | None = Query(None, pattern="^[0-9a-f]{64}$")) -> Response:
     """The cover of what the satellite's AirPlay receiver plays, as it sent
-    it. The page asks with ?v=<sha256>, so an answer can be kept."""
+    it. The page and Home Assistant ask with ?v=<sha256>, so an answer can be
+    kept: and one for another picture is a 404, so that a picture that has
+    changed since is never kept under a SHA that is not its own."""
     s = hub.sessions.get(hub.resolve(nid))
-    if s is None or not s.artwork:
-        raise ApiError(404, f"satellite {nid} has no AirPlay artwork now", code="no_artwork")
+    if s is None or not s.artwork or (v is not None and v != s.artwork["sha256"]):
+        raise ApiError(404, f"satellite {nid} has no AirPlay artwork now"
+                            + (" with that SHA-256" if v and s is not None and s.artwork else ""),
+                       code="no_artwork")
     return Response(s.artwork["data"], media_type=s.artwork["type"],
                     headers={"ETag": f'"{s.artwork["sha256"]}"', "Cache-Control": "private, max-age=86400"})
 
@@ -3004,10 +3591,176 @@ async def ptt(nid: str, body: PttBody | None = None) -> Response:
 
 @app.post("/satellites/{nid}/flush")
 async def flush(nid: str) -> Response:
-    """Drop the speaker audio queued and playing, and the conversation in
-    progress: what the "stop" button does."""
+    """Drop the speaker audio queued and playing, the music, and the
+    conversation in progress: what the "stop" button does."""
     await hub.stop(hub.session(nid))
     return Response(status_code=204)
+
+
+def _media_answer(reason: str, played_s: float | None) -> dict:
+    return {"played_s": None if played_s is None else round(played_s, 2),
+            "stopped": reason != "ended", "reason": reason}
+
+
+def _dropped(s: Session) -> str:
+    """Why an announcement queued on `s` did not play to its end, as the
+    reasons of a media stream say it."""
+    if hub.sessions.get(s.id) is not s:
+        return "disconnected"
+    if not s.adopted:
+        return "unadopted"
+    if not hub.speaker_allowed(s):
+        return "speaker_off"
+    return "muted" if s.status.get("muted") else "stopped"
+
+
+@app.post("/satellites/{nid}/media")
+async def media(nid: str, request: Request, announce: bool = Query(False)) -> dict:
+    """Play a WAV that is still arriving: Home Assistant's play_media, its
+    TTS and its announcements (clients/home-assistant), converted by its own
+    ffmpeg to exactly the format GET /satellites/{id} names under `media`.
+    The hub reads the header, refuses any other format, and relays the PCM;
+    it never decodes or resamples.
+
+    Music (?announce=0) plays on the media lane of the satellite that plays
+    for this one (Hub.stream_media), in place of any stream already playing
+    there, which ends "superseded". An announcement (?announce=1) is read
+    whole and played as one sentence on the voice lane, after whatever is
+    queued there, with the music paused or ducked under it. Either way the
+    answer comes when it has played, or has been stopped: {played_s,
+    stopped, reason}. Errors come before any audio plays."""
+    src = hub.session(nid)
+    s = _speaker_on(hub.speaker_for(src))
+    if s.caps and "speaker" not in s.caps:
+        raise ApiError(409, f"satellite {s.id} has no speaker", code="no_speaker")
+    want = hub.media_view(src.id)["announce" if announce else "music"]
+    try:
+        (rate, channels), pcm = await audio.wav_stream(request.stream())
+    except ValueError as e:
+        raise ApiError(415, f"not a 16-bit PCM WAV: {e}", code="unsupported_audio",
+                       param="body") from None
+    except ClientDisconnect:
+        return _media_answer("cancelled", None if announce else 0.0)
+    if (rate, channels) != (want["rate"], want["channels"]):
+        raise ApiError(415, f"satellite {s.id} plays {'an announcement' if announce else 'music'} "
+                            f"as {want['rate']} Hz, {want['channels']} channel(s); this WAV is "
+                            f"{rate} Hz, {channels} channel(s)", code="format_mismatch", param="body")
+    stream = MediaStream(src.id)
+    event = {"type": "media", "satellite": s.id, "source": src.id, "id": stream.id,
+             "announce": announce}
+
+    if announce:
+        limit = ANNOUNCE_MAX_S * rate * 2 * channels
+        body = bytearray()
+        try:
+            async for chunk in pcm:
+                body += chunk
+                if len(body) > limit:
+                    raise ApiError(413, f"an announcement is at most {ANNOUNCE_MAX_S} s",
+                                   code="announce_too_long", param="body")
+        except ClientDisconnect:
+            return _media_answer("cancelled", None)
+        # Asked again: the upload took as long as Home Assistant took to
+        # convert it, and the speaker may have been turned off meanwhile.
+        _speaker_on(s)
+        if hub.sessions.get(s.id) is not s:
+            return _media_answer("disconnected", None)
+        clip = Clip(bytes(body[:len(body) // 2 * 2]), "announcement")
+        s.speaker.put_nowait(clip)
+        hub.publish(event | {"state": "playing", "reason": None, "played_s": None})
+        # Ended in a finally, as the music is below: a handler cancelled at
+        # shutdown must not leave the events saying it plays for good.
+        reason, played_s = "cancelled", None
+        try:
+            played = await clip.done
+            # Sent is not heard: the satellite still holds what was sent ahead.
+            if played and (left := s.play_until - time.monotonic()) > 0:
+                await asyncio.sleep(left)
+            reason = "ended" if played else _dropped(s)
+            played_s = len(clip.pcm) / 2 / rate if played else None
+        finally:
+            hub.publish(event | {"state": "ended", "reason": reason, "played_s": played_s})
+        return _media_answer(reason, played_s)
+
+    while s.media is not None:
+        await hub.stop_media(s, "superseded")
+    s.media = stream
+    hub.publish(event | {"state": "playing", "reason": None, "played_s": 0.0})
+    reason = None
+    try:
+        reason = await hub.stream_media(s, stream, pcm, rate, channels)
+    finally:
+        if s.media is stream:
+            s.media = None
+        # In the finally: a body that broke off some other way, or the hub
+        # shutting down, still ends what the page and Home Assistant were
+        # told is playing, or they show it playing for good.
+        reason = reason or stream.stopped or "cancelled"
+        played_s = round(stream.played_s, 2)
+        hub.publish(event | {"state": "ended", "reason": reason, "played_s": played_s})
+    log.info("satellite %s: media for %s %s after %.1f s", s.id, src.id, reason, played_s)
+    return _media_answer(reason, played_s)
+
+
+@app.post("/satellites/{nid}/media/stop")
+async def media_stop(nid: str) -> Response:
+    """End the media stream playing for this satellite, and have a satellite
+    with a media lane drop what it holds of it. 204 whether or not anything
+    was playing: Home Assistant's media_stop."""
+    await hub.stop_media(hub.speaker_for(hub.session(nid)), "stopped")
+    return Response(status_code=204)
+
+
+@app.post("/satellites/{nid}/airplay/{command}")
+async def airplay_command(nid: str, command: Literal[AIRPLAY_COMMANDS]) -> dict:
+    """Ask the phone playing to the satellite's AirPlay receiver to play,
+    pause, skip or stop, or end its session (disconnect). The satellite asks
+    Shairport Sync, which asks the phone, and answers with the phone's own
+    answer and whether it saw the change happen (`confirmed`); the phone
+    decides, and may take a command and not act on it.
+
+    Refused at once (409) for what cannot work: a satellite that is no
+    AirPlay receiver, an agent too old to take commands (it would never
+    answer), no phone connected, or a command the phone does not take now."""
+    s = hub.session(nid)
+    caps = s.caps.get("airplay")
+    if not caps:
+        raise ApiError(409, f"satellite {s.id} is not an AirPlay receiver", code="no_airplay")
+    if not (isinstance(caps, dict) and caps.get("controls") is True):
+        raise ApiError(409, f"satellite {s.id} runs an agent that takes no AirPlay commands; "
+                            "update it", code="airplay_no_controls")
+    air = s.status.get("airplay") if isinstance(s.status.get("airplay"), dict) else {}
+    if air.get("session") is not True:
+        raise ApiError(409, f"no phone is playing to satellite {s.id}", code="airplay_idle")
+    remote = air.get("remote") if isinstance(air.get("remote"), dict) else {}
+    controls = remote.get("controls") if isinstance(remote.get("controls"), list) else []
+    if command not in controls:
+        raise ApiError(409, f"the phone playing to satellite {s.id} does not take {command} now",
+                       code="airplay_no_remote")
+    rid = uuid.uuid4().hex
+    reply = asyncio.get_running_loop().create_future()
+    s.replies[rid] = reply
+    result: dict = {"ok": False}
+    try:
+        if not await _quietly(s.send_json({"type": "airplay_command", "id": rid, "command": command})):
+            raise ApiError(409, f"satellite {s.id} is not connected", code="satellite_offline")
+        try:
+            result = await asyncio.wait_for(reply, AIRPLAY_WAIT_S)
+        except TimeoutError:
+            raise ApiError(504, f"satellite {s.id} did not answer {command} within "
+                                f"{AIRPLAY_WAIT_S:g} s", code="satellite_timeout") from None
+        if hub.sessions.get(s.id) is not s:
+            raise ApiError(409, f"satellite {s.id} went away before it answered",
+                           code="satellite_offline")
+    finally:
+        s.replies.pop(rid, None)
+        hub.publish({"type": "airplay_command", "satellite": s.id, "command": command,
+                     "ok": result.get("ok") is True, "status": result.get("status"),
+                     "confirmed": result.get("confirmed")})
+    if result.get("ok") is not True:
+        raise ApiError(502, f"the phone did not take {command} ({result.get('status')}: "
+                            f"{result.get('error')})", code="airplay_refused")
+    return {"command": command, "status": result.get("status"), "confirmed": result.get("confirmed")}
 
 
 @app.get("/satellites/{nid}/listen")

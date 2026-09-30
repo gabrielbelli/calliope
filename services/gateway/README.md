@@ -123,7 +123,7 @@ here would quietly undo that.
 | `GET /v1/models` | answered here | — |
 | `GET /v1/models/{id}` | answered here, indexed off that same list | — |
 | `GET /health` | every backend, and voice-satellites when `GATEWAY_SATELLITES_URL` is set | — |
-| `GET`, `POST`, `PUT`, `PATCH`, `DELETE` `/satellites/...` | voice-satellites, if deployed | streamed through. Listed one by one in `SATELLITES_PATHS`; the hub's own README has what each does |
+| `GET`, `POST`, `PUT`, `PATCH`, `DELETE` `/satellites/...` | voice-satellites, if deployed | streamed through. Listed one by one in `SATELLITES_PATHS`; the hub's own README has what each does. `POST /satellites/{id}/media` is Home Assistant's music and announcements, a WAV relayed as it is written and answered when it has played: the read timeout starts when the upload ends and is `GATEWAY_SATELLITES_MEDIA_TIMEOUT`, and a write that stalls for `GATEWAY_SATELLITES_TIMEOUT` ends it |
 | `WS /satellites/ws`, `WS /nodes/ws` | voice-satellites | relayed frame for frame, and **not** behind `GATEWAY_API_KEYS` ([ADR 0013](../../docs/adr/0013-satellites-one-door.md)). `/nodes/ws` is the path pre-release firmware from before 2026-09-25 dials, kept until no such board is left |
 
 **Native routes mount flat and unprefixed, and nothing is rewritten.** That is
@@ -585,6 +585,7 @@ this in code.
 | `GATEWAY_TTS_TIMEOUT` | `300` | Read timeout, seconds |
 | `GATEWAY_TTS_LONG_TIMEOUT` | `240` | Must stay above tts-long's `TTS_OPENAI_SYNC_TIMEOUT` |
 | `GATEWAY_SATELLITES_TIMEOUT` | `120` | Read timeout, seconds. The slowest satellite routes are a `listen` of up to 60 s and a `say` or routing test that waits for TTS and an assistant. Was `GATEWAY_NODES_TIMEOUT` |
+| `GATEWAY_SATELLITES_MEDIA_TIMEOUT` | `300` | Read timeout, seconds, of `POST /satellites/{id}/media` alone. An announcement is answered once it has played, after whatever the satellite already had queued, and the hub takes up to 120 s of one: this is two at that cap and a reply before them. Its writes keep `GATEWAY_SATELLITES_TIMEOUT` |
 | `GATEWAY_CONNECT_TIMEOUT` | `2` | |
 | `GATEWAY_HEALTH_TIMEOUT` | `5` | Per backend, fanned out concurrently |
 | `GATEWAY_CHAT_MAX_BYTES` | `16777216` | The only body this process holds that can carry audio — see below. Over it is a `413`, counted while reading rather than taken from `Content-Length` |

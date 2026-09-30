@@ -170,6 +170,88 @@ async def test_the_instruction_not_to_buffer_survives_the_proxy(monkeypatch):
         "a length this response cannot keep makes a client stop reading early"
 
 
+class Taking(httpx.AsyncBaseTransport):
+    """voice-satellites taking an upload: each piece recorded as it arrives,
+    and the answer given once the body has ended, as POST
+    /satellites/{id}/media answers once the music has played."""
+
+    def __init__(self) -> None:
+        self.received: list[bytes] = []
+        self.query = b""
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.query = request.url.query
+        async for piece in request.stream:
+            if piece:
+                self.received.append(piece)
+        # stream=, not json=: a body given whole is read at once, and the
+        # proxy, which streams every answer, would find nothing left to read.
+        answer = json.dumps({"played_s": 0.04, "stopped": False, "reason": "ended"}).encode()
+        return httpx.Response(200, headers={"content-type": "application/json"},
+                              stream=httpx.ByteStream(answer))
+
+
+async def _upload(app, path: str, query: bytes, pieces: list[bytes],
+                  before_last) -> tuple[int, bytes]:
+    """One chunked POST through the real ASGI app, a piece per message, as
+    Home Assistant sends a WAV its ffmpeg is still writing. `before_last` is
+    called just before the last piece leaves the client."""
+    left = list(pieces)
+    status, answer = 0, b""
+
+    async def receive():
+        if not left:
+            await anyio.Event().wait()   # still there, saying nothing (see _drive)
+        piece = left.pop(0)
+        if not left:
+            before_last()
+        return {"type": "http.request", "body": piece, "more_body": bool(left)}
+
+    async def send(message):
+        nonlocal status, answer
+        if message["type"] == "http.response.start":
+            status = message["status"]
+        elif message["type"] == "http.response.body":
+            answer += message.get("body", b"")
+
+    await app({
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "scheme": "http", "path": path, "raw_path": path.encode(),
+        "query_string": query, "root_path": "", "client": ("127.0.0.1", 12345),
+        "server": ("gateway.test", 80),
+        "headers": [(b"host", b"gateway.test"), (b"content-type", b"audio/wav"),
+                    (b"transfer-encoding", b"chunked")],
+    }, receive, send)
+    return status, answer
+
+
+async def test_a_media_upload_reaches_the_hub_while_it_is_still_being_sent(monkeypatch):
+    """Home Assistant's play_media is a WAV its ffmpeg is still writing, for
+    as long as the music lasts, and the hub plays it as it arrives. A gateway
+    that read the upload to its end before forwarding it would play a radio
+    stream never, and a song only after it had all been converted. The hub
+    must have the first piece before the client has sent the last."""
+    main = reload_gateway(monkeypatch)
+    hub = Taking()
+    router = Router({"stt.test": MockBackend("stt-stack"), "tts.test": MockBackend("tts-stack"),
+                     "long.test": MockBackend("tts-long"), "satellites.test": hub})
+    monkeypatch.setattr(main, "new_client",
+                        lambda: httpx.AsyncClient(transport=router, follow_redirects=False))
+    pieces = [b"RIFF\xff\xff\xff\xffWAVE", bytes(3528), bytes([1]) * 3528]
+    at_last: list[int] = []
+
+    async with main.app.router.lifespan_context(main.app):
+        status, answer = await _upload(main.app, "/satellites/020000000002/media", b"announce=0",
+                                       pieces, lambda: at_last.append(len(hub.received)))
+
+    assert at_last and at_last[0] >= 1, (
+        "the hub had nothing when the last piece left the client: the upload "
+        "was read whole before it was forwarded")
+    assert b"".join(hub.received) == b"".join(pieces) and hub.query == b"announce=0"
+    assert status == 200
+    assert json.loads(answer) == {"played_s": 0.04, "stopped": False, "reason": "ended"}
+
+
 async def test_the_chunk_plan_survives_the_proxy_in_both_directions(monkeypatch):
     """X-Chunk-Phonemes coming back, X-Chunk-Plan going out.
 

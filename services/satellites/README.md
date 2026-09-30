@@ -27,7 +27,8 @@ out of `GATEWAY_API_KEYS`, is
 [Routes](#routes) · [Events](#events) · [The device protocol](#the-device-protocol) ·
 [Listening](#listening) · [Wake words](#wake-words) ·
 [Destinations](#destinations) · [Keys](#keys) · [Lights](#lights) ·
-[Buttons](#buttons) · [Command, conversation and trigger](#command-conversation-and-trigger) ·
+[Buttons](#buttons) · [Media](#media) · [AirPlay](#airplay) ·
+[Command, conversation and trigger](#command-conversation-and-trigger) ·
 [Speech-to-text](#speech-to-text) · [Routing](#routing) ·
 [Home Assistant over MQTT](#home-assistant-over-mqtt) ·
 [Signed firmware](#signed-firmware) ·
@@ -207,8 +208,8 @@ name.
 | `PUT /satellites/wake-words` | `{"words": [...], "ptt": {...}}`: replace them all, live. A field an entry leaves out keeps its saved value. A bad set is a 422 and the old one stays. |
 | `POST /satellites/wake-words/models?name=` | A custom wake word: the `.onnx` as the raw body, checked to be an openWakeWord classifier (input `[batch, 16, 96]`, under 5 MB) before it is written. Then offered in `available` and assigned like a built-in. [`tools/wakeword-train`](../../tools/wakeword-train/README.md) trains one; a model trained there is CC BY-NC-SA 4.0, because its training features and feature models are. |
 | `DELETE /satellites/wake-words/models/{name}` | Only a custom model, and only once no wake word uses it (409 otherwise). |
-| `GET /satellites/{id}` | One satellite: its name, whether it is adopted and online, model, `firmware`, `config`, its last `status`, `caps`, the update in progress (`ota`), `listening`, `earcons`, `wake_words` (the names assigned to it), `output` (`speaker`, `jack` or `null`, [Speaker or jack](#speaker-or-jack)), `boot` (`reset_reason`, `stages_ms`, and `stalled_in` and `stall_restarts` after a stalled start; firmware from 2026-09-26) and `latency` (how quickly its last 20 replies began and ended, [Streaming](#streaming)) |
-| `PATCH /satellites/{id}` | `output_satellite`: another adopted satellite that plays what this one plays (its replies, earcons, Say and tones), or `""` for its own speaker ([Output](#output)); `airplay_enabled` and `airplay_name` (up to 64 printable characters, `""` for the satellite's name) on a satellite with caps `airplay`, 409 `no_airplay` otherwise; `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness` (1-100), `ring_top` (0-11: the LED at 12 o'clock as mounted, where a bar on the ring starts) and `ring_upside_down` (the bar then runs the other way, so it still fills clockwise as seen), `buttons` ([Buttons](#buttons)); `local_volume_buttons` for firmware from before 2026-09-27 |
+| `GET /satellites/{id}` | One satellite: its name, whether it is adopted and online, model, `firmware`, `config`, its last `status`, `caps` (while it is offline, the caps it last proved its adoption with; `{}` for one the hub has never seen), the update in progress (`ota`), `listening`, `earcons`, `wake_words` (the names assigned to it), `output` (`speaker`, `jack` or `null`, [Speaker or jack](#speaker-or-jack)), `boot` (`reset_reason`, `stages_ms`, and `stalled_in` and `stall_restarts` after a stalled start; firmware from 2026-09-26) `latency` (how quickly its last 20 replies began and ended, [Streaming](#streaming)), `media` (what `POST /satellites/{id}/media` takes for it and what plays for it, or `null`, [Media](#media)) and `update` (`sha256`, `version`, `uploaded_at` of the image `POST /satellites/ota` would install, when that is an update: the newest for its model by the page's own ordering that it would accept, not what it runs, not older, not what an update in progress installs; else `null`) |
+| `PATCH /satellites/{id}` | `output_satellite`: another adopted satellite that plays what this one plays (its replies, earcons, Say and tones), or `""` for its own speaker ([Output](#output)); `airplay_enabled` and `airplay_name` (up to 64 printable characters, `""` for the satellite's name) on a satellite with caps `airplay`, 409 `no_airplay` otherwise; `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness` (1-100), `ring_top` (0-11: the LED at 12 o'clock as mounted, where a bar on the ring starts) and `ring_upside_down` (the bar then runs the other way, so it still fills clockwise as seen), `buttons` ([Buttons](#buttons)); `local_volume_buttons` for firmware from before 2026-09-27. While the satellite is offline, `audio_sink`, `audio_source`, `echo_reference` and the AirPlay settings are refused (409 `no_audio_devices`, `no_airplay`) when its saved caps lack them; with no saved caps they are taken. Every PATCH publishes a `config` event naming what changed. `speaker_enabled: false` also ends the media playing there |
 | `POST /satellites/{id}/adopt` | `{"name": "..."}` |
 | `POST /satellites/{id}/forget` | |
 | `POST /satellites/{id}/identify` | Blink for five seconds. Works before adoption, which is the point. |
@@ -216,10 +217,13 @@ name.
 | `POST /satellites/{id}/lights` | `{"mode": "off|solid|pulse|spin|pixels", "color": [r,g,b], "brightness": 0-255, "pixels": [[r,g,b], ...]}`. 409 for a satellite with `lights_enabled` false. `listen` is the hub's own, for a conversation, and is not offered here. |
 | `POST /satellites/{id}/tone` | `{"frequency": 440, "seconds": 1}` on the satellite's speaker. 409 for a satellite with `speaker_enabled` false. |
 | `POST /satellites/{id}/say` | `{"text": "...", "voice": "bm_george"}`: Kokoro, via `SATELLITES_TTS_URL`. 409 for a satellite with `speaker_enabled` false. |
-| `POST /satellites/{id}/flush` | Stop: drop the speaker audio queued and playing, and cancel the conversation in progress |
-| `POST /satellites/{id}/ptt` | `{"wake_word": "..."}`, optional: listen as if the satellite's push-to-talk button had been pressed, handled by that word's entry or by `ptt`. 204, or 409 naming why not (`satellite_busy`, `satellite_muted`, `mic_disabled`, `trigger_word`), or 404 `wake_word_not_found`. For Home Assistant. |
+| `POST /satellites/{id}/flush` | Stop: drop the speaker audio queued and playing, end the media stream on it and on the satellite that plays for it, and cancel the conversation in progress |
+| `POST /satellites/{id}/ptt` | `{"wake_word": "..."}`, optional: listen as if the satellite's push-to-talk button had been pressed, handled by that word's entry or by `ptt`. 204, or 409 naming why not (`satellite_busy`, also while a wake word it heard is being [double-checked](#double-checking-a-wake-word); `satellite_muted`, `mic_disabled`, `trigger_word`), or 404 `wake_word_not_found`. For Home Assistant. |
 | `GET /satellites/{id}/listen?seconds=5&channel=` | A WAV of the raw mic channels, up to 60 s |
-| `GET /satellites/{id}/airplay/artwork` | The cover of what an AirPlay receiver plays, as its satellite last sent it (`image/jpeg` or `image/png`, with its SHA-256 as the ETag). 404 before one arrives |
+| `GET /satellites/{id}/airplay/artwork?v=` | The cover of what an AirPlay receiver plays, as its satellite last sent it (`image/jpeg` or `image/png`, with its SHA-256 as the ETag). 404 before one arrives, after a status stops naming it, and when `v` (a SHA-256) is not the picture held ([AirPlay](#airplay)) |
+| `POST /satellites/{id}/airplay/{command}` | `play`, `pause`, `play_pause`, `next`, `previous`, `stop` or `disconnect`, to the phone playing to its AirPlay receiver (422 for anything else). 200 `{"command", "status", "confirmed"}` once the satellite has answered; 409 `no_airplay`, `airplay_no_controls`, `airplay_idle` or `airplay_no_remote` at once; 502 `airplay_refused` in the phone's or Shairport Sync's words; 504 `satellite_timeout` after 6 s ([AirPlay](#airplay)) |
+| `POST /satellites/{id}/media?announce=0` | A 16-bit PCM WAV as the body, in the format `media` names, played as it arrives: music, or with `announce=1` an announcement. Answered once it has played or been stopped: `{"played_s", "stopped", "reason"}`. 409 `speaker_disabled` or `no_speaker`, 415 `unsupported_audio` or `format_mismatch`, 413 `announce_too_long`, all before any audio plays. For Home Assistant ([Media](#media)) |
+| `POST /satellites/{id}/media/stop` | End the media stream playing for it, and have a satellite with a media lane drop what it holds. 204 whether or not anything was playing. For Home Assistant |
 | `POST /satellites/{id}/set-hub` | `{"url": "wss://host:port"}`: the satellite saves it and reboots onto that hub |
 | `POST /satellites/{id}/inject?play=0&wake_word=` | A 16 kHz mono 16-bit WAV as the body, through the satellite's own wake words, the endpoint and routing path as if the satellite had heard it. [Verifying](#verifying-the-pipeline-without-a-voice). |
 | `GET /satellites/routing` | What each wake word does, which secret variables are set (never their values), the STT and TTS URLs and engine, warnings |
@@ -229,23 +233,29 @@ name.
 | `POST /satellites/llm/models` | `{"base_url", "api_key_env"}`: `{"models": [...]}`, the ids a language model server lists at `GET {base_url}/models`, asked with that key, for an `llm` word's picker. A listing that pages (`has_more` and `last_id`, as Anthropic's does) is read to its end, from `after_id`, up to ten pages more. 502 in the server's own words, 504 after 10 s. |
 | `POST /satellites/llm/test` | An `llm` destination, saved or not: one short question through the same path a turn takes, with no TTS. `{"model", "reply", "first_token_ms", "total_ms", "token_limit"}`, or 502 in the provider's words, or 504 after 25 s. |
 | `PUT /satellites/secrets` | `{"name": "OPENAI_API_KEY", "value": "..."}`: store an API key on the hub under that name, or clear it with `"value": null`. Answers the wake word view. No route reads a value back. 409 `set_in_environment` when the environment already sets the name. [Keys](#keys). |
-| `GET /satellites/telemetry` | Whether [telemetry](#telemetry) is on, its `level`, `retention_days` and `max_mb`, and the day `files` it holds with their `bytes` |
+| `GET /satellites/telemetry` | Whether [telemetry](#telemetry) is on, its `level`, `retention_days` and `max_mb`, the day `files` it holds, the `clips` it keeps (`count`, `bytes`), and `bytes`: everything kept, clips included |
 | `PUT /satellites/telemetry` | `{"enabled": true, "level": "full|timings", "retention_days": 1-365, "max_mb": 10-5000}`, any of them: saved and in force at once. 422 for a value out of range |
-| `DELETE /satellites/telemetry` | Delete every record; the settings stay |
+| `DELETE /satellites/telemetry` | Delete every record and every clip; the settings stay |
 | `GET /satellites/telemetry/records?hours=&since=&until=&kind=&satellite=&word=&limit=500` | The newest `limit` records that match (up to 20000), oldest first. `kind` is comma-separated: `turn`, `wake`, `near_miss`, `session`, `device` |
 | `GET /satellites/telemetry/summary?hours=24&satellite=` | The records of the last `hours`, aggregated ([Telemetry](#telemetry)) |
+| `GET /satellites/telemetry/clips/{name}` | `audio/wav`: the audio of a wake word the [double-check](#double-checking-a-wake-word) did not hear, as its `wake` record's `verify.clip` names it (`<yyyymmddThhmmssZ>-<satellite>-<word>.wav`). 404 for any other name, and for a clip that is gone |
 | `GET /satellites/firmware` | Uploaded images |
 | `POST /satellites/firmware?model=&version=&signature=` | The `.bin` as the raw body. It must start with the ESP32 image magic (0xE9), or be a Linux satellite's release bundle (a gzipped tar, `model=raspberry-pi`), and fit a 4 MB slot. `signature` is base64 or base64url DER ECDSA. |
 | `DELETE /satellites/firmware/{sha256}` | |
 | `POST /satellites/ota` | `{"satellite": "<id>|<name>|all", "sha256": "..."}`. Images are only sent to adopted, online satellites of the image's model, and not to a satellite that would refuse the signature. |
 
-The gateway routes all of these. The Satellites tab uses all but six:
+The gateway routes all of these. The Satellites tab uses all but nine:
 
 - `GET /satellites/{id}`, because the list already carries every satellite.
 - `GET` and `PUT /satellites/routing`, because routing lives on each wake
   word and the tab edits it there.
 - `ptt`, which is Home Assistant's.
+- `media` and `media/stop`, which are Home Assistant's too: it converts
+  what it plays with its own ffmpeg. The page has Say, and its Stop
+  (`/flush`) ends the media as well.
 - `GET /satellites/telemetry/summary`, which is for scripts and tuning.
+- `GET /satellites/telemetry/clips/{name}`, which is for tuning and for
+  retraining a wake word's model.
 - `inject`, which is for scripts. A button that runs a clip through a
   satellite's real actions would be one press from Home Assistant acting on
   it.
@@ -263,18 +273,23 @@ satellite's id. An event from a clip run through `/inject` carries
 | `offline` | A satellite's socket closes | |
 | `pending` | A satellite with no token connects | `address` |
 | `status` | Every status report, about every 10 s | `status`: the report as sent ([protocol](#the-device-protocol)) |
-| `settings` | A button on the satellite changed a setting | `settings`: what changed, among `volume`, `lights_enabled` and `brightness` |
+| `settings` | A button on the satellite changed a setting, or the satellite changed one itself (a status with `cause: "local"`: a Pi whose output volume a phone's AirPlay slider moved) | `settings`: what changed, among `volume`, `lights_enabled` and `brightness` |
+| `config` | The hub's record of a satellite changed: a PATCH, or a setting the satellite reported for the first time | `changed`: the names of what changed, never the values (a button mapping holds webhook addresses) |
+| `firmware` | An image is uploaded or deleted | `action` (`added` or `deleted`), `sha256`, and `model` and `version` when added. No `satellite`: any satellite of that model may have an `update` now |
 | `output` | The hub decides the audio goes to the speaker or the jack | `output` ([Speaker or jack](#speaker-or-jack)) |
 | `jack` | A plug goes in or out of a Linux satellite's card that detects its jacks | `device`, `name` (the PipeWire node), `direction` (`output` or `input`), `plugged` |
 | `button` | A button is pressed or released | `button`, `action` (`press` or `release`), `held_ms` |
 | `ota` | An update moves on | `state` (`started`, `progress`, `rebooting`, `verified`, `failed`), `pct`, `version`, `error` |
 | `wake_words` | A wake word's model finishes downloading, or fails | `words`: every word with its `state` and `error` |
-| `wake` | A wake word is heard, or push-to-talk pressed | `wake_word`, `score`, `direction` |
+| `wake` | A wake word is heard (for a word whose double-check is `on`, once STT has heard it too), or push-to-talk pressed | `wake_word`, `score`, `direction` |
+| `wake_rejected` | STT did not hear a wake word in the audio that held it ([Double-checking a wake word](#double-checking-a-wake-word)): the wake was dropped (`mode: "on"`), or would have been (`mode: "log"`) | `word`, `score`, `heard` (the transcript, up to 120 characters), `mode` |
 | `routed` | A command, or an injected clip, has been answered | `wake_word`, `rule_id` (the word that answered), `mode`, `reply_to`, `error`, `transcript`, `language`, `language_source`, `reply_language`, `voice`, `reply_text`, `spoken_text`, `interrupted`, `timings_ms`, `timeline_ms`, `endpoint`, `command_s`, `played`, `note` |
 | `conversation_started` | A conversation word is heard, or a command hands over | `wake_word`, `rule_id`, `reason` (`wake_word` or `fallback`), `from_rule`, `follow_up_s` |
 | `turn` | Each exchange in a conversation | the fields of `routed`, and `turn`, `ended`, `handed_over_to` |
 | `conversation_ended` | A conversation ends | `rule_id`, `turns`, `seconds`, `reason` ([Conversations](#conversations)) |
 | `triggered` | A trigger word is heard | `satellite_name`, `wake_word`, `score`, `direction` |
+| `media` | A media stream or an announcement starts, and when it ends ([Media](#media)) | `satellite` (the one that plays it), `source` (the one it was sent to), `id`, `announce`, `state` (`playing` or `ended`), `reason` (`null` while it plays), `played_s` |
+| `airplay_command` | After every AirPlay command sent to a satellite ([AirPlay](#airplay)) | `command`, `ok`, `status`, `confirmed` |
 
 Transcripts and replies are in this stream and not in the INFO log.
 
@@ -291,6 +306,7 @@ as binary frames whose first byte names the kind.
 | `2` speaker | hub → satellite | same header, then mono s16le at the satellite's speaker rate |
 | `3` firmware | hub → satellite | `kind, 0, 0, 0, offset u32`, then up to 8 KB of image |
 | `4` earcon | hub → satellite | `kind, 0, 0, 0, offset u32`, then up to 8 KB of s16le at 48 kHz |
+| `5` media | hub → satellite with caps `media` | the speaker's header with its `channels`, then interleaved s16le at `caps.media.rate`, 20 ms a frame (3,528 bytes at 44.1 kHz stereo). Every other satellite gets media as `2`, between replies ([Media](#media)) |
 
 The Korvo sends 4 channels at 16 kHz in 20 ms frames: the speaker loopback
 first, then the three microphones. It plays 48 kHz mono. The hub paces speaker
@@ -301,21 +317,30 @@ audio at real time plus a 300 ms lead.
 | `type` | When | Fields |
 |---|---|---|
 | `hello` | On connecting, and again after adoption with the new token | `id` (the MAC), `model`, `fw`, `token`, `name`, `reset_reason`, `ota_pending`, `caps` (below), `boot` (`stages_ms`, and `stalled_in` and `stall_restarts` after a stalled start; firmware from 2026-09-26), and its settings: `volume`, `mic_gain_db`, `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness`, `ring_top`, `ring_upside_down` (firmware from 2026-09-25; the last two from 2026-09-27) |
-| `status` | Every 10 s, after every `welcome` or `config`, and at once after a button changed a setting | `uptime_s`, `rssi`, `heap`, `psram`, `muted`, the same settings as `hello`, `mic_dropped`, `spk_dropped`, `spk_buffered_ms`, `duck`, `earcons_ready`, `buttons_mv` (the button ladder's `now`, `min`, `max` and `polls`), and `cause: "button"` after a button's action (firmware from 2026-09-27) |
+| `status` | Every 10 s, after every `welcome` or `config`, and at once after a button changed a setting | `uptime_s`, `rssi`, `heap`, `psram`, `muted`, the same settings as `hello`, `mic_dropped`, `spk_dropped`, `spk_buffered_ms`, `duck`, `earcons_ready`, `buttons_mv` (the button ladder's `now`, `min`, `max` and `polls`), and `cause: "button"` after a button's action (firmware from 2026-09-27). A Linux satellite also says `audio`, `airplay` (with `remote`, [AirPlay](#airplay)), the fields its caps `health` name, `media_buffered_ms` and `media_dropped`, and `cause: "local"` after it changed a setting itself (its output volume, moved by a phone's AirPlay slider), which the hub takes as it takes a button's |
 | `button` | A press or a release | `button`, `action` (`press` or `release`), `held_ms` |
 | `ota` | An update moves on | `state` (`started`, `progress`, `rebooting`, `failed`, `verified`), `version`, `pct`, `error`. A signed build fails with `unsigned image` or `bad signature` |
 | `ota_next` | The next piece of an update, please | `offset` |
 | `earcons` | The answer to `earcon_list` | `ready`, `items` (`id`, `size`, `sha256`), `last_load_us` |
 | `earcon_next`, `earcon_stored`, `earcon_failed` | An earcon upload moves on | `id` and `offset`; `id`, `size` and `sha256`; `op` (`put`, `play` or `delete`), `id` and `error` |
-| `artwork` | An AirPlay receiver's cover changed (a Linux satellite), once per picture | `sha256`, `format` (`jpeg` or `png`), `data` (base64, up to 2 MB). Kept in memory, checked against its hash, served at `GET /satellites/{id}/airplay/artwork` |
+| `artwork` | An AirPlay receiver's cover changed (a Linux satellite), once per picture | `sha256`, `format` (`jpeg` or `png`), `data` (base64, up to 2 MB). Kept in memory, checked against its hash, served at `GET /satellites/{id}/airplay/artwork`. Sent before the status that names it |
+| `airplay_result` | The answer to `airplay_command` | `id` (the command's), `command`, `ok`, `status` (the phone's HTTP status, or Shairport Sync's own 490-498; `null` for `disconnect`), `confirmed` (the player showed the change within 1.5 s), `error` (Shairport's reason for a 49x, `the phone answered <status>`, or `unknown command`) |
 
 `hello.caps` names what the satellite can do. The hub sends a message that
 needs a capability only to a satellite whose caps list it. Older firmware
 ignores what it does not know without a word.
 
+A capability counts when it is there and truthy: a list that is not empty, a
+number over 0, an object, or `true`. Names the hub does not know are ignored.
+The hub keeps an adopted satellite's caps from each hello that proves its
+adoption, so `GET /satellites/{id}` still says what a satellite is while it is
+offline, across a restart of the hub. `{}` means it has not been seen since.
+
 | Capability | Meaning |
 |---|---|
-| `mic` | `rate`, `channels`, `format` of the microphone stream |
+| `mic` | `rate`, `channels`, `format` of the microphone stream, and on a Pi `max_gain_db`, the most `mic_gain_db` does there (3.5; absent means 37.5) |
+| `media` | `rate`, `channels`, `format` of its media lane: it takes frame kind `5` and `media_flush` (the Pi agent) |
+| `health` | The diagnostic fields its status reports (`temp_c`, `throttled`, `under_voltage`, `load` on a Pi) |
 | `speaker` | `rate`, `channels`, `format` it plays |
 | `lights` | The number of LEDs |
 | `light_modes` | The light modes it draws. `listen` is in it from 2026-09-28; without it the hub uses the first five |
@@ -326,7 +351,7 @@ ignores what it does not know without a word.
 | `ota_key` | On a signed build, the id of the key an update must be signed by |
 | `audio_devices` | A Linux satellite ([pi-satellite](../../clients/pi-satellite/README.md)): it lists PipeWire's outputs and inputs as `audio` in its hello and status, and takes `audio_sink`, `audio_source` and `echo_reference` in `welcome` and `config` |
 | `bundle` | `"tar.gz"`: its updates are signed release bundles, not ESP32 images |
-| `airplay` | `{"version": 1}`: an AirPlay receiver. It takes `airplay_enabled` and `airplay_name` in `welcome` and `config`, and its status has `airplay` (`enabled`, `name`, `running`, `error`) |
+| `airplay` | `{"version": 1}`: an AirPlay receiver. It takes `airplay_enabled` and `airplay_name` in `welcome` and `config`, and its status has `airplay` (`enabled`, `name`, `running`, `error`). `{"version": 2, "controls": true}`: it also takes `airplay_command`, and its `airplay` has `remote` ([AirPlay](#airplay)) |
 
 A satellite whose caps name no `mic` is a speaker only: it is adopted and
 plays, and the hub does not listen to it (`listening` says it has no
@@ -350,6 +375,8 @@ channel 0, as the Korvo's loopback is.
 | `earcon` | `id`: play it |
 | `earcon_delete` | `id`. The firmware takes it; the hub does not send it today |
 | `duck` | `level` 0-100 on the volume scale, and `ms`, 0 for until `unduck` |
+| `media_flush` | None: drop the media lane's buffer now (`flush` is the voice lane's). Only to a satellite with caps `media` |
+| `airplay_command` | `id` (32 hex), `command` (`play`, `pause`, `play_pause`, `next`, `previous`, `stop`, `disconnect`). Only to a satellite whose caps `airplay` has `controls: true` |
 
 **Updates.** The hub sends `ota`. The satellite begins writing to its spare
 slot and asks for chunks with `ota_next`, one at a time, hashing as it goes. On
@@ -394,8 +421,9 @@ event loop never does it. A full queue drops its oldest frame and counts it as
 3. **Endpointer:** webrtcvad. The command ends after the word's `silence_ms`
    without speech (800 ms unless set), at 10 s, or at 4 s if no speech
    started.
-4. **What the word does**, one conversation per satellite at a time: the
-   `wake` earcon if the satellite holds it, the ring lit in the word's colour
+4. **What the word does**, once a word set to be
+   [double-checked](#double-checking-a-wake-word) has been, one conversation
+   per satellite at a time: the `wake` earcon if the satellite holds it, the ring lit in the word's colour
    ([Lights](#lights)),
    the satellite ducked (and the satellite the word answers on, if that is
    another one), then STT, the word's action and the reply, streamed
@@ -447,7 +475,7 @@ happens once it is heard. The Satellites tab edits the same entries through
    "mode": "command", "language": null,
    "action": {"destination": {"type": "ha_assist", "url": "http://homeassistant.local:8123"},
               "reply_to": "same", "voice": null, "fallback": "hey_jarvis"},
-   "silence_ms": 800},
+   "silence_ms": 800, "verify": {"mode": "on", "spellings": []}},
   {"name": "hey_jarvis", "threshold": 0.5, "satellites": ["*"],
    "mode": "conversation", "language": "en",
    "action": {"destination": {"type": "llm", "base_url": "https://api.openai.com/v1",
@@ -477,9 +505,12 @@ happens once it is heard. The Satellites tab edits the same entries through
 | `trigger.feedback` | `earcon` | `earcon`, `none` | `earcon` plays the satellite's `done` and flashes the ring |
 | `trigger.cooldown_s` | 3 | 0 to 600 | How long the same word cannot fire again |
 | `trigger.ends_conversation` | false | | Whether the word ends a conversation it is heard in |
+| `verify.mode` | `log` | `off`, `log`, `on` | Whether STT double-checks the word before the hub answers it. `log` blocks nothing and records what `on` would have done ([Double-checking a wake word](#double-checking-a-wake-word)) |
+| `verify.spellings` | `[]` | up to 12, each 1 to 40 printable characters | What else counts as the word in a transcript, beyond the spellings the hub knows for it |
 
 The file's `ptt` block is push-to-talk's own entry, without a name, threshold
-or satellites. It cannot be a trigger.
+or satellites. It cannot be a trigger. Its `verify` is ignored: push-to-talk
+is never double-checked.
 
 #### Saving
 
@@ -543,6 +574,73 @@ log names each one left behind. The hub writes the file as version 2 and leaves
 `rules.json` where it is, untouched. A `rules.json` that does not load
 migrates nothing, and those words route nowhere, as before, until they are
 given an action.
+
+### Double-checking a wake word
+
+A wake word model scores a sound, not a word, and a voice on a TV or on
+another device in the room can score as high as a person. On 29 Sep 2026 a
+Portuguese video playing in a bedroom woke `alexa` at 0.905 to 0.956, with
+"Obrigado." and "De manipular." after it, while real wakes scored 0.877 to
+1.0. The two overlap, so no threshold separates them, and the hub cannot know
+what a TV or a phone is playing. So it does what Amazon does: when a word
+fires, the hub transcribes the audio that held it with the stack's own STT,
+and answers only when the word is in the transcript. That works whatever is
+playing and for every word.
+
+**The audio** is the two seconds up to where the detector fired, as the model
+heard it: after the front-end, from a three-second buffer the listener keeps
+(`app/listening.py`). It goes to `SATELLITES_STT_URL` on the same path as a
+command, to the default engine with no language, so Parakeet detects it.
+
+**Each word's `verify.mode`** says what happens:
+
+| Mode | What happens |
+|---|---|
+| `off` | The model's word alone, as before. |
+| `log` | The default for every word. The wake goes ahead at once, and the check runs beside it and records what `on` would have done: a `wake_rejected` event with `mode: "log"`, and the telemetry record. Nothing waits for it. |
+| `on` | Nothing anyone can see or hear happens until STT has heard the word: no earcon, no duck, no ring and no conversation. The satellite keeps capturing the command meanwhile. Heard, the conversation starts and takes that command. Not heard, the wake is dropped with its command, silently, a `wake_rejected` event is published, and the satellite listens for its wake words again. |
+
+Turn a word to `on` once its `log` records show what it would have dropped.
+The earcon then waits for the check, and each record's `verify.ms` says how
+long that was. A word STT did not hear while a conversation waited for its
+next turn does not cost that turn: the conversation was listening anyway, and
+what followed is its turn, as if nothing had been detected. Push-to-talk, from the button or from Home Assistant, is never
+checked, and nor is a clip through `/inject`, which tests what follows the
+wake word.
+
+**Matching** (`app/verify.py`). The transcript and each spelling are
+normalised: lower case, accents removed, and every run of anything that is
+not a letter or a digit made one space. A spelling of k words is compared with
+every run of k words of the transcript, and runs of up to k words are also
+compared with it written without spaces, so "chatgpt" matches "chat gpt". A
+match is a `difflib` ratio of 0.8 or more, except for a spelling of five
+letters or fewer, which must be there exactly as written: at 0.8, "could" and
+"loud" were "cloud", "the rock" was "grock" and "Davis" was "javis". An empty
+transcript matches nothing. The spellings are the ones the hub knows STT writes for the word
+(`SPELLINGS` there: `alexa` also as "alexia", "aleksa", "alecsa" and
+"alessa"; `hey_claude` also as "cloud"), or for any other word its name with
+underscores as spaces, and then the word's own `verify.spellings`. A leading
+"hey" or "ok" is dropped from each, so "Hey, Jarvis." is heard as "jarvis".
+
+**It fails open.** An STT that errs, is not set, or has not answered within
+1.5 s lets the wake through, recorded as `error`: the model has already
+fired, and a satellite must not go deaf because STT is down. The
+transcription is not left running past those 1.5 s either, so a slow STT is
+not given a TV's wakes to transcribe ahead of the commands.
+
+**A second wake while a check is under way** on the same satellite supersedes
+it, and so do the stop button, a mute, a disconnect and the listener starting
+again after a fault: the check's result is recorded, as `superseded`, and not
+acted on. Nothing came of that wake, so whatever STT heard, it publishes no
+`wake_rejected` and keeps no clip.
+
+**Clips.** With [telemetry](#telemetry) on at level `full`, the audio of every
+wake STT did not hear (`rejected`, and `would_reject` under `log`) is kept as
+a WAV, 16 kHz, 16-bit mono, in `telemetry/clips/` on the data volume, named in
+its record's `verify.clip` and served by
+`GET /satellites/telemetry/clips/{name}`. These are the hard negatives a
+word's model is retrained on. They are kept and deleted with their day's
+records.
 
 ### Destinations
 
@@ -821,6 +919,98 @@ that satellite is ducked, so its music goes down.
   interrupted with the wake word.
 - It is the hub's routing: the satellite is never told.
 
+### Media
+
+Home Assistant plays music, its TTS and announcements on a satellite through
+`POST /satellites/{id}/media`
+([clients/home-assistant](../../clients/home-assistant/README.md)). Its own
+ffmpeg converts what it plays to exactly the format `GET /satellites/{id}`
+names under `media`, and the hub relays the PCM. The hub never decodes or
+resamples, so it needs nothing in its image for any format Home Assistant
+can read.
+
+```json
+"media": {"through": "<the satellite that plays it>",
+          "music":    {"rate": 44100, "channels": 2},
+          "announce": {"rate": 44100, "channels": 1},
+          "playing":  {"id": "<32 hex>", "source": "<the satellite it was sent to>", "since": 1790000000.0}}
+```
+
+- `through` is the satellite whose speaker plays it: this one, or its
+  [Output](#output). Both formats are that satellite's.
+- `music` is its caps `media`, or else its speaker's rate, mono.
+  `announce` is always its speaker's rate, mono.
+- `playing` is the stream playing there for this satellite, or `null`.
+- A WAV in another format is refused before any audio plays, with 415
+  `format_mismatch` naming the format wanted. Anything but 16-bit PCM, or no
+  audio within the first 64 KiB, is 415 `unsupported_audio`. Sizes of 0 or
+  0xFFFFFFFF (a WAV written to a pipe) are fine.
+
+Each speaker has two lanes:
+
+| Lane | Carries | Satellite with caps `media` (the Pi) | Any other (the Korvo) |
+|---|---|---|---|
+| Voice | Replies, earcons, Say, tones, announcements, one after another | Frame kind `2` | Frame kind `2` |
+| Media | Music, one stream at a time | Frame kind `5`, 44.1 kHz stereo, kept 1 s ahead. The Pi ducks it under the voice itself | Frame kind `2`, mono at its speaker's rate, sent only while the voice lane is idle. A reply pauses the music, which carries on after it |
+
+The Korvo's firmware is unchanged: to it, music is a long reply.
+
+- **Music** (`?announce=0`) replaces any stream already playing there. That
+  stream's upload is answered `superseded`, and a Pi is sent `media_flush`.
+- **An announcement** (`?announce=1`: `tts.speak`, `assist_satellite.announce`,
+  `play_media` with `announce`) is read whole, up to 120 s (413
+  `announce_too_long` beyond), and plays as one sentence on the voice lane,
+  after whatever is queued there. It is answered once it has been heard,
+  which is what `assist_satellite.announce` waits for. Behind the gateway
+  that answer must come within `GATEWAY_SATELLITES_MEDIA_TIMEOUT` (300 s) of
+  the upload's end, or Home Assistant is told 504 while it still plays: room
+  for two announcements at the cap and a reply before them.
+- **The answer** is `{"played_s", "stopped", "reason"}`. `reason` is `ended`,
+  `stopped` (`/media/stop`, or Stop on the page, `/flush`), `superseded`,
+  `speaker_off`, `muted` (the privacy mute), `unadopted`, `disconnected` or
+  `cancelled` (the upload broke off). A dropped announcement has
+  `played_s: null`.
+- **Stopping.** `POST /satellites/{id}/media/stop` ends the stream playing for
+  that satellite. Turning its speaker off, the privacy mute, Stop and
+  forgetting it end it too. A client still uploading when the stream stops
+  may see the connection close instead of the answer.
+- **A stalled upload** holds the stream open only as long as the gateway
+  lets it: a write to the hub that cannot go through for
+  `GATEWAY_SATELLITES_TIMEOUT` (120 s) ends it. So there is no pause, only
+  stop.
+
+### AirPlay
+
+A Pi can be an AirPlay receiver (caps `airplay`,
+[pi-satellite](../../clients/pi-satellite/README.md)). Its status carries
+`airplay`: whether it is on, what plays and from which phone, and, from the
+agent that takes commands (caps `airplay` `{"version": 2, "controls": true}`),
+`remote`:
+
+```json
+"remote": {"available": true,
+           "controls": ["play", "pause", "play_pause", "next", "previous", "stop", "disconnect"],
+           "last": {"command": "next", "ok": true, "status": 204, "confirmed": true, "at": 1790000000.0}}
+```
+
+- **Controls.** `POST /satellites/{id}/airplay/{command}` sends
+  `airplay_command` and waits up to 6 s for `airplay_result`. The agent asks
+  Shairport Sync, which asks the phone, and watches for 1.5 s whether the
+  phone did it (`confirmed`). The phone decides: it may take a command and
+  not act on it, and `confirmed: false` says so. Every command publishes an
+  `airplay_command` event.
+- **What is on offer** is `remote.controls`: `[]` with no phone connected
+  (409 `airplay_idle`), `["disconnect"]` while the phone does not take
+  remote control, and all seven while it does. A command not in it is 409
+  `airplay_no_remote`. An agent from before commands would ignore one
+  without a word, so it is refused at once (409 `airplay_no_controls`).
+- **The cover.** The satellite sends `artwork` once per picture, before the
+  status that names it (`airplay.artwork.sha256`). A status that names
+  another picture, or none, drops the one held, so the cover goes when the
+  music stops. `GET /satellites/{id}/airplay/artwork?v=<sha256>` is a 404 for
+  any other picture, so an answer kept under that SHA is always that
+  picture. A satellite whose status has no `airplay` never loses one.
+
 ## Command, conversation and trigger
 
 Each wake word has a mode (`app/router.py`, `app/dialogue.py`, and
@@ -1040,8 +1230,10 @@ it speaks may stop its reply.
 
 ### Trigger words
 
-A trigger word acts on its detection alone, with no second step to catch a
-false one, so it is stricter by default: threshold 0.7 rather than 0.5. The
+A trigger word acts on its detection alone, with no command after it to
+catch a false one, so it is stricter by default: threshold 0.7 rather than
+0.5. Its [double-check](#double-checking-a-wake-word) is the second step,
+once it is `on`. The
 same word does not fire again within `cooldown_s` (3 s), because one
 utterance can score over the threshold in several frames. Heard during a
 conversation, a trigger fires and the conversation goes on, unless
@@ -1145,14 +1337,16 @@ Turn it on with the **Telemetry** section of the Satellites tab, or
 `SATELLITES_TELEMETRY` only sets where a hub with no saved choice starts.
 
 Records are JSON lines in `telemetry/YYYY-MM-DD.jsonl` (UTC days), written
-by a background thread, so a turn never waits on the disk. Days older than
-`retention_days` (14) are deleted, then the oldest while the files are over
-`max_mb` (200); today's file is never deleted.
+by a background thread, so a turn never waits on the disk. At level `full`,
+the audio of each wake the [double-check](#double-checking-a-wake-word) did
+not hear is kept beside them in `telemetry/clips/`. Days older than
+`retention_days` (14) are deleted, clips with them, then the oldest days while
+the files and clips are over `max_mb` (200); today's are never deleted.
 
 | `kind` | One for each | What it holds |
 |---|---|---|
 | `turn` | Utterance, through to its reply | The wake word, its score and threshold; how the turn started (`wake`, `ptt`, `follow_up`, `inject`); the destination (type, model, pipeline, agent, tools); the command's length, why it ended, its loudness (`rms_dbfs`, `peak_dbfs`, `clipped_pct`) and the pause setting; the language, voice, transcript and reply; the error; `timings_ms` and `timeline_ms` as the event stream has them; the satellite's Wi-Fi, memory and dropped audio; the echo canceller's state; and `events`, below |
-| `wake` | Wake word the hub heard | Score, threshold, direction, and what the hub did: `started`, `carried_on`, `interrupted`, `ignored_busy`, `trigger`, `trigger_cooldown`. A clip through `/inject` is not counted |
+| `wake` | Wake word the hub heard | Score, threshold, direction, and what the hub did: `started`, `carried_on`, `interrupted`, `ignored_busy`, `trigger`, `trigger_cooldown`, `rejected` (the double-check did not hear it) or `superseded` (another wake, the stop button, a mute, a disconnect or the listener starting again after a fault came before its check was done). `verify` for a word that is double-checked, else null: its `mode`, the `decision` (`accepted`, `rejected`, `would_reject`, `error`), what STT `heard` (up to 120 characters), the spelling it `matched` or null, the STT's `ms`, and the `clip` kept, or null. A clip through `/inject` is not counted |
 | `near_miss` | Score that reached half its threshold and fell back without firing (at most one every 2 s per word) | The peak and the threshold: a word said to a satellite that did not hear it |
 | `session` | Satellite connecting or going away | Firmware, reset reason and boot timings; the close code and how long it was connected |
 | `device` | Satellite, once a minute | Wi-Fi signal, free heap and PSRAM, uptime, the speaker buffer, and the audio dropped since the last one |
@@ -1172,7 +1366,8 @@ speech (`t_ms`, as `timeline_ms` is):
 | `tts`, `synth` | Each sentence batch: engine, voice, `chars`, `ms`, `audio_s`, and `via` Home Assistant for a pipeline's own voice |
 
 **Levels.** `full` keeps what was said, answered, searched and returned, each
-cut to 400 characters. `timings` keeps every number and none of the words.
+cut to 400 characters, and the clips. `timings` keeps every number and none
+of the words: no transcript, no `verify.heard`, and no clip.
 Either way the records stay on the hub's volume; nothing is sent anywhere.
 
 The summary (`GET /satellites/telemetry/summary`) gives, per wake word, how
@@ -1182,7 +1377,8 @@ the largest median. Then each STT engine (requests, time, retries, statuses),
 the language models (rounds per turn, time to first token, tokens, models,
 finish reasons), each tool, Home Assistant's agents (their tool calls, failed
 targets, how often an intent was handled locally), each TTS engine (time per
-second of audio), each wake word (decisions, scores, near misses), and each
+second of audio), each wake word (decisions, the double-check's decisions as `verify`,
+scores, near misses), and each
 satellite (signal, memory, dropped audio, disconnects by close code). Turns
 from `/inject` are counted apart, as `injected_turns`.
 
@@ -1224,14 +1420,14 @@ action carried over from a rule saved before the rename says `"token_env":
 
 | In `SATELLITES_DATA_DIR` | What it holds |
 |---|---|
-| `satellites.json` | Each adopted satellite: its name, model and config, and its token's SHA-256 only |
+| `satellites.json` | Each adopted satellite: its name, model and config, and its token's SHA-256 only. Beside them, under `caps`, the caps each last proved its adoption with; kept outside the records so that the image before them still starts on the file |
 | `wake_words.json` | The wake words and push-to-talk, each with its action ([Wake words](#wake-words)) |
 | `secrets.json` | The API keys stored from the Satellites tab, mode 0600, in plain text ([Keys](#keys)) |
 | `firmware/` | Uploaded firmware images |
 | `models/` | Wake word models, fetched and uploaded (`SATELLITES_MODEL_DIR`) |
 | `debug/` | With `SATELLITES_DEBUG_AUDIO=1`, the last ten commands' audio |
 | `telemetry.json` | Whether [telemetry](#telemetry) is on, its level, retention and size cap |
-| `telemetry/` | With telemetry on, a JSON-lines file of records per UTC day |
+| `telemetry/` | With telemetry on, a JSON-lines file of records per UTC day, and at level `full`, `clips/`: the audio of each wake word the double-check did not hear |
 | `rules.json` | Routing from before 2026-09-25. Read once into `wake_words.json`, then left where it is |
 | `nodes.json` | A pre-release build's satellites. Read once into `satellites.json`, then left where it is |
 

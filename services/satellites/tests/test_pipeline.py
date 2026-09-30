@@ -8,6 +8,12 @@ which never resolve. The wake word model is FakeWakeWords, which fires on a
 marker sample rather than on speech, so these tests need no model files; the
 two at the end that do use the real openWakeWord models are skipped offline.
 
+Every word double-checks itself by default, in the mode that only records
+(Hub.on_wake), so every wake here also sends STT the audio that held it. The
+fake STT hears the word wherever that audio holds its marker, and counts
+those requests in `checks`, apart from `seen`: what these tests count is the
+commands. test_verify.py is where the double-check itself is tested.
+
 SATELLITES_FRONTEND is 0 unless a test says otherwise, so the mono stream is
 the first microphone as sent and a marker survives to the detector.
 """
@@ -23,6 +29,8 @@ import struct
 import threading
 import time
 import wave
+from email.parser import BytesParser
+from email.policy import HTTP
 from pathlib import Path
 
 import httpx
@@ -143,14 +151,27 @@ class FakeWakeWords:
 class Services:
     """STT, TTS and anything else on a *.test host."""
 
+    # The words a marker stands for, as STT writes them.
+    SAID = {MARK: "Hey Jarvis."}
+
     def __init__(self):
         self.seen: list[httpx.Request] = []
         self.transcript = "what time is it"
         self.stt_gate: threading.Event | None = None
         self.handlers = {"stt.test": self.stt, "tts.test": self.tts}
+        # The double-check of a wake word: STT given the audio that held a
+        # marker. `check` answers it (the request, and what the marker
+        # stands for); by default, with the word.
+        self.checks: list[httpx.Request] = []
+        self.check = lambda request, said: httpx.Response(200, json={"text": said})
 
     async def __call__(self, request: httpx.Request) -> httpx.Response:
         await request.aread()
+        said = self.wake_word_in(request)
+        if said is not None:
+            self.checks.append(request)
+            out = self.check(request, said)
+            return await out if asyncio.iscoroutine(out) else out
         self.seen.append(request)
         handler = self.handlers.get(request.url.host)
         if handler is None:
@@ -173,6 +194,24 @@ class Services:
         asks before its first transcription and when its answer is stale,
         is not one."""
         return [r.url.host for r in self.seen if r.url.path != "/health"]
+
+    def wake_word_in(self, request: httpx.Request) -> str | None:
+        """What STT would write for the wake word whose marker the audio
+        sent to it holds, or None for any other request."""
+        if request.url.host != "stt.test" or request.url.path != "/v1/audio/transcriptions":
+            return None
+        samples = sent_audio(request)
+        return next((said for value, said in self.SAID.items()
+                     if np.count_nonzero(samples == value) >= FRAME // 2), None)
+
+
+def sent_audio(request: httpx.Request) -> np.ndarray:
+    """The samples of the WAV a transcription request carries."""
+    head = b"Content-Type: " + request.headers["content-type"].encode() + b"\r\n\r\n"
+    msg = BytesParser(policy=HTTP).parsebytes(head + request.content)
+    part = next(p for p in msg.iter_parts() if p.get_param("name", header="content-disposition") == "file")
+    with wave.open(io.BytesIO(part.get_payload(decode=True))) as w:
+        return np.frombuffer(w.readframes(w.getnframes()), "<i2")
 
 
 class Satellite:

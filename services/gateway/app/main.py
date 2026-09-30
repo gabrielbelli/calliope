@@ -129,6 +129,9 @@ class Backend(NamedTuple):
     url: str             # no trailing slash; paths are appended verbatim
     read_timeout: float
     timeout_help: str    # the way out, quoted in the 504 body
+    # The clock on each write of an upload, when it is not read_timeout: only
+    # the satellites' media route, whose answer may come long after its body.
+    write_timeout: float | None = None
 
 
 # Connect is 2 s everywhere: a container on the same host either accepts
@@ -522,7 +525,8 @@ async def _proxy(request: Request, backend: Backend, *,
         request.method, url,
         headers=_request_headers(request),
         content=content,
-        timeout=httpx.Timeout(backend.read_timeout, connect=CONNECT_TIMEOUT),
+        timeout=httpx.Timeout(backend.read_timeout, connect=CONNECT_TIMEOUT,
+                              write=backend.write_timeout or backend.read_timeout),
     )
 
     try:
@@ -1180,6 +1184,18 @@ SATELLITES = Backend(
                  "a say waits for the whole sentence to be synthesised, and a "
                  "routing test for the assistant. Ask for less.",
 )
+# POST /satellites/{nid}/media is answered once what it carried has played.
+# Music is answered within a second of its upload's end. An announcement is
+# read whole at once and answered only when it has been heard, after whatever
+# the satellite's voice lane already held: up to the hub's cap of 120 s
+# (ANNOUNCE_MAX_S) of its own, behind a reply or another announcement. Under
+# the read timeout above, a long one would be answered 504 while it still
+# played, and Home Assistant's assist_satellite.announce and tts.speak would
+# call it a failure. 300 s is two announcements at that cap and a reply
+# before them.
+# Its writes keep GATEWAY_SATELLITES_TIMEOUT: an upload the hub stops taking
+# still ends then.
+SATELLITES_MEDIA_TIMEOUT = float(os.getenv("GATEWAY_SATELLITES_MEDIA_TIMEOUT", "300"))
 
 SATELLITES_PATHS = (
     ("GET", "/satellites"),
@@ -1214,23 +1230,37 @@ SATELLITES_PATHS = (
     ("POST", "/satellites/llm/test"),
     # Telemetry, off until turned on: its settings, its records and their
     # summary. Above /satellites/{nid}: PUT and DELETE have no twin there.
+    # clips/{name} is the audio of a wake word the hub's double-check did not
+    # hear, kept at level full for retraining the word's model.
     ("GET", "/satellites/telemetry"),
     ("PUT", "/satellites/telemetry"),
     ("DELETE", "/satellites/telemetry"),
     ("GET", "/satellites/telemetry/records"),
     ("GET", "/satellites/telemetry/summary"),
+    ("GET", "/satellites/telemetry/clips/{name}"),
     ("GET", "/satellites/{nid}"),
     ("PATCH", "/satellites/{nid}"),
-    # An AirPlay receiver's cover, for its section on the Satellites tab.
+    # An AirPlay receiver's cover, and the phone's transport controls (play,
+    # pause, next...), for its section on the Satellites tab and for Home
+    # Assistant's media player.
     ("GET", "/satellites/{nid}/airplay/artwork"),
+    ("POST", "/satellites/{nid}/airplay/{command}"),
     ("GET", "/satellites/{nid}/listen"),
     # inject is routed for scripts that verify the listening path with a
-    # recorded clip, and ptt for Home Assistant's integration, behind the same
-    # keys as everything else here; the page calls neither (see NOT_ON_PAGE in
-    # tests/test_gateway.py).
+    # recorded clip, and ptt, media and media/stop for Home Assistant's
+    # integration, behind the same keys as everything else here; the page
+    # calls none of them (see NOT_ON_PAGE in tests/test_gateway.py).
+    #
+    # media is Home Assistant's long upload: a WAV its ffmpeg is still
+    # writing, played as it arrives and answered when it has played. It is
+    # streamed both ways and never buffered, as every POST here is
+    # (_to_satellites). The read timeout starts only once the body has ended,
+    # so music longer than GATEWAY_SATELLITES_TIMEOUT plays to its end; a
+    # write to the hub that stalls for longer than that ends it. The read
+    # timeout is its own, SATELLITES_MEDIA_TIMEOUT (_media_to_satellites).
     *(("POST", f"/satellites/{{nid}}/{action}") for action in (
         "adopt", "forget", "identify", "reboot", "lights", "tone", "say",
-        "flush", "set-hub", "inject", "ptt")),
+        "flush", "set-hub", "inject", "ptt", "media", "media/stop")),
 )
 
 
@@ -1242,9 +1272,23 @@ async def _to_satellites(request: Request) -> Response:
                         content=request.stream() if streaming else None)
 
 
+async def _media_to_satellites(request: Request) -> Response:
+    """POST /satellites/{nid}/media, on SATELLITES_MEDIA_TIMEOUT. Derived from
+    SATELLITES when called rather than at import, so the two can never point
+    at different hubs."""
+    if not SATELLITES.url:
+        return _unreachable(SATELLITES)
+    backend = SATELLITES._replace(
+        read_timeout=SATELLITES_MEDIA_TIMEOUT, write_timeout=SATELLITES.read_timeout,
+        timeout_help="An announcement is answered once it has played, after "
+                     "whatever the satellite already had queued; an upload the "
+                     f"hub stopped taking ends after {SATELLITES.read_timeout:.0f} s.")
+    return await _proxy(request, backend, content=request.stream())
+
+
 for _method, _path in SATELLITES_PATHS:
-    app.add_api_route(_path, _to_satellites, methods=[_method],
-                      include_in_schema=False)
+    app.add_api_route(_path, _media_to_satellites if _path == "/satellites/{nid}/media"
+                      else _to_satellites, methods=[_method], include_in_schema=False)
 
 
 # THE DEVICE SOCKET HAS TWO PATHS AND ONE HANDLER. The feature was called
