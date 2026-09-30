@@ -14,12 +14,25 @@ DUCKING. While the satellite speaks, or while the hub holds a duck (someone
 is talking to it, or to a satellite that plays through it), every other
 stream (AirPlay, and later Bluetooth) goes down to a fraction of its volume,
 and back when it is over. Through pipewire-pulse's pactl, which reads and
-sets each stream's own volume."""
+sets each stream's own volume.
+
+REMOTE CONTROL. Play, pause, next and the rest go to the phone as DACP
+requests, through Shairport Sync's own D-Bus call RemoteCommand: the only one
+that hands back the phone's answer (the MPRIS methods throw it away). The
+phone's app decides whether it acts on a request it accepted, so the agent
+watches MPRIS afterwards to say whether it did (agent._confirm). Disconnect
+is Shairport Sync's DropSession, which needs nothing from the phone.
+
+THE COVER comes through the metadata pipe; a picture that went by while no
+agent read the pipe (the agent restarted mid-track) is found again in
+Shairport Sync's own cover cache (cached_cover), private to calliope."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -29,6 +42,7 @@ import stat
 import threading
 import time
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 log = logging.getLogger("calliope.airplay")
 
@@ -44,6 +58,24 @@ VOLUME_HOOK = "/opt/calliope/current/bin/calliope-airplay-volume"
 # as Shairport Sync's own volume control does: its first step is quiet.
 VOLUME_RANGE_DB = 60
 OURS = "Assistant"        # media.role of the agent's own streams (pipewire.Player)
+ARTWORK_MAX = 2 * 1024 * 1024   # the largest cover sent to the hub, or taken from the cache
+# Shairport Sync keeps each cover here too, as cover-<md5>.<jpg|png>: beside
+# the pipe, private to calliope (0700), and gone at reboot with the rest of
+# the runtime directory.
+COVERS = PIPE.parent / "calliope-airplay-covers"
+
+# The hub's commands (airplay_command), as DACP names them.
+COMMANDS = {"play": "play", "pause": "pause", "play_pause": "playpause", "next": "nextitem",
+            "previous": "previtem", "stop": "stop"}
+CONTROLS = (*COMMANDS, "disconnect")
+# RemoteCommand's own answers where the phone gave none: what each means.
+SHAIRPORT_CODES = {490: "no DACP port known yet", 491: "the phone refused the connection",
+                   492: "argument out of range", 493: "failed to send", 494: "busy",
+                   495: "receive error", 496: "cannot connect", 497: "cannot open a socket",
+                   498: "bad address"}
+BUSY = 494        # the request met Shairport Sync's own once-a-second probe of the phone
+DBUS_NAME = "org.gnome.ShairportSync"
+DBUS_PATH = "/org/gnome/ShairportSync"
 
 
 def available() -> bool:
@@ -56,7 +88,7 @@ def _quote(text: str) -> str:
     return '"' + clean.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def config(name: str, pipe: Path = PIPE) -> str:
+def config(name: str, pipe: Path = PIPE, covers: Path = COVERS) -> str:
     """Shairport Sync's configuration for this satellite."""
     return "\n".join([
         "// Written by the Calliope satellite agent (calliope_pi/airplay.py).",
@@ -92,6 +124,13 @@ def config(name: str, pipe: Path = PIPE) -> str:
         '  include_cover_art = "yes";',
         f"  pipe_name = {_quote(str(pipe))};",
         "  pipe_timeout = 5000;",
+        # Shairport Sync names each picture cover-<md5>.<jpg|png> here, and
+        # MPRIS's artUrl points at it: where the agent finds the cover again
+        # after a restart (cached_cover). Private (0700, AirPlay.apply) and
+        # emptied at reboot, unlike its default in /tmp, which any user can
+        # write to. Adding the line changes the configuration's text, so
+        # Shairport Sync restarts once on the release that adds it.
+        f"  cover_art_cache_directory = {_quote(str(covers))};",
         "};",
         ""])
 
@@ -106,12 +145,18 @@ async def _run(*argv: str, timeout: float = 15.0) -> tuple[int, str]:
     except TimeoutError:
         proc.kill()
         return 124, f"{argv[0]} did not answer within {timeout:g} s"
+    except asyncio.CancelledError:
+        # The caller stopped waiting (agent._confirm's deadline): nothing is
+        # left running behind it.
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        raise
     return proc.returncode or 0, out.decode(errors="replace")
 
 
 class AirPlay:
-    def __init__(self, conf: Path = CONF, pipe: Path = PIPE):
-        self.conf, self.pipe = conf, pipe
+    def __init__(self, conf: Path = CONF, pipe: Path = PIPE, covers: Path = COVERS):
+        self.conf, self.pipe, self.covers = conf, pipe, covers
         self.error: str | None = None
 
     async def apply(self, enabled: bool, name: str) -> None:
@@ -125,8 +170,15 @@ class AirPlay:
             await _run("systemctl", "--user", "disable", "--now", UNIT)
             self.error = None
             return
-        text = config(name, self.pipe)
+        text = config(name, self.pipe, self.covers)
         make_fifo(self.pipe)
+        # Made before Shairport Sync starts, which would otherwise make it
+        # itself with its umask cleared, open to every user.
+        try:
+            self.covers.mkdir(parents=True, exist_ok=True)
+            self.covers.chmod(0o700)
+        except OSError as e:
+            log.warning("AirPlay cover cache %s: %s", self.covers, e)
         changed = not self.conf.exists() or self.conf.read_text() != text
         if changed:
             self.conf.parent.mkdir(parents=True, exist_ok=True)
@@ -158,6 +210,39 @@ def make_fifo(path: Path) -> None:
         log.warning("AirPlay metadata pipe %s: %s", path, e)
 
 
+COVER_NAME = re.compile(r"^cover-([0-9a-f]{32})\.(jpg|png)$")
+
+
+def cached_cover(art_url: str, cache_dir: Path = COVERS) -> bytes | None:
+    """The picture MPRIS's artUrl names, from Shairport Sync's cover cache,
+    or None. Only a file:// URL straight into the cache, named as Shairport
+    Sync names a cover, a regular file no larger than ARTWORK_MAX, whose MD5
+    is its name: a file half written, or put there by anything else, is
+    refused."""
+    try:
+        url = urlsplit(art_url)
+    except ValueError:
+        return None
+    if url.scheme != "file":
+        return None
+    path = Path(unquote(url.path))
+    m = COVER_NAME.match(path.name)
+    if m is None:
+        return None
+    try:
+        if path.parent.resolve() != cache_dir.resolve():
+            return None
+        st = path.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_size > ARTWORK_MAX:
+            return None
+        data = path.read_bytes()
+    except (OSError, ValueError):   # ValueError: a NUL in the path, which no file has
+        return None
+    if len(data) > ARTWORK_MAX or hashlib.md5(data, usedforsecurity=False).hexdigest() != m.group(1):
+        return None
+    return data
+
+
 ITEM = re.compile(rb"<item><type>([0-9a-f]{8})</type><code>([0-9a-f]{8})</code><length>(\d+)</length>"
                   rb"(?:\s*<data encoding=\"base64\">\s*([A-Za-z0-9+/=\s]*)</data>)?\s*</item>")
 
@@ -179,7 +264,8 @@ CORE_INT = {"astm": "duration_ms", "astn": "track_number", "astc": "track_count"
 SSNC_TEXT = {"snam": "client_name", "snua": "client_agent", "clip": "client_ip", "svip": "server_ip",
              "cmod": "client_model", "cdid": "client_device_id", "cmac": "client_mac", "styp": "stream_type",
              "daid": "dacp_id", "ofmt": "output_format", "ofps": "output_rate", "sdsc": "stream_description"}
-# Kept on the Pi only: with it, anyone on the network could control the phone.
+# Never kept, not even on the Pi: with it, anyone on the network could
+# control the phone. Shairport Sync holds its own copy, which RemoteCommand uses.
 PRIVATE = frozenset({"acre"})
 RTP_RATE = 44100
 
@@ -200,13 +286,15 @@ def _decoded(kind: str, code: str, data: bytes):
 
 class Metadata:
     """Everything Shairport Sync says through its metadata pipe, kept for the
-    page and for what comes later (Home Assistant, remote control): every
-    item raw (`raw`, by "type/code"), and the parts a person reads decoded
-    (`state`): the session, play and pause, the track and its source file,
-    progress, the phone (name, model, address, app), its volume, and the
-    cover art (kept on the Pi, named by its hash). The phone's remote-control
-    token stays in `remote` and never leaves the Pi. `on_change` is called
-    from the reading thread when something a person would see changed."""
+    page and Home Assistant: every item raw (`raw`, by "type/code"), and the
+    parts a person reads decoded (`state`): the session, play and pause, the
+    track and its source file, progress, the phone (name, model, address,
+    app), its volume, and the cover art (kept on the Pi, named by its hash).
+    The phone's remote-control token is never kept at all (PRIVATE).
+    `pictured` says whether this session has sent a picture, even an empty
+    one, so a cover from the cache never replaces the pipe's word.
+    `on_change` is called from the reading thread when something a person
+    would see changed."""
 
     def __init__(self, pipe: Path = PIPE, on_change=None, art_dir: Path | None = None):
         self.pipe, self.on_change = pipe, on_change
@@ -215,8 +303,12 @@ class Metadata:
                             "artist": None, "album": None, "volume": None, "since": None,
                             "track": {}, "client_info": {}, "progress": None, "artwork": None}
         self.raw: dict = {}
-        self.remote: dict = {}
+        self.pictured = False
         self.art_file = self.art_dir / "calliope-airplay-cover"
+        # The pipe's thread and the agent's cover recovery both write the
+        # cover: one at a time, so the file and the state always name the
+        # same picture, and a recovery never lands on one the pipe just sent.
+        self._art_lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._picture: bytearray | None = None
 
@@ -253,14 +345,16 @@ class Metadata:
         before = json.dumps(s, sort_keys=True, default=str)
         key = f"{kind}/{code}"
         if code in PRIVATE:
-            self.remote[code] = data.decode("ascii", "replace")
-        elif code != "PICT":
+            return False
+        if code != "PICT":
             self.raw[key] = {"value": _decoded(kind, code, data), "at": round(time.time(), 3)}
         text = data.decode("utf-8", "replace").strip() or None
         if kind == "ssnc":
             if code in ("abeg", "pbeg", "prsm"):
                 s["session"], s["playing"] = True, True
                 s["since"] = s["since"] or time.time()
+                if code == "abeg":
+                    self.pictured = False
             elif code == "pfls":
                 s["playing"] = False
             elif code == "prgr" and text:
@@ -278,7 +372,6 @@ class Metadata:
                 if code == "aend":
                     s.update(client=None, title=None, artist=None, album=None, volume=None,
                              track={}, client_info={}, artwork=None)
-                    self.remote.clear()
             elif code == "pvol" and text:
                 try:
                     db = float(text.split(",")[0])
@@ -309,21 +402,35 @@ class Metadata:
 
     def _artwork(self, data: bytes) -> None:
         """The cover, saved beside the pipe by its hash, and named in the state."""
-        if not data:
-            self.state["artwork"] = None
-            return
-        kind = "jpeg" if data[:3] == b"\xff\xd8\xff" else "png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "bin"
-        digest = __import__("hashlib").sha256(data).hexdigest()
-        try:
-            self.art_dir.mkdir(parents=True, exist_ok=True)
-            self.art_file.write_bytes(data)
-        except OSError:
-            pass
-        self.state["artwork"] = {"sha256": digest, "bytes": len(data), "type": kind}
+        with self._art_lock:
+            self.pictured = True
+            if not data:
+                self.state["artwork"] = None
+                return
+            kind = "jpeg" if data[:3] == b"\xff\xd8\xff" else "png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "bin"
+            digest = hashlib.sha256(data).hexdigest()
+            try:
+                self.art_dir.mkdir(parents=True, exist_ok=True)
+                self.art_file.write_bytes(data)
+            except OSError:
+                pass
+            self.state["artwork"] = {"sha256": digest, "bytes": len(data), "type": kind}
+
+    def recover_artwork(self, data: bytes) -> bool:
+        """A cover found again in Shairport Sync's cache (cached_cover), kept
+        exactly as the same picture from the pipe would have been; whether it
+        was. Not when the pipe has sent a picture since the agent looked:
+        reading MPRIS and the cache takes a while, and the pipe's word is
+        this track's. Asked again under the lock for that reason."""
+        with self._art_lock:
+            if self.pictured:
+                return False
+            self._artwork(data)
+            return True
 
     def view(self) -> dict:
-        """What the status carries: the decoded state, and every raw item."""
-        return {"raw": dict(self.raw), "remote_control": bool(self.remote)}
+        """What the status carries beside the decoded state: every raw item."""
+        return {"raw": dict(self.raw)}
 
 
 async def mpris_metadata() -> dict:
@@ -344,7 +451,8 @@ async def mpris_metadata() -> dict:
         v = (data.get(key) or {}).get("data")
         return ", ".join(v) if isinstance(v, list) else v
     return {k: v for k, v in (("title", value("xesam:title")), ("artist", value("xesam:artist")),
-                              ("album", value("xesam:album")), ("art_url", value("mpris:artUrl"))) if v}
+                              ("album", value("xesam:album")), ("art_url", value("mpris:artUrl")),
+                              ("trackid", value("mpris:trackid"))) if v}
 
 
 async def mpris_status() -> str | None:
@@ -359,6 +467,58 @@ async def mpris_status() -> str | None:
     try:
         return json.loads(out).get("data")
     except ValueError:
+        return None
+
+
+async def remote_available() -> bool | None:
+    """Whether Shairport Sync can reach the phone's remote control now
+    (RemoteControl.Available: it asks the phone every second, and five
+    failures in a row make it false); None when it cannot be asked."""
+    code, out = await _run("busctl", "--user", "--json=short", "get-property", DBUS_NAME, DBUS_PATH,
+                           f"{DBUS_NAME}.RemoteControl", "Available", timeout=3.0)
+    if code:
+        return None
+    try:
+        data = json.loads(out).get("data")
+    except (ValueError, AttributeError):
+        return None
+    return data if isinstance(data, bool) else None
+
+
+async def remote_command(command: str) -> tuple[bool, int | None, str | None]:
+    """One of CONTROLS, sent to the phone: (ok, status, error). `status` is
+    the phone's own HTTP status, or Shairport Sync's 490-498 when it could not
+    ask (SHAIRPORT_CODES), and None for disconnect, which asks the phone
+    nothing. A busy answer is asked once more."""
+    if command == "disconnect":
+        code, out = await _run("busctl", "--user", "call", DBUS_NAME, DBUS_PATH, DBUS_NAME, "DropSession",
+                               timeout=8.0)
+        if code == 0:
+            return True, None, None
+        return False, None, out.strip()[-200:] or f"busctl exited {code}"
+    if command not in COMMANDS:
+        return False, None, "unknown command"
+    for attempt in range(2):
+        code, out = await _run("busctl", "--user", "--json=short", "--timeout=5", "call", DBUS_NAME, DBUS_PATH,
+                               DBUS_NAME, "RemoteCommand", "s", COMMANDS[command], timeout=8.0)
+        status = _remote_status(out) if code == 0 else None
+        if status != BUSY or attempt:
+            break
+        await asyncio.sleep(0.3)
+    if status is not None and 200 <= status < 300:
+        return True, status, None
+    if status in SHAIRPORT_CODES:
+        return False, status, SHAIRPORT_CODES[status]
+    if status is not None:
+        return False, status, f"the phone answered {status}"
+    return False, None, out.strip()[-200:] or f"busctl exited {code}"
+
+
+def _remote_status(out: str) -> int | None:
+    """The status in RemoteCommand's answer, {"type": "is", "data": [status, body]}."""
+    try:
+        return int(json.loads(out)["data"][0])
+    except (ValueError, TypeError, KeyError, IndexError):
         return None
 
 

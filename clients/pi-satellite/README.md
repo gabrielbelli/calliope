@@ -14,10 +14,8 @@ Tested target: Raspberry Pi 3 Model B+ on Raspberry Pi OS Lite 64-bit
 | Microphone | Optional: any USB microphone or input. Sent at 16 kHz with the output's monitor as channel 0, so the hub's echo canceller removes the satellite's own voice and music |
 | Updates | Signed bundles from the hub, installed beside the running release, rolled back if the new one does not reach the hub within 180 s |
 | Wi-Fi | On first boot, or after three minutes without a network, an open network `calliope-sat-XXXX` with a setup page, as on the ESP32 |
-
-| AirPlay | An AirPlay receiver under the satellite's name (or one you give it), on the same output, turned down while the satellite speaks or someone talks to it |
-
-Bluetooth comes next, through the same output.
+| AirPlay | An AirPlay receiver under the satellite's name (or one you give it), on the same output, turned down while the satellite speaks or someone talks to it. Play, pause, skip and disconnect from the Satellites tab and Home Assistant |
+| Music | Home Assistant's media player, in stereo, on a stream of its own that goes down under the voice ([Music from the hub](#music-from-the-hub)) |
 
 ## Audio quality
 
@@ -62,8 +60,21 @@ the Satellites tab shows it under Device and in the AirPlay section, whose
 **Path** says "Bit-perfect" when the phone's samples reach the card unchanged,
 or what they were converted from and to. Two things are never bit-perfect by
 design: a reply ducks the music while it speaks, and a reply mixed over music
-is mixed. The phone's volume and the satellite's **Volume** set the same
-output volume, so the last one moved wins.
+is mixed. The phone's volume and the satellite's **Volume** are one volume,
+the output's own: the last one moved wins, and the satellite reports what
+the phone set (**One volume** under [AirPlay](#airplay)).
+
+## Music from the hub
+
+Home Assistant's media player plays through the hub's media lane: binary
+frames of kind 5, 44.1 kHz stereo (`caps.media`), which the agent plays on a
+stream of its own (`media.role` Music), apart from the voice. A reply, Say or
+tone does not stop the music: the music goes down under the voice, as AirPlay
+does, and comes back afterwards. `media_flush` drops the music that is
+buffered and leaves the voice alone; `flush` drops only the voice.
+Announcements come on the voice lane, as a reply does, and nothing plays
+while the speaker is off. The status reports `media_buffered_ms` and
+`media_dropped`.
 
 ## AirPlay
 
@@ -93,19 +104,81 @@ id), its volume, and the cover (saved on the Pi, named by its SHA-256).
 Whether it plays comes from Shairport Sync's own MPRIS interface on
 calliope's session bus, the player's own word, and from the metadata's
 events where MPRIS is not there. The phone's remote-control token
-(`acre`) stays on the Pi: the hub's API has no key, and the token controls
-the phone's playback.
+(`acre`) is never kept, not even on the Pi: with it, anyone on the network
+could control the phone. Shairport Sync keeps its own copy, and the remote
+control goes through Shairport Sync (below).
 
-**Volume.** A phone keeps its own: it sends its slider's position when it
-connects and whenever it moves, and that sets the output's volume. (Setting
-the phone's slider from here, over Shairport Sync's remote control, was
-tried on 29 Sep 2026: phones did not keep it.)
+**One volume.** A phone keeps its own volume: it sends its slider's
+position when it connects and whenever it moves, and
+`bin/calliope-airplay-volume` sets the output's volume from it. The agent
+reads the output's volume back (`wpctl get-volume`) at each periodic status
+and whenever AirPlay's state changes, once the hub has welcomed it. When
+the phone has moved it, the agent takes it as the satellite's own `volume`,
+saves it and reports it with `cause: "local"`, so the hub, the Satellites
+tab and Home Assistant show the real volume. The agent sets the output's
+volume only on `welcome`, on a `config` that contains `volume`, and when the
+output changes (a new output has a volume of its own, which must not be
+taken for the phone's): a change to any other setting no longer puts the
+phone's volume back. While the chosen output is unplugged nothing is read
+back, as what plays meanwhile is a stand-in. Setting it also
+unmutes the output, which the phone's hook mutes at the bottom of its
+slider. (Setting the phone's slider from here, over Shairport Sync's remote
+control, was tried on 29 Sep 2026: phones did not keep it.)
+
+**Remote control.** The hub's `airplay_command` (the Satellites tab's
+controls, Home Assistant's media player) asks the phone to play, pause, play
+or pause, skip forward or back, or stop. It goes through Shairport Sync's
+D-Bus call `RemoteCommand`, the only one that returns the phone's answer: the
+phone's HTTP status (normally 204), or Shairport Sync's own 490 to 498 when
+it could not ask (the answer's `error` says why). A 494, Shairport Sync busy
+with its own once-a-second probe of the phone, is asked once more.
+`disconnect` drops the session (`DropSession`), which needs nothing from the
+phone, and the phone loses the receiver.
+
+The phone decides. A 204 says only that it took the request, so the agent
+then watches MPRIS for up to 1.5 s and answers `confirmed: true` when it saw
+the change: playing, paused, another track, stopped. An app that takes a
+request and does nothing with it gives `confirmed: false`, and so does a
+play/pause or skip when MPRIS could not be read before it, as there is then
+nothing to see a change against. The hub waits 6 s for the answer, so the
+watching never takes it past 5 s after the command arrived; only a phone
+slow to answer can. The status says
+what can be asked now, in `airplay.remote`:
+
+| `controls` | When |
+|---|---|
+| `[]` | No session (`available` is `null`) |
+| `["disconnect"]` | A session, but the phone does not answer its remote control (Shairport Sync's `RemoteControl.Available` is false: five failed probes in a row) |
+| all seven | A session, and the phone answers |
+
+`remote.last` is the last command and how it went.
 
 **The cover** of what plays goes to the hub once per picture (`artwork`
 message, JPEG or PNG up to 2 MB, named by its SHA-256), which serves it at
 `GET /satellites/{id}/airplay/artwork`; the Satellites tab shows it in the
-AirPlay section. The title, artist and album come from MPRIS where the
-metadata has not said them yet.
+AirPlay section. The cover always goes before the status that names it: the
+hub drops a cover that the status no longer names, so the cover of music
+that has stopped goes too.
+
+**The cover after a restart.** The pipe delivers each picture once, to
+whoever reads it then: an agent restarted in the middle of a track misses
+it, and nothing can ask the phone to send it again. Shairport Sync also
+keeps the picture in its cover cache as `cover-<md5>.jpg` (or `.png`), and
+MPRIS's `artUrl` points at it. The agent has Shairport Sync keep that cache
+in a private directory (`$XDG_RUNTIME_DIR/calliope-airplay-covers`, mode
+0700, emptied at reboot) instead of its default in `/tmp`, which any user
+can write to. After a restart the agent takes the cover from there, and only:
+
+- while MPRIS says Playing or Paused. The `artUrl` outlives the session, so
+  a stopped player still names the cover of music that is over;
+- from a file straight in that directory whose MD5 is its name, which also
+  refuses a file that is half written;
+- when the pipe has sent no picture (or "no picture") in this session.
+
+The title, artist and album come back from MPRIS the same way, where the
+metadata has not said them yet. The release that adds the cache directory
+changes Shairport Sync's configuration, so Shairport Sync restarts once when
+that release is installed, which ends any AirPlay session playing then.
 
 The status
 carries them as `airplay` and is sent at once when they change, so the
@@ -147,8 +220,8 @@ password when Imager writes.
    `calliope-sat-XXXX` (the last four of its MAC) within two minutes.
 3. Join it from a phone. The setup page lists the networks it found. Choose
    yours, enter the password, check the hub address, and press **Join**.
-   On a Pi 3, choose a **5 GHz** network if you will use Bluetooth audio:
-   its 2.4 GHz Wi-Fi shares the Bluetooth radio, and music stutters.
+   On a Pi 3, a **5 GHz** network is the better choice: its 2.4 GHz Wi-Fi
+   shares the radio with Bluetooth.
 4. The Pi joins, installs PipeWire (a few minutes on the first boot), and
    appears on the **Satellites** tab. Adopt it.
 
@@ -207,12 +280,24 @@ model), `audio` (PipeWire's outputs and inputs, and the defaults), and in
 its status `temp_c`, `throttled` (the firmware's under-voltage and
 throttling flags) and `load`. `heap` is the memory available.
 
+The caps in its `hello` say what it has, and the hub, the Satellites tab and
+Home Assistant offer only that:
+
+| Cap | What it says |
+|---|---|
+| `speaker` | The voice: 44.1 kHz mono s16le, kind 2 frames |
+| `media` | The media lane: 44.1 kHz stereo s16le, kind 5 frames and `media_flush` ([Music from the hub](#music-from-the-hub)) |
+| `mic` | Only while it has a microphone: 16 kHz, with the output's monitor as channel 0 (`reference`). `max_gain_db` 3.5 is the most `mic_gain_db` does here: the agent raises the input's volume to 1.5 at most, 20·log10(1.5) = 3.52 dB |
+| `airplay` | `{"version": 2, "controls": true}` where Shairport Sync is installed: it takes `airplay_command`, and its status has `airplay.remote` |
+| `health` | The board's readings its status carries: `temp_c`, `throttled`, `under_voltage`, `load` |
+| `earcons`, `duck`, `audio_devices`, `bundle`, `ota_key` | As in the hub's README (`services/satellites/README.md`) |
+
 ## Tests
 
 ```bash
 python3 -m pytest    # needs pytest, pytest-asyncio, websockets, cryptography
 ```
 
-They run the agent against a fake hub on a real WebSocket, with PipeWire and
-`calliope-root` replaced, and install, confirm and roll back real signed
-bundles in a temporary directory.
+They run the agent against a fake hub on a real WebSocket, with PipeWire,
+Shairport Sync and `calliope-root` replaced, and install, confirm and roll
+back real signed bundles in a temporary directory. Nothing plays.

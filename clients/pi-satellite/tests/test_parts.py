@@ -1,10 +1,11 @@
-"""The small parts: frames, PipeWire's device list, the state file, the
-board's readings and the Wi-Fi setup page."""
+"""The small parts: frames, PipeWire's device list, its players and volumes,
+the state file, the board's readings and the Wi-Fi setup page."""
 
 from __future__ import annotations
 
 import json
 import struct
+import time
 from array import array
 
 from calliope_pi import frames, pipewire, portal, state, system
@@ -68,6 +69,85 @@ def test_frames_have_the_hubs_layout():
     fw = frames.parse(struct.pack("<BBBBI", 3, 0, 0, 0, 8192) + b"chunk")
     assert (fw.kind, fw.offset, fw.payload) == (frames.FIRMWARE, 8192, b"chunk")
     assert frames.parse(b"\x02short") is None and frames.parse(b"") is None
+
+
+def test_a_media_frame_is_parsed_with_its_sequence():
+    f = frames.parse(struct.pack("<BBBBIQ", 5, 0, 2, 0, 41, 0) + b"\x01\x00\x02\x00")
+    assert (f.kind, f.seq, f.payload) == (frames.MEDIA, 41, b"\x01\x00\x02\x00")
+    assert frames.parse(b"\x05short") is None
+
+
+class FakeProc:
+    """A pw-cat that takes everything and ends when asked."""
+    returncode = None
+
+    def __init__(self):
+        self.stdin = self
+
+    def write(self, data):
+        pass
+
+    async def drain(self):
+        pass
+
+    def close(self):
+        pass
+
+    def kill(self):
+        self.returncode = -9
+
+    async def wait(self):
+        self.returncode = self.returncode or 0
+
+
+async def test_a_stereo_player_opens_a_two_channel_stream_and_counts_its_time_in_frames(monkeypatch):
+    started = []
+
+    async def spawn(*argv, **kw):
+        started.append(argv)
+        return FakeProc()
+    monkeypatch.setattr(pipewire.asyncio, "create_subprocess_exec", spawn)
+    p = pipewire.Player(channels=2, role="Music")
+    pcm = b"\x00\x00" * 2 * 882            # 20 ms of stereo at 44.1 kHz: 3,528 bytes
+    before = time.monotonic()
+    await p.write(pcm)
+    after = time.monotonic()
+    [argv] = started
+    assert argv[argv.index("--channels") + 1] == "2" and argv[argv.index("--rate") + 1] == "44100"
+    assert json.loads(argv[argv.index("--properties") + 1]) == {"media.role": "Music"}
+    # A frame is two channels of two bytes: 3,528 bytes are 20 ms, not 40.
+    assert before + len(pcm) / 4 / 44100 <= p.until <= after + len(pcm) / 4 / 44100
+    await p.flush()
+
+
+async def test_get_volume_reads_wpctl_and_ignores_muted(monkeypatch):
+    asked, answers = [], iter([(0, "Volume: 0.32\n"), (0, "Volume: 0.32 [MUTED]\n"), (0, "Volume: 1.00\n"),
+                               (1, "Object not found\n"), (0, "nonsense\n")])
+
+    async def run(*argv, timeout=5.0):
+        asked.append(argv)
+        return next(answers)
+    monkeypatch.setattr(pipewire, "_run", run)
+    sink = pipewire.Device("alsa_output.usb", "USB Audio", "alsa", 41)
+    assert await pipewire.get_volume(sink) == 0.32
+    assert await pipewire.get_volume(sink) == 0.32, "a mute is not a volume"
+    assert await pipewire.get_volume(None) == 1.0
+    assert await pipewire.get_volume(sink) is None and await pipewire.get_volume(sink) is None
+    assert asked[0] == ("wpctl", "get-volume", "41") and asked[2] == ("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@")
+
+
+async def test_setting_the_volume_unmutes_the_output(monkeypatch):
+    asked = []
+
+    async def run(*argv, timeout=5.0):
+        asked.append(argv)
+        return 0, ""
+    monkeypatch.setattr(pipewire, "_run", run)
+    assert await pipewire.set_volume(pipewire.Device("alsa_output.usb", "USB Audio", "alsa", 41), 0.4)
+    await pipewire.set_volume(None, 1.2)
+    assert asked == [("wpctl", "set-volume", "41", "0.400"), ("wpctl", "set-mute", "41", "0"),
+                     ("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "1.000"),
+                     ("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0")]
 
 
 def test_the_state_survives_a_restart_and_takes_only_known_settings():

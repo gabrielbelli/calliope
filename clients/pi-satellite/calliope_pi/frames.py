@@ -4,6 +4,8 @@
   2 speaker  hub -> satellite   the same 16-byte header, then mono s16le at the speaker rate
   3 firmware hub -> satellite   kind, 0, 0, 0, offset u32, then up to 8 KB of the update
   4 earcon   hub -> satellite   kind, 0, 0, 0, offset u32, then up to 8 KB of s16le at 48 kHz
+  5 media    hub -> satellite   the speaker's header (channels 2), then 20 ms of interleaved
+                                s16le at caps.media's rate: music, on a lane of its own
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-MIC, SPEAKER, FIRMWARE, EARCON = 1, 2, 3, 4
+MIC, SPEAKER, FIRMWARE, EARCON, MEDIA = 1, 2, 3, 4, 5
 AUDIO = struct.Struct("<BBBBIQ")   # 16 bytes
 CHUNK = struct.Struct("<BBBBI")    # 8 bytes
 
@@ -33,7 +35,7 @@ def parse(data: bytes) -> Frame | None:
     if not data:
         return None
     kind = data[0]
-    if kind == SPEAKER and len(data) >= AUDIO.size:
+    if kind in (SPEAKER, MEDIA) and len(data) >= AUDIO.size:
         _, _, _, _, seq, _ = AUDIO.unpack_from(data)
         return Frame(kind, data[AUDIO.size:], seq=seq)
     if kind in (FIRMWARE, EARCON) and len(data) >= CHUNK.size:

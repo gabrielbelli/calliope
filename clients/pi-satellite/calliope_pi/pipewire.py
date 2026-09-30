@@ -8,7 +8,10 @@ same thing, and a player that dies takes nothing of the agent with it.
 OUTPUT is one device for everything the board plays: the hub's replies here,
 and AirPlay and Bluetooth later. Choosing it sets PipeWire's default sink.
 The agent's own stream carries media.role "Assistant", which WirePlumber's
-role policy can duck other streams for.
+role policy can duck other streams for. Music the hub streams (its media
+lane) plays on a stream of its own, stereo, with media.role "Music": to the
+agent it is one more stream that goes down while the satellite speaks, as
+AirPlay does.
 
 INPUT is the chosen microphone, recorded together with the output's monitor,
 what the speaker is playing, as channel 0: the hub's front-end cancels the
@@ -36,6 +39,14 @@ MIC_RATE = 16000
 SPEAKER_RATE = 44100
 FRAME_MS = 20
 IDLE_S = 0.6          # after the last sample has played, the player is closed
+# The most the agent raises the input's own volume (set_source_volume):
+# half as much again as the card's own level.
+SOURCE_VOLUME_MAX = 1.5
+# The most mic_gain_db does here (caps.mic.max_gain_db): 20*log10(1.5) = 3.52 dB
+# is the most that clamp lets through, in the hub's 0.5 dB steps. A higher
+# setting changes nothing on this satellite, so the page and Home Assistant
+# do not offer one.
+MIC_GAIN_MAX_DB = 3.5
 
 
 @dataclass(frozen=True)
@@ -275,12 +286,29 @@ async def set_volume(dev: Device | None, fraction: float) -> bool:
     """The device's own volume, 0.0-1.0 (the default sink when `dev` is None)."""
     target = str(dev.id) if dev is not None else "@DEFAULT_AUDIO_SINK@"
     code, _ = await _run("wpctl", "set-volume", target, f"{max(0.0, min(1.0, fraction)):.3f}")
+    # A volume set on purpose is meant to be heard, and the phone's hook
+    # (bin/calliope-airplay-volume) mutes the output at the bottom of its
+    # slider: a volume from the hub would otherwise stay silent.
+    await _run("wpctl", "set-mute", target, "0")
     return code == 0
+
+
+VOLUME = re.compile(r"Volume:\s*([0-9]+(?:\.[0-9]+)?)")
+
+
+async def get_volume(dev: Device | None) -> float | None:
+    """The device's own volume as wpctl has it, on set_volume's scale (the
+    default sink when `dev` is None); None when it cannot be read. A mute is
+    left out: "Volume: 0.32 [MUTED]" is 0.32."""
+    target = str(dev.id) if dev is not None else "@DEFAULT_AUDIO_SINK@"
+    code, out = await _run("wpctl", "get-volume", target)
+    m = VOLUME.search(out) if code == 0 else None
+    return float(m.group(1)) if m else None
 
 
 async def set_source_volume(dev: Device | None, fraction: float) -> bool:
     target = str(dev.id) if dev is not None else "@DEFAULT_AUDIO_SOURCE@"
-    code, _ = await _run("wpctl", "set-volume", target, f"{max(0.0, min(1.5, fraction)):.3f}")
+    code, _ = await _run("wpctl", "set-volume", target, f"{max(0.0, min(SOURCE_VOLUME_MAX, fraction)):.3f}")
     return code == 0
 
 
@@ -304,10 +332,12 @@ class Player:
     """The hub's audio, played to the output as it arrives. A pw-cat is
     started with the first samples and closed IDLE_S after the last has
     played, so the Assistant stream exists only while there is a voice to
-    duck other streams for."""
+    duck other streams for. The media lane is a second Player, stereo, with
+    the role "Music"."""
 
-    def __init__(self, rate: int = SPEAKER_RATE, target: str | None = None, role: str = "Assistant"):
-        self.rate, self.target, self.role = rate, target, role
+    def __init__(self, rate: int = SPEAKER_RATE, target: str | None = None, role: str = "Assistant",
+                 channels: int = 1):
+        self.rate, self.target, self.role, self.channels = rate, target, role, channels
         self.proc: asyncio.subprocess.Process | None = None
         self.until = 0.0          # time.monotonic() when what was written has played
         self.dropped = 0          # writes lost to a player that failed
@@ -324,7 +354,7 @@ class Player:
             return
         if self.proc is None or self.proc.returncode is not None:
             self.proc = await asyncio.create_subprocess_exec(
-                *_cat("playback", self.rate, 1, self.target, self.role),
+                *_cat("playback", self.rate, self.channels, self.target, self.role),
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
             if self.on_active is not None:
@@ -337,7 +367,7 @@ class Player:
             self.proc = None
             return
         now = time.monotonic()
-        self.until = max(self.until, now) + len(pcm) / 2 / self.rate
+        self.until = max(self.until, now) + len(pcm) / (2 * self.channels) / self.rate
         if self._closer is None or self._closer.done():
             self._closer = asyncio.create_task(self._close_when_idle())
 
