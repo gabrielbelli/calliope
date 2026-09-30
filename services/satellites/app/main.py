@@ -1233,10 +1233,12 @@ class Hub:
             self.heard(s, heard, check)
 
     async def _check(self, s: Session, check: WakeCheck) -> None:
-        """STT on the wake word's own audio, the word looked for in what it
-        heard (verify.matches), and then what the word's mode says. A check
-        STT could not answer lets the wake through (`error`): the model has
-        already fired, and a hub whose STT is down must still answer.
+        """STT on the wake word's own audio, told to listen for the word
+        (verify.vocabulary, the transcription's `boost`), the word looked for
+        in what it heard (verify.matches), and then what the word's mode
+        says. A check STT could not answer lets the wake through (`error`):
+        the model has already fired, and a hub whose STT is down must still
+        answer.
 
         In a task, never on the listener: the Ear keeps processing the
         microphones while STT works. The STT call is a task of its own, and
@@ -1254,7 +1256,8 @@ class Hub:
         nothing says it was ignored and no clip of it is kept."""
         heard = check.heard
         t0 = time.monotonic()
-        stt = routing.current().transcribe(heard.clip, timeout=verify.VERIFY_TIMEOUT_S)
+        stt = routing.current().transcribe(heard.clip, timeout=verify.VERIFY_TIMEOUT_S,
+                                           boost=verify.vocabulary(heard.wake_word, check.spellings))
         call = self.spawn(_outcome(stt), name=f"verify-stt-{s.id}")
         try:
             said = await asyncio.wait_for(asyncio.shield(call), verify.VERIFY_TIMEOUT_S)

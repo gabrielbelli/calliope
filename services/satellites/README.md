@@ -506,7 +506,7 @@ happens once it is heard. The Satellites tab edits the same entries through
 | `trigger.cooldown_s` | 3 | 0 to 600 | How long the same word cannot fire again |
 | `trigger.ends_conversation` | false | | Whether the word ends a conversation it is heard in |
 | `verify.mode` | `log` | `off`, `log`, `on` | Whether STT double-checks the word before the hub answers it. `log` blocks nothing and records what `on` would have done ([Double-checking a wake word](#double-checking-a-wake-word)) |
-| `verify.spellings` | `[]` | up to 12, each 1 to 40 printable characters | What else counts as the word in a transcript, beyond the spellings the hub knows for it |
+| `verify.spellings` | `[]` | up to 12, each 1 to 40 printable characters | What else counts as the word in a transcript, beyond the spellings the hub knows for it. STT is also told to listen for them when it double-checks the word |
 
 The file's `ptt` block is push-to-talk's own entry, without a name, threshold
 or satellites. It cannot be a trigger. Its `verify` is ignored: push-to-talk
@@ -592,6 +592,20 @@ heard it: after the front-end, from a three-second buffer the listener keeps
 (`app/listening.py`). It goes to `SATELLITES_STT_URL` on the same path as a
 command, to the default engine with no language, so Parakeet detects it.
 
+**STT is told which word to listen for.** The check's transcription, and
+only that one, carries the word's name as a transcript writes it ("Jarvis",
+"Alexa", "Lumos", "Claude", "Grok", "Chat GPT", or a custom word's name with
+capitals, so `hey_mycroft` is "Mycroft") and the word's own
+`verify.spellings`, without a leading "hey" or "ok" and without one that is
+only a "hey" or an "ok". They go as the
+request's `prompt`, boosted as Home Assistant's names are
+([Speech-to-text](#speech-to-text)). Parakeet's boost only finishes a word
+the audio began, where the model was already close: "Jarv..." comes back
+"Jarvis" and not "Jarves", and a TV's "Obrigado." stays "Obrigado.". The
+terms go only where the names would be boosted. Whisper does not get them,
+because it takes terms as hotwords whatever the audio, and the audio a check
+exists for is the audio the word is not in.
+
 **Each word's `verify.mode`** says what happens:
 
 | Mode | What happens |
@@ -609,18 +623,76 @@ checked, and nor is a clip through `/inject`, which tests what follows the
 wake word.
 
 **Matching** (`app/verify.py`). The transcript and each spelling are
-normalised: lower case, accents removed, and every run of anything that is
-not a letter or a digit made one space. A spelling of k words is compared with
-every run of k words of the transcript, and runs of up to k words are also
-compared with it written without spaces, so "chatgpt" matches "chat gpt". A
-match is a `difflib` ratio of 0.8 or more, except for a spelling of five
-letters or fewer, which must be there exactly as written: at 0.8, "could" and
-"loud" were "cloud", "the rock" was "grock" and "Davis" was "javis". An empty
-transcript matches nothing. The spellings are the ones the hub knows STT writes for the word
-(`SPELLINGS` there: `alexa` also as "alexia", "aleksa", "alecsa" and
-"alessa"; `hey_claude` also as "cloud"), or for any other word its name with
-underscores as spaces, and then the word's own `verify.spellings`. A leading
-"hey" or "ok" is dropped from each, so "Hey, Jarvis." is heard as "jarvis".
+normalised: lower case, accents removed ("ç" as the "s" it sounds), and every
+run of anything that is not a letter or a digit made one space. A spelling of
+k words is compared with every run of k words of the transcript, and runs of
+up to k words are also compared with it written without spaces, so "chatgpt"
+matches "chat gpt". A match is a `difflib` ratio of 0.8 or more, from a run
+no more than one letter shorter than the spelling: "essa", one of the
+commonest words in Portuguese, is 0.8 of "alessa". A spelling of five letters
+or fewer must be there exactly as written: at 0.8, "could" and "loud" were
+"cloud", "the rock" was "grock" and "Davis" was "javis". An empty transcript
+matches nothing. The spellings are the ones the
+hub knows STT writes for the word (`SPELLINGS` there: `alexa` also as
+"alexia", "aleksa", "alecsa" and "alessa"; `hey_claude` also as "cloud"), or
+for any other word its name with underscores as spaces and without a version
+(`hey_nabu_v2` is "nabu"), and then the word's own `verify.spellings`. A
+leading "hey" or "ok" is dropped from each, so "Hey, Jarvis." is heard as
+"jarvis", and a spelling that is only a "hey" or an "ok" is dropped, since it
+would match any wake.
+
+**Matching by sound.** A spelling of four sounds or more also matches a run
+that sounds like it. A spelling's sounds are its consonants, one class each,
+with the vowels, "y" and "h" left out, and two of one class with nothing or
+only vowels between them counted once:
+
+| Class | Letters |
+|---|---|
+| T | d, t, j, dj, and g before e, i or y |
+| P | b, p |
+| F | f, v, w, ph |
+| K | k, q, ck, and c or g before anything else; x is K then S |
+| S | s, z, ss, ç, and c before e, i or y |
+| X | ch, sh |
+| L, R, M | l and lh; r and rr; m, n and nh |
+
+An x is K then S, as in "Alexa", by choice: in Portuguese it is more often
+the X of "caixa", or an S or a Z, and no one class fits all of them. A g
+before e or i is T, as in "gente" and "gem", and so also, wrongly, in "get".
+
+A run matches when all three are true:
+
+- It has exactly the spelling's sounds, in their order.
+- It begins with a vowel only where the spelling does.
+- It is 0.65 of the spelling or more by its letters.
+
+On 30 Sep 2026 a real "hey jarvis" came back as "Hey hey Dervis.": 0.67 of
+"jarvis" by its letters, and T R F S by its sounds, as "jarvis" is. "Hey
+Travis" matches the same way.
+
+What each rule keeps out:
+
+| Rule | Kept out |
+|---|---|
+| Four sounds or more | "could" has the sounds of "claude" (K L T), and "Lucas" those of "alexa" (L K S), so `alexa`, `lumos`, `hey_claude` and `hey_grok` are matched by their letters alone |
+| No sound added or dropped | "três", "atrás" and "dress" are "jarvis" without its F, and "Davis" is T F S |
+| No sound changed | "talvez", "televisão", "direitos", "travel" and "girls". With one changed sound allowed, `hey_jarvis` was heard in 2% of sentences of everyday Portuguese and 1.3% of English |
+| A vowel first only where the spelling has one | "através" and "otherwise", which are T R F S |
+| 0.65 by its letters | "tarefas", "tarifas" and "tariffs", which are T R F S and 0.62 |
+
+**What it still lets through.** Measured on 32,963 sentences of everyday
+Portuguese and 31,976 of English (FLEURS, mTEDx, Tatoeba):
+
+| Word | Portuguese | English | What matched |
+|---|---|---|---|
+| `hey_jarvis` | 1 (0.00%) | 5 (0.02%) | "Jarvis" itself; "drives", which is T R F S and 0.67 of "jarves", as "Dervis" is of "jarvis" |
+| `alexa` | 20 (0.06%) | 0 | "aldeia", "baleia" and "alheia", 0.8 of "alexia" by their letters |
+| `hey_claude` | 2 (0.01%) | 6 (0.02%) | "Claude" itself; "cloud", a spelling of its own; "lauded", "lauder" and "alaude" |
+| `hey_chat_gpt` | 1 (0.00%) | 0 | "GPT", a spelling of its own |
+| `lumos`, `hey_grok` | 0 | 0 | |
+
+A clip holds about five words, so a TV that fires the model on everyday
+speech still gets past the check in fewer than 1 in 1,000 clips.
 
 **It fails open.** An STT that errs, is not set, or has not answered within
 1.5 s lets the wake through, recorded as `error`: the model has already
@@ -1131,15 +1203,27 @@ goes to its default engine. Then, for each command:
   false in its `/health`). Whisper is not sent it: it takes a glossary's terms
   as hotwords, and stt-stack measured terms absent from the audio raising its
   word error rate by 28%.
+- **A wake word's own name.** A wake word's
+  [double-check](#double-checking-a-wake-word) adds the word's name and its
+  own `verify.spellings` as the request's `prompt`, boosted with the names,
+  to that transcription alone. They go only where the names would be
+  boosted: not to Whisper, and not while the boost is off or refused.
 
 The vocabulary never costs a transcription:
 
 - While the stack's `/health` does not list the profile, which is a hub
   without the integration, the hub does not name it, and looks again every
   10 minutes.
-- If the stack refuses the `boost`, the hub sends the names again without it,
-  so the repairs still apply, and leaves the boost off for 10 minutes. The
-  log has a WARNING that begins `routing: stt-stack refused to boost`.
+- If the stack refuses the `boost` of a double-check, a spelling of the word
+  can have a character the model has no piece for. The hub sends the check
+  again without the word's terms and still with the boost, so the names keep
+  theirs. If that is not refused, the word's checks go without those terms
+  for 10 minutes, and the hub logs an INFO line that begins
+  `routing: stt-stack cannot boost`.
+- If the stack refuses the `boost` of any other request, or of that one
+  again, the hub sends the names again without it, so the repairs still
+  apply, and leaves the boost off for 10 minutes. The log has a WARNING that
+  begins `routing: stt-stack refused to boost`.
 - If the stack refuses the profile with any other 400, the hub transcribes
   again without it, leaves it out for 10 minutes, and logs a WARNING that
   begins `routing: stt-stack refused the home-assistant vocabulary`.

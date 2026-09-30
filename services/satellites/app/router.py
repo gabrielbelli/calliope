@@ -228,7 +228,8 @@ class VerifySettings(BaseModel):
     mode: Literal["off", "log", "on"] = "log"
     # What else counts as the word in a transcript, beyond the spellings
     # verify.SPELLINGS knows: a custom model's name, or what STT was seen
-    # writing for it.
+    # writing for it. STT is told to listen for them too, as they are
+    # written here (verify.vocabulary).
     spellings: list[Spelling] = Field(default_factory=list, max_length=12)
 
     @field_validator("spellings")
@@ -628,10 +629,12 @@ class Router:
         # is looked for again.
         self._stt: dict | None = None
         self._stt_until = 0.0
-        # When stt-stack last refused HA_GLOSSARY, or listed it as absent, and
-        # when it last refused `boost`.
+        # When stt-stack last refused HA_GLOSSARY, or listed it as absent,
+        # when it last refused `boost`, and when it last could not boost a
+        # wake word's terms, by the `prompt` they went as.
         self._glossary_missing: float | None = None
         self._boost_refused: float | None = None
+        self._terms_refused: dict[str, float] = {}
         self._own_client = client is None
         # follow_redirects stays False (httpx's default, stated so it is not
         # changed casually): a redirect would carry a destination's bearer
@@ -798,7 +801,8 @@ class Router:
         return True
 
     async def transcribe(self, pcm: bytes, hint: str | None = None, *,
-                         timeout: float | None = None) -> str:
+                         timeout: float | None = None,
+                         boost: list[str] | tuple[str, ...] = ()) -> str:
         """The transcript. `hint` (a wake word's language) is sent only to an
         engine that takes one: Whisper does, and Parakeet refuses the field
         with a 400 and detects the language itself. A word whose language an
@@ -814,6 +818,31 @@ class Router:
         never cost a transcription: a refused `boost` is sent again with the
         names and without it, and any other 400 on a request that named them
         (no such profile) is sent again without them.
+
+        `boost` is vocabulary for this transcription alone: a wake word's
+        double-check gives the word's own name (verify.vocabulary), so that
+        "Jarv..." comes back "Jarvis" and not "Jarves". The terms go as the
+        request's `prompt`, the field stt-stack takes one-off terms in, and
+        only where the names would be boosted: to an engine that boosts,
+        unless the stack has biasing off or refused the boost within
+        GLOSSARY_RETRY_S. Parakeet's boost only finishes a word the audio
+        began (stt-stack's boosting.START_WEIGHT is 0 unless a deployment
+        changes it) and only where the model was already close
+        (boosting.GATE), so a TV's "Obrigado." stays "Obrigado.". Whisper
+        takes terms as hotwords, whatever the audio, and the audio a check
+        exists for is the audio the word is not in, so it is not sent them.
+        Without the boost they would reach only the stack's case repair,
+        which the match does not see.
+
+        A term the model cannot spell (a character it has no piece for) has
+        the boost refused. That is the word's spelling and not the stack, so
+        the transcription goes again without this call's terms and with the
+        boost still asked for: a stack that refuses the boost itself refuses
+        it again, and is heard as above, and one that does not keeps boosting
+        the names for the commands. Terms it could not boost are not sent
+        again for GLOSSARY_RETRY_S, so that a spelling the model cannot spell
+        does not cost every check of its word a second request inside
+        verify.VERIFY_TIMEOUT_S.
 
         `timeout` bounds each request instead of stt_timeout: a wake word's
         double-check stops waiting after verify.VERIFY_TIMEOUT_S, and a
@@ -839,14 +868,28 @@ class Router:
                      "writes it); looked for again in %.0f min", HA_GLOSSARY, GLOSSARY_RETRY_S / 60)
             self._glossary_missing = time.monotonic()
             names = False
+        boosting = boosts and health.get("hotwords") is not False and (
+            self._boost_refused is None or time.monotonic() - self._boost_refused >= GLOSSARY_RETRY_S)
         if names and boosts:
             data["glossary"] = HA_GLOSSARY
-            if health.get("hotwords") is not False and (
-                    self._boost_refused is None
-                    or time.monotonic() - self._boost_refused >= GLOSSARY_RETRY_S):
-                data["boost"] = "true"
+        prompt = ", ".join(boost)
+        refused = self._terms_refused.get(prompt)
+        if boosting and prompt and (refused is None or time.monotonic() - refused >= GLOSSARY_RETRY_S):
+            data["prompt"] = prompt
+        if boosting and (names or "prompt" in data):
+            data["boost"] = "true"
         wav = audio.wav(pcm, MIC_RATE, 1)
         r = await self._post_stt(data, wav, hint=hint, timeout=timeout)
+        if "prompt" in data and r.status_code == 400 and _refuses_boost(r):
+            refusal = r.text[:300].strip()
+            del data["prompt"]
+            r = await self._post_stt(data, wav, retry="terms_refused", timeout=timeout)
+            if not (r.status_code == 400 and _refuses_boost(r)):
+                log.info("routing: stt-stack cannot boost %s, so a wake word's check goes without "
+                         "them for %.0f min: %s", prompt, GLOSSARY_RETRY_S / 60, refusal)
+                now = time.monotonic()
+                self._terms_refused = {p: t for p, t in self._terms_refused.items()
+                                       if now - t < GLOSSARY_RETRY_S} | {prompt: now}
         if "boost" in data and r.status_code == 400 and _refuses_boost(r):
             log.warning("routing: stt-stack refused to boost the %s vocabulary, so its names go "
                         "without the boost for %.0f min: %s", HA_GLOSSARY, GLOSSARY_RETRY_S / 60,

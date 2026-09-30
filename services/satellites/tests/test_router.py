@@ -541,8 +541,9 @@ def stt_with(fake: Fake, *, engine: str | None, profiles: set[str], spellable: b
     or the one `engine`), whether biasing is on and, when `listed`, its
     glossary profiles. A transcription naming a profile it does not have is
     a 400 in its words, and so is `boost` when `spellable` is False (a term
-    with a character the model has no piece for) or `hotwords` is off; the
-    rest name the engine."""
+    of the profile with a character the model has no piece for), when the
+    request's own terms (`prompt`) have "☕", which it has none for either,
+    or when `hotwords` is off; the rest name the engine."""
     one = {"parakeet": PARAKEET, "whisper": WHISPER}.get(engine or "")
 
     def handler(r: httpx.Request) -> httpx.Response:
@@ -566,6 +567,10 @@ def stt_with(fake: Fake, *, engine: str | None, profiles: set[str], spellable: b
             return httpx.Response(400, json={"error": {
                 "message": "'boost' cannot be honoured for 1 term(s): 'Guest’s Bedroom' "
                            "at '’'.", "code": "invalid_value", "param": "boost"}})
+        if "boost" in parts and "☕" in parts.get("prompt", b"").decode():
+            return httpx.Response(400, json={"error": {
+                "message": "'boost' cannot be honoured for 1 term(s): '☕' at '☕'.",
+                "code": "invalid_value", "param": "boost"}})
         return httpx.Response(200, json={"text": fake.stt_text},
                               headers={"x-stt-engine": engine} if engine else {})
     fake.handlers["stt.test"] = handler
@@ -665,6 +670,77 @@ async def test_a_stack_with_biasing_off_is_never_sent_boost(make, fake):
     sent = transcriptions(fake)
     assert len(sent) == 2
     assert all(s["glossary"] == b"home-assistant" and "boost" not in s for s in sent)
+
+
+@pytest.mark.parametrize("profiles", [{"home-assistant"}, set()])
+async def test_a_wake_words_own_terms_are_boosted_for_its_check_alone(make, fake, profiles):
+    """A wake word's double-check gives the word's name (verify.vocabulary):
+    it goes as the request's `prompt`, boosted, beside the names where the
+    stack has them, and the next command has the names alone, or on a hub
+    without the integration nothing to boost at all."""
+    stt_with(fake, engine="parakeet", profiles=profiles)
+    router = make()
+    assert await router.transcribe(ONE_SECOND, boost=["Jarvis", "nah boo"]) == "what time is it"
+    await router.transcribe(ONE_SECOND)
+    check, command = transcriptions(fake)
+    names = b"home-assistant" if profiles else None
+    assert (check["prompt"], check["boost"], check.get("glossary")) == (b"Jarvis, nah boo", b"true", names)
+    assert "prompt" not in command and command.get("glossary") == names
+    assert command.get("boost") == (b"true" if profiles else None)
+
+
+@pytest.mark.parametrize("engine,hotwords", [("whisper", True), ("parakeet", False)])
+async def test_a_wake_words_own_terms_go_only_where_they_are_boosted(make, fake, engine, hotwords):
+    """Whisper takes terms as hotwords whatever the audio, and the audio a
+    check is for is the audio the word is not in. A stack with biasing off
+    would only repair their case, which the match does not see."""
+    stt_with(fake, engine=engine, profiles={"home-assistant"}, hotwords=hotwords)
+    router = make()
+    await router.transcribe(ONE_SECOND, boost=["Jarvis"])
+    [sent] = transcriptions(fake)
+    assert "prompt" not in sent and "boost" not in sent
+
+
+@pytest.mark.parametrize("profiles", [{"home-assistant"}, set()])
+async def test_a_wake_words_term_the_model_cannot_spell_costs_one_check_the_terms_and_not_the_boost(
+        make, fake, monkeypatch, profiles):
+    """The refusal is the word's spelling, not the stack: the check is heard
+    again without its terms and still asking for the boost, and the names
+    keep theirs. Every check had sent the terms and been refused again, a
+    second request inside the check's 1.5 s: the next goes without them
+    from the start, and they are tried again after ten minutes."""
+    stt_with(fake, engine="parakeet", profiles=profiles)
+    router = make()
+    terms = ["Jarvis", "☕"]
+    assert await router.transcribe(ONE_SECOND, boost=terms) == "what time is it"
+    await router.transcribe(ONE_SECOND, boost=terms)
+    await router.transcribe(ONE_SECOND)
+    refused, kept, again, command = transcriptions(fake)
+    names = b"home-assistant" if profiles else None
+    assert refused["prompt"] == "Jarvis, ☕".encode() and refused["boost"] == b"true"
+    assert "prompt" not in kept and (kept["boost"], kept.get("glossary")) == (b"true", names)
+    assert all("prompt" not in s and s.get("glossary") == names for s in (again, command))
+    assert again.get("boost") == command.get("boost") == (b"true" if profiles else None)
+
+    clock = time.monotonic() + router_module.GLOSSARY_RETRY_S
+    monkeypatch.setattr(router_module.time, "monotonic", lambda: clock)
+    await router.transcribe(ONE_SECOND, boost=terms)
+    assert transcriptions(fake)[-2]["prompt"] == "Jarvis, ☕".encode()
+
+
+async def test_a_stack_that_refuses_the_boost_is_told_apart_from_a_term_it_cannot_spell(make, fake):
+    """Refused again without the word's terms, the boost is the stack's to
+    refuse: the names go without it for ten minutes, and the word's terms
+    with them."""
+    stt_with(fake, engine="parakeet", profiles={"home-assistant"}, spellable=False)
+    router = make()
+    assert await router.transcribe(ONE_SECOND, boost=["Jarvis"]) == "what time is it"
+    await router.transcribe(ONE_SECOND, boost=["Jarvis"])
+    with_terms, without_them, unboosted, later = transcriptions(fake)
+    assert with_terms["prompt"] == b"Jarvis" and with_terms["boost"] == b"true"
+    assert "prompt" not in without_them and without_them["boost"] == b"true"
+    assert all("prompt" not in s and "boost" not in s and s["glossary"] == b"home-assistant"
+               for s in (unboosted, later))
 
 
 async def test_a_word_in_the_language_of_a_fine_tune_is_heard_by_it(make, fake):

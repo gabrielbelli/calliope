@@ -1,9 +1,9 @@
 """The double-check of a wake word (verify.py, Hub.on_wake): STT is given the
-audio that held the word, and the hub answers only when the word is in what
-it heard.
+audio that held the word, told to listen for it, and the hub answers only
+when the word is in what it heard.
 
-The matcher is tested on its own, on what STT wrote on 29 Sep 2026 for real
-wakes and for a Portuguese video that woke "alexa". The rest runs through the
+The matcher is tested on its own, on what STT wrote for real wakes on 29 and
+30 Sep 2026 and for a Portuguese video that woke "alexa". The rest runs through the
 hub as test_conversation.py does: a satellite on the test socket, a wake word
 as a marker sample (MarkerWords), and a fake STT whose answer to the wake
 word's audio a test chooses (Services.check). That is how a TV is made to say
@@ -28,6 +28,7 @@ import test_pipeline
 from test_conversation import conversation, mark, save, settled
 from test_listening import MARK, Marker, run
 from test_pipeline import EARCON_CAPS, NID, RATE, EarconStore, adopt, floor, of, voiced, wait
+from test_router import PARAKEET, multipart
 
 from app import telemetry, verify
 from app.listening import VERIFY_WINDOW_S, Ear, room_floor
@@ -78,28 +79,127 @@ def telemetry_on(client, level: str = "full") -> None:
 
 
 @pytest.mark.parametrize("transcript,word,heard", [
+    # A real "hey jarvis" on 30 Sep 2026: 0.67 of "jarvis" by its letters,
+    # and T R F S by its sounds, as "jarvis" is.
+    ("Hey hey Dervis.", "hey_jarvis", True),
+    ("Hey Jarvis", "hey_jarvis", True),
+    ("Hey, Jarvis.", "hey_jarvis", True),
+    ("Hey, Jervis", "hey_jarvis", True),
+    ("Hey Travis", "hey_jarvis", True),
+    ("Hey Javis", "hey_jarvis", True),
+    ("Ei Jarvis", "hey_jarvis", True),
     ("Alexa.", "alexa", True),
     ("Alécia,", "alexa", True),
     ("Aleksa, liga a luz", "alexa", True),
-    ("Hey, Jarvis.", "hey_jarvis", True),
+    ("Alessa", "alexa", True),
+    ("Alexia", "alexa", True),
+    ("Lumos", "lumos", True),
+    ("Lumus", "lumos", True),
+    ("Lúmos", "lumos", True),
+    ("Hey Claude", "hey_claude", True),
     ("Hey Cloud", "hey_claude", True),
+    ("Hey Claud", "hey_claude", True),   # 0.91 of "claude", which is not short
+    ("Hey Clod", "hey_claude", True),
+    ("Hey Grok", "hey_grok", True),
+    ("Hey Groc", "hey_grok", True),
     ("chatgpt", "hey_chat_gpt", True),
+    ("Hey Chat GPT", "hey_chat_gpt", True),
     ("Chat GPT, what is new", "hey_chat_gpt", True),
-    # What a Portuguese video said where the model heard "alexa".
-    ("deixa", "alexa", False),
+    # What a Portuguese video said where the model heard "alexa", and
+    # Portuguese that is close to it by its letters or its sounds.
     ("Obrigado.", "alexa", False),
     ("De manipular.", "alexa", False),
+    ("deixa", "alexa", False),
     ("a lei já", "alexa", False),
-    ("", "alexa", False),
-    # Everyday words one letter away from a short spelling (SHORT_SPELLING).
+    ("relaxa", "alexa", False),
+    ("a caixa", "alexa", False),
+    ("puxa vida", "alexa", False),
+    ("que horas são", "alexa", False),
+    ("tudo bem", "alexa", False),
+    # 0.8 of "alessa" and of "alexia" by their letters, but two letters
+    # shorter: "essa" was 1 in 100 sentences of everyday Portuguese.
+    ("essa", "alexa", False),
+    ("Leia isto", "alexa", False),
+    ("less is more", "alexa", False),
+    # Everyday words one letter away from a short spelling (SHORT_SPELLING),
+    # or with all the sounds of one too short to be told by them (SOUND_MIN).
     ("I could do that", "hey_claude", False),
     ("so loud", "hey_claude", False),
     ("the rock", "hey_grok", False),
+    # One sound short of "jarvis": T F S, and T R S.
     ("Davis", "hey_jarvis", False),
-    ("Hey Claud", "hey_claude", True),   # 0.91 of "claude", which is not short
+    ("três", "hey_jarvis", False),
+    ("atrás", "hey_jarvis", False),
+    ("dress", "hey_jarvis", False),
+    # One sound changed, what one changed sound let through most often in
+    # everyday Portuguese and English: T L F S, T L F S, T R T S and so on.
+    ("Talvez amanhã", "hey_jarvis", False),
+    ("Vi na televisão", "hey_jarvis", False),
+    ("direitos humanos", "hey_jarvis", False),
+    ("Os jornais de hoje", "hey_jarvis", False),
+    ("Os termos do acordo", "hey_jarvis", False),
+    ("I love to travel", "hey_jarvis", False),
+    ("the girls", "hey_jarvis", False),
+    ("sweet dreams", "hey_jarvis", False),
+    ("magic tricks", "hey_jarvis", False),
+    ("traffic", "hey_jarvis", False),
+    # All of "jarvis"'s sounds, but a vowel before them, or too far from it
+    # by its letters.
+    ("através da porta", "hey_jarvis", False),
+    ("otherwise", "hey_jarvis", False),
+    ("as tarefas", "hey_jarvis", False),
+    ("as tarifas", "hey_jarvis", False),
+    ("tariffs", "hey_jarvis", False),
+    *[("", word, False) for word in verify.SPELLINGS],
 ])
-def test_a_word_is_heard_as_stt_spells_it_and_not_in_what_only_sounds_like_it(transcript, word, heard):
+def test_a_word_is_heard_as_stt_spells_it_or_as_it_sounds_and_not_in_everyday_words(transcript, word, heard):
     assert (verify.matches(transcript, verify.spellings(word)) is not None) is heard
+
+
+def test_a_spelling_sounds_as_its_consonants_do_one_class_a_sound():
+    """What differs between the ways STT writes one name is mostly its
+    vowels, and a d for a j. Three sounds are everyday words as well, which
+    is why a spelling needs SOUND_MIN of them to be heard by them."""
+    assert verify.sounds("jarvis") == verify.sounds("dervis") == verify.sounds("travis") == "TRFS"
+    assert verify.sounds("alexa") == verify.sounds("aleksa") == verify.sounds("alecsa") == "LKS"
+    assert verify.sounds("chat gpt") == verify.sounds("chatgpt") == verify.sounds("chad gbt") == "XTKPT"
+    assert verify.sounds("Caça") == verify.sounds("cassa") == "KS"
+    assert verify.sounds("ação") == verify.sounds("asão") == "S"
+    assert [verify.sounds(w) for w in ("gente", "gato", "filha", "phone", "chuva", "hey")] == [
+        "TMT", "KT", "FL", "FM", "XF", ""]
+    assert verify.sounds("could") == verify.sounds("claude") == "KLT"
+    assert verify.sounds("lucas") == verify.sounds("alexa")
+
+
+def test_a_long_spelling_is_heard_by_all_its_sounds_from_its_first_and_near_it_by_its_letters():
+    jarvis = verify.spellings("hey_jarvis")
+    assert verify.matches("Hey Travis", jarvis) == "jarvis"      # T R F S, 0.67
+    assert verify.matches("Hey Jarbas", jarvis) is None          # T R P S
+    assert verify.matches("Hey Carvas", jarvis) is None          # K R F S
+    assert verify.matches("Hey drivers", jarvis) is None         # T R F R S
+    assert verify.matches("através", jarvis) is None             # T R F S after a vowel
+    assert verify.matches("tarefas", jarvis) is None             # T R F S, 0.62 of "jarves"
+    assert verify.matches("Chad GPS", verify.spellings("hey_chat_gpt")) is None
+    # What it costs: "drives" is T R F S and 0.67 of "jarves", as "Dervis"
+    # is of "jarvis", in 5 of 31,976 everyday English sentences.
+    assert verify.matches("She drives to work", jarvis) == "jarves"
+    # Three sounds are not told by their sounds at all: "Lucas" is "alexa"'s L K S.
+    assert verify.matches("Lucas", verify.spellings("alexa")) is None
+
+
+def test_stt_is_told_the_words_name_as_a_transcript_writes_it_and_its_own_spellings_as_typed():
+    """Not the built-in misspellings: matches() takes those anyway, and
+    STT told to listen for them would be told to get the word wrong. A
+    comma is a space, which stt-stack would otherwise read as two terms."""
+    assert verify.vocabulary("hey_jarvis") == ["Jarvis"]
+    assert verify.vocabulary("hey_chat_gpt") == ["Chat GPT"]
+    assert verify.vocabulary("alexa_ptbr", ["Hey Lexa", "alexa", "Aléxia"]) == ["Alexa", "Lexa", "Aléxia"]
+    assert verify.vocabulary("hey_mycroft") == ["Mycroft"]
+    assert verify.vocabulary("ok_nabu", ["Hey, Nabu!", "nah, boo"]) == ["Nabu", "nah boo"]
+    # Nor a "hey" on its own, which is in every "hey jarvis", nor the
+    # version a model's file name carries.
+    assert verify.vocabulary("hey_jarvis", ["hey", "OK", "Hey!"]) == ["Jarvis"]
+    assert verify.vocabulary("hey_nabu_v2") == ["Nabu"]
 
 
 def test_a_words_own_spellings_count_too_and_any_word_is_its_own_name():
@@ -111,6 +211,12 @@ def test_a_words_own_spellings_count_too_and_any_word_is_its_own_name():
     assert verify.matches("Nah, boo!", verify.spellings("ok_nabu")) is None
     assert verify.matches("Nah, boo!", verify.spellings("ok_nabu", ["nah boo"])) == "nah boo"
     assert verify.spellings("alexa_ptbr") == verify.spellings("alexa")
+    # A "hey" alone would match any wake, and the "v2" of a file name is not said.
+    assert verify.spellings("hey_jarvis", ["hey", "ok"]) == verify.spellings("hey_jarvis")
+    assert verify.matches("Hey, what's up?", verify.spellings("hey_jarvis", ["hey"])) is None
+    assert verify.spellings("hey_nabu_v2") == ["nabu"]
+    # A word named nothing but "hey" still has its name.
+    assert verify.spellings("hey") == ["hey"]
 
 
 # ---- the Ear ------------------------------------------------------------------------------
@@ -382,6 +488,30 @@ def test_the_check_does_not_leave_its_transcription_running_for_the_routers_time
     assert check.extensions["timeout"]["read"] == verify.VERIFY_TIMEOUT_S
     [command] = services.sent("stt.test", "/v1/audio/transcriptions")
     assert command.extensions["timeout"]["read"] == 30.0
+
+
+def test_the_check_tells_stt_to_listen_for_the_word_and_the_command_is_not_told(
+        client, app, events, services, plug):
+    """On a stack that boosts, the check's transcription carries the word's
+    name and its own spellings (verify.vocabulary) for that transcription
+    alone: the command after it has Home Assistant's names, boosted as
+    ever, and nothing of the word's."""
+    stt = services.handlers["stt.test"]
+
+    async def parakeet(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok", "hotwords": True, "models": [PARAKEET]})
+        return await stt(request)
+    services.handlers["stt.test"] = parakeet
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        save(client, ALEXA_ON | {"verify": {"mode": "on", "spellings": ["Hey Lexa", "alexa"]}})
+        plug(ws).send(said("alexa"))
+        wait(lambda: of(events, "routed"), what="the answer")
+    [check] = [multipart(r) for r in services.checks]
+    [command] = [multipart(r) for r in services.sent("stt.test", "/v1/audio/transcriptions")]
+    assert (check["prompt"], check["boost"], check["glossary"]) == (b"Alexa, Lexa", b"true", b"home-assistant")
+    assert "prompt" not in command and (command["boost"], command["glossary"]) == (b"true", b"home-assistant")
 
 
 def test_a_word_not_heard_while_a_conversation_waits_leaves_it_its_turn(client, app, events, services, plug):
