@@ -272,6 +272,7 @@ def test_what_the_page_shows_for_an_unset_setting_is_the_hubs_default():
     assert shown["feedback"] == default(router["TriggerSettings"], "feedback")
     assert float(shown["silence_ms"]) == default(router["Behaviour"], "silence_ms")
     assert float(shown["follow_silence_ms"]) == default(router["ConversationSettings"], "silence_ms")
+    assert shown["verify"] == default(router["VerifySettings"], "mode")
 
 
 def test_the_pauses_the_page_allows_are_the_hubs():
@@ -314,6 +315,29 @@ def test_the_end_phrases_the_page_allows_are_the_hubs():
     assert longest == [int(most["longest"])]
 
 
+def test_the_double_check_the_page_offers_is_the_hubs():
+    """Its modes are VerifySettings' own, and Also accept holds as many
+    spellings, as long, as the hub takes: the list's max_length and each
+    Spelling's."""
+    router = {n.name: n for n in HUB_ROUTER.body if isinstance(n, ast.ClassDef)}
+    mode = next(a for a in router["VerifySettings"].body
+                if isinstance(a, ast.AnnAssign) and a.target.id == "mode")
+    hub_modes = {e.value for e in mode.annotation.slice.elts}
+    select = WORD_MARKUP[WORD_MARKUP.index('data-f="v.mode"'):]
+    select = select[:select.index("</select>")]
+    assert set(re.findall(r'<option value="(\w+)"', select)) == hub_modes == {"off", "log", "on"}
+    bounds = dict(re.findall(r"(most|longest): (\d+)",
+                             re.search(r"const WAKE_SPELLINGS = \{([^}]*)\}", CODE).group(1)))
+    field = next(a for a in router["VerifySettings"].body
+                 if isinstance(a, ast.AnnAssign) and a.target.id == "spellings")
+    assert [k.value.value for k in field.value.keywords if k.arg == "max_length"] == [int(bounds["most"])]
+    spelling = next(n for n in HUB_ROUTER.body if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
+                    and n.targets[0].id == "Spelling")
+    longest = [k.value.value for c in ast.walk(spelling) if isinstance(c, ast.Call)
+               for k in c.keywords if k.arg == "max_length"]
+    assert longest == [int(bounds["longest"])]
+
+
 def test_try_a_word_sends_exactly_what_the_routing_test_takes():
     body = hub_class("TryBody", HUB_ROUTER)
     taken = {a.target.id for a in body.body if isinstance(a, ast.AnnAssign)}
@@ -345,6 +369,7 @@ def test_the_events_the_page_logs_are_the_ones_the_hub_publishes():
     for kind, reads in (("conversation_started", ("rule_id", "wake_word", "reason", "from_rule")),
                         ("conversation_ended", ("reason", "turns")),
                         ("triggered", ("wake_word", "score", "satellite")),
+                        ("wake_rejected", ("word", "heard", "mode")),
                         ("turn", ("turn", "ended", "handed_over_to"))):
         assert f'"{kind}"' in CODE, f"the page does not handle {kind}"
         missing = set(reads) - published(kind)

@@ -20,7 +20,9 @@ What they prevent:
   * a poll that left before a save and answers after it: the page's copy goes
     back to the list before the save, and the next edit's Save PUTs that;
   * one missed poll (the hub restarting): what the hub answered stays on
-    screen with the reason beside it, and the reason goes with the next poll.
+    screen with the reason beside it, and the reason goes with the next poll;
+  * an AirPlay control offered for a command the phone does not take now,
+    or one that sends another command than the one it says.
 
 The same harness drives test_satellites_ordering.py and
 test_satellites_states.py, which import `run` from here.
@@ -816,15 +818,46 @@ def test_airplay_is_bit_perfect_on_a_wider_card_at_the_same_rate_and_not_otherwi
     assert got["paused"] == ""
 
 
+# A row's AirPlay section for satAirPlay: each selector is one stand-in, kept
+# by name in `parts`, and the controls' four buttons are kept by their act in
+# `buttons`. An element records its attributes and whether it was focused.
+AIRPLAY_ROW = r"""
+  const el = () => ({ dataset: {}, hidden: false, disabled: false, textContent: "", value: "",
+                      checked: false, attrs: {}, append() {}, style: {},
+                      setAttribute(k, v) { this.attrs[k] = String(v); },
+                      getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+                      contains() { return false; }, focus() { this.focused = true; },
+                      get parentElement() { return el(); }, querySelector() { return el(); } });
+  function airplayRow() {
+    const parts = {}, buttons = {};
+    const part = sel => (parts[sel] = parts[sel] || el());
+    const ctl = part(".sat-apctl");
+    ctl.hidden = true;
+    ctl.querySelector = sel => {
+      const act = /data-act="([\w-]+)"/.exec(sel)[1];
+      return (buttons[act] = buttons[act] || el());
+    };
+    ctl.contains = x => Object.values(buttons).includes(x);
+    return { li: { querySelector: part }, parts, buttons, ctl };
+  }
+  const ALL = ["play", "pause", "play_pause", "next", "previous", "stop", "disconnect"];
+  // A Pi with a phone connected, playing, that takes `controls`.
+  const pi = (airplay, controls) => ({
+    id: "b827eb121359", name: "pi-edifier", adopted: true, online: true,
+    caps: { speaker: {}, airplay: { version: 2, controls: true } },
+    status: { airplay: { running: true, session: true, playing: true, client: "Gabriel's iPhone",
+                         ...(controls === undefined ? {} : { remote: { available: controls.length > 1,
+                                                                       controls, last: null } }),
+                         ...airplay } } });
+  const offered = buttons => Object.fromEntries(Object.entries(buttons).map(([k, b]) => [k, !b.disabled]));
+"""
+
+
 def test_the_airplay_section_shows_the_cover_the_hub_keeps(tmp_path):
     """The cover's address carries its SHA-256, so a new track is a new
     picture; with no session, or AirPlay off, there is none."""
-    got = run(tmp_path, """
-      const el = () => ({ dataset: {}, hidden: false, textContent: "", value: "", checked: false,
-                          append() {}, style: {}, setAttribute() {},
-                          get parentElement() { return el(); }, querySelector() { return el(); } });
-      const parts = {};
-      const li = { querySelector: sel => (parts[sel] = parts[sel] || el()) };
+    got = run(tmp_path, AIRPLAY_ROW + """
+      const { li, parts } = airplayRow();
       const n = { id: "b827eb121359", online: true, caps: { speaker: {}, airplay: { version: 1 } },
                   status: { airplay: { running: true, session: true, playing: true,
                                        artwork: { sha256: "ab12", bytes: 900, type: "jpeg" } } } };
@@ -837,3 +870,169 @@ def test_the_airplay_section_shows_the_cover_the_hub_keeps(tmp_path):
     """)
     assert got["first"] == "/ui/api/satellites/b827eb121359/airplay/artwork?v=ab12"
     assert got["shown"] is False and got["gone"] is True
+
+
+def test_a_cover_that_was_not_there_yet_is_asked_for_again(tmp_path):
+    """The hub answers 404 for a cover it does not hold yet, or holds another
+    picture than the one asked for. Remembered as asked, the cover stayed
+    blank until the track changed; the next update asks again."""
+    got = run(tmp_path, AIRPLAY_ROW + """
+      const { li, parts } = airplayRow();
+      const art = parts[".sat-apart"] = el();
+      const asked = [];
+      Object.defineProperty(art, "src", { set(v) { asked.push(v); }, get() { return asked[asked.length - 1]; } });
+      const n = pi({ artwork: { sha256: "ab12", bytes: 900, type: "jpeg" } }, ALL);
+      satAirPlay(li, n, {});
+      satAirPlay(li, n, {});                            // the same cover, still loading: not asked again
+      const once = asked.length;
+      art.onerror();                                    // 404
+      const hidden = art.hidden;
+      satAirPlay(li, n, {});
+      art.onload();
+      console.log(JSON.stringify({ once, hidden, asked, shown: !art.hidden }));
+    """)
+    assert got["once"] == 1, "a cover still loading was asked for again on every poll"
+    assert got["hidden"] is True, got
+    assert got["asked"] == ["/ui/api/satellites/b827eb121359/airplay/artwork?v=ab12"] * 2, got
+    assert got["shown"] is True, got
+
+
+def test_airplay_controls_show_only_while_a_phone_is_connected(tmp_path):
+    """No phone, AirPlay off, the satellite offline, or an agent from before
+    that says nothing of remote control: no controls. When they go under the
+    focus, the focus goes to the section's summary, not to the page."""
+    got = run(tmp_path, AIRPLAY_ROW + """
+      const { li, parts, buttons, ctl } = airplayRow();
+      const shown = [];
+      const look = (n, cfg) => { satAirPlay(li, n, cfg || {}); shown.push(!ctl.hidden); };
+      look(pi({ session: false, playing: false }, []));
+      look(pi({}, ALL));
+      look(pi({}, ALL), { airplay_enabled: false });
+      look({ ...pi({}, ALL), online: false });
+      look(pi({}, undefined));                          // an agent from before: no `remote`
+      look(pi({ playing: false }, ["disconnect"]));
+      document.activeElement = buttons["ap-disconnect"];
+      look(pi({ session: false, playing: false }, []));
+      console.log(JSON.stringify({ shown, summary: !!parts[".sat-ap > summary"].focused }));
+    """)
+    assert got["shown"] == [False, True, False, False, False, True, False], got
+    assert got["summary"] is True, "the controls went from under the focus and left it on the page"
+
+
+def test_each_airplay_control_is_enabled_by_what_the_phone_takes_now(tmp_path):
+    """The agent lists what the phone takes: everything once it has handed
+    over remote control, Disconnect alone while it has not (and the hint says
+    to use the phone), nothing without a session. A button whose request is
+    still out is left as it is."""
+    got = run(tmp_path, AIRPLAY_ROW + """
+      const { li, parts, buttons } = airplayRow();
+      const look = controls => {
+        satAirPlay(li, pi({}, controls), { airplay_name: "Lounge" });
+        return { offered: offered(buttons), hint: parts[".sat-aphint"].textContent };
+      };
+      const none = look([]), only = look(["disconnect"]), all = look(ALL);
+      buttons["ap-next"].setAttribute("aria-busy", "true");
+      buttons["ap-next"].disabled = true;
+      satAirPlay(li, pi({}, ALL), {});
+      console.log(JSON.stringify({ none, only, all, busy: buttons["ap-next"].disabled }));
+    """)
+    off = {"ap-previous": False, "ap-toggle": False, "ap-next": False, "ap-disconnect": False}
+    assert got["none"]["offered"] == off, got
+    assert got["only"]["offered"] == {**off, "ap-disconnect": True}, got
+    assert got["only"]["hint"] == "This phone does not take remote control, so use the phone.", got
+    assert got["all"]["offered"] == {k: True for k in off}, got
+    assert got["all"]["hint"] == "Phones and Macs list it as Lounge.", got
+    assert got["busy"] is True, "a poll took a button mid-request out of busy()'s hands"
+
+
+def test_the_play_pause_control_says_what_it_will_do(tmp_path):
+    """Pause while the phone plays, Play while it is paused, each offered only
+    when the phone takes it, or takes play_pause."""
+    got = run(tmp_path, AIRPLAY_ROW + """
+      const { li, buttons } = airplayRow();
+      const toggle = (airplay, controls) => {
+        satAirPlay(li, pi(airplay, controls), {});
+        const b = buttons["ap-toggle"];
+        return [b.textContent, !b.disabled];
+      };
+      console.log(JSON.stringify([
+        toggle({ playing: true }, ALL), toggle({ playing: false }, ALL),
+        toggle({ playing: true }, ["play", "disconnect"]), toggle({ playing: false }, ["pause", "disconnect"]),
+        toggle({ playing: false }, ["play_pause", "disconnect"])]));
+    """)
+    assert got == [["Pause", True], ["Play", True], ["Pause", False], ["Play", False], ["Play", True]], got
+
+
+# satelliteAct on a Pi's row: the hub's AirPlay route is recorded and answered
+# with `airplay` (or refused with `refusal`), and what the controls' own note
+# (.sat-apnote) is told is kept in `said`; anything said to another host, the
+# row's note included, is not.
+AIRPLAY_ACT = AIRPLAY_ROW + r"""
+  const posts = [], said = [], HOST = { textContent: "" };
+  let airplay = { status: 204, confirmed: true }, refusal = null;
+  const real = json;
+  json = async (path, o) => {
+    if (!path.includes("/airplay/")) return real(path, o);
+    posts.push([path, o && o.method]);
+    if (refusal) { const e = new Error(refusal); e.status = 502; throw e; }
+    return { command: path.split("/").pop(), ...airplay };
+  };
+  satSaid = (host, text) => { if (host === HOST) said.push(text); };
+  const press = (n, act) => satelliteAct({ _n: n, dataset: { id: n.id },
+                                           querySelector: sel => sel === ".sat-apnote" ? HOST : stand() },
+                                         act, stand());
+"""
+
+
+def test_an_airplay_control_posts_its_own_command(tmp_path):
+    """Each control is one POST to the hub's AirPlay route for its command.
+    The toggle names the change it wants, which the agent can confirm, and
+    sends play_pause only to a phone that takes nothing more precise."""
+    got = run(tmp_path, AIRPLAY_ACT + """
+      for (const act of ["ap-previous", "ap-toggle", "ap-next", "ap-disconnect"]) await press(pi({}, ALL), act);
+      await press(pi({ playing: false }, ALL), "ap-toggle");
+      await press(pi({ playing: false }, ["play_pause", "disconnect"]), "ap-toggle");
+      console.log(JSON.stringify(posts));
+    """)
+    base = "/satellites/b827eb121359/airplay/"
+    assert got == [[base + c, "POST"] for c in ("previous", "pause", "next", "disconnect", "play",
+                                                "play_pause")], got
+
+
+def test_a_command_the_phone_did_not_act_on_is_said(tmp_path):
+    """The phone answers a command and may still do nothing with it; the
+    agent sees that on the player. Said then, and nothing is said when it
+    did act. A refusal is the hub's sentence, as every failure is."""
+    got = run(tmp_path, AIRPLAY_ACT + """
+      airplay = { status: 204, confirmed: false };
+      await press(pi({}, ALL), "ap-next");
+      airplay = { status: 204, confirmed: true };
+      await press(pi({}, ALL), "ap-next");
+      refusal = "the phone did not take next (491: the phone refused the connection)";
+      await press(pi({}, ALL), "ap-next");
+      console.log(JSON.stringify({ said, notes }));
+    """)
+    assert got["said"] == ["The phone took the command but did not act on it.", ""], got
+    assert got["notes"] == [["bad", "the phone did not take next (491: the phone refused the connection)"]], got
+
+
+def test_disconnect_asks_first_and_names_the_phone(tmp_path):
+    """Disconnect ends somebody's music, so it asks, and names the phone the
+    satellite reports; No sends nothing."""
+    got = run(tmp_path, AIRPLAY_ACT + """
+      confirming = false;
+      await press(pi({}, ALL), "ap-disconnect");
+      await press(pi({ client: null }, ALL), "ap-disconnect");
+      const refused = posts.length;
+      confirming = true;
+      await press(pi({}, ALL), "ap-disconnect");
+      await press(pi({}, ALL), "ap-next");
+      console.log(JSON.stringify({ asked, refused, posts: posts.map(p => p[0].split("/").pop()) }));
+    """)
+    assert got["asked"] == [
+        "Disconnect Gabriel's iPhone from pi-edifier? The music stops playing here.",
+        "Disconnect the phone from pi-edifier? The music stops playing here.",
+        "Disconnect Gabriel's iPhone from pi-edifier? The music stops playing here.",
+    ], "Next asked a question, or Disconnect did not"
+    assert got["refused"] == 0, "Disconnect was sent after No"
+    assert got["posts"] == ["disconnect", "next"], got

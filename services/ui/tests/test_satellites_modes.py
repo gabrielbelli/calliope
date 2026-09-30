@@ -821,3 +821,75 @@ def test_a_words_voice_picker_offers_its_own_language_by_name(tmp_path):
     assert "Dora · female" in got["note"] and "pf_dora" not in got["note"], got["note"]
     page = (Path(__file__).resolve().parents[1] / "app" / "static" / "ui.html").read_text()
     assert "satFillSelect(q('[data-f=\"a.voice\"]'), wakeVoiceOptions(w.language, a.voice))" in page
+
+
+def test_the_double_check_is_chosen_per_word_and_round_trips_through_the_put_body(tmp_path):
+    """Double-check and Also accept sit with a word's other settings, in
+    every mode: shown as the hub keeps them (Record only for a hub that
+    says nothing), sent back whole with a change, and a list longer than
+    the hub takes is named before Save. Push-to-talk is never offered it."""
+    got = run(tmp_path, MODERN + """
+      hub.words[0].verify = { mode: "log", spellings: ["alexia"] };
+      hub.words.push({ name: "lumos", threshold: 0.7, satellites: ["*"], mode: "trigger", language: null,
+                       action: null, silence_ms: 800, colour: null,
+                       conversation: { follow_up_s: 8, silence_ms: 600, end_phrases: null },
+                       trigger: { feedback: "earcon", cooldown_s: 3, ends_conversation: false },
+                       state: "ready", error: null });
+      await satellitesRefresh();
+      const shown = name => {
+        const row = name === "ptt" ? WAKE.pttRow : WAKE.rows.get(name);
+        const els = new Map(), find = row.querySelector;
+        row.querySelector = sel => { if (!els.has(sel)) els.set(sel, find(sel)); return els.get(sel); };
+        return () => ({ mode: row.querySelector('[data-f="v.mode"]').value,
+                        spellings: row.querySelector('[data-f="v.spellings"]').value,
+                        hidden: row.querySelector(".ww-verify").hidden === true });
+      };
+      const jarvis = shown("hey_jarvis"), lumos = shown("lumos"), ptt = shown("ptt");
+      wakeRender();
+      const before = { jarvis: jarvis(), lumos: lumos(), ptt: ptt().hidden };
+      wakeEdit("hey_jarvis", w => wakeField(w, "v.mode", "on"));
+      wakeEdit("lumos", w => wakeField(w, "v.spellings", "lumus, loo moss , "));
+      const after = { jarvis: jarvis(), lumos: lumos() };
+      await wakeSave();
+      const body = { jarvis: sent("hey_jarvis").verify, lumos: sent("lumos").verify };
+      const many = Array.from({ length: 13 }, (_, i) => "alexa" + i).join(", ");
+      const say = text => { wakeEdit("lumos", w => wakeField(w, "v.spellings", text));
+                            return wakeProblem(WAKE.draft.find(w => w.name === "lumos"), wakeEffective()); };
+      const fixes = { thirteen: say(many), long: say("x".repeat(41)), twelve: say(many.split(", ").slice(1).join(", ")) };
+      const at = wakeProblemAt(WAKE.draft.find(w => w.name === "lumos"), say(many)).f;
+      console.log(JSON.stringify({ before, after, body, fixes, at }));
+    """)
+    assert got["before"] == {"jarvis": {"mode": "log", "spellings": "alexia", "hidden": False},
+                             "lumos": {"mode": "log", "spellings": "", "hidden": False},
+                             "ptt": True}, got["before"]
+    assert got["after"]["jarvis"]["mode"] == "on", got["after"]
+    assert got["after"]["lumos"]["spellings"] == "lumus, loo moss", got["after"]
+    assert got["body"] == {"jarvis": {"mode": "on", "spellings": ["alexia"]},
+                           "lumos": {"spellings": ["lumus", "loo moss"]}}, got["body"]
+    fix = "Keep to 12 other spellings, each of 40 characters at most."
+    assert got["fixes"] == {"thirteen": fix, "long": fix, "twelve": ""}, got["fixes"]
+    assert got["at"] == "v.spellings"
+    # Every mode's, as the ring colour is: data-when shows it for all three.
+    page = (Path(__file__).resolve().parents[1] / "app" / "static" / "ui.html").read_text()
+    assert '<div class="grid2 ww-verify" data-when="command conversation trigger">' in page
+
+
+def test_a_wake_word_the_double_check_did_not_hear_is_logged_in_words(tmp_path):
+    """The hub's wake_rejected: a wake word STT did not hear in the audio
+    that held it. On, the wake was dropped; Record only, it went ahead and
+    the line says what On would have done. Neither is a failure, and
+    neither asks the hub for its lists again."""
+    got = run(tmp_path, MODERN + """
+      let source = null;
+      globalThis.EventSource = window.EventSource = class { constructor() { source = this; } };
+      await satellitesRefresh();
+      const asked = hub.calls.length;
+      const ev = mode => ({ type: "wake_rejected", at: 1000, satellite: "aaaaaaaaaaaa", word: "hey_jarvis",
+                            score: 0.93, heard: "Obrigado.", mode });
+      source.onmessage({ data: JSON.stringify(ev("on")) });
+      console.log(JSON.stringify({ on: satEventWhat(ev("on")), log: satEventWhat(ev("log")),
+                                   bad: satEventBad(ev("on")), asked: hub.calls.length - asked }));
+    """)
+    assert got["on"] == "hey jarvis ignored: heard “Obrigado.”", got
+    assert got["log"] == "hey jarvis would have been ignored: heard “Obrigado.”", got
+    assert got["bad"] is False and got["asked"] == 0, got

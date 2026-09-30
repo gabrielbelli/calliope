@@ -4245,6 +4245,13 @@ const SAT_COPY = {
   apSource: "ALAC, lossless · 44.1 kHz · 16-bit · stereo",
   apBitPerfect: "Bit-perfect: the phone's samples reach the card unchanged",
   apConverted: "Converted from {from} to {to}",
+  /* The phone decides: it may take remote control or not, and it may take
+     a command and do nothing with it, which the agent sees on the player
+     (the hub's `confirmed`). */
+  apNoRemote: "This phone does not take remote control, so use the phone.",
+  apNotConfirmed: "The phone took the command but did not act on it.",
+  apAPhone: "the phone",
+  askApDisconnect: "Disconnect {client} from {name}? The music stops playing here.",
   qPwm: "PWM, not a DAC",
   qHdmi: "HDMI: the display's own DAC",
   qHat: "DAC HAT",
@@ -4278,7 +4285,7 @@ const SAT_COPY = {
   tmSize: "{size} kept, over {days}.",
   tmFailed: "The hub did not answer: {message}",
   tmDays: "Days kept is a whole number from 1 to 365.",
-  askTmDelete: "Delete every telemetry record on the hub? Its settings stay as they are.",
+  askTmDelete: "Delete every telemetry record and kept clip on the hub? Its settings stay as they are.",
   voiceElsewhere: "{v} · {lang}, not this word's language",
   voiceUnlisted: "{v}, not a voice the stack lists",
   moreFix: "needs a fix",
@@ -4350,6 +4357,7 @@ const SAT_COPY = {
   fixPauseFollow: "Pause for 0.2 to 3 seconds before a follow-up ends.",
   fixCooldown: "Make the cooldown 0 to 600 seconds.",
   fixPhrase: "Keep to 64 end phrases, each of 64 characters at most.",
+  fixSpellings: "Keep to 12 other spellings, each of 40 characters at most.",
   fixGone: "Its model is no longer on the hub: upload it again under Custom models, or remove this word.",
   wwFix: "{word} needs a fix before the wake words can be saved.",
   wwUnfinished: "Finish setting up {word} to save the wake words.",
@@ -4826,6 +4834,19 @@ function satAdoptedMarkup(u) {
           <div class="hint sat-aphint"></div>
           <img class="sat-apart" alt="Cover of what is playing" hidden>
           <dl class="facts sat-apfacts"></dl>
+          <!-- THE PHONE'S OWN CONTROLS, while one is connected (satAirPlay).
+               No data-needs: satNeeds would write disabled back from its own
+               conditions over what the phone takes now. Their answers go in
+               the note under them, which is not a sat-note: satNoteFor then
+               sends a refused On or Name to the row's note, just above this
+               section, and not under the cover and fourteen facts. -->
+          <div class="actions sat-apctl" hidden>
+            <button class="small" type="button" data-act="ap-previous">Previous</button>
+            <button class="small" type="button" data-act="ap-toggle"></button>
+            <button class="small" type="button" data-act="ap-next">Next</button>
+            <button class="small" type="button" data-act="ap-disconnect">Disconnect</button>
+          </div>
+          <div class="sat-apnote" aria-live="polite"></div>
         </div>
       </details>
       <details class="sub sat-try">
@@ -5025,7 +5046,9 @@ function satelliteBuild(li, n) {
    Device. The row's own note sits under the switches and the Buttons one
    under the grid, beside the controls whose failures they carry: at the
    foot of the row, a refused Volume was reported below three disclosures,
-   while the slider kept the value that was not saved. */
+   while the slider kept the value that was not saved. AirPlay has no note of
+   its own, so its On and Name use the row's, which is just above it; its
+   controls answer in theirs (satelliteAct). */
 function satNoteFor(li, from) {
   const scope = (from && from.closest && from.closest(".body")) || li;
   return scope.querySelector(":scope > .sat-note")
@@ -5268,19 +5291,52 @@ function satAirPlay(li, n, cfg) {
   if (!name.dataset.held && name !== document.activeElement) name.value = cfg.airplay_name || "";
   name.placeholder = satName(n);
   const ap = n.online ? (n.status && n.status.airplay) || null : null;
+  /* THE PHONE'S OWN CONTROLS, and each one only while the phone takes it
+     now. The agent lists them from Shairport Sync's live RemoteControl
+     (status.airplay.remote): all of them once the phone has handed over
+     remote control, Disconnect alone while it has not, since that ends the
+     session from this side, and nothing with no session. An agent from
+     before sends no `remote`, and the hub would refuse every command it
+     was sent, so there are no controls then at all. */
+  const ctl = q(".sat-apctl"), remote = ap && ap.remote, can = (remote && remote.controls) || [];
   satSet(q(".sat-ap .sum-note"), n.online ? satAirPlayNote(cfg, ap) : "");
   satSet(q(".sat-aphint"), !on || !n.online ? ""
     : ap && ap.error ? satText("apError", { error: ap.error })
+    : ap && ap.session && can.length === 1 && can[0] === "disconnect" ? SAT_COPY.apNoRemote
     : ap && ap.running ? satText("apOn", { name: cfg.airplay_name || satName(n) }) : SAT_COPY.apStarting);
+  /* Disconnect ends the session, and the poll after it hides the controls
+     under the focus, which fell to the page: it goes to the section's own
+     summary, as Update's does to Device's. */
+  const shown = !!(on && ap && ap.session && remote);
+  if (!shown && !ctl.hidden && ctl.contains(document.activeElement)) {
+    q(".sat-ap > summary").focus({ preventScroll: true });
+  }
+  ctl.hidden = !shown;
+  /* Pause while it plays and Play while it is paused, which the agent can
+     confirm, or play_pause for a phone that takes only that. A button
+     mid-request is left as busy() set it, as satNeeds leaves one. */
+  const playing = !!(ap && ap.playing);
+  const takes = { "ap-previous": can.includes("previous"), "ap-next": can.includes("next"),
+                  "ap-toggle": can.includes(playing ? "pause" : "play") || can.includes("play_pause"),
+                  "ap-disconnect": can.includes("disconnect") };
+  for (const [act, ok] of Object.entries(takes)) {
+    const b = ctl.querySelector(`[data-act="${act}"]`);
+    if (b.getAttribute("aria-busy") === "true") continue;
+    b.disabled = !ok;
+    if (act === "ap-toggle") satSet(b, playing ? "Pause" : "Play");
+  }
   const audio = (n.status && n.status.audio) || {};
   /* THE COVER, from the hub, which keeps the last one the Pi sent; named by
      its SHA-256, so a new track's cover is a new address and the browser's
-     cache serves the rest. */
+     cache serves the rest. A cover that is not there yet (the hub answers
+     404 while it holds another picture than the one asked for) is asked for
+     again on the next update: remembered as asked, it stayed blank for the
+     rest of the track. */
   const art = q(".sat-apart"), sha = on && ap && ap.session && ap.artwork && ap.artwork.sha256;
   if (!sha) art.hidden = true;
   else if (art.dataset.sha !== sha) {
     art.dataset.sha = sha;
-    art.onerror = () => { art.hidden = true; };
+    art.onerror = () => { art.hidden = true; delete art.dataset.sha; };
     art.onload = () => { art.hidden = false; };
     art.src = `/ui/api/satellites/${encodeURIComponent(n.id)}/airplay/artwork?v=${sha}`;
   } else art.hidden = !art.complete || !art.naturalWidth;
@@ -5785,12 +5841,17 @@ function hexColour(hex) {
 const SAT_BUSY = { adopt: "Adopting…", identify: "Blinking…", dismiss: "Forgetting…",
                    say: "Saying…", tone: "Playing…", listen: "Recording…", stop: "Stopping…",
                    lights: "Showing…", rename: "Renaming…", reboot: "Rebooting…",
-                   movego: "Moving…", forget: "Forgetting…", update: "Updating…" };
+                   movego: "Moving…", forget: "Forgetting…", update: "Updating…",
+                   "ap-previous": "Skipping back…", "ap-toggle": "Asking the phone…",
+                   "ap-next": "Skipping…", "ap-disconnect": "Disconnecting…" };
 
 async function satelliteAct(li, act, button) {
   const n = li._n || {}, id = li.dataset.id, name = satName(n);
   const q = sel => li.querySelector(sel);
-  const host = satNoteFor(li, button);
+  /* An AirPlay control answers directly under the controls. The section's
+     On and Name answer in the row's note instead (satNoteFor), which is the
+     nearest note to them. */
+  const host = act.startsWith("ap-") ? q(".sat-apnote") : satNoteFor(li, button);
   if (act === "wakewords") { satGoWakeWords(); return; }
   if (act === "ring" || act.startsWith("ring-")) { satRingSetup(li, act, button); return; }
   if (act === "move") { satMoveOpen(li, button.getAttribute("aria-expanded") !== "true"); return; }
@@ -5810,10 +5871,21 @@ async function satelliteAct(li, act, button) {
   if (act === "rename" && !renamed) { satSaid(host, SAT_COPY.renameEmpty); q(".sat-rename input").focus(); return; }
   const img = li._img;
   if (act === "update" && !img) return;
+  /* AN AIRPLAY CONTROL IS THE COMMAND IT SENDS THE PHONE. The toggle asks
+     for what it says, Pause or Play, since only a named change can be
+     confirmed on the player; play_pause is for a phone that takes nothing
+     else. Disconnect ends somebody's music, so it asks first and names
+     whose. */
+  const ap = (n.status && n.status.airplay) || {}, can = (ap.remote && ap.remote.controls) || [];
+  const flip = ap.playing ? "pause" : "play";
+  const command = act === "ap-previous" ? "previous" : act === "ap-next" ? "next"
+    : act === "ap-toggle" ? (can.includes(flip) ? flip : "play_pause")
+    : act === "ap-disconnect" ? "disconnect" : null;
   const ask = act === "reboot" ? satText("askReboot", { name })
     : act === "forget" ? satText("askForget", { name })
     : act === "movego" ? satText("askMove", { name, url })
-    : act === "update" ? satText("askUpdate", { name, v: img.version }) : null;
+    : act === "update" ? satText("askUpdate", { name, v: img.version })
+    : act === "ap-disconnect" ? satText("askApDisconnect", { client: ap.client || SAT_COPY.apAPhone, name }) : null;
   if (ask && !confirm(ask)) return;
   host.textContent = "";
   const done = busy(button, SAT_BUSY[act]);
@@ -5892,6 +5964,11 @@ async function satelliteAct(li, act, button) {
       await json(`/satellites/${id}/forget`, { method: "POST" });
       SATELLITES.writes++;
       satForgotten(li);
+    } else if (command) {
+      /* The hub answers once the phone has, and says whether the player
+         then changed; a refusal is a 502 with the phone's reason. */
+      const r = await json(`/satellites/${id}/airplay/${command}`, { method: "POST" });
+      satSaid(host, r && r.confirmed === false ? SAT_COPY.apNotConfirmed : "");
     }
     satellitesRefresh();
   } catch (e) {
@@ -6066,7 +6143,7 @@ const WAKE = { server: null, draft: null, draftPtt: null, removed: new Set(), fa
 const WAKE_PTT = "ptt";
 const WAKE_THRESHOLD = { usual: 0.5, trigger: 0.7 };
 const WAKE_SHOWN = { follow_up_s: 8, cooldown_s: 3, feedback: "earcon", silence_ms: 800, follow_silence_ms: 600,
-                     colour: "#286eff" };
+                     colour: "#286eff", verify: "log" };
 /* A word's ring colour, as the colour picker writes it; unset is the hub's
    listening blue (WAKE_SHOWN.colour, main.LISTEN_COLOUR there). */
 const WAKE_COLOUR = /^#[0-9a-fA-F]{6}$/;
@@ -6079,6 +6156,9 @@ const WAKE_PAUSE = { low: 200, high: 3000 };
 /* A conversation's end phrases: how many, and how long each may be
    (router.ConversationSettings and its EndPhrase). */
 const WAKE_PHRASES = { most: 64, longest: 64 };
+/* The other spellings a word's double-check accepts: how many, and how long
+   each may be (router.VerifySettings and its Spelling). */
+const WAKE_SPELLINGS = { most: 12, longest: 40 };
 const WAKE_LANG = /^([a-z]{2,3}(-[A-Za-z0-9]{2,8})*|auto)$/;
 const WAKE_ENV = /^[A-Z][A-Z0-9_]{0,63}$/;
 /* The hub's own settings (destinations.hub_setting): under its prefix, with
@@ -6136,12 +6216,15 @@ function wakeTurn(write) {
 function wakeCopy(w) {
   return { name: w.name, threshold: w.threshold, satellites: [...w.satellites], mode: w.mode,
            language: w.language, action: w.mode === "trigger" ? undefined : w.action,
-           silence_ms: w.silence_ms, colour: w.colour, conversation: w.conversation, trigger: w.trigger };
+           silence_ms: w.silence_ms, colour: w.colour, conversation: w.conversation, trigger: w.trigger,
+           verify: w.verify };
 }
-/* Push-to-talk's entry: a word's, without a name, a threshold or satellites. */
+/* Push-to-talk's entry: a word's, without a name, a threshold or satellites.
+   Its `verify` goes back as the hub gave it, and the hub ignores it: a
+   button is never double-checked, so the row does not offer it. */
 function wakePttCopy(p) {
   return { mode: p.mode, language: p.language, action: p.action, silence_ms: p.silence_ms,
-           colour: p.colour, conversation: p.conversation, trigger: p.trigger };
+           colour: p.colour, conversation: p.conversation, trigger: p.trigger, verify: p.verify };
 }
 function wakeClone(v) { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
 /* Keys sorted, so the hub's order and the page's compare equal. */
@@ -6341,8 +6424,8 @@ function wakeMs(text) { const s = wakeNumber(text); return s == null ? null : Ma
 
 /* ONE SETTER FOR EVERY FIELD. `key` is the control's data-f: "lang" and "tag"
    are the language, "dest" the action's type, "preset" a provider's address,
-   and "d.", "a.", "c." and "t." a field of the destination, the action, the
-   conversation or the trigger. A required field left empty stays "" so its
+   and "d.", "a.", "c.", "t." and "v." a field of the destination, the action,
+   the conversation, the trigger or the double-check. A required field left empty stays "" so its
    fix is named; an optional one left empty is unset. A secret is never typed
    here, only the NAME of the variable that holds it ("d.env", which is
    token_env or api_key_env); the key box has no data-f at all. */
@@ -6382,14 +6465,20 @@ function wakeField(w, key, raw) {
       : name === "silence_ms" ? wakeMs(text) : wakeNumber(text) };
   } else if (kind === "t") {
     w.trigger = { ...(w.trigger || {}), [name]: name === "cooldown_s" ? wakeNumber(text) : text };
+  } else if (kind === "v") {
+    /* Also accept, as the end phrases are typed: separated by commas, and
+       empty is none. */
+    w.verify = { ...(w.verify || {}), [name]: name === "spellings"
+      ? (text ? text.split(",").map(p => p.trim()).filter(Boolean) : []) : text };
   }
 }
 
 function wakeWithin(v, low, high) { return typeof v === "number" && isFinite(v) && v >= low && v <= high; }
 /* Too many end phrases, or one too long. The box takes 2000 characters, so
    seventy short ones passed here and came back from the hub as a 422. */
-function wakePhrasesBad(list) {
-  return !!list && (list.length > WAKE_PHRASES.most || list.some(p => p.length > WAKE_PHRASES.longest));
+function wakePhrasesBad(list) { return wakeListBad(list, WAKE_PHRASES); }
+function wakeListBad(list, bounds) {
+  return !!list && (list.length > bounds.most || list.some(p => p.length > bounds.longest));
 }
 
 /* AN ADDRESS AS THE HUB KEEPS IT, without a trailing slash
@@ -6420,8 +6509,10 @@ function wakeProblem(w, words) {
   const can = WAKE.server && WAKE.server.available;
   if (w.name && Array.isArray(can) && !can.includes(w.name)) return SAT_COPY.fixGone;
   if (!w.mode) return "";
-  /* Before a trigger's return: its colour is sent and checked too. */
+  /* Before a trigger's return: its colour and its double-check are sent and
+     checked too. */
   if (w.colour != null && !WAKE_COLOUR.test(w.colour)) return SAT_COPY.fixColour;
+  if (wakeListBad(w.verify && w.verify.spellings, WAKE_SPELLINGS)) return SAT_COPY.fixSpellings;
   if (w.mode === "trigger") {
     const t = w.trigger || {};
     return "cooldown_s" in t && !wakeWithin(t.cooldown_s, 0, 600) ? SAT_COPY.fixCooldown : "";
@@ -6486,6 +6577,7 @@ function wakeProblemAt(w, problem) {
     [SAT_COPY.fixColour]: ["colour"],
     [SAT_COPY.fixPauseFollow]: ["c.silence_ms"],
     [SAT_COPY.fixPhrase]: ["c.end_phrases"],
+    [SAT_COPY.fixSpellings]: ["v.spellings"],
   }[problem] || ["a.fallback"];
   return { f, empty: !!empty };
 }
@@ -7251,6 +7343,20 @@ function wakeRowMarkup(u) {
             <button class="small tight" type="button" data-ww="colourdefault" hidden>Use the default</button></div>
           <div class="hint">What the ring shows while this word listens, thinks or flashes.</div></div>
       </div>
+      <div class="grid2 ww-verify" data-when="command conversation trigger">
+        <div><label for="${u}-verify">Double-check</label>
+          <select id="${u}-verify" data-f="v.mode">
+            <option value="off">Off</option>
+            <option value="log">Record only</option>
+            <option value="on">On</option>
+          </select>
+          <div class="hint">Transcribes the wake word first, so a TV or another speaker saying something like it is ignored.</div>
+          <div class="hint">Record only shows in Activity what it would have ignored.</div></div>
+        <div><label for="${u}-spell">Also accept</label>
+          <input type="text" id="${u}-spell" data-f="v.spellings" maxlength="600"
+                 placeholder="e.g. alexia, aleksa" spellcheck="false" autocomplete="off">
+          <div class="hint">Other ways speech-to-text writes the word, separated by commas.</div></div>
+      </div>
       <div class="grid2 ww-does" data-when="trigger">
         <div><label for="${u}-feel">When heard</label>
           <select id="${u}-feel" data-f="t.feedback">
@@ -7557,6 +7663,12 @@ function wakeRowUpdate(row, w, live, removed, words, ptt, changed) {
      was blue, and Use the default never showed. */
   wakeValue(q('[data-f="colour"]'), w.colour || WAKE_SHOWN.colour);
   q('[data-ww="colourdefault"]').hidden = !w.colour;
+  /* THE DOUBLE-CHECK IS EVERY MODE'S TOO, and never push-to-talk's: a
+     button is not a TV, and the hub ignores the block there. */
+  if (ptt) q(".ww-verify").hidden = true;
+  const v = w.verify || {};
+  wakeValue(q('[data-f="v.mode"]'), v.mode || WAKE_SHOWN.verify);
+  wakeValue(q('[data-f="v.spellings"]'), (v.spellings || []).join(", "));
   const moreFix = !!culprit && !quiet && !!culprit.closest(".ww-more");
   if (w.action && (w.mode === "command" || w.mode === "conversation")) wakeActionUpdate(row, w, words, moreFix);
   if (w.mode === "trigger") {
@@ -8218,6 +8330,13 @@ function satellitesListen() {
       || (ev.type === "pending" ? "New satellite" : ev.satellite);
     const ota = row && row._n && row._n.ota;
     const what = satEventWhat(ev, ota && ota.version);
+    /* AN EVENT THE LOG HAS NO WORDS FOR IS LEFT OUT, and changes nothing
+       here. The hub publishes some for Home Assistant alone (a media stream,
+       an AirPlay command, the names of settings changed in its record, a
+       firmware image uploaded or deleted), and each reached the log as the
+       protocol's own word and asked for a refresh: "config" once for every
+       slider let go. The poll brings what they change. */
+    if (what === null) return;
     if (ev.type === "wake" && !ev.injected) {
       SATELLITES.woke.set(ev.satellite, Date.now());
       if (typeof ev.score === "number" && ev.wake_word !== "ptt") {
@@ -8274,7 +8393,7 @@ function satellitesListen() {
       }
     }
     $("evnone").hidden = true;
-    if (!progress && !["button", "wake", "routed", "turn", "triggered"].includes(ev.type)
+    if (!progress && !["button", "wake", "routed", "turn", "triggered", "wake_rejected"].includes(ev.type)
         && satellitesOpen()) {
       satellitesRefresh();
     } else if (!satellitesOpen() && ["pending", "online", "offline"].includes(ev.type)) {
@@ -8325,12 +8444,17 @@ function satEventsSay(text) {
   $("evnone").hidden = !!text || $("satelliteevents").children.length > 0;
 }
 
-/* What a button changed on the device, in words. */
-function satSettingsSaid(s) {
+/* What the device changed itself (a button, or a phone's AirPlay slider),
+   in words. */
+function satSettingsSaid(s, n) {
   const said = [];
-  /* In the slider's twelve steps, rounded as satLevel rounds them: a percent
-     appeared nowhere else on the page. */
-  if (typeof s.volume === "number") said.push(`volume ${Math.round(s.volume * 12 / 100)} of 12`);
+  /* In the units of that satellite's own Volume slider (satHardware): the
+     ring's twelve steps, rounded as satLevel rounds them, on a satellite
+     with a ring; a percent on one without (a Pi). */
+  const steps = !n || (satHas(n, "lights") && !satHas(n, "audio_devices"));
+  if (typeof s.volume === "number") {
+    said.push(steps ? `volume ${Math.round(s.volume * 12 / 100)} of 12` : `volume ${Math.round(s.volume)}%`);
+  }
   if (typeof s.lights_enabled === "boolean") said.push(`lights ${s.lights_enabled ? "on" : "off"}`);
   if (typeof s.brightness === "number") said.push(`brightness ${s.brightness}%`);
   return said.join(", ") || "nothing";
@@ -8341,7 +8465,8 @@ function satSettingsSaid(s) {
    says When pressed and a row that says Now on v0.3.1. `going` is the
    version the row shows an update taking, since a progress event carries
    none. A pending satellite is named New satellite (the hub sends it no
-   name), so its line does not say "new" again. */
+   name), so its line does not say "new" again. An event with no words here
+   is null, and satellitesListen leaves it out. */
 const SAT_EDGE_SAID = { press: "pressed", release: "released" };
 function satEventWhat(ev, going) {
   const v = ev.version || going || "new firmware";
@@ -8355,10 +8480,12 @@ function satEventWhat(ev, going) {
     : ev.type === "conversation_started" ? satTalkStarted(ev)
     : ev.type === "conversation_ended" ? satTalkEnded(ev)
     : ev.type === "triggered" ? satTriggered(ev)
-    : ev.type === "settings" ? `set on the device: ${satSettingsSaid(ev.settings || {})}`
+    : ev.type === "wake_rejected" ? satWakeRejected(ev)
+    : ev.type === "settings"
+      ? `set on the device: ${satSettingsSaid(ev.settings || {}, SATELLITES.list.find(o => o.id === ev.satellite))}`
     : ev.type === "output" ? (ev.output === "jack" ? "playing through its jack (aux)" : "playing through its speaker")
     : ev.type === "jack" ? `${ev.device || ev.name}: ${ev.plugged ? "plugged in" : "unplugged"}`
-    : ev.type;
+    : null;
 }
 const SAT_WOKE_ENDS = ["routed", "turn", "conversation_ended", "triggered"];
 
@@ -8423,6 +8550,14 @@ function satTalkEnded(ev) {
 function satTriggered(ev) {
   const score = typeof ev.score === "number" ? ` (${ev.score.toFixed(2)})` : "";
   return `${ev.injected ? "test: " : ""}triggered ${wwLabel(ev.wake_word)}${score}`;
+}
+/* A wake word the hub's double-check did not hear: the model fired, and STT
+   heard something else in the same audio (a TV, most often). With Double-
+   check at Record only the wake went ahead, and this says what On would
+   have done. */
+function satWakeRejected(ev) {
+  const how = ev.mode === "log" ? "would have been ignored" : "ignored";
+  return `${wwLabel(ev.word)} ${how}: heard “${ev.heard || ""}”`;
 }
 
 /* ============================================================ try a word == */

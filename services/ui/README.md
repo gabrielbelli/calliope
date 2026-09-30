@@ -747,7 +747,7 @@ Closed, a row shows the name, one state word and one line. Open, it has:
 | **Speaker**, **Microphone**, **Lights** | `speaker_enabled`, `mic_enabled`, `lights_enabled` | |
 | **Output** | `audio_sink` or `output_satellite` | Each own output with what it is: "USB DAC · up to 32-bit · 384 kHz", "DAC HAT", "HDMI: the display's own DAC", and the Pi's own jack marked **\*** as "PWM, not a DAC"; the line under it says whether something is plugged into it (where the card can tell), what the chosen one takes and what it is driven at now, and the jack's limits; each option says "plugged in" or "nothing plugged in" where the card can tell. Its own outputs first (a Linux satellite's devices from its last status and the system's default; the Korvo's speaker), then every other adopted satellite with a speaker. One chosen before and gone now stays chosen and says so. Chosen another satellite, the hint names where it plays, or that it plays on its own speaker while that one is offline |
 | **Microphone input** | `audio_source` | A Linux satellite only (caps `audio_devices`) |
-| **AirPlay** (its own section) | `airplay_enabled`, `airplay_name` | A satellite with caps `airplay` only. **On**, and **Name on phones** (the satellite's own when empty). Its summary says playing, paused, waiting, off or not running; under it, while a phone is connected: the cover, whole at its own shape (a square album, a video's 16:9; from `/satellites/{id}/airplay/artwork`, addressed by its SHA-256), Status, From (the phone and its model), Now playing, Album (and year), Genre, Position, Original file (the phone's own file: its kind and bit rate), Source (classic AirPlay is always ALAC, lossless, 16-bit at 44.1 kHz), Bit rate (1,411 kb/s), Handed on as (the stream into PipeWire), Played at (what the card is driven at), Path ("Bit-perfect" when the phone's 16-bit samples reach the card unchanged: the same rate and channels, and a card driven at 16 bits or wider in whole numbers; otherwise what they were converted from and to), Delay here, and the phone's volume |
+| **AirPlay** (its own section) | `airplay_enabled`, `airplay_name` | A satellite with caps `airplay` only. **On**, and **Name on phones** (the satellite's own when empty). Its summary says playing, paused, waiting, off or not running; under it, while a phone is connected: the cover, whole at its own shape (a square album, a video's 16:9; from `/satellites/{id}/airplay/artwork`, addressed by its SHA-256), Status, From (the phone and its model), Now playing, Album (and year), Genre, Position, Original file (the phone's own file: its kind and bit rate), Source (classic AirPlay is always ALAC, lossless, 16-bit at 44.1 kHz), Bit rate (1,411 kb/s), Handed on as (the stream into PipeWire), Played at (what the card is driven at), Path ("Bit-perfect" when the phone's 16-bit samples reach the card unchanged: the same rate and channels, and a card driven at 16 bits or wider in whole numbers; otherwise what they were converted from and to), Delay here, and the phone's volume. Under them, **Previous**, **Pause** or **Play**, **Next** and **Disconnect**: `POST /satellites/{id}/airplay/{command}`, shown while a phone is connected to a satellite whose agent reports remote control (`status.airplay.remote`), and each one greyed unless the phone takes that command now. A phone that has not handed over remote control takes only Disconnect, and the hint says to use the phone. **Pause** reads **Play** while the phone is paused. Disconnect asks first and names the phone. The phone decides what it does with a command, so it can answer and then do nothing; the hub then says `confirmed: false` (the player did not change within 1.5 s), and the page says "The phone took the command but did not act on it." |
 
 A control for hardware a satellite does not have is not shown at all: a
 Raspberry Pi with no ring, buttons or microphone has no light brightness,
@@ -773,7 +773,7 @@ through one:
 | **Blink** | `POST /satellites/{id}/identify`. **Chime** on a satellite without a ring (a Raspberry Pi), which plays its wake sound three times |
 | **Play a tone** | `POST /satellites/{id}/tone` |
 | **Listen 5 s** | `GET /satellites/{id}/listen?seconds=5`, played back in the page |
-| **Stop** | `POST /satellites/{id}/flush`: what the satellite's Set button does |
+| **Stop** | `POST /satellites/{id}/flush`: what the satellite's Set button does. It also stops music Home Assistant is playing on it |
 | **Colour**, **Light pattern** (Solid, Pulse, Spin, Off), **Show** | `POST /satellites/{id}/lights` `{"mode", "color"}` |
 
 **Buttons** is a grid: one row per button the satellite reports (Rec, Mode,
@@ -825,6 +825,8 @@ field is in the hub's
 | **Pause that ends the command, seconds** | `silence_ms`, sent in milliseconds | 0.2 to 3 s |
 | **Pause that ends a follow-up, seconds** | `conversation.silence_ms` | 0.2 to 3 s |
 | **Ring colour**, **Use the default** | `colour` (`#rrggbb`), or none for the listening blue | |
+| **Double-check**: Off, Record only, On | `verify.mode`: `off`, `log`, `on`. Every mode's, and Record only for a word the hub has said nothing about ([Double-checking a wake word](../satellites/README.md#double-checking-a-wake-word)) | |
+| **Also accept** | `verify.spellings`, comma-separated | Up to 12, each up to 40 characters |
 | **When heard**: Chime and flash, Nothing | `trigger.feedback`: `earcon`, `none` | |
 | **Cooldown, seconds** | `trigger.cooldown_s` | 0 to 600 |
 | **Ends a conversation it is heard in** | `trigger.ends_conversation` | |
@@ -851,7 +853,17 @@ key a word was saved with, because asking sends the key. After a change,
 press **List models**.
 
 The last row, after the words, is push-to-talk's own entry: what a button set
-to Talk does. It has a mode and an action, and cannot be a trigger.
+to Talk does. It has a mode and an action, and cannot be a trigger. It has no
+**Double-check**: the hub never checks a button, and its `verify` goes back
+as the hub gave it.
+
+**Double-check** is what stops a TV or another device in the room waking a
+satellite with something that only sounds like the word: the hub transcribes
+the wake word before it answers. **Record only**, every word's default,
+answers as before and logs in Activity what **On** would have ignored, so a
+word is turned **On** once that log shows it would have ignored the right
+things. **Also accept** adds the ways speech-to-text writes a word that the
+hub does not know, such as a custom model's name.
 
 **Try a word** (`POST /satellites/routing/test`) runs a typed sentence
 through a word's saved action and makes the reply, and plays nothing.
@@ -863,7 +875,15 @@ through a word's saved action and makes the reply, and plays nothing.
 
 **Activity** is the hub's event stream (`GET /satellites/events`) as a log a
 screen reader hears: buttons, wake words, conversations, triggers, updates,
-and satellites coming and going. It marks a gap while the stream was down.
+settings set on the device itself, and satellites coming and going. It marks
+a gap while the stream was down. A wake word the hub's double-check did not
+hear (`wake_rejected`) is a line of its own: "alexa ignored: heard
+“Obrigado.”", or, under Record only, "alexa would have been ignored: heard
+“Obrigado.”". It leaves out the events the hub publishes
+for Home Assistant alone, since the next poll shows what they change: media
+streams, AirPlay commands, the names of the settings changed in the hub's
+record (`config`, after a `PATCH` or a satellite's report), and firmware
+images uploaded or deleted.
 
 **Telemetry** is off until turned on ([the hub's
 Telemetry](../satellites/README.md#telemetry)). Its summary says whether the
@@ -876,7 +896,7 @@ every poll.
 | **Keep** | `level`: **Everything, with what was said** (`full`) or **Timings only, no words** (`timings`) |
 | **Days kept** | `retention_days`, 1 to 365 |
 | **Download** | `GET /satellites/telemetry/records?limit=20000`, as `telemetry.json`. Shown once something is recorded |
-| **Delete all** | `DELETE /satellites/telemetry`, after a question. The settings stay |
+| **Delete all** | `DELETE /satellites/telemetry`, after a question: the records and the clips the double-check kept. The settings stay |
 
 **Firmware** lists the uploaded images and uploads one:
 
@@ -895,6 +915,7 @@ every poll.
 - `GET /satellites`, `GET /satellites/events`, and `GET`, `PATCH /satellites/{id}`
 - `POST /satellites/{id}/` `adopt`, `forget`, `identify`, `reboot`,
   `lights`, `tone`, `say`, `flush`, `set-hub`, and `GET /satellites/{id}/listen`
+- `GET /satellites/{id}/airplay/artwork` and `POST /satellites/{id}/airplay/{command}`
 - `GET` and `PUT /satellites/wake-words`, `POST /satellites/wake-words/models`
   and `DELETE /satellites/wake-words/models/{name}`
 - `GET` and `PUT /satellites/routing`, and `POST /satellites/routing/test`
@@ -905,15 +926,20 @@ every poll.
 - `GET`, `PUT` and `DELETE /satellites/telemetry`, `GET /satellites/telemetry/records`
   and `GET /satellites/telemetry/summary`
 
-Two hub routes are left out on purpose. `POST /satellites/{id}/inject` runs a
+Five hub routes are left out on purpose. `POST /satellites/{id}/inject` runs a
 recorded clip through a satellite's real actions, which is a script's job: a
 button for it would be one press from Home Assistant acting on a clip.
 `POST /satellites/{id}/ptt` is Home Assistant's way to start listening, and
-the page has the satellites' own Talk buttons. The device socket
-`/satellites/ws` is not here either, because a browser never opens it. A
-firmware image or a wake word model is held whole by the hub before it can
-refuse it, so this service refuses either upload over 8 MB before it
-forwards a byte.
+the page has the satellites' own Talk buttons. `POST /satellites/{id}/media`
+and `POST /satellites/{id}/media/stop` are Home Assistant's too: its media
+player and its announcements upload audio it has already converted with its
+own ffmpeg. The page has Say for speech, and its Stop (`/flush`) stops that
+music as well. `GET /satellites/telemetry/clips/{name}` serves the audio of a
+wake word the double-check did not hear, which is for tuning and retraining
+the word's model from the records, not for the page. The device socket `/satellites/ws` is not here either,
+because a browser never opens it. A firmware image or a wake word model is
+held whole by the hub before it can refuse it, so this service refuses
+either upload over 8 MB before it forwards a byte.
 
 ---
 

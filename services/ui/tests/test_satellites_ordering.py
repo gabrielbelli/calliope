@@ -14,7 +14,9 @@ What they prevent:
     copy over a word somebody is in the middle of editing;
   * the rows moving on a poll, which takes the row under a finger away;
   * a /satellites answer read before an adopt and landing after it, which
-    rebuilt the adopted row as pending, closed, until the next poll.
+    rebuilt the adopted row as pending, closed, until the next poll;
+  * an event the page has no words for (the hub's events for Home Assistant)
+    reaching Activity as the protocol's own word and asking for a refresh.
 """
 
 # The harness, and the skip when node is not on PATH: pytest reads pytestmark
@@ -207,7 +209,9 @@ def test_an_update_is_one_line_in_activity_and_asks_the_hub_nothing_per_ten_per_
         online: satEventWhat({ type: "online", name: "kitchen", firmware: "v0.3.1" }),
         offline: satEventWhat({ type: "offline" }),
         pending: satEventWhat({ type: "pending", satellite: "a1b2c3d4e5f6" }),
-        volume: satSettingsSaid({ volume: 58 }) }));
+        volume: satSettingsSaid({ volume: 58 }),
+        korvo: satSettingsSaid({ volume: 58 }, { caps: { lights: 12, mic: {} } }),
+        pi: satSettingsSaid({ volume: 58 }, { caps: { speaker: {}, audio_devices: true } }) }));
     """)
     assert got["after_start"] == {"added": 1, "refreshed": 1}, got
     assert got["progress"] == {"added": 1, "refreshed": 1, "pct": 100, "state": "progress"}, \
@@ -222,6 +226,40 @@ def test_an_update_is_one_line_in_activity_and_asks_the_hub_nothing_per_ten_per_
     assert got["pending"] == "waiting to be adopted (ID a1b2c3d4e5f6)", got
     # The slider's steps, where Activity said a percent seen nowhere else.
     assert got["volume"] == "volume 7 of 12", got
+    # Each satellite's own slider: the Korvo's ring steps, the Pi's percent
+    # (a phone's AirPlay slider sets a Pi's volume, as a button does a Korvo's).
+    assert got["korvo"] == "volume 7 of 12" and got["pi"] == "volume 58%", got
+
+
+def test_an_event_the_log_has_no_words_for_is_left_out_and_asks_for_nothing(tmp_path):
+    """The hub publishes events for Home Assistant alone: a media stream, an
+    AirPlay command, a setting changed (after every PATCH, so every slider
+    let go), an image uploaded. Each reached Activity as the protocol's own
+    word, the image's with no name at all, and asked the hub for its three
+    lists. An event the page has words for is still logged."""
+    got = run(tmp_path, """
+      let source = null;
+      globalThis.EventSource = window.EventSource = class { constructor() { source = this; } };
+      await satellitesRefresh();
+      $("tab-satellites").hidden = false;               // open, so an event may refresh
+      let added = 0, refreshed = 0;
+      const add = satEventAdd;
+      satEventAdd = li => { added++; return add(li); };
+      satellitesRefresh = () => { refreshed++; };
+      const send = ev => source.onmessage({ data: JSON.stringify({ at: 1000, ...ev }) });
+      const id = "aaaaaaaaaaaa", row = SATELLITES.rows.get(id), before = row._last;
+      send({ type: "media", satellite: id, source: id, id: "f".repeat(32), announce: false,
+             state: "playing", reason: null, played_s: 0 });
+      send({ type: "airplay_command", satellite: id, command: "next", ok: true, status: 204, confirmed: true });
+      send({ type: "config", satellite: id, changed: ["volume"] });
+      send({ type: "firmware", action: "added", sha256: "e".repeat(64), model: "raspberry-pi", version: "v1" });
+      const unknown = { added, refreshed, row: row._last === before };
+      send({ type: "offline", satellite: id });
+      console.log(JSON.stringify({ unknown, known: { added, refreshed, row: row._last } }));
+    """)
+    assert got["unknown"] == {"added": 0, "refreshed": 0, "row": True}, got
+    assert got["known"]["added"] == 1 and got["known"]["refreshed"] == 1, got
+    assert got["known"]["row"].startswith("Last event: went offline, "), got
 
 
 def test_an_update_line_keeps_the_time_it_started_when_progress_rewrites_it(tmp_path):

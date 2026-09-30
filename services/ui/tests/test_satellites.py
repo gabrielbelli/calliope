@@ -29,6 +29,7 @@ The failures these prevent are the quiet ones:
 """
 
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
@@ -400,16 +401,77 @@ def test_the_buttons_grid_fits_a_phone_and_names_the_lights_switch():
     assert ".sat-buttons .body>.hint+.hint{margin-top:var(--s1)}" in BARE_CSS
 
 
+class Elements(HTMLParser):
+    """A template's elements, each with its classes, its parent and its
+    children: enough to walk the markup the way satNoteFor's selectors do."""
+
+    VOID = {"input", "img", "br", "hr", "source", "wbr"}
+
+    def __init__(self, markup: str):
+        super().__init__()
+        self.root = self.at = {"tag": None, "cls": set(), "attrs": {}, "up": None, "kids": []}
+        self.feed(markup)
+        self.close()
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        el = {"tag": tag, "cls": set((attrs.get("class") or "").split()), "attrs": attrs,
+              "up": self.at, "kids": []}
+        self.at["kids"].append(el)
+        if tag not in self.VOID:
+            self.at = el
+
+    def handle_endtag(self, tag):
+        shut = self.at
+        while shut["up"] is not None and shut["tag"] != tag:
+            shut = shut["up"]
+        if shut["up"] is not None:
+            self.at = shut["up"]
+
+    def each(self, el=None):
+        for kid in (el or self.root)["kids"]:
+            yield kid
+            yield from self.each(kid)
+
+
 def test_a_failed_setting_is_reported_beside_the_control():
     """A refused Volume, Speaker or Lights went to the row's note, which sat
     after Try it, Buttons and Device, a screen away on a phone with Device
-    open; and a refused button mapping under four hints below the grid."""
+    open; and a refused button mapping under four hints below the grid. An
+    AirPlay control's answer is said under the controls, and a refused On or
+    Name in the row's note just above the section, not under the cover and
+    the facts."""
     note = '<div class="sat-note" aria-live="polite"></div>'
     assert OPEN_ROW.count(note) == 1, "the row's own note is not above its disclosures"
     assert OPEN_ROW.index('class="row sat-switches"') < OPEN_ROW.index(note)
     assert BUTTONS.index(note) < BUTTONS.index('<div class="hint">')
+    airplay = between(ADOPTED, '<details class="sub sat-ap"', "</details>")
+    assert "sat-note" not in re.sub(r"<!--.*?-->", "", airplay, flags=re.S), \
+        "AirPlay's On and Name answer under the cover and the facts"
+    assert airplay.index('class="actions sat-apctl"') < airplay.index('<div class="sat-apnote" aria-live="polite">')
+    assert 'act.startsWith("ap-") ? q(".sat-apnote") : satNoteFor(li, button)' in function("satelliteAct")
     assert BODY.count(note) == 4, "a section lost its note, or has two"
-    assert 'scope.querySelector(":scope > .sat-note")' in function("satNoteFor")
+    # Where each setting's failure lands, by satNoteFor's own walk: the note
+    # directly under the control's .body, or else the row's.
+    walk = function("satNoteFor")
+    assert 'from.closest(".body")' in walk and 'scope.querySelector(":scope > .sat-note")' in walk
+    assert 'li.querySelector("details.sat-row > .body > .sat-note")' in walk
+    row = Elements(ADOPTED)
+
+    def section(control):
+        scope = control
+        while "body" not in scope["cls"]:
+            scope = scope["up"]
+        if not any("sat-note" in kid["cls"] for kid in scope["kids"]):
+            return "row"
+        details = scope["up"]
+        return "row" if "sat-row" in details["cls"] else " ".join(sorted(details["cls"] - {"sub"}))
+
+    landed = {el["attrs"]["data-cfg"]: section(el) for el in row.each() if "data-cfg" in el["attrs"]}
+    assert landed == {"volume": "row", "mic_gain_db": "row", "brightness": "row", "audio_source": "row",
+                      "speaker_enabled": "row", "mic_enabled": "row", "lights_enabled": "row",
+                      "airplay_enabled": "row", "airplay_name": "row",
+                      "ring_top": "sat-device", "ring_upside_down": "sat-device"}, landed
 
 
 def test_the_device_facts_are_written_in_place_and_not_rebuilt_on_a_poll():
@@ -431,15 +493,15 @@ def test_the_one_filled_button_on_the_list_is_adopt():
 
 
 def test_every_consequential_action_asks_first_and_nothing_prompts():
-    """Reboot, Forget, Move, Update, Update every satellite, Roll back every
-    satellite and Delete each ask, and the question comes before anything is
-    greyed or sent. Rename is an inline field now, so the page has no
-    prompt() at all. (Roll back is new: Update every satellite used to sit on
-    every image, older ones included, and downgraded the house without
-    saying so.)"""
+    """Reboot, Forget, Move, Update, AirPlay's Disconnect, Update every
+    satellite, Roll back every satellite and Delete each ask, and the question
+    comes before anything is greyed or sent. Rename is an inline field now,
+    so the page has no prompt() at all. (Roll back is new: Update every
+    satellite used to sit on every image, older ones included, and downgraded
+    the house without saying so.)"""
     act = function("satelliteAct")
     ask = act.index("if (ask && !confirm(ask)) return;")
-    for key in ("askReboot", "askForget", "askMove", "askUpdate"):
+    for key in ("askReboot", "askForget", "askMove", "askUpdate", "askApDisconnect"):
         assert f'satText("{key}"' in act[:ask], f"{key} is not asked"
     assert ask < act.index("busy(button") < act.index("await json(`/satellites/${id}/set-hub`")
     fw = function("firmwareAct")
@@ -551,7 +613,7 @@ SAMPLES = {"from": "44.1 kHz · 16-bit · stereo", "to": "48 kHz · 32-bit · st
            "s": "1.3", "output": "Jack (aux)", "hears": "home_assistant_cloud (en-GB)",
            "speaks": "calliope_kokoro as pf_dora", "first": "0.4",
            "reply": "Hello! How can I help you today?", "buttons": "Rec or Mode",
-           "model": "vendor/test-model-large-instruct"}
+           "model": "vendor/test-model-large-instruct", "client": "Gabriel's iPhone"}
 
 
 def sat_copy() -> dict[str, str]:
@@ -905,6 +967,13 @@ def test_every_wake_word_request_is_one_the_gateway_fence_can_read():
     assert CODE.count('json("/satellites/llm/models", { method: "POST"') == 1
     assert CODE.count('json("/satellites/llm/test", { method: "POST"') == 1
     assert CODE.count('json("/satellites/secrets", { method: "PUT"') == 1
+
+
+def test_the_airplay_request_is_one_the_gateway_fence_can_read():
+    """The same fence for the AirPlay controls: one call, whose path reads as
+    /satellites/{p}/airplay/{p} and whose method is a literal, so voice-ui's
+    PROXIED and the gateway are checked against the route the hub answers."""
+    assert CODE.count('json(`/satellites/${id}/airplay/${command}`, { method: "POST" })') == 1
 
 
 # ------------------------------------------------ a language model word --
