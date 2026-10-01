@@ -159,17 +159,29 @@ def strip_wake_phrase(text: str, wake_word: str) -> str:
     import difflib
     import re
 
+    from . import verify
+
     words = [w for w in _wake_key(wake_word).split("_") if w]
     if not words or wake_word == "ptt":
         return text
+    # THE WORD AS IT IS SAID, NOT ONLY ITS MODEL'S NAME. A model named for its
+    # variant ("alexa_ptbr") is said "Alexa": matched on its name alone, the
+    # "ptbr" that nobody says kept "Alexandre, ligue as luzes" whole, so Home
+    # Assistant's own intents (which know the satellite's room) could not
+    # match it and a language model guessed the room instead. So the phrases
+    # are the name and, with the name's own "hey"/"ok" in front where it has
+    # one, every spelling the double-check knows (verify.spellings).
+    lead = [w for w in words[:1] if w in ("hey", "ok")]
+    phrases = [words] + [lead + s.split() for s in verify.spellings(wake_word)]
     tokens = list(re.finditer(r"[\w']+", text))
-    like = lambda a, b: difflib.SequenceMatcher(None, a.casefold(), b).ratio() >= 0.6
-    for start in range(len(words)):  # the whole phrase, then shorter tails of it
-        tail = words[start:]
-        if len(tokens) >= len(tail) and all(like(t.group(), w) for t, w in zip(tokens, tail)):
-            # Nothing but the wake word: there is no command, and "Hey Jarvis."
-            # must not reach a destination as if it were one.
-            return text[tokens[len(tail)].start():] if len(tokens) > len(tail) else ""
+    like = lambda a, b: difflib.SequenceMatcher(None, verify.normalise(a), b).ratio() >= 0.6
+    for phrase in phrases:
+        for start in range(len(phrase)):  # the whole phrase, then shorter tails of it
+            tail = phrase[start:]
+            if len(tokens) >= len(tail) and all(like(t.group(), w) for t, w in zip(tokens, tail)):
+                # Nothing but the wake word: there is no command, and "Hey Jarvis."
+                # must not reach a destination as if it were one.
+                return text[tokens[len(tail)].start():] if len(tokens) > len(tail) else ""
     return text
 
 

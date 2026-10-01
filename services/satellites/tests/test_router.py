@@ -523,6 +523,14 @@ def test_the_wake_word_is_taken_off_the_front_of_the_transcript_and_nowhere_else
     assert strip_wake_phrase("Hey Jarvis.", "hey_jarvis") == ""
     assert strip_wake_phrase("ask jarvis about it", "hey_jarvis") == "ask jarvis about it"
     assert strip_wake_phrase("turn the lights off", "ptt") == "turn the lights off"
+    # A model named for its variant is still said by its name: left in,
+    # "Alexandre," kept Home Assistant's own intents (which know the room)
+    # from matching "ligue as luzes".
+    assert strip_wake_phrase("Alexandre, ligue as luzes.", "alexa_ptbr") == "ligue as luzes."
+    assert strip_wake_phrase("Alexa, liga a luz da mesa", "alexa_ptbr") == "liga a luz da mesa"
+    assert strip_wake_phrase("Aléxia, que horas são?", "alexa_ptbr") == "que horas são?"
+    assert strip_wake_phrase("Hey Nabu, lights off", "hey_nabu_v2") == "lights off"
+    assert strip_wake_phrase("ligue as luzes", "alexa_ptbr") == "ligue as luzes"
 
 
 # ---- Home Assistant's vocabulary ------------------------------------------------
