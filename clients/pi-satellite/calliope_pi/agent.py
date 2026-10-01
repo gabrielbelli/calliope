@@ -764,21 +764,31 @@ class Agent:
         self._art_sent = art["sha256"]
 
     async def _devices_changed(self) -> None:
-        """A plug went in or out, or a card came or went: the page is told
-        now (debounced, as pactl reports one change as several events). A
-        task of its own, apart from AirPlay's: neither swallows the other."""
+        """A plug went in or out, a card came or went, or an output's volume
+        moved: the page is told now (debounced, as pactl reports one change
+        as several events). A task of its own, apart from AirPlay's: neither
+        swallows the other.
+
+        THE PHONE'S SLIDER IS A SINK EVENT TOO. bin/calliope-airplay-volume
+        sets the output's volume, and pactl reports it here as a change on
+        the sink, so the volume is taken now rather than at the next status
+        tick (up to STATUS_S later): Home Assistant and the page follow the
+        phone within a second. A volume the hub just set is already the
+        satellite's own, so _check_volume sees no change and nothing is sent."""
         if self._devices_pushing is not None and not self._devices_pushing.done():
             return
 
         async def push() -> None:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
             before = {d["name"]: d.get("jack") for d in self.devices.view()["sinks"] + self.devices.view()["sources"]}
             self.devices = await pipewire.devices()
             after = {d["name"]: d.get("jack") for d in self.devices.view()["sinks"] + self.devices.view()["sources"]}
-            if after != before:
-                self.playing_at = pipewire.output_format(await pipewire.sinks(), self.devices.default_sink)
+            local = await self._check_volume()
+            if after != before or local:
+                if after != before:
+                    self.playing_at = pipewire.output_format(await pipewire.sinks(), self.devices.default_sink)
                 with contextlib.suppress(Exception):
-                    await self.send(self.status())
+                    await self.send(self.status("local" if local else None))
         self._devices_pushing = asyncio.create_task(push())
 
     async def run(self) -> None:

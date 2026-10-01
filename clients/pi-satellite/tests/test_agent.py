@@ -504,6 +504,47 @@ async def test_a_volume_the_phone_set_becomes_the_satellites_own(fake, monkeypat
     assert not [c for c in fake["calls"] if c[0] == "volume" and c[2] != 0.6], "the phone's volume is not undone"
 
 
+async def test_the_phones_slider_reaches_the_hub_at_once_not_at_the_next_tick(fake, monkeypatch):
+    """pactl reports the hook's volume change as a sink event: the status
+    with cause "local" goes out then, long before the ticker would send it."""
+    monkeypatch.setattr(agentmod, "STATUS_S", 30)
+    a = agent_with(hub="ws://x", token="t", name="k")
+
+    async def hub(ws, got):
+        await recv(ws, got, "hello")
+        await ws.send(json.dumps({"type": "welcome", "name": "k", "config": {"volume": 60}}))
+        await roundtrip(ws, got)
+        fake["volumes"][None] = 0.45          # the phone's slider, through the hook
+        started = asyncio.get_running_loop().time()
+        await a._devices_changed()            # what pactl subscribe's sink event calls
+        while (await recv(ws, got, "status")).get("cause") != "local":
+            pass
+        got.append({"took_s": asyncio.get_running_loop().time() - started})
+    got = await talk(a, hub)
+    local = [s for s in of(got, "status") if s.get("cause") == "local"]
+    assert local and local[0]["volume"] == 45
+    assert next(g["took_s"] for g in got if isinstance(g, dict) and "took_s" in g) < 2, "not the 30 s tick"
+
+
+async def test_a_sink_event_with_nothing_moved_sends_nothing(fake, monkeypatch):
+    monkeypatch.setattr(agentmod, "STATUS_S", 30)
+    a = agent_with(hub="ws://x", token="t", name="k")
+
+    async def hub(ws, got):
+        await recv(ws, got, "hello")
+        await ws.send(json.dumps({"type": "welcome", "name": "k", "config": {"volume": 60}}))
+        await roundtrip(ws, got)
+        before = len(of(got, "status"))
+        fake["volumes"][None] = 0.60          # the hub's own volume: no change
+        await a._devices_changed()
+        await asyncio.sleep(0.6)
+        await ws.send(json.dumps({"type": "earcon_list"}))
+        await recv(ws, got, "earcons")
+        got.append({"statuses_after": len(of(got, "status")) - before})
+    got = await talk(a, hub)
+    assert next(g["statuses_after"] for g in got if isinstance(g, dict) and "statuses_after" in g) == 0
+
+
 async def test_an_output_past_full_is_taken_once_as_100_even_when_it_cannot_be_saved(fake, monkeypatch):
     monkeypatch.setattr(agentmod, "STATUS_S", 0.05)
     a = agent_with(hub="ws://x", token="t", name="k")
