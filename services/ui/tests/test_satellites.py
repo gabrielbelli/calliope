@@ -710,7 +710,7 @@ def test_satellite_rows_read_the_saved_words_and_never_the_draft():
 
 def test_change_wake_words_opens_the_editor_and_moves_focus_to_it():
     body = function("satGoWakeWords")
-    assert 'MENISCUS.calm.matches ? "auto" : "smooth"' in body, \
+    assert 'matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"' in body, \
         "the scroll ignores reduced motion"
     assert '.focus({ preventScroll: true })' in body
 

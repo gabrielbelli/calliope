@@ -28,10 +28,11 @@
 <!--
   THIRD-PARTY NOTICE -- MENISCUS. The dock in this file is ported from
   Meniscus by hasib41 (github.com/hasib41/meniscus-liquid-nav), found through
-  its listing at vibing.inc/library/meniscus-vg-2134. Its geometry, spring
-  constants and drag response are theirs; the icons, accents and themes are
-  this page's. Three blocks below carry a pointer back to the original: the
-  dock CSS, the .rail markup, and the dockTrough/meniscusTo spring loop.
+  its listing at vibing.inc/library/meniscus-vg-2134. Its trough, bead,
+  spring and drag have since been taken out; what remains of theirs is the
+  bar itself -- the plate, its rim light and its ground shadow. The icons,
+  accents, themes and the selection pill are this page's. Two blocks below
+  carry a pointer back to the original: the dock CSS and the .rail markup.
 
   This notice is required by the licence and travels with the code. Do not
   delete it, and if the dock is ever rewritten from scratch, move the entry in
@@ -93,7 +94,7 @@
      unpainted. Dead neutral here looks like a wireframe. 9.75:1 on --panel. */
   --accent:#33404C; --accent-ink:#F8F5EE;
   /* THE LAMP. The only saturated thing on the page, and it means exactly one
-     thing: something is happening right now. It may be a dot, a bead, a bar or
+     thing: something is happening right now. It may be a dot, a ring, a bar or
      a playhead. IT IS NEVER A GROUND BEHIND TEXT, which is the whole of how it
      stays distinct from --bad on a Jobs tab showing both at once. 5.22:1 on
      --panel, 4.56:1 on --bg, which is the floor and still clears AA. */
@@ -163,31 +164,49 @@
     .9922, .996, .998, 1);
 
   /* ------------------------------------------------------------ the dock --
-     THE LIVE ACCENT. Each tab carries its own, and the script lerps these
-     three channels between them as the bead travels, so the bead, its halo,
-     the label under it and the wash behind the whole page are one colour that
-     moves. Written as bare channels, not as a colour: mixing an accent with
-     `transparent` through color-mix goes milky, because the mix runs toward
-     transparent BLACK and desaturates on the way. Overwritten by JS. */
-  --glow-rgb:196 42 30;
-  --glow:rgb(var(--glow-rgb));
+     THE PILL IS A TINT, NOT A FILL: the tab's accent at low alpha over the
+     plate, so the icon and the name on it stay the brightest things in the
+     bar. Stronger here than in dark, because beside a creme page the eye is
+     adapted to light and a faint tint on the dark plate reads fainter still. */
+  --pill-a:.24;
   /* THE PLATE IS DARK IN BOTH THEMES, deliberately. A pale plate gives the
-     rim light nothing to be brighter than and the bead's halo nothing to
-     bloom against -- the socket loses its silhouette and the component stops
-     reading as a lit object. A dark console on a creme faceplate is what the
-     hardware this page is dressed as actually looks like. */
-  --plate:#1B1512; --plate-hi:#241C18; --plate-lo:#120C0A;
+     rim light nothing to be brighter than and the accents nothing to glow
+     against, and the bar stops reading as a lit object. A dark console on a
+     creme faceplate is what the hardware this page is dressed as actually
+     looks like. */
+  --plate-hi:#241C18; --plate-lo:#120C0A;
+  /* THE BAR'S EDGE AND SHADOW ARE PER THEME, because what parts a dark plate
+     from a creme page is the opposite of what parts it from a dark one. A
+     white rim light is paler than this page, so it drew a pale outline and
+     the plate read as a sticker cut out of it: here the edge is the plate
+     darkened to 45%, and the light is one line inside it, under the top
+     edge. Pure black at up to .82 left a grey haze on the creme, so the
+     shadow is a warm brown at about a third of that. */
+  --dock-rim:linear-gradient(#100D0B,#080504);
+  --dock-shadow:inset 0 1px 0 rgb(255 255 255 / .14),0 1px 2px rgb(40 22 14 / .22),
+    0 8px 18px -6px rgb(40 22 14 / .3),0 22px 36px -14px rgb(40 22 14 / .34);
   /* THE BADGE FOLLOWS THE PLATE, NOT THE PAGE. It sat on --ink with --panel
      for its numeral, and the plate is dark in both themes while the page's
      ink is dark only in light: there it was #1A1714 on #1B1512, 1.01:1, a
      numeral in a hole. One pale pill on the one dark plate, 15.9:1. */
   --count-bg:#EBE5DA; --count-ink:#1A1210;
-  --icon-off:#B3A69E; --icon-on:#1A1210;
+  --icon-off:#B3A69E;
   --bloom-a:.10; --bloom-top:#EFE7DA;
-  /* Geometry. JS measures the bar and overwrites all four; these are only
-     what the no-JS bar falls back to. */
-  --dock-r:18px; --bead-d:52px; --bead-cy:0px; --rise:38px;
 }
+/* THE LIVE ACCENT. Each tab carries its own, and the script writes the
+   selected tab's to the pill and to the wash behind the page, so the two are
+   one colour. Bare channels, not a colour: mixing an accent with
+   `transparent` through color-mix goes milky, because the mix runs toward
+   transparent BLACK and desaturates on the way.
+   REGISTERED, so the three channels interpolate and the colour glides from
+   one tab's to the next over the pill's own travel rather than switching on
+   the click. An engine without @property steps instead, which is still
+   correct.
+   NOT INHERITED, and written on the two elements that paint it rather than
+   on :root. Inherited from the root, every element on the page took a new
+   value on every frame of the fade, so each tab change restyled the whole
+   document for half a second, a long Jobs list included. */
+@property --glow-rgb{syntax:"<number>+";inherits:false;initial-value:196 42 30}
 @media (prefers-color-scheme:dark){
   :root{
     /* WARM NEAR-BLACK, NOT BLUE-BLACK. A red lamp on a blue-black ground is a
@@ -200,7 +219,7 @@
        #201D18 is a hole rather than a control. 8.95:1 on --panel. */
     --accent:#B2BFC9; --accent-ink:#12181D;
     --live:#FF6A57;
-    /* THE BEAD INVERTS BETWEEN THE THEMES AND THE STOP CARRYING 3:1 SWAPS WITH
+    /* THE LAMP INVERTS BETWEEN THE THEMES AND THE STOP CARRYING 3:1 SWAPS WITH
        IT: the rim holds the boundary in light, the core holds it in dark. That
        is what a real lamp does against two different chassis, and the two-stop
        structure this page already had is what made it free. */
@@ -216,6 +235,12 @@
     /* The wash is the one thing on a dark ground that carries the accent at
        full strength, so it runs twice as hot here as on the creme face. */
     --bloom-a:.20; --bloom-top:#31211B;
+    --pill-a:.18;
+    /* On a dark page the rim light is the plate's only silhouette, and a
+       deep black shadow is what the ground already looks like. */
+    --dock-rim:linear-gradient(rgb(255 255 255 / .58),rgb(255 255 255 / .06));
+    --dock-shadow:0 6px 14px rgb(0 0 0 / .5),0 10px 22px -8px rgb(0 0 0 / .74),
+      0 32px 56px -20px rgb(0 0 0 / .82);
   }
 }
 /* THE BROWSER PAINTS ITS OWN WIDGETS FROM THIS, and without it every one
@@ -292,14 +317,9 @@ code,.num{font-family:var(--mono)}
      viewport now, not a lid at the top, so the column has to end above it or
      the last control on every tab sits underneath the bar: 76px of dock, the
      22px it floats by, one --s6 of air, and whatever the phone reserves for
-     its home indicator. */
-  /* 124, NOT 98, AND THE DIFFERENCE IS THE BEAD. The comment used to budget
-     "76px of dock, the 22px it floats by" -- but the bead rides ON the
-     surface line with its centre at the plate's top edge, so half a diameter
-     of it (26px at the measured 52) sits ABOVE the bar. Reserving the bar
-     alone left the last control on a panel with 14px of real air under a
-     glowing disc rather than the --s6 the rule intends. */
-  padding:var(--s5) var(--s4) calc(var(--s6) + 124px + env(safe-area-inset-bottom))}
+     its home indicator. Nothing rises above the bar, so the bar is the whole
+     of what has to be cleared. */
+  padding:var(--s5) var(--s4) calc(var(--s6) + 98px + env(safe-area-inset-bottom))}
 
 /* ----------------------------------------------------------- masthead -- */
 /* THE BRAND IS NOT IN THE NAVIGATION ANY MORE, and that was the note: a mark
@@ -358,22 +378,23 @@ code,.num{font-family:var(--mono)}
 .bloom{position:fixed;inset:0;pointer-events:none;z-index:0;
   background:
     radial-gradient(42% 24% at 50% 100%, rgb(var(--glow-rgb) / var(--bloom-a)), transparent 72%),
-    radial-gradient(90% 44% at 50% 0%, var(--bloom-top), transparent 72%)}
+    radial-gradient(90% 44% at 50% 0%, var(--bloom-top), transparent 72%);
+  transition:--glow-rgb .5s var(--spring)}
 
 /* ------------------------------------------------------------- the dock --
-   The navigation. Its TOP edge is a liquid surface and the selected tab is a
-   bead the surface dips beneath; the icon of whichever tab is under the bead
-   rises into it, and the label appears below.
+   The navigation: one rounded bar, and a tinted pill behind the selected
+   tab's icon and name that slides to whichever tab is chosen.
+
+   A FLAT HIGHLIGHT INSIDE AN UNBROKEN BAR. The selected tab used to be a
+   glowing bead that rose out of the bar through a socket notched into its
+   outline, and the owner's word for it was "unsettling": the one object that
+   says where you are was also the one breaking the bar's silhouette and
+   moving the most. The bar keeps one outline at all times now and the
+   selection lives inside it, which is how the iOS and macOS tab bars draw it.
 
    Ported from Meniscus by hasib41 (github.com/hasib41/meniscus-liquid-nav),
-   MIT: "Use it in anything." The geometry, the spring constants and the drag
-   are theirs and are not reinterpreted here -- the previous attempt cut the
-   trough into the BOTTOM edge with no bead riding it, which is the component
-   upside down and was rejected on sight.
-
-   ONE PATH, NOT PSEUDO-ELEMENTS. Assembling a socket from a border-radius and
-   two overlapping boxes leaves seams that show exactly when the shape goes
-   asymmetric, which is the whole point of the lean. */
+   MIT. What remains of the port is the bar itself: the plate, its rim light
+   and its ground shadow. */
 /* A FULL-WIDTH RAIL THAT FLEX-CENTRES THE DOCK. It was left:50% with a
    translateX(-50%), which lands the layer on a half-pixel whenever the
    computed width is odd -- and a fixed layer on a half-pixel renders every
@@ -383,92 +404,125 @@ code,.num{font-family:var(--mono)}
   bottom:calc(22px + env(safe-area-inset-bottom));
   display:flex;justify-content:center;pointer-events:none}
 .dock{position:relative;pointer-events:auto;
-  /* 410 AND NOT 380, AND THE NUMBER IS THE CORNER. The socket's outer
-     shoulder reaches about 42px from the bead's centre; at 380 the first
-     tab's centre sits 77px in with a 15px corner arc, leaving 14px of flat
-     run before the shoulder climbs into the radius -- visible as a pinched
-     top-left the moment the first tab is selected, which is the default. At
-     410 there are 22, which is the reference's clearance. */
-  width:min(410px,calc(100% - 36px));height:76px;
-  touch-action:pan-y;-webkit-tap-highlight-color:transparent;
-  /* No-JS fallback: a plain rounded bar. The script cuts the real skin. */
-  background:var(--plate);border-radius:var(--dock-r)}
-.js .dock{background:none}
-/* The ground shadow, living entirely under the bar's lower half so the socket
-   can never expose it. */
-.dock .cast{position:absolute;inset:46% 7% 6% 7%;border-radius:999px;
-  background:var(--plate);
-  box-shadow:0 10px 22px -8px rgba(0,0,0,.74),0 32px 56px -20px rgba(0,0,0,.82)}
-.dock .skin{position:absolute;inset:0;width:100%;height:100%;overflow:visible;
-  filter:drop-shadow(0 6px 14px rgba(0,0,0,.5))}
-.dock .skin path{fill:url(#dock-plate);stroke:url(#dock-rim);stroke-width:1}
-.plate-hi{stop-color:var(--plate-hi)} .plate-lo{stop-color:var(--plate-lo)}
-/* A specular highlight along the top edge, falling off down the sides. This
-   is the light source, not a border -- and because the rim follows the same
-   path, it is the rim that actually draws the meniscus curve. */
-.rim-hi{stop-color:#fff;stop-opacity:.58} .rim-lo{stop-color:#fff;stop-opacity:.06}
+  /* THE CORNER AND THE INSET ARE ONE PAIR. The pill stands --dock-in off the
+     bar's outer edge wherever it comes near one, and its radius is the bar's
+     less that inset, so the two curves stay concentric at the first and last
+     tab instead of pinching. The corner is the cards' corner, so the plate
+     and the cards above it read as cut from the same stock. --at is the
+     selected tab's index, written by the script. */
+  --dock-r:var(--radius-l);--dock-in:6px;--at:0;
+  width:min(410px,calc(100% - 36px));height:76px;border-radius:var(--dock-r);
+  /* THE EDGE IS THE BORDER, painted with a gradient of its own (--dock-rim):
+     on a dark page a rim light, bright along the top edge where the light
+     falls and almost gone at the foot; on the creme page a dark edge. */
+  border:1px solid transparent;
+  background:linear-gradient(var(--plate-hi),var(--plate-lo)) padding-box,
+    var(--dock-rim) border-box;
+  /* A contact shadow, and a deeper one pulled in under the lower half by its
+     negative spread, so the bar stands off the page rather than being
+     printed on it. */
+  box-shadow:var(--dock-shadow);
+  -webkit-tap-highlight-color:transparent}
 
-/* THE BEAD. It rides ON the surface line, half in the socket and half out. */
-.dock .bead{position:absolute;top:var(--bead-cy);left:0;
-  width:var(--bead-d);height:var(--bead-d);
-  margin:calc(var(--bead-d) / -2) 0 0 calc(var(--bead-d) / -2);
-  border-radius:50%;
-  background:linear-gradient(168deg,color-mix(in srgb,var(--glow) 76%,#fff),var(--glow) 62%);
-  box-shadow:
-    0 0 0 1px rgb(var(--glow-rgb) / .5),
-    0 0 26px 2px rgb(var(--glow-rgb) / .32),
-    0 10px 18px -7px rgba(0,0,0,.68),
-    inset 0 0 0 1px rgba(255,255,255,.42),
-    inset 0 -3px 6px -3px rgba(26,16,16,.18);
-  will-change:transform;pointer-events:none}
-.dock:not(.ready) .bead{opacity:0}
+/* FIVE EQUAL COLUMNS, and the pill is laid in the first of them. A grid
+   track is a box exactly one tab wide at every bar width, so the pill needs
+   no measuring and no resize observer: it moves by its own width times --at.
+   The 1px taken off the padding is the rim, which this box sits inside. */
+.tabs{position:absolute;inset:0;display:grid;grid-auto-flow:column;grid-auto-columns:1fr;
+  padding:0 calc(var(--dock-in) - 1px)}
+/* THE PILL. Absolutely positioned, so it takes no column of its own and the
+   tabs are laid out as if it were not there; first in the strip, so the icon
+   and the name paint over it. Both end lines are named: on an absolutely
+   positioned item an `auto` end is the container's padding edge, not the
+   next line, and the pill came out the width of the whole strip. */
+.tabs .highlight{position:absolute;grid-area:1/1/2/2;inset:calc(var(--dock-in) - 1px) 0;
+  border-radius:calc(var(--dock-r) - var(--dock-in));
+  background:rgb(var(--glow-rgb) / var(--pill-a));
+  transform:translateX(calc(var(--at) * 100%));
+  /* Half a second is about how long the .35 s spring --spring was sampled
+     from takes to settle, so the curve plays at its own rate: most of the
+     way in a fifth of a second, then a settle with no overshoot. A tap
+     carries no momentum, so nothing here may bounce. Everything else that
+     changes with the selection -- the colour, the icons, the names, the
+     badge -- runs on this same clock, so a tab change is one event. */
+  transition:transform .5s var(--spring),--glow-rgb .5s var(--spring);pointer-events:none}
+/* PLACED, NOT MOVED: the first paint, before there is anything on screen
+   for the pill or the colour to travel from. The script holds this class
+   for exactly one style pass. Every transition in the bar, not only the
+   pill's: with the names and icons left out, a link to Jobs opened with
+   "Transcribe" fading out under an unselected tab for 150 ms. :root makes
+   it outrank the reduced-motion rules, which keep the colour's fade. */
+:root.dock-still .tabs *,:root.dock-still .bloom{transition:none}
 
-.tabs{position:absolute;inset:0;display:flex;padding-inline:clamp(26px,10.5%,54px)}
-.tabs button{position:relative;flex:1;display:block;height:100%;padding:0;
+.tabs button{position:relative;display:block;height:100%;padding:0;
   border:0;background:none;font:inherit;color:inherit;cursor:pointer;
-  border-radius:14px;--t:0}
-/* THE RING ENCLOSES THE WHOLE TAB, ICON AND NAME. An outline inset by 3px
-   on a 76px-tall button drew a box around the icon and cut through the label
-   under it, so the keyboard's mark said "this glyph" rather than "this tab".
-   A drawn ring outside the button's sides reaches round both. */
+  border-radius:calc(var(--dock-r) - var(--dock-in));
+  /* THE SELECTED TAB'S INK is its accent lifted toward white. The plain
+     accents are as low as 3.3:1 on their own pill (the rose, Satellites);
+     lifted, all five clear 5:1 there, and the name at 11px needs 4.5. */
+  --on:color-mix(in srgb,var(--acc) 70%,#fff);
+  /* A LONE ICON SITS ON THE BAR'S CENTRE LINE, AND A NAMED ONE RISES BY HALF
+     ITS NAME'S LINE, so whichever is showing is centred in the bar. --up is
+     the rise, and the icon, the name and the badge all take it. It was on
+     every tab once, and four unnamed icons rode 9px high over an empty
+     strip, as if their names were missing. */
+  --ico:24px;--up:0px;--up-named:calc((3px + var(--t-micro) * 1.3) / 2);
+  transition:transform .2s ease-out,opacity .2s ease-out}
+.tabs button[aria-selected=true]{--up:var(--up-named)}
+/* FEEDBACK ON PRESS, quick in and slower out, and deep enough to see: at .97
+   a 24px icon shrank by under a pixel. The pill stays still, so on the
+   chosen tab only what sits on it answers. */
+.tabs button:active:not(:disabled){transform:scale(.94);opacity:.7;transition-duration:.06s}
+/* THE RING ENCLOSES THE WHOLE TAB, ICON AND NAME, a pixel outside the
+   pill's outline. An outline inset on the button boxed the icon and cut
+   through the name under it, so the keyboard's mark said "this glyph"
+   rather than "this tab". */
 .tabs button:focus-visible{outline:none}
-.tabs button:focus-visible::after{content:"";position:absolute;inset:6px -6px;
-  border-radius:16px;box-shadow:0 0 0 2px var(--acc);pointer-events:none}
-/* The icon is ink while it sits on the plate and ink-on-accent once it is in
-   the bead, interpolated by --t so a drag reads as continuous rather than as
-   a step change at the halfway mark. */
-.tabs button svg{position:absolute;left:50%;top:50%;width:24px;height:24px;
+.tabs button:focus-visible::after{content:"";position:absolute;
+  inset:calc(var(--dock-in) - 2px) -1px;
+  border-radius:calc(var(--dock-r) - var(--dock-in) + 1px);
+  box-shadow:0 0 0 2px var(--acc);pointer-events:none}
+.tabs button svg{position:absolute;left:50%;top:50%;width:var(--ico);height:var(--ico);
   fill:none;stroke:currentColor;stroke-width:1.8;
   stroke-linecap:round;stroke-linejoin:round;
-  color:color-mix(in oklab,var(--icon-off) calc((1 - var(--t)) * 100%),var(--icon-on));
-  transform:translate(-50%,-50%) translateY(calc(var(--t) * var(--rise) * -1));
-  will-change:transform}
-.tabs .label{position:absolute;left:0;right:0;bottom:13%;
-  font-size:var(--t-micro);font-weight:600;letter-spacing:.06em;
-  color:var(--acc);opacity:0;
-  transform:translateY(calc((1 - var(--t)) * 7px));
+  color:var(--icon-off);transform:translate(-50%,calc(-50% - var(--up)));
+  transition:color .5s var(--spring),transform .5s var(--spring)}
+.tabs button[aria-selected=true] svg{color:var(--on)}
+/* Centred on the tab by its own width rather than stretched across it, so
+   a name wider than its column overhangs both sides evenly. Set under a
+   centred icon and lifted with it, so the two travel as one group.
+   ONE TRACKING FOR ONE SIZE: the name is --t-micro on every screen, so it
+   is .02em on every screen; .06em was loose for 11px mixed case. */
+.tabs .label{position:absolute;left:50%;top:calc(50% + var(--ico) / 2 + 3px);
+  transform:translate(-50%,calc(-1 * var(--up)));
+  font-size:var(--t-micro);font-weight:600;line-height:1.3;letter-spacing:.02em;
+  color:var(--icon-off);opacity:0;
+  transition:opacity .5s var(--spring),color .5s var(--spring),transform .5s var(--spring);
   pointer-events:none;white-space:nowrap}
-/* A label belongs to the chosen tab. While the bead is dragged every label
-   previews, so you can see what you are about to land on. */
-.tabs button[aria-selected=true] .label,
-.dock.dragging .label{opacity:var(--t)}
-/* WHERE CAN I GO, ANSWERED WITHOUT TRYING EACH ICON. Four of five tabs were
-   an unnamed glyph. Pointing at one, or tabbing to it, names it; the 7px
-   offset at t=0 keeps the word clear of the icon (label 58-73px, icon
-   26-50px in a 76px bar). */
+/* A name belongs to the chosen tab, and the accent belongs to it alone. */
+.tabs button[aria-selected=true] .label{opacity:1;color:var(--on)}
+/* WHERE CAN I GO, ANSWERED WITHOUT TRYING EACH ICON. Four of five tabs are
+   an unnamed glyph. Pointing at one, or tabbing to it, names it, in its
+   icon's grey: in the accent, with no pill behind it, it read as a tab half
+   chosen. */
 @media (hover:hover){ .tabs button:hover .label{opacity:1} }
 .tabs button:focus-visible .label{opacity:1}
 
 /* THE RUNNING-JOB COUNT, readable from the other three tabs without opening
    them. It was a numeral in a recess beside the word "Jobs"; the word is an
    icon now, so it is a badge on the icon -- still a numeral, never a bare
-   dot, because a dot that means "some" is a dot that means nothing. */
+   dot, because a dot that means "some" is a dot that means nothing.
+   ON THE ICON'S TOP-RIGHT CORNER, and lifted with it. Placed from the bar's
+   centre instead, a chosen tab's badge came within 1.35px of the pill's top
+   edge and read as a collision; from the icon it sits 5px inside the pill,
+   the pill's own inset from the bar. */
 .tabs .count{position:absolute;left:50%;top:50%;
-  margin:-22px 0 0 4px;min-width:1.25em;padding:0 .25em;
+  margin:calc(-1 * var(--ico) / 2 - 6px) 0 0 calc(var(--ico) / 2 - 7px);
+  transform:translateY(calc(-1 * var(--up)));transition:transform .5s var(--spring);
+  min-width:1.25em;padding:0 .25em;
   border-radius:999px;background:var(--count-bg);color:var(--count-ink);
   font-size:.625rem;font-weight:700;line-height:1.5;letter-spacing:0;
-  text-align:center;pointer-events:none;
-  transform:translateY(calc(var(--t) * var(--rise) * -1))}
+  text-align:center;pointer-events:none}
 .tabs .count:empty{display:none}
 /* AND IT IS NEVER RED. --live and --bad share a hue by design and are 1.48:1
    apart, so a deuteranope sees one red: the moment the lamp becomes a ground
@@ -773,19 +827,21 @@ button:has(> .glyph.line){min-width:var(--control-h)}
 .seg button:disabled{background:var(--sunk)}
 .seg button[aria-pressed=true]:disabled{background:var(--sunk);color:var(--ink);
   box-shadow:inset 0 0 0 1px var(--dim)}
-/* WHERE THE SURFACE CANNOT BE SEEN, A PILL COMES BACK. Under forced colours
-   a gradient stroke and an SVG fill are painted over by the system palette,
-   so the selected tab would be distinguished by the risen icon alone -- and
-   a transform is exactly the cue a forced-colours user is most likely to
-   lose. Every word the bead was standing in for comes back with it:
-   .status.running still says Running, .count is still a numeral, the
-   dictation clock is still counting and the transport still shows a
-   timecode. Nothing on this page depends on colour alone, in any mode. */
+/* WHERE THE TINT CANNOT BE SEEN, AN OUTLINE CARRIES THE SELECTION. Under
+   forced colours the pill's tinted ground and the bar's gradients are
+   painted over by the system palette, so the selected tab would differ only
+   in the colour of its icon -- the cue a forced-colours user has already
+   lost. The pill goes, every tab is named, and the chosen one is outlined.
+   Every other word stays too: .status.running still says Running, .count
+   is still a numeral, the dictation clock is still counting and the
+   transport still shows a timecode. Nothing on this page depends on colour
+   alone, in any mode. */
 @media (forced-colors:active){
-  .dock .skin,.dock .bead,.dock .cast,.bloom{display:none}
+  .tabs .highlight,.bloom{display:none}
   .dock{background:ButtonFace;border:1px solid ButtonBorder}
-  .tabs button svg{transform:translate(-50%,-50%)}
   .tabs .label{opacity:1;color:ButtonText}
+  /* Every tab is named here, so every icon makes room for its name. */
+  .tabs button{--up:var(--up-named)}
   .tabs button:focus-visible::after{box-shadow:none;outline:2px dotted ButtonText}
   /* NOT Highlight/HighlightText, AND THAT PAIR WAS UNREADABLE. HighlightText
      resolves to black in the common high-contrast schemes, and Chromium paints
@@ -823,9 +879,10 @@ button:has(> .glyph.line){min-width:var(--control-h)}
    now --bg sunk into the faceplate. Two cues carry the boundary and neither is
    optional: the 1.14:1 fill step, which a poor display will lose on its own,
    and the hairline, which survives it. */
-/* THE CORNER IS THE DOCK'S CORNER. A 10px radius under a 15px bar is two
-   different materials in one view; matched, the card and the plate read as cut
-   from the same stock even though one is a recess and the other is raised. */
+/* THE CORNER IS THE DOCK'S CORNER, one token for both: --radius-l, which the
+   dock takes as --dock-r. A 10px radius under a 16px bar was two different
+   materials in one view; matched, the card and the plate read as cut from the
+   same stock even though one is a recess and the other is raised. */
 .card{background:var(--bg);border:1px solid var(--card-line);
   border-radius:var(--radius-l);padding:var(--s4);margin-bottom:var(--s3);
   box-shadow:var(--lift)}
@@ -1270,13 +1327,15 @@ details>summary:active{opacity:.72}
   .drop{transition:background-color .12s ease}
   /* THE LAMP LOSES NOTHING HERE, because it never had a pulse to lose: it is
      a fill and a halo, and both are states rather than motion.
-     THE BEAD STILL MOVES TO THE SELECTED TAB -- reduced motion means gentler
-     feedback, not none. meniscusTo() reads this query at call time and sets
-     the position directly instead of springing to it, so the bead arrives
-     rather than travelling and the surface never leans. The icon still rises
-     and the label still appears, because both are the answer to "which one is
-     selected" and neither is vestibular. */
-  .tabs button svg{transition:none}
+     THE PILL STILL GOES TO THE SELECTED TAB -- reduced motion means gentler
+     feedback, not none. It arrives instead of travelling, and the icon, its
+     name and its badge are set at their height instead of rising; the colour
+     still cross-fades and the name still fades in, because those answer
+     "which one is selected" and none of them is vestibular. */
+  .tabs .highlight{transition-property:--glow-rgb}
+  .tabs button svg{transition-property:color}
+  .tabs .label{transition-property:opacity,color}
+  .tabs .count{transition:none}
 }
 /* THIS DESIGN COSTS ALMOST NOTHING HERE. Nothing on the page is translucent
    any more -- the sticky head that needed a backdrop-filter is gone, and the
@@ -1303,7 +1362,7 @@ details>summary:active{opacity:.72}
   /* THE PLATE GETS A DRAWN EDGE. Its silhouette is a 1px rim light at 58%
      white, which is exactly the kind of cue a reader who asked for more
      contrast is least able to see. */
-  .dock .skin path{stroke:var(--ink);stroke-opacity:1}
+  .dock{border-color:var(--ink)}
   .bloom{display:none}
   .card,.job{border:1px solid var(--line)}
   .band span{background:#000;border:1px solid #fff}
@@ -1325,7 +1384,9 @@ details>summary:active{opacity:.72}
   /* Lit and unlit then differ by FILL INSIDE A BORDER, which survives any
      palette the reader forces on top of this one. */
   .brand .lamp{box-shadow:0 0 0 1px var(--ink)}
-  .dock .bead{box-shadow:0 0 0 2px var(--ink)}
+  /* The pill's tint is a step of 1.2 to 1.7:1 on the plate; an edge in the
+     accent itself, 3.3:1 or more on the pill, is a cue that can be found. */
+  .tabs .highlight{box-shadow:inset 0 0 0 2px rgb(var(--glow-rgb))}
   /* A SATELLITE ROW IS A LIST ROW, NOT A PANEL. Boxed like the Expert panels
      it became a box per satellite, and a box per sub-disclosure inside that:
      the nesting this tab was rebuilt to remove. The rows keep their
@@ -1372,7 +1433,7 @@ details>summary:active{opacity:.72}
 @media (max-width:30rem){
   /* Tracking is size-specific, including when the viewport forces the size. */
   .brand{letter-spacing:.14em}
-  .tabs button svg{width:22px;height:22px}
+  .tabs button{--ico:22px}
   /* THE TAB NAMES KEEP --t-micro HERE, which is rem and so follows the
      reader's text setting. They dropped to 10px on a phone, under the 11px
      floor for words that name a control, on the one screen where the dock is
@@ -1656,12 +1717,12 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
 <body>
 
 <!-- The ambient wash. Its hue is the live accent, written by the dock. -->
-<div class="bloom" aria-hidden="true"></div>
+<div class="bloom" id="bloom" aria-hidden="true"></div>
 
 <!-- ======================================================== the dock ==
      THE NAVIGATION IS THE CENTRAL OBJECT NOW, not a strip along the top of a
-     title bar. It floats at the foot of the viewport, its top edge is a
-     liquid surface, and the selected tab is a bead that surface dips beneath.
+     title bar. It floats at the foot of the viewport as one rounded bar, and
+     the selected tab is a tinted pill inside it.
 
      IT COMES FIRST IN THE DOCUMENT even though it is painted last, so a
      screen reader meets the navigation before the section it names -- which
@@ -1669,30 +1730,15 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
      where can I go" is actually asked in.
 
      Ported from Meniscus by hasib41 (github.com/hasib41/meniscus-liquid-nav),
-     MIT. The four icons and the accents are this page's; the geometry, the
-     spring and the drag are theirs. -->
+     MIT. The bar is theirs; the icons, the accents and the pill are this
+     page's. -->
 <div class="rail">
 <div class="dock" id="dock">
-  <span class="cast" aria-hidden="true"></span>
-  <svg class="skin" id="skin" aria-hidden="true" focusable="false" preserveAspectRatio="none">
-    <defs>
-      <!-- A whisper of a gradient reads as a lit plate rather than a flat
-           swatch; the rim is the plate's only silhouette against the page. -->
-      <linearGradient id="dock-plate" x1="0" y1="0" x2="0" y2="1">
-        <stop class="plate-hi" offset="0"/><stop class="plate-lo" offset="1"/>
-      </linearGradient>
-      <linearGradient id="dock-rim" x1="0" y1="0" x2="0" y2="1">
-        <stop class="rim-hi" offset="0"/><stop class="rim-lo" offset="1"/>
-      </linearGradient>
-    </defs>
-    <path id="skinfill"/>
-  </svg>
-  <!-- Decorative: which tab is selected is already carried by aria-selected
-       and by the label, so a screen reader gains nothing from the bead and
-       would only have to skip it. -->
-  <span class="bead" id="bead" aria-hidden="true"></span>
-
   <div class="tabs" role="tablist" aria-label="Sections" id="tabs">
+    <!-- Decorative: which tab is selected is already carried by aria-selected
+         and by the name, so a screen reader gains nothing from the pill and
+         would only have to skip it. -->
+    <span class="highlight" id="highlight" aria-hidden="true"></span>
     <!-- EACH TAB CARRIES ITS OWN ACCENT and the script reads it from here, so
          the stylesheet stays the one place the palette is written down. They
          are one warm ramp, red through rose: red is what a hundred years of
@@ -3480,214 +3526,47 @@ function speechPlan(engine, text) {
 
 /* ========================================================== the dock ===== */
 /*
-  THE ONE PLACE ON THIS PAGE THAT CARRIES MOMENTUM, and the reason --spring's
-  comment does not describe the whole file. Everything else here is clicked,
-  so it is critically damped and does not overshoot; this is a surface being
-  dragged from one tab to another, and a surface that stops dead at its
-  destination is the one thing a liquid never does.
+  THE SELECTION IS A PILL THAT SLIDES, AND NOTHING ELSE IN THE BAR MOVES.
+  The script's whole part in that is one number: the selected tab's index,
+  written to --at on the dock, which the stylesheet turns into a translate of
+  one column per step on a critically damped curve. There is no measuring,
+  no frame loop and no drag, and reduced motion is a CSS rule.
 
-  Ported from Meniscus by hasib41 (github.com/hasib41/meniscus-liquid-nav),
-  MIT: "Use it in anything." The geometry, the spring constants and the drag
-  below are theirs and are deliberately NOT reinterpreted -- the previous
-  attempt at this cut the trough into the bottom edge of a top strip with no
-  bead riding it, which is the component upside down, and it was rejected on
-  sight. When in doubt here, match the reference.
-
-  Four moving parts:
-    1 dockMeasure  derives every dimension from the measured bar and writes
-                   them back as custom properties, so the CSS and the path
-                   always agree about where the bead is.
-    2 dockTrough   the bar's outline as ONE closed path whose socket is
-                   parametric -- centre, half-width, depth, and two
-                   independent shoulder radii. Because the socket is computed
-                   rather than assembled it can lean into the travel and
-                   shallow out at speed.
-    3 dockLoop     one rAF, one spring. The bead's own velocity drives the
-                   lean, the widening and its squash. It stops when settled.
-    4 the lamp     meniscusLevel and meniscusBusy keep their names and their
-                   signatures because a dozen call sites use them; what they
-                   drive moved from a bead in the tab strip to the disc in
-                   the masthead, which is the mark.
+  It also writes the selected tab's accent to --glow-rgb on the pill and on
+  the wash behind the page, the two things that paint it, and it owns the
+  masthead's words and the lamp beside the wordmark.
 */
-document.documentElement.classList.add("js");
+const DOCK = $("dock"), DOCKTABS = Array.from(document.querySelectorAll("[role=tab]"));
+const DOCKGLOW = [$("highlight"), $("bloom")].filter(Boolean);
 
-const DOCK  = $("dock"), DOCKSKIN = $("skin"), DOCKFILL = $("skinfill"),
-      DOCKBEAD = $("bead"), DOCKTABS = Array.from(document.querySelectorAll("[role=tab]"));
-
-/* `level` is how loud the microphone is, `mic` and `busy` are the two
-   independent reasons the lamp can be lit, and `calm` is the reduced-motion
-   query held once rather than rebuilt on every frame of the meter. */
-const MENISCUS = { level: 0, mic: false, busy: new Set(),
-  calm: matchMedia("(prefers-reduced-motion: reduce)") };
-
-const dclamp = (v, a, b) => (v < a ? a : v > b ? b : v);
-const dsmooth = t => t * t * (3 - 2 * t);
-
-/* Each tab's accent is read from the stylesheet rather than written here, so
-   the palette has exactly one home. Bare channels, because mixing an accent
-   toward `transparent` through color-mix runs it toward transparent BLACK and
-   it goes milky on the way. */
+/* Each tab's accent, as the bare channels --glow-rgb takes. Read from the
+   stylesheet rather than written here, so the palette has exactly one home. */
 const dhex = s => {
   const h = (s || "").trim().replace("#", "") || "C42A1E";
   const n = parseInt(h.length === 3 ? h.replace(/./g, "$&$&") : h, 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255].join(" ");
 };
 const DOCKACC = DOCKTABS.map(t => dhex(getComputedStyle(t).getPropertyValue("--acc")));
-const dmix = (a, b, t) => Math.round(a[0] + (b[0] - a[0]) * t) + " "
-  + Math.round(a[1] + (b[1] - a[1]) * t) + " "
-  + Math.round(a[2] + (b[2] - a[2]) * t);
 
-/* ---------------------------------------------------------- 1 geometry -- */
-const G = { W: 0, H: 0, R: 17, D: 52, RB: 32, S: 11, CY: 0, slots: [], span: 80 };
-
-/* Half-width of a socket built from a shoulder of radius s tangent to the top
-   edge and a bowl of radius rb centred at (., by). Falls straight out of the
-   external-tangency condition |C1C2| = s + rb. */
-const dreach = (s, rb, by) => Math.sqrt(Math.max((s + rb) ** 2 - (s - by) ** 2, 1));
-
-function dockMeasure() {
-  if (!DOCK) return false;
-  const r = DOCK.getBoundingClientRect();
-  const W = Math.round(r.width), H = Math.round(r.height);
-  if (W < 40 || H < 30) return false;
-  G.slots = DOCKTABS.map(t => {
-    const b = t.getBoundingClientRect();
-    return b.left - r.left + b.width / 2;
-  });
-  G.span = G.slots.length > 1 ? G.slots[1] - G.slots[0] : W;
-  G.W = W; G.H = H;
-  G.R = dclamp(H * 0.20, 13, 20);
-  G.CY = 0;                                /* the bead rides ON the surface */
-  let D = Math.min(H * 0.68, G.span * 0.78);
-  /* The outer shoulder has to clear the bar's own corner, so shrink the bead
-     until the whole socket fits between the first tab's centre and the arc. */
-  const room = G.slots[0] - G.R - 6;
-  for (let i = 0; i < 3; i++) {
-    const hw = dreach(D * 0.22, D / 2 + 6, G.CY);
-    if (hw <= room) break;
-    D *= room / hw;
-  }
-  G.D = Math.max(Math.round(D), 30);
-  G.S = G.D * 0.22;
-  G.RB = G.D / 2 + 6;
-  DOCKSKIN.setAttribute("viewBox", "0 0 " + W + " " + H);
-  DOCK.style.setProperty("--dock-r", G.R.toFixed(1) + "px");
-  DOCK.style.setProperty("--bead-d", G.D + "px");
-  DOCK.style.setProperty("--bead-cy", G.CY + "px");
-  DOCK.style.setProperty("--rise", (H / 2 - G.CY).toFixed(1) + "px");
-  return true;
+/* PUT THE PILL UNDER THE SELECTED TAB. Animated, it travels there. Not
+   animated, it is placed, and that is for the first paint only: nothing is
+   on screen yet for it to travel from, and a link to Jobs must not open
+   with the pill sliding across from Transcribe. .dock-still turns every
+   transition in the bar and the wash off for the one style pass the read
+   below forces, so the jump is committed before they come back. */
+function dockPlace(animate) {
+  if (!DOCK) return;
+  const at = Math.max(0, DOCKTABS.findIndex(b => b.getAttribute("aria-selected") === "true"));
+  const root = document.documentElement;
+  if (!animate) root.classList.add("dock-still");
+  DOCK.style.setProperty("--at", String(at));
+  for (const el of DOCKGLOW) el.style.setProperty("--glow-rgb", DOCKACC[at]);
+  if (animate) return;
+  void getComputedStyle($("highlight")).transform;
+  root.classList.remove("dock-still");
 }
 
-/* ---------------------------------------------------------- 2 the skin -- */
-/* ONE CLOSED PATH. Along the top edge the flat run is interrupted by a socket
-   built from three tangent arcs: a convex shoulder that turns the edge down, a
-   concave bowl that wraps the bead, and a second shoulder back up. Because the
-   arcs are solved for tangency rather than eyeballed with Beziers, the bowl
-   hugs the bead exactly and the joins are invisible at any size.
-
-   THE TWO SHOULDER RADII ARE INDEPENDENT, and that is where the liquid lives:
-   a longer trailing radius and a shorter leading one make the surface visibly
-   drag behind the weight that is moving through it. */
-function dockTrough(bx, by, rb, sL, sR) {
-  const W = G.W, H = G.H, R = G.R;
-  /* The shoulder's centre sits radius-s below the top edge, so its arc leaves
-     the flat run tangentially; solve its x from external tangency. */
-  const wing = (s, side) => {
-    const L = s + rb, half = dreach(s, rb, by), sx = bx + side * half;
-    return { sx: sx, tx: sx + ((bx - sx) / L) * s, ty: s + ((by - s) / L) * s };
-  };
-  const A = wing(sL, -1), B = wing(sR, +1);
-  /* The bowl runs from A's tangent point to B's the short way, under the bead. */
-  const a0 = Math.atan2(A.ty - by, A.tx - bx), a1 = Math.atan2(B.ty - by, B.tx - bx);
-  let sweep = (a0 - a1) * 180 / Math.PI;
-  while (sweep < 0) sweep += 360;
-  const large = sweep > 180 ? 1 : 0, n = v => v.toFixed(2);
-  return "M0 " + n(R) + "A" + n(R) + " " + n(R) + " 0 0 1 " + n(R) + " 0"
-    + "L" + n(dclamp(A.sx, R, W - R)) + " 0"
-    + "A" + n(sL) + " " + n(sL) + " 0 0 1 " + n(A.tx) + " " + n(A.ty)
-    + "A" + n(rb) + " " + n(rb) + " 0 " + large + " 0 " + n(B.tx) + " " + n(B.ty)
-    + "A" + n(sR) + " " + n(sR) + " 0 0 1 " + n(dclamp(B.sx, R, W - R)) + " 0"
-    + "L" + n(W - R) + " 0" + "A" + n(R) + " " + n(R) + " 0 0 1 " + n(W) + " " + n(R)
-    + "L" + n(W) + " " + n(H - R) + "A" + n(R) + " " + n(R) + " 0 0 1 " + n(W - R) + " " + n(H)
-    + "L" + n(R) + " " + n(H) + "A" + n(R) + " " + n(R) + " 0 0 1 0 " + n(H - R) + "Z";
-}
-
-/* -------------------------------------------------- 3 one rAF, one spring */
-let dx = 0, dv = 0, dtarget = 0, ddragging = false, draf = 0, dlast = 0;
-
-function dockPaint() {
-  if (!G.W) return;
-  /* q is signed travel, -1..1. Everything liquid is a function of it. The
-     normaliser is set so a hop to the next tab reads about half strength and a
-     sweep across the whole bar saturates. */
-  const q = dclamp(dv / 1100, -1, 1) * (ddragging ? 0.5 : 1), mag = Math.abs(q);
-  const sL = dclamp(G.S * (1 + 0.06 * mag + 0.40 * q), G.S * 0.55, G.S * 2.1);
-  const sR = dclamp(G.S * (1 + 0.06 * mag - 0.40 * q), G.S * 0.55, G.S * 2.1);
-  DOCKFILL.setAttribute("d", dockTrough(dx, G.CY, G.RB, sL, sR));
-  /* Volume-preserving squash along the direction of travel. */
-  const sx = 1 + 0.07 * mag;
-  DOCKBEAD.style.transform = "translate3d(" + dx.toFixed(2) + "px,0,0) scale("
-    + sx.toFixed(3) + "," + (1 / sx).toFixed(3) + ")";
-  /* Icons rise into the bead as it passes over them, so a drag reads as
-     liquid instead of stepped, and the accent is whatever is under the bead. */
-  let near = 0, nd = Infinity;
-  for (let i = 0; i < DOCKTABS.length; i++) {
-    const gap = Math.abs(dx - G.slots[i]);
-    if (gap < nd) { nd = gap; near = i; }
-    DOCKTABS[i].style.setProperty("--t",
-      dsmooth(dclamp(1 - gap / (G.span * 0.55), 0, 1)).toFixed(3));
-  }
-  const side = dx >= G.slots[near] ? 1 : -1;
-  const other = dclamp(near + side, 0, DOCKTABS.length - 1);
-  const t = other === near ? 0 : dclamp(Math.abs(dx - G.slots[near]) / G.span, 0, 1);
-  document.documentElement.style.setProperty("--glow-rgb",
-    dmix(DOCKACC[near], DOCKACC[other], t));
-}
-
-function dockLoop(now) {
-  draf = 0;
-  const step0 = Math.min((now - dlast) / 1000, 1 / 30);
-  dlast = now;
-  /* A TAP SETTLES WITHOUT OVERSHOOT. It travels 1.5x slower than a drag so
-     the socket has time to read, and its damping is critical: 2·√142 is
-     23.83, and 24 is the round number at or above it. It was 19.3, a ratio
-     of .81, which swung the bead past the tab it was sent to and back -- an
-     overshoot on a control that was merely pressed, carrying no momentum,
-     which is the misuse the rest of this page's springs refuse. The drag keeps
-     its stiffer pair, so the surface tracks the finger and a release carries
-     the finger's own velocity. */
-  const K = ddragging ? 900 : 142, C = ddragging ? 52 : 24;
-  let step = step0;
-  while (step > 0) {                            /* substep, for stability */
-    const h = Math.min(step, 1 / 240);
-    dv += (-K * (dx - dtarget) - C * dv) * h;
-    dx += dv * h;
-    step -= h;
-  }
-  dockPaint();
-  if (Math.abs(dx - dtarget) > 0.05 || Math.abs(dv) > 0.6 || ddragging) dockRun();
-  else { dx = dtarget; dv = 0; dockPaint(); }
-}
-function dockRun() {
-  if (draf) return;
-  dlast = performance.now();
-  draf = requestAnimationFrame(dockLoop);
-}
-
-/* THE PUBLIC NAME IS UNCHANGED. A dozen call sites say meniscusTo(true) and
-   there is nothing to gain from renaming them along with the component. */
-function meniscusTo(animate) {
-  if (!DOCK || !G.slots.length) return;
-  const on = DOCKTABS.find(b => b.getAttribute("aria-selected") === "true") || DOCKTABS[0];
-  dtarget = G.slots[DOCKTABS.indexOf(on)] || 0;
-  /* REDUCED MOTION IS NOT NO FEEDBACK. The bead still moves to the selected
-     tab, it simply arrives rather than travelling, and with no velocity there
-     is nothing to make the surface lean. */
-  if (!animate || MENISCUS.calm.matches) { dx = dtarget; dv = 0; dockPaint(); return; }
-  dockRun();
-}
-
-/* --------------------------------------------------------- 4 the masthead */
+/* ------------------------------------------------------------ the masthead */
 /* The <h1> and the line under it belong to whichever tab is selected. They
    live here rather than one per panel so the document never has two <h1>s,
    and the strings sit beside the tabs they name. */
@@ -3712,86 +3591,33 @@ function dockMasthead(button) {
    which turns "this is being captured" into "this is the brand". Unlit it is
    dark red glass, so you learn where the indicator is before it ever lights.
    Fill and a halo, never a pulse: a half-hertz oscillation above a transcript
-   somebody is reading is the hazard the house standard names. */
-function meniscusLamp() {
+   somebody is reading is the hazard the house standard names.
+   `mic` and `busy` are the two independent reasons it can be lit, and
+   neither may put out the other. */
+const LAMP = { mic: false, busy: new Set() };
+function lampPaint() {
   const b = $("brand");
-  if (b) b.classList.toggle("lit", MENISCUS.mic || MENISCUS.busy.size > 0);
+  if (b) b.classList.toggle("lit", LAMP.mic || LAMP.busy.size > 0);
 }
-function meniscusLevel(level, lit) {
-  MENISCUS.level = MENISCUS.calm.matches ? 0 : dclamp(level || 0, 0, 1);
-  MENISCUS.mic = !!lit;
-  meniscusLamp();
+function lampMic(lit) {
+  LAMP.mic = !!lit;
+  lampPaint();
 }
-function meniscusBusy(source, on) {
-  if (on) MENISCUS.busy.add(source); else MENISCUS.busy.delete(source);
-  meniscusLamp();
-}
-
-/* ------------------------------------------------------------- the drag -- */
-/* The bead can be dragged: the surface follows the finger and snaps to the
-   nearest tab on release. 7px of hysteresis before it commits to a drag, so a
-   tap with a shaky finger is still a tap. */
-let dstartX = 0, dpid = null;
-if (DOCK) {
-  DOCK.addEventListener("pointerdown", e => {
-    if (e.button !== 0 && e.pointerType === "mouse") return;
-    dpid = e.pointerId; dstartX = e.clientX;
-  });
-  DOCK.addEventListener("pointermove", e => {
-    if (e.pointerId !== dpid) return;
-    if (!ddragging && Math.abs(e.clientX - dstartX) < 7) return;
-    if (!ddragging) {
-      ddragging = true;
-      DOCK.classList.add("dragging"); DOCK.setPointerCapture(dpid);
-    }
-    e.preventDefault();
-    const left = DOCK.getBoundingClientRect().left;
-    dtarget = dclamp(e.clientX - left, G.slots[0], G.slots[G.slots.length - 1]);
-    dockRun();
-  });
-  const drelease = e => {
-    if (e.pointerId !== dpid) return;
-    dpid = null;
-    if (!ddragging) return;
-    ddragging = false;
-    DOCK.classList.remove("dragging");
-    let near = 0, nd = Infinity;
-    G.slots.forEach((s, i) => { const g = Math.abs(dtarget - s); if (g < nd) { nd = g; near = i; } });
-    /* Land it through the page's own tab handler, so the panel swap, the
-       masthead and the poller all happen exactly as they do on a click. */
-    DOCKTABS[near].click();
-  };
-  DOCK.addEventListener("pointerup", drelease);
-  DOCK.addEventListener("pointercancel", drelease);
+function lampBusy(source, on) {
+  if (on) LAMP.busy.add(source); else LAMP.busy.delete(source);
+  lampPaint();
 }
 
 /* ---------------------------------------------------------------- boot --- */
-function dockLayout(animate) {
-  if (!dockMeasure()) return;
-  meniscusTo(animate);
-  DOCK.classList.add("ready");
-}
 if (DOCK) {
-  dockLayout(false);
-  if (typeof ResizeObserver === "function") {
-    new ResizeObserver(() => dockLayout(false)).observe(DOCK);
-  }
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => dockLayout(false));
-  /* THE MASTHEAD IS WRITTEN BY THE TAB HANDLER (navTabSelected), so a drag, a
-     key and a click cannot disagree about it. The dock had a click listener
-     of its own for this, which a drag suppressed so that the release would
-     not count as a second press; the release lands through click() anyway,
-     so a drag left the old tab's name in the <h1> over the new tab's panel.
-     This line is the first paint's, before any tab has been chosen. */
+  dockPlace(false);
+  /* THE MASTHEAD IS WRITTEN BY THE TAB HANDLER (navTabSelected), so a key
+     and a click cannot disagree about it. This line is the first paint's,
+     before any tab has been chosen. */
   dockMasthead(DOCKTABS.find(b => b.getAttribute("aria-selected") === "true") || DOCKTABS[0]);
 }
 
 const TABS = Array.from(document.querySelectorAll('[role=tab]'));
-/* THE SURFACE IS MEASURED, NEVER ASSUMED -- and dockLayout is where that
-   happens now: it re-measures the bar and then places the bead, so the two
-   can never disagree. The observer that used to live here watched the tab
-   strip and only re-placed the bead; the dock's own observer measures first,
-   which is what a change of tab widths actually requires. */
 TABS.forEach(button => {
   button.addEventListener("click", () => {
     /* Re-selecting the selected tab is not a state change, so it gets no
@@ -3803,21 +3629,16 @@ TABS.forEach(button => {
          the tablist pattern exists to avoid. */
       b.tabIndex = b === button ? 0 : -1;
     });
-    /* THE BEAD MOVES SYNCHRONOUSLY, AND IT USED NOT TO. This was
-       `requestAnimationFrame(() => meniscusTo(true))` fired BEFORE the loop
-       above -- so the placement depended on one frame callback landing, and it
-       read the attributes it was racing. A frame that never comes is not
-       hypothetical on this page: a tab throttled in the background still runs
-       timers and still finishes jobs, and the bead would then be sitting under
-       a tab that is no longer the selected one, which is the single thing the
-       navigation exists to say.
-
-       There is nothing to defer for. meniscusTo reads G.slots, which
-       dockMeasure already filled in, so it touches no layout -- it only sets
-       the spring's target. The travel itself is still a spring, still
-       interruptible, and still arrives rather than jumping under reduced
-       motion; what is gone is the frame between the click and the intent. */
-    meniscusTo(changed);
+    /* THE PILL IS SENT SYNCHRONOUSLY, after the attributes it reads. It was
+       once placed from a requestAnimationFrame callback fired BEFORE the
+       loop above -- so it depended on a frame landing, and it read the
+       selection it was racing. A frame that never comes is not hypothetical
+       here: a tab throttled in the background still runs timers and still
+       finishes jobs, and the pill would then sit under a tab that is no
+       longer the selected one, which is the single thing the navigation
+       exists to say. dockPlace only writes two custom properties; the
+       travel is the stylesheet's transition. */
+    dockPlace(true);
     /* FROM THE BUTTONS, NOT A LIST WRITTEN OUT HERE. This was
        ["transcribe","speak","jobs"], so adding a fourth tab gave you a button
        that set aria-selected, hid the old panel and never showed the new one:
@@ -4174,9 +3995,9 @@ const NAV_WAITS = { speak: "voices", jobs: "jobs", vocab: "glossaries", satellit
 try { history.scrollRestoration = "manual"; } catch {}
 
 /* WHERE THE PAGE OPENS. Read once, at parse time and before the first paint,
-   so a link to Jobs never shows Transcribe for a frame and the bead never
+   so a link to Jobs never shows Transcribe for a frame and the pill never
    travels from the first tab to the one the address names: nothing has been
-   drawn yet, so meniscusTo(false) puts it there and the panel appears without
+   drawn yet, so dockPlace(false) puts it there and the panel appears without
    its entrance. The tabs are set directly rather than through click(), which
    would push an entry and run the tab's arrivals (a jobs poll, a satellites
    refresh) before the sections they call exist. Only the tabs, the dock, the
@@ -4200,7 +4021,7 @@ function navFirst() {
       const panel = $("tab-" + b.dataset.tab);
       if (panel) panel.hidden = b !== button;
     }
-    meniscusTo(false);
+    dockPlace(false);
   }
   dockMasthead(button);
   navTitle();
@@ -4218,9 +4039,9 @@ function navStart() {
 }
 
 /* A TAB IS A STEP BACK UNDOES. Called by the tab handler for every way a tab
-   is chosen (a click, an arrow key, Home, End, a drag of the bead), so all of
-   them write the same entry. The masthead is written here and only here, so
-   the name under the dock and the tab under the bead cannot disagree. A tab
+   is chosen (a click, an arrow key, Home, End), so all of them write the
+   same entry. The masthead is written here and only here, so the name in
+   the heading and the tab under the pill cannot disagree. A tab
    chosen by Back itself (NAV.silent) writes nothing: the entry is already
    the one it is on. It still asks the live layer whether what the tab shows
    is stale, which is why that line comes before the silent one: arriving by
@@ -7040,7 +6861,7 @@ function satMoveOpen(li, open, refocus) {
 function satGoWakeWords() {
   const box = $("sat-wakewords");
   box.open = true;
-  box.scrollIntoView({ block: "start", behavior: MENISCUS.calm.matches ? "auto" : "smooth" });
+  box.scrollIntoView({ block: "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   box.querySelector("summary").focus({ preventScroll: true });
   SATELLITES.hooks.nav("wake-words");
 }
@@ -13691,7 +13512,7 @@ function audioSink(ctx, plan) {
     },
     close() {
       closed = true;
-      meniscusBusy("speak", false);
+      lampBusy("speak", false);
       $("speak-progress").hidden = true;
       /* THE GRAPH OUTLIVES THE RESPONSE, which is exactly what "playing as it
          is made" means at the end: the last delta lands, the body finishes,
@@ -13760,7 +13581,7 @@ function textSink(plan) {
     commit() {},
     close() {
       clearInterval(timer); timer = 0;
-      meniscusBusy("speak", false);
+      lampBusy("speak", false);
       $("speak-progress").hidden = true;
       $("speak-stop").hidden = false;
     },
@@ -13896,7 +13717,7 @@ async function speakNow(voice, text, listen) {
      idempotent, so the two calls the streaming branch already makes are
      unaffected. */
   if (sink) sink.open();
-  meniscusBusy("speak", true);
+  lampBusy("speak", true);
   try {
     /* THIS PAGE READS THE CHUNK SCHEDULE, AND SAYS SO. tts-stack plans a
        streamed request's chunk sizes against the rule this file enforces: a
@@ -14570,7 +14391,7 @@ function renderJobs() {
      A bare numeral cannot tell a queue of two waiting from a queue of two
      running, and those are the two states the whole tab is about. */
   $("jobcount").classList.toggle("live", running > 0);
-  meniscusBusy("jobs", running > 0);
+  lampBusy("jobs", running > 0);
   $("jobsafe").hidden = !running;
 
   if (!list.length && jobsFailed) {
@@ -15583,17 +15404,14 @@ function meter(bar, analyser, data) {
     const target = Math.min(1, peak * 1.6);
     shown = target > shown ? target : shown + (target - shown) * 0.25;
     bar.style.transform = "scaleX(" + shown.toFixed(3) + ")";
-    /* THE SAME NUMBER REACHES THE SEAM, and it is the same number rather than
-       a second reading of the same signal: two analysers disagreeing about how
-       loud a room is would be the control contradicting itself. */
-    meniscusLevel(shown, true);
     frame = requestAnimationFrame(paint);
   };
+  lampMic(true);
   frame = requestAnimationFrame(paint);
   return () => {
     cancelAnimationFrame(frame);
     bar.style.transform = "scaleX(0)";
-    meniscusLevel(0, false);
+    lampMic(false);
   };
 }
 

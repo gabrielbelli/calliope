@@ -36,9 +36,9 @@ def test_every_tab_opens_its_own_panel_and_is_photographed(new_page, goto, scree
         hidden_others = page.locator(f"[role=tabpanel]:not(#{panel})").evaluate_all(
             "els => els.every(e => e.hidden || getComputedStyle(e).display === 'none')")
         assert hidden_others, f"another panel stayed visible beside {name}"
-        # The dock's spring and the panel's entrance run on requestAnimationFrame,
-        # which Playwright's animations="disabled" cannot stop; this is longer
-        # than either.
+        # The panel's entrance and the dock's pill are still moving just after
+        # the click, and the measurements below read the page at rest; this is
+        # longer than either.
         page.wait_for_timeout(700)
         # The masthead names the tab; a heading in the panel that says it
         # again is the same word twice on one screen. Read off the rendered

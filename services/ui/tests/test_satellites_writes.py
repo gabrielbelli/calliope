@@ -111,7 +111,7 @@ const focusWithin = box => box.contains(document.activeElement);
 const reason = (p, fallback) => fallback;
 const saved = new Map();
 const store = { get: (k, d) => saved.has(k) ? saved.get(k) : d, set: (k, v) => saved.set(k, v) };
-const MENISCUS = { calm: { matches: true } };
+const matchMedia = () => ({ matches: true });
 
 // THE FAKE HUB. A request reaches it when json() is called and is answered at
 // once, and the answer reaches the page one macrotask later, as over a

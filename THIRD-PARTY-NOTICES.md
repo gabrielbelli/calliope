@@ -169,25 +169,25 @@ Their code is in our tree, so their notice travels with it.
 
 ### `hasib41/meniscus-liquid-nav` — MIT — Copyright (c) 2026 Hasib
 
-The dock — the bottom navigation whose top edge is a liquid surface, and whose
-selected tab is a bead that surface dips beneath — is **ported from Meniscus**.
-The geometry, the spring constants and the drag response are theirs and are
-deliberately not reinterpreted. The four icons, the accents and the two themes
+The dock, the bottom navigation, was **ported from Meniscus**. Its liquid
+trough, the bead the selected tab rode in, the spring and the drag have since
+been taken out (a flat bar with a tinted pill now marks the selected tab).
+What remains of theirs is the bar itself: the plate, its rim light and its
+ground shadow. The icons, the accents, the two themes and the selection pill
 are this page's. Found through its listing at
 `vibing.inc/library/meniscus-vg-2134`; upstream is
 `github.com/hasib41/meniscus-liquid-nav`, with a live demo at
 `hasib41.github.io/meniscus-liquid-nav/`.
 
-All of it lives in `services/ui/app/static/ui.html`, in three places, each
-already carrying a pointer back to the original:
+It lives in `services/ui/app/static/ui.html`, in two places, each already
+carrying a pointer back to the original:
 
 | Where | What came from Meniscus |
 |---|---|
-| the dock CSS (`.rail`, `.dock`, the socket custom properties) | the plate, the rim and the bead |
-| the `<div class="rail">` markup and its SVG `<defs>` | the one closed path the socket is cut into |
-| `dockMeasure`, `dockTrough`, `meniscusTo` and the spring loop | the geometry, the spring and the drag |
+| the dock CSS (`.rail`, `.dock`) | the plate, the rim light and the ground shadow |
+| the `<div class="rail">` markup | the bar's structure |
 
-It is one component in vanilla JS and SVG with zero dependencies, which is why
+It was one component in vanilla JS and SVG with zero dependencies, which is why
 it could be taken at all — there was no framework attached to it, and nothing
 to reconcile with a page that has no build step.
 
