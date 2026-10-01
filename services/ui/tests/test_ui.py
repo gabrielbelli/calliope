@@ -495,3 +495,80 @@ def test_the_prefixed_mount_carries_the_profile_name_too(client):
     assert api.put("/ui/api/glossaries/mine",
                    json={"text": "Catallaxy\n"}).status_code == 200
     assert gateway.seen[-1].url.path == "/glossaries/mine"
+
+
+# ------------------------------------------------------- the page's addresses --
+#
+# Every tab has a path, and every place inside one a path under it, which the
+# page reads to open itself. The server's half is small and has to be exact:
+# each such path is the page, byte for byte and header for header, in every
+# case /ui is, and none of them may take a route this service already had.
+
+
+def test_every_tab_has_an_address_the_server_serves(client):
+    """The tab names are read off the page's own buttons, so a sixth tab
+    without a route fails here rather than 404ing on its first reload."""
+    import re
+
+    api, _, _ = client()
+    from app import main
+
+    tabs = re.findall(r'role="tab" id="tab-btn-\w+" data-tab="(\w+)"', main.PAGE.read_text())
+    assert len(tabs) == 5, tabs
+    routes = {route.path for route in main.app.routes}
+    for tab in tabs:
+        slug = "vocabulary" if tab == "vocab" else tab
+        assert f"/ui/{slug}" in routes, f"/ui/{slug} is not served"
+        assert f"/ui/{slug}/{{rest:path}}" in routes, f"/ui/{slug}/... is not served"
+
+
+def test_a_deep_link_serves_the_same_page_with_the_same_headers(client):
+    """Anything else would be two pages, and a policy that differed by path
+    would be a hole in whichever was looser."""
+    api, _, _ = client()
+    page = api.get("/ui")
+    deep = api.get("/ui/satellites/kitchen/airplay")
+    assert deep.status_code == 200
+    assert deep.text == page.text
+    for header in ("content-security-policy", "cache-control", "content-type"):
+        assert deep.headers[header] == page.headers[header], header
+
+
+def test_a_deep_link_is_served_when_the_gateway_is_down(client):
+    """/ui loads with the gateway down, so the page can say what is down; a
+    reload of a deeper address must load in exactly the same case."""
+    api, gateway, _ = client(UI_GATEWAY_URL="http://nothing.test")
+    response = api.get("/ui/jobs/abc")
+    assert response.status_code == 200
+    assert "<title>Calliope</title>" in response.text
+
+
+def test_a_deep_link_is_served_without_a_key_when_the_gateway_wants_one(client):
+    """The page is public markup with no data in it, at any address, and it
+    is never the thing that asks the gateway about a key."""
+    api, gateway, _ = client()
+    gateway.keys = ("sk-real",)
+    before = sum(1 for r in gateway.seen if r.url.path == "/v1/models")
+    for path in ("/ui/transcribe", "/ui/speak/clone", "/ui/jobs/abc", "/ui/vocabulary/tech",
+                 "/ui/satellites/wake-words/hey_jarvis/more"):
+        assert api.get(path).status_code == 200, path
+    assert sum(1 for r in gateway.seen if r.url.path == "/v1/models") == before, \
+        "a deep link cost a key check"
+
+
+def test_the_page_views_shadow_no_route_of_this_service(client):
+    """The five names are the only doors: the service's own /ui routes still
+    answer as themselves, a near miss is the 404 envelope, and the proxy
+    under /ui/api is untouched."""
+    api, gateway, _ = client()
+    for path in ("/ui/config", "/ui/health", "/ui/clips"):
+        response = api.get(path)
+        assert response.status_code == 200, path
+        assert response.headers["content-type"].startswith("application/json"), path
+    for path in ("/ui/nope", "/ui/transcribex", "/ui/vocab"):
+        response = api.get(path)
+        assert response.status_code == 404, path
+        assert_four_field_envelope(response)
+    before = len(gateway.seen)
+    assert api.get("/ui/api/satellites").status_code == 200
+    assert gateway.seen[before:] and gateway.seen[-1].url.path == "/satellites"

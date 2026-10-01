@@ -1761,7 +1761,7 @@ def test_the_page_tells_you_which_tab_you_are_on_from_across_the_room():
     # READ FROM THE STYLESHEET, NOT WRITTEN TWICE. A palette with a second copy
     # in the script is a palette that drifts the first time one of them moves.
     body = js_between("const DOCKACC", "1 geometry --")
-    assert 'getComputedStyle(t).getPropertyValue("--acc")' in SCRIPT
+    assert 'getComputedStyle(t).getPropertyValue("--acc")' in body
     # And the wash is driven by the SAME channels, so the colour of the room is
     # the colour of the bead by construction rather than by coincidence.
     paint = js_between("function dockPaint(", "function dockLoop(")
@@ -2280,3 +2280,82 @@ def test_the_vocabulary_panel_closes_the_elements_it_opens():
     check.feed(markup)
     assert check.bad == [], f"{check.bad} closes an element that is not open"
     assert check.open == ["body"], f"left open: {check.open}"
+
+
+# ------------------------------------------------------------- the router --
+#
+# Every tab and every place in one has an address now, and the page reads its
+# location to open it. The router's pure half is driven in Node by
+# test_navigation.py and the whole of it in a browser by e2e/test_routes.py;
+# these pin the seams that neither run can see, which are the ones that let a
+# second writer of the title, the masthead or the history back in.
+
+ROUTER = SCRIPT[SCRIPT.index("/* ============================================================ router === */"):
+                SCRIPT.index("/* ============================================== playback speed ======== */")]
+
+
+def test_the_tab_handler_hands_every_change_to_the_router():
+    """A click, an arrow key, Home, End and a drag of the bead all land in the
+    tab handler, so that is where the address is written, once, for all five."""
+    handler = SCRIPT[SCRIPT.index("const TABS = Array.from"):]
+    handler = handler[:handler.index("async function poll()")]
+    assert "navTabSelected(button, changed);" in handler
+    assert "history." not in bare(handler), "the tab handler writes history of its own"
+
+
+def test_the_masthead_is_written_by_the_tab_handler_so_a_drag_names_its_tab():
+    """A REAL DEFECT. The dock kept a click listener of its own to write the
+    <h1>, and suppressed it during a drag so the release would not count as a
+    press. The release lands through click() all the same, so a drag moved
+    the bead and the panel and left the old tab's name over them."""
+    selected = js_between("function navTabSelected(", "\n}\n")
+    assert "dockMasthead(button);" in selected
+    assert selected.index("dockMasthead(button);") < selected.index("if (!changed) return;"), \
+        "re-selecting a tab would leave a stale masthead"
+    assert "dsuppress" not in SCRIPT
+    assert "DOCKTABS.forEach(b => b.addEventListener(\"click\"" not in bare(SCRIPT)
+
+
+def test_only_the_router_writes_the_document_title():
+    """The time a job has left, the place and the tab share one title, so one
+    function writes it; renderJobs used to write "calliope" over it, lower
+    case, on every poll."""
+    code = bare(SCRIPT)
+    assert code.count("document.title =") == 1
+    title = js_between("function navTitle()", "\n}\n")
+    assert "document.title =" in title
+
+
+def test_the_router_issues_no_request_of_its_own():
+    """Opening an address reads what the tabs have already asked for. The
+    one question it adds -- whether a job the listing did not carry exists --
+    is asked by the Jobs section, beside the listing it is about, so every
+    request stays in the section that owns its route."""
+    for call in ("api(", "json(", "fetch("):
+        assert not re.search(r"(?<![\w.$])" + re.escape(call), ROUTER), f"the router calls {call}"
+    jobs = SCRIPT[SCRIPT.index("/* ========================================================== jobs tab === */"):]
+    assert "async function jobLookup(id)" in jobs
+    assert "async function jobLookup(id)" not in ROUTER
+
+
+def test_the_satellites_section_reaches_the_router_only_through_its_hooks():
+    """test_satellites_writes.py runs the Satellites section alone in Node,
+    where the router does not exist. A direct call from the section into the
+    router, or into anything that would later live beside it, is a
+    ReferenceError there and a coupling here; SATELLITES.hooks is the door."""
+    section = bare(HTML[HTML.index("const SATELLITES = {"):HTML.index("async function loadGlossaries(")])
+    assert "SATELLITES.hooks.nav(" in section, "the section no longer tells the router anything"
+    outside = section.replace("SATELLITES.hooks.", "")
+    assert "NAV." not in outside and "LIVE." not in outside
+    for prefix in ("nav", "live"):
+        found = re.search(r"(?<![\w.$])" + prefix + r"[A-Z]\w*\s*\(", outside)
+        assert not found, f"the section calls {found.group(0)} directly"
+
+
+def test_every_new_status_host_announces_what_it_writes():
+    """What a link found missing is written into these after the page has
+    drawn, so it is announced or it is not heard at all."""
+    for host in ("jobnote", "satnote"):
+        tag = HTML[HTML.index(f'id="{host}"'):]
+        tag = tag[:tag.index(">")]
+        assert 'aria-live="polite"' in tag, f"#{host} changes silently"

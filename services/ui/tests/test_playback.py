@@ -669,7 +669,6 @@ def test_the_speak_highlight_is_segment_level_and_says_so():
     inside one is not -- it would need forced alignment, and dividing a
     segment's duration by its word count is the drifting estimate this avoids.
     """
-    body = HTML[HTML.index("function speakCues("):]
     head = HTML[:HTML.index("function speakCues(")]
     comment = head[head.rindex("/*"):]
     assert "forced alignment" in comment or "NOT word level" in comment

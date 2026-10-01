@@ -35,6 +35,9 @@ services/*/tests
 services/*/conftest.py
 services/*/pytest.ini
 services/*/requirements-dev.txt
+# The browser tests (services/ui/e2e/README.md): a harness for a developer's
+# machine, never an image's.
+services/ui/e2e
 
 # The benchmark is a client, not part of the service. It has its own
 # requirements.txt and pulls a second Whisper implementation.

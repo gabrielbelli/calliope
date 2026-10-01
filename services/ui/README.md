@@ -47,6 +47,64 @@ typed. The Satellites tab is the satellite hub's page, and needs the hub
 
 ---
 
+## Addresses
+
+Every tab has an address, and so does every place inside one. The page reads
+its own location when it loads and opens what the path names, so a reload
+comes back to the same place and a link can point at one satellite, one job or
+one profile.
+
+| URL | Opens | Canonical |
+|---|---|---|
+| `/ui` | Transcribe | yes |
+| `/ui/transcribe` | Transcribe | replaced with `/ui` |
+| `/ui/transcribe/expert` | the Expert panel, open | yes |
+| `/ui/speak` | Speak | yes |
+| `/ui/speak?voice=<option value>` | Speak with that voice selected | yes |
+| `/ui/speak/clone` | Clone a new voice, with its sheet open | yes |
+| `/ui/speak/expert` | whichever Expert panel belongs to the voice | yes |
+| `/ui/jobs[?show=<filter>&kind=<kind>]` | Jobs with those filters | `show` omitted when `playable`, `kind` omitted when `all` |
+| `/ui/jobs/<id>` | that job: marked, scrolled to, focused, its text opened | yes (query kept) |
+| `/ui/vocabulary` | Vocabulary | yes |
+| `/ui/vocabulary/<name>` | that profile, open in the editor | lower case |
+| `/ui/satellites` | the list | yes |
+| `/ui/satellites/<sat>` | that satellite's row, open (a satellite waiting to be adopted is scrolled to and its name box focused) | its name as a slug (`Sala de Estar` is `sala-de-estar`), or its ID when the name is empty, shared with another satellite, a section's name or shaped like an ID |
+| `/ui/satellites/<sat>/<part>` | the row and its `airplay`, `try`, `buttons` or `device` section | yes |
+| `/ui/satellites/wake-words` | Wake words | reserved |
+| `/ui/satellites/wake-words/<word>` | that word's row; `ptt` is push-to-talk | yes |
+| `/ui/satellites/wake-words/<word>/more` | the row and its More | yes |
+| `/ui/satellites/try-a-word` | Wake words and Try a word | reserved |
+| `/ui/satellites/custom-models` | Wake words and Custom models | reserved |
+| `/ui/satellites/activity`, `/telemetry`, `/firmware` | that section | reserved |
+
+The tab's slug is `vocabulary`; its `data-tab` in the markup is still `vocab`.
+A path the tab has no place for is cut back to the part it has, and an unknown
+tab (`/ui/nope`) is a JSON 404 from this service and from the gateway. Nothing
+that does something or needs the page's memory has an address: the
+transcript, the link dialog, the job player, the ring's set-up, the move form,
+a new profile, and every button.
+
+Choosing a tab, or opening a place (a row, a section, a word, a job's text, an
+Expert panel, a profile), adds a step that Back undoes. Opening a section
+inside a place, changing a filter or the voice, and what the page does itself
+(adopt, rename, add a word, forget, delete a profile) rewrite the entry they
+are on. Back restores the scroll and the focus the entry was left with, closes
+what the entry being left opened, and answers the link dialog No if it is open.
+
+A link to something that has gone waits for its list to answer first, then
+says so in that tab's own note, replaces the address with the nearest parent
+that exists, and shows the parent. A job that exists but is filtered out gets
+a Show everything button; one that is only older than the fifty runs the
+service lists is said to be. A satellite's address found by its ID survives a
+rename made anywhere.
+
+A deep link loads in every case `/ui` loads. The page server answers each
+path under the five tab names with the same file and the same headers, needs
+no key for it and makes no gateway round trip to decide; the gateway lists
+each tab as one pair of routes (`/ui/<tab>` and `/ui/<tab>/{rest:path}`).
+
+---
+
 ## Why this is its own container, and what it costs
 
 The framework survey argued for serving the page from the gateway itself, and
@@ -1178,6 +1236,11 @@ The Satellites tab has its own suites:
 | `tests/test_satellites_llm.py` | A language model word: its provider, model list, key and Test |
 | `tests/test_satellites_states.py` | The state word, chip and line each satellite row shows, over every case |
 | `tests/test_wake_words_contract.py` | The wake word fields the page sends against the names the hub's own code reads |
+
+The page's addresses have one of each: `tests/test_navigation.py` runs the
+router's pure half in Node (every address read, cut to its shape and written
+back), and `e2e/test_routes.py` opens each address in a headless browser
+against a local stack (see `e2e/README.md`, which is also how it is run).
 
 The Node suites skip without `node` on PATH. None starts a server or reaches
 the network.

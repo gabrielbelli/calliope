@@ -2356,6 +2356,9 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
            page, not about any one job. -->
       <div class="hint" id="jobsafe" hidden>Close this page if you want. The job runs on the server.</div>
 
+      <!-- What a link to a job found: filtered out, older than the listing,
+           or gone. Written by the router and taken back by the next move. -->
+      <div id="jobnote" aria-live="polite"></div>
       <div id="joblist"></div>
     </div>
   </section>
@@ -2465,6 +2468,9 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
       <!-- A hub that has answered and then stops: the list stays, with this
            beside it, until the next poll that reaches it. -->
       <div id="sathubfail" aria-live="polite"></div>
+      <!-- What a link into this tab found missing: a satellite, or the wake
+           word list. Written by the router and taken back by the next move. -->
+      <div id="satnote" aria-live="polite"></div>
       <div id="satellitesman" hidden>
         <div id="satellitesempty" hidden>
           <p class="sat-empty">No satellites yet.</p>
@@ -3474,17 +3480,17 @@ function meniscusBusy(source, on) {
 /* The bead can be dragged: the surface follows the finger and snaps to the
    nearest tab on release. 7px of hysteresis before it commits to a drag, so a
    tap with a shaky finger is still a tap. */
-let dstartX = 0, dpid = null, dsuppress = false;
+let dstartX = 0, dpid = null;
 if (DOCK) {
   DOCK.addEventListener("pointerdown", e => {
     if (e.button !== 0 && e.pointerType === "mouse") return;
-    dpid = e.pointerId; dstartX = e.clientX; dsuppress = false;
+    dpid = e.pointerId; dstartX = e.clientX;
   });
   DOCK.addEventListener("pointermove", e => {
     if (e.pointerId !== dpid) return;
     if (!ddragging && Math.abs(e.clientX - dstartX) < 7) return;
     if (!ddragging) {
-      ddragging = true; dsuppress = true;
+      ddragging = true;
       DOCK.classList.add("dragging"); DOCK.setPointerCapture(dpid);
     }
     e.preventDefault();
@@ -3503,7 +3509,6 @@ if (DOCK) {
     /* Land it through the page's own tab handler, so the panel swap, the
        masthead and the poller all happen exactly as they do on a click. */
     DOCKTABS[near].click();
-    setTimeout(() => { dsuppress = false; }, 0);
   };
   DOCK.addEventListener("pointerup", drelease);
   DOCK.addEventListener("pointercancel", drelease);
@@ -3521,10 +3526,12 @@ if (DOCK) {
     new ResizeObserver(() => dockLayout(false)).observe(DOCK);
   }
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => dockLayout(false));
-  DOCKTABS.forEach(b => b.addEventListener("click", () => {
-    if (dsuppress) return;
-    dockMasthead(b);
-  }));
+  /* THE MASTHEAD IS WRITTEN BY THE TAB HANDLER (navTabSelected), so a drag, a
+     key and a click cannot disagree about it. The dock had a click listener
+     of its own for this, which a drag suppressed so that the release would
+     not count as a second press; the release lands through click() anyway,
+     so a drag left the old tab's name in the <h1> over the new tab's panel.
+     This line is the first paint's, before any tab has been chosen. */
   dockMasthead(DOCKTABS.find(b => b.getAttribute("aria-selected") === "true") || DOCKTABS[0]);
 }
 
@@ -3624,6 +3631,7 @@ TABS.forEach(button => {
        already does exactly this line; the tab did not. */
     if (changed && button.dataset.tab === "jobs") schedule(0);
     if (changed && button.dataset.tab === "satellites") satellitesRefresh();
+    navTabSelected(button, changed);
   });
   /* Arrow, Home and End over the strip. It calls next.click() rather than
      repeating what a tab does, so the listener above stays the only thing that
@@ -3727,6 +3735,816 @@ function paintRunner() {
   if (svc.length) bits.push("running " + svc.join(", "));
   $("runnergpu").textContent = bits.join(" · ");
 }
+
+/* ============================================================ router === */
+/*
+  EVERY PLACE ON THIS PAGE HAS AN ADDRESS, AND THE ADDRESS IS THE PAGE'S OWN.
+  The page was one URL, /ui, whatever it showed: a reload always landed on
+  Transcribe, a link could not say "the kitchen satellite" or "that job", and
+  Back left the page altogether instead of closing what had just been opened.
+  So the path names the tab and the place inside it, and the page reads its
+  own location to open it. The server answers every path under a tab name with
+  this same file (app/main.py, and one GET pair per tab in the gateway), so
+  there is still one document and no build step.
+
+  WHAT CAN HAVE AN ADDRESS, AND WHAT NEVER CAN. A place: a tab, a satellite's
+  row and its sections, a hub section, a wake word, a job, a profile, an
+  Expert panel. Never an effect, and never something that needs this tab's
+  memory: the transcript, the link dialog, the job player, the ring's set-up,
+  the move form, a new profile, or any button. A URL that did something when
+  loaded, or that meant nothing after a reload, is a URL that lies.
+
+  THE HISTORY RULES, in one line each. A tab or a place the reader opens is a
+  step Back undoes (push). A detail inside a place, a setting (the filters,
+  the voice) and anything the page itself did (adopt, rename, a word added,
+  forget) rewrites the entry it is on (replace). A poll or a scripted open
+  writes nothing at all.
+
+  Two halves: the addresses, which are pure and driven in Node by
+  tests/test_navigation.py, then the page glue. The glue runs at the top
+  level before the Satellites, Jobs and Vocabulary sections below it exist,
+  so what it does at parse time touches only the tabs, the dock and the
+  masthead; everything that needs data waits for boot().
+*/
+
+/* ------------------------------------------------- router: addresses -- */
+const NAV_SLUG = { transcribe: "transcribe", speak: "speak", jobs: "jobs",
+                   vocab: "vocabulary", satellites: "satellites" };
+const NAV_TAB = Object.fromEntries(Object.entries(NAV_SLUG).map(([tab, slug]) => [slug, tab]));
+const NAV_HUB = { "wake-words": "sat-wakewords", "try-a-word": "ww-try", "custom-models": "ww-models",
+                  activity: "sat-activity", telemetry: "sat-telemetry", firmware: "sat-firmware" };
+const NAV_HUB_LABEL = { "wake-words": "Wake words", "try-a-word": "Try a word",
+                        "custom-models": "Custom models", activity: "Activity",
+                        telemetry: "Telemetry", firmware: "Firmware" };
+const NAV_PART = { airplay: "sat-ap", try: "sat-try", buttons: "sat-buttons", device: "sat-device" };
+const NAV_PART_LABEL = { airplay: "AirPlay", try: "Try it", buttons: "Buttons", device: "Device" };
+const NAV_QUERY = { jobs: ["show", "kind"], speak: ["voice"] };
+
+/* A PATH AND A QUERY, AS THE PAGE READS THEM. Anything that is not under /ui
+   and a known tab is Transcribe, which is what /ui itself shows. A segment is
+   decoded once; one that will not decode, or is longer than any name here
+   can be, ends the path there rather than being guessed at. Only the query
+   keys the tab uses are read, so a link carrying anything else loses it. */
+function navParse(pathname, search) {
+  const segments = String(pathname || "").split("/").filter(Boolean);
+  const route = { view: "transcribe", parts: [], query: {} };
+  if (segments[0] !== "ui" || !NAV_TAB[segments[1]]) return route;
+  route.view = NAV_TAB[segments[1]];
+  for (const raw of segments.slice(2)) {
+    let part;
+    try { part = decodeURIComponent(raw); } catch { break; }
+    if (!part || part.length > 128) break;
+    route.parts.push(part);
+  }
+  const params = new URLSearchParams(search || "");
+  for (const key of NAV_QUERY[route.view] || []) {
+    const value = params.get(key);
+    if (value) route.query[key] = value;
+  }
+  return route;
+}
+
+/* The shape each tab allows; anything past it is dropped, never guessed at. */
+function navShape(route) {
+  const p = route.parts, keep = n => ({ ...route, parts: p.slice(0, n) });
+  switch (route.view) {
+    case "transcribe": return keep(p[0] === "expert" ? 1 : 0);
+    case "speak": return keep(p[0] === "expert" || p[0] === "clone" ? 1 : 0);
+    case "jobs": case "vocab": return keep(Math.min(p.length, 1));
+  }
+  if (p[0] === "wake-words") return keep(p.length >= 3 && p[2] === "more" ? 3 : Math.min(p.length, 2));
+  if (Object.hasOwn(NAV_HUB, p[0] || "")) return keep(1);
+  if (p.length >= 2 && Object.hasOwn(NAV_PART, p[1])) return keep(2);
+  return keep(Math.min(p.length, 1));
+}
+
+/* THE ONE SPELLING OF AN ADDRESS. Transcribe with nothing open is /ui, the
+   page's oldest address, so every link and bookmark made before this section
+   existed is already canonical. */
+function navPath(route) {
+  const parts = route.parts || [];
+  let path = route.view === "transcribe" && !parts.length ? "/ui" : "/ui/" + NAV_SLUG[route.view];
+  for (const part of parts) path += "/" + encodeURIComponent(part);
+  const params = new URLSearchParams();
+  for (const key of NAV_QUERY[route.view] || []) if ((route.query || {})[key]) params.set(key, route.query[key]);
+  const query = params.toString();
+  return query ? path + "?" + query : path;
+}
+
+/* Where closing a place goes back to. The two wake word tools live inside
+   Wake words on the page, so that is their parent, not the list. */
+function navParent(route) {
+  const p = route.parts;
+  if (route.view === "satellites" && (p[0] === "try-a-word" || p[0] === "custom-models"))
+    return { ...route, parts: ["wake-words"], query: {} };
+  return { ...route, parts: p.slice(0, -1), query: route.view === "jobs" ? route.query : {} };
+}
+
+/* A NAME AS A PATH SEGMENT: lower-case ASCII and hyphens, accents folded, so
+   "Sala de Estar" is sala-de-estar and nothing in it needs escaping. */
+function satSlug(name) {
+  return String(name || "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64).replace(/-+$/, "");
+}
+
+/* A satellite's segment is its name while that name is unambiguous, and its
+   ID otherwise: empty, reserved, shaped like an ID, or shared. */
+function navSatSegment(n, list) {
+  const slug = n && n.adopted && n.name ? satSlug(n.name) : "";
+  const taken = !slug || Object.hasOwn(NAV_HUB, slug) || /^[0-9a-f]{12}$/.test(slug)
+    || list.filter(o => o.adopted && o.name && satSlug(o.name) === slug).length > 1;
+  return taken ? n.id : slug;
+}
+
+/* THE WAY BACK FROM A SEGMENT: the ID first, because it never changes; then
+   the slug while exactly one satellite has it; then the name as typed, for
+   a link somebody wrote by hand. Two matches are no match. */
+function navSatFind(segment, list) {
+  const s = String(segment || "").toLowerCase();
+  const byId = list.find(n => n.id === s);
+  if (byId) return byId;
+  const bySlug = list.filter(n => n.adopted && n.name && satSlug(n.name) === s);
+  if (bySlug.length === 1) return bySlug[0];
+  const byName = list.filter(n => String(n.name || "").toLowerCase() === s);
+  return byName.length === 1 ? byName[0] : null;
+}
+
+/* Most specific first, so a truncated browser tab still shows what matters. */
+function navTitleText(parts) { return parts.filter(Boolean).concat("Calliope").join(" · "); }
+
+/* ------------------------------------------------------- router: page -- */
+/* WHERE THE PAGE IS, AND WHAT IT IS WAITING FOR. `route` is what the address
+   names; `place` the <details> it opened, outermost first, so Back can shut
+   them; `sat` the satellite it names by ID, which survives a rename; `item`,
+   `section` and `eta` make the title. `settled` holds the lists that have
+   answered at least once and `waiting` whoever is waiting on one that has
+   not. `pending` is a satellites address that arrived before the hub did.
+   `touched` and `touchedAt` are the last summary a person pressed, which is
+   how a person's toggle is told from the page's own (see the listeners).
+   `said` is the note the router wrote last, so the next navigation can take
+   it back. */
+const NAV = { route: { view: "transcribe", parts: [], query: {} }, silent: false,
+              touched: null, touchedAt: 0, settled: new Set(), waiting: new Map(),
+              pending: null, place: [], sat: null, item: "", section: "", eta: null, said: null };
+/* Which list each tab's places are found in. Transcribe's are in the markup. */
+const NAV_WAITS = { speak: "voices", jobs: "jobs", vocab: "glossaries", satellites: "satellites" };
+/* THE PAGE PUTS THE SCROLL BACK ITSELF. The browser's own restoration runs
+   before the lists have loaded, so it restored a position in a page that was
+   still a few hundred pixels tall, and then the rows arrived under it. */
+try { history.scrollRestoration = "manual"; } catch {}
+
+/* WHERE THE PAGE OPENS. Read once, at parse time and before the first paint,
+   so a link to Jobs never shows Transcribe for a frame and the bead never
+   travels from the first tab to the one the address names: nothing has been
+   drawn yet, so meniscusTo(false) puts it there and the panel appears without
+   its entrance. The tabs are set directly rather than through click(), which
+   would push an entry and run the tab's arrivals (a jobs poll, a satellites
+   refresh) before the sections they call exist. Only the tabs, the dock, the
+   store and the masthead are touched; the address is made canonical by
+   navApply, once the lists it names have answered. */
+function navFirst() {
+  const route = navShape(navParse(location.pathname, location.search));
+  /* Written through for jobFilter() and jobKind() to read, which already fall
+     back on a value they do not know; checking it here would be a second
+     list of the filters. */
+  if (route.view === "jobs") {
+    if (/^[a-z]+$/.test(route.query.show || "")) store.set("jobfilter", route.query.show);
+    if (/^[a-z]+$/.test(route.query.kind || "")) store.set("jobkind", route.query.kind);
+  }
+  NAV.route = route;
+  const button = TABS.find(b => b.dataset.tab === route.view) || TABS[0];
+  if (button.getAttribute("aria-selected") !== "true") {
+    for (const b of TABS) {
+      b.setAttribute("aria-selected", String(b === button));
+      b.tabIndex = b === button ? 0 : -1;
+      const panel = $("tab-" + b.dataset.tab);
+      if (panel) panel.hidden = b !== button;
+    }
+    meniscusTo(false);
+  }
+  dockMasthead(button);
+  navTitle();
+}
+
+/* THE FIRST ADDRESS, ONCE THE PAGE HAS DATA TO OPEN IT WITH. Called by boot()
+   before the lists are read, so each wait below is in place when its list
+   answers. The hook is set first: the satellites poll this starts is the one
+   that settles its wait. Satellites is the one tab whose arrival boot() never
+   runs (the tab handler does it, and no click happened), so it is run here. */
+function navStart() {
+  SATELLITES.hooks.nav = navSatellites;
+  if (NAV.route.view === "satellites") satellitesRefresh();
+  navApply(NAV.route, "load", history.state || {});
+}
+
+/* A TAB IS A STEP BACK UNDOES. Called by the tab handler for every way a tab
+   is chosen (a click, an arrow key, Home, End, a drag of the bead), so all of
+   them write the same entry. The masthead is written here and only here, so
+   the name under the dock and the tab under the bead cannot disagree. A tab
+   chosen by Back itself (NAV.silent) writes nothing: the entry is already
+   the one it is on. */
+function navTabSelected(button, changed) {
+  dockMasthead(button);
+  if (!changed) return;
+  if (NAV.silent) return;
+  NAV.route = { view: button.dataset.tab, parts: [], query: navQueryNow(button.dataset.tab) };
+  NAV.place = []; NAV.sat = null; NAV.item = NAV.section = "";
+  navGo(navPath(NAV.route), "push");
+}
+
+/* THE FILTERS THE JOBS TAB IS SHOWING, as they belong in its address: only
+   what differs from the default, so /ui/jobs means the default and a link
+   with a filter shows that filter. No other tab carries a setting of this
+   kind in the query except Speak's voice, which navVoice writes itself. */
+function navQueryNow(tab) {
+  if (tab !== "jobs") return {};
+  const query = {};
+  if (jobFilter() !== "playable") query.show = jobFilter();
+  if (jobKind() !== "all") query.kind = jobKind();
+  return query;
+}
+
+/* WHERE THE READER WAS ON THIS ENTRY, kept on the entry itself: the scroll
+   and a key for the focus, written just before the page leaves it (a push, or
+   the page going away), so Back can put both back. The focus is a key, never
+   a DOM path, because every list here is redrawn by its polls. */
+function navKeep() {
+  try { history.replaceState({ ...(history.state || {}), v: 1, scroll: Math.round(scrollY),
+                               focus: navFocusKey() }, "", location.href); } catch {}
+}
+/* EVERY CHANGE OF ADDRESS GOES THROUGH HERE. An address equal to the one
+   showing writes nothing, so choosing the tab already chosen, or a scripted
+   open of what is already open, is never an entry. `parent` is where closing
+   this place goes back to (navToggled). A replace keeps the entry's own
+   state, so an entry that was pushed stays known as pushed through the
+   details written onto it. Wrapped, because Safari throws after a hundred
+   writes in thirty seconds and a lost history entry is better than a page
+   that stops. */
+function navGo(path, how, parent) {
+  navUnsay();
+  const here = location.pathname + location.search;
+  if (path !== here) {
+    try {
+      if (how === "push") {
+        navKeep();
+        history.pushState({ v: 1, pushed: true, parent: parent === undefined ? here : parent,
+                            sat: NAV.sat }, "", path);
+      } else history.replaceState({ ...(history.state || {}), v: 1, sat: NAV.sat }, "", path);
+    } catch {}
+  }
+  navTitle();
+}
+window.addEventListener("pagehide", navKeep);
+
+/* A NOTE ABOUT A LINK, TAKEN BACK BY THE NEXT NAVIGATION. "There is no job
+   abc12345 here now" is true of the address that was opened and of nothing
+   after it, so the next navGo clears it; only while it still says what this
+   wrote, so a note another action has written over is left alone. */
+function navSay(host, text, once) {
+  navUnsay();
+  if (once) satNoteOnce(host, "flat", text); else note(host, "flat", text);
+  NAV.said = { host, text: host.textContent };
+}
+function navUnsay() {
+  const said = NAV.said;
+  NAV.said = null;
+  if (!said || said.host.textContent !== said.text) return;
+  note(said.host, "", "");
+  delete said.host.dataset.said;
+}
+
+/* USER TOGGLES VERSUS SCRIPTED ONES. `toggle` fires asynchronously, so no flag
+   set around a scripted `open = true` can tell the two apart by the time it
+   arrives. A trusted click on a summary can: the browser marks it, and
+   Enter or Space on a focused summary dispatches one too, so the keyboard is
+   covered. Every scripted open on the page (an adopt, a word added, a lone
+   satellite's row, the rows remembered open, Change wake words, and this
+   section's own opens) is thereby history-free with no bookkeeping at the
+   call site. Captured, because toggle does not bubble. */
+document.addEventListener("click", ev => {
+  if (!ev.isTrusted) return;
+  const summary = ev.target instanceof Element ? ev.target.closest("summary") : null;
+  NAV.touched = summary && summary.parentElement instanceof HTMLDetailsElement ? summary.parentElement : null;
+  NAV.touchedAt = performance.now();
+}, true);
+document.addEventListener("toggle", ev => {
+  const box = ev.target;
+  if (!(box instanceof HTMLDetailsElement) || box !== NAV.touched) return;
+  NAV.touched = null;
+  if (performance.now() - NAV.touchedAt < 1000) navToggled(box);
+}, true);
+
+/* THE ADDRESS OF A <details>, or null for one that has none. `detail` marks a
+   section inside a place (a satellite's AirPlay, a word's More), which
+   rewrites the entry rather than adding one: Back from the kitchen's AirPlay
+   goes to where the reader was before the kitchen, not to the kitchen with
+   AirPlay shut. `sat` is the satellite's ID, for navGo to keep on the entry. */
+function navPlaceOf(box) {
+  const at = (view, parts, query) => ({ route: { view, parts, query: query || {} }, detail: false });
+  if (box.id === "stt-expert") return at("transcribe", ["expert"]);
+  if (box.id === "tts-expert-fast" || box.id === "tts-expert-clone")
+    return at("speak", ["expert"], NAV.route.view === "speak" ? NAV.route.query : {});
+  if (box.classList.contains("jobtext")) {
+    const text = box.querySelector("[data-text]");
+    return text ? at("jobs", [text.dataset.text], navQueryNow("jobs")) : null;
+  }
+  const hub = Object.keys(NAV_HUB).find(key => NAV_HUB[key] === box.id);
+  if (hub) return at("satellites", [hub]);
+  const word = box.closest("li.ww[data-name]");
+  if (word && box.classList.contains("ww-more"))
+    return { ...at("satellites", ["wake-words", word.dataset.name, "more"]), detail: true };
+  if (word && box.parentElement === word && box.classList.contains("sat-row"))
+    return at("satellites", ["wake-words", word.dataset.name]);
+  const li = box.closest("li.sat[data-id]");
+  if (!li || !li._n) return null;
+  const segment = navSatSegment(li._n, navSatList(li._n));
+  if (box.parentElement === li && box.classList.contains("sat-row"))
+    return { ...at("satellites", [segment]), sat: li.dataset.id };
+  const part = box.classList.contains("sub")
+    && Object.keys(NAV_PART).find(key => box.classList.contains(NAV_PART[key]));
+  return part ? { ...at("satellites", [segment, part]), detail: true, sat: li.dataset.id } : null;
+}
+
+/* The satellite list with one satellite as the page now knows it: a rename
+   is on the row at once and in SATELLITES.list only after the next poll, and
+   a segment worked out from the old name would clash with nothing. */
+function navSatList(n) {
+  const list = SATELLITES.list.map(o => o.id === n.id ? n : o);
+  return list.some(o => o.id === n.id) ? list : list.concat(n);
+}
+
+/* A <details> and every <details> it sits in, outermost first: what one
+   address holds open, and so what Back from it has to shut. */
+function navChain(box) {
+  const chain = [];
+  for (let at = box; at; at = at.parentElement && at.parentElement.closest("details")) chain.unshift(at);
+  return chain;
+}
+
+/* A PERSON OPENED OR CLOSED A PLACE. Opening pushes its address (a detail
+   replaces), with the place's parent recorded as where closing it goes.
+   Closing is heard only when the address names this place or something in
+   it: a row closed while the address names another is not a navigation. If
+   the entry was pushed by opening this very place, closing it is Back, so
+   the history is left as it was before the open rather than growing an
+   entry per open and close; otherwise the parent replaces the entry. */
+function navToggled(box) {
+  const place = navPlaceOf(box);
+  if (!place) return;
+  const route = place.route;
+  const bare = navPath({ ...route, query: {} });
+  const parent = navPath(navParent(route));
+  if (box.open) {
+    NAV.route = route;
+    NAV.sat = place.sat || null;
+    navNames(route);
+    NAV.place = navChain(box);
+    navGo(navPath(route), place.detail ? "replace" : "push", parent);
+    return;
+  }
+  const here = location.pathname;
+  if (here !== bare && !here.startsWith(bare + "/") && !NAV.place.includes(box)) return;
+  NAV.route = navParent(route);
+  NAV.sat = place.sat && NAV.route.parts.length ? place.sat : null;
+  NAV.place = navChain(box).slice(0, -1);
+  navNames(NAV.route);
+  const state = history.state || {};
+  if (here === bare && state.pushed && state.parent === parent) history.back();
+  else navGo(parent, "replace");
+}
+
+/* WHAT THE TITLE SAYS ABOUT THE PLACE: the thing, then the section it is in.
+   The names are the page's own (the satellite as its row says it, the word
+   as people say it), never the segment, which may be an ID. */
+function navNames(route) {
+  const p = route.parts;
+  let item = "", section = "";
+  if ((route.view === "transcribe" || route.view === "speak") && p[0] === "expert") item = "Expert";
+  else if (route.view === "speak" && p[0] === "clone") item = "Use my own voice";
+  else if (route.view === "jobs" && p[0]) item = `Job ${p[0].slice(0, 8)}`;
+  else if (route.view === "vocab" && p[0]) item = p[0];
+  else if (route.view === "satellites" && p[0] === "wake-words" && p[1]) {
+    item = p[1] === "ptt" ? "Push-to-talk" : wwLabel(p[1]);
+    section = NAV_HUB_LABEL["wake-words"];
+  } else if (route.view === "satellites" && Object.hasOwn(NAV_HUB, p[0] || "")) section = NAV_HUB_LABEL[p[0]];
+  else if (route.view === "satellites" && p[0]) {
+    const row = NAV.sat && SATELLITES.rows.get(NAV.sat);
+    const n = (row && row._n) || navSatFind(p[0], SATELLITES.list);
+    item = n ? satName(n) : "";
+    section = p[1] && Object.hasOwn(NAV_PART_LABEL, p[1]) ? NAV_PART_LABEL[p[1]] : "";
+  }
+  NAV.item = item;
+  NAV.section = section;
+}
+/* THE ONLY WRITER OF THE TITLE. A running job's time left leads on every
+   tab, because the title is what a background tab shows, and that is the
+   answer the reader switched away to wait for. */
+function navTitle() {
+  const left = NAV.eta ? `${Math.max(1, Math.round(NAV.eta / 60))}m left` : "";
+  document.title = navTitleText([left, NAV.item, NAV.section, MASTHEAD[NAV.route.view][0]]);
+}
+
+/* BACK AND FORWARD. The entry arrived at is opened as a link to it would be,
+   and the scroll and the focus it was left with are put back. */
+window.addEventListener("popstate", ev => {
+  /* A dialog is a question about the entry being left: it is answered No. */
+  if ($("confirm").open) { $("confirm").close(); abandon(); }
+  navApply(navShape(navParse(location.pathname, location.search)), "pop", ev.state || {});
+});
+
+/* OPEN WHAT AN ADDRESS NAMES. `how` is "load" (the first address), "pop"
+   (Back or Forward) or "late" (a satellites address the hub answered after
+   the wait: its rows are opened, and the scroll and the focus, which the
+   reader may have moved meanwhile, are left alone).
+
+   NOTHING IS DECIDED GONE BEFORE ITS LIST HAS ANSWERED. Each tab waits for
+   the list its places live in, then resolves the address against it; what
+   is gone is said in that tab's own note, the address is replaced with the
+   nearest parent that exists, and the parent is shown. The address ends
+   canonical: a satellite by ID becomes its name, a name in capitals lower
+   case, a section it lacks is dropped. */
+async function navApply(route, how, state) {
+  const leaving = NAV.place;
+  NAV.route = route; NAV.item = NAV.section = ""; NAV.place = []; NAV.sat = null;
+  navUnsay();
+  if (how === "pop") {
+    /* The click is synchronous, so the flag covers exactly the one call. */
+    const button = TABS.find(b => b.dataset.tab === route.view) || TABS[0];
+    NAV.silent = true;
+    try { button.click(); } finally { NAV.silent = false; }
+    /* An entry without a filter was written while the default was showing. */
+    const show = route.query.show || "playable", kind = route.query.kind || "all";
+    if (route.view === "jobs" && (show !== jobFilter() || kind !== jobKind())) {
+      store.set("jobfilter", show);
+      store.set("jobkind", kind);
+      syncJobFilters();
+      /* The rows showing are the other filter's, so a job is looked for in
+         the listing this asks for and not in them. */
+      NAV.settled.delete("jobs");
+      schedule(0);
+    }
+  }
+  navTitle();
+  const ready = await navReady(NAV_WAITS[route.view]);
+  if (NAV.route !== route) return;
+  const found = route.view === "transcribe" ? navAtTranscribe(route)
+    : route.view === "speak" ? navAtSpeak(route, ready)
+    : route.view === "jobs" ? await navAtJobs(route, ready)
+    : route.view === "vocab" ? await navAtVocab(route, ready)
+    : navAtSatellites(route, state);
+  if (!found || NAV.route !== route) return;
+  if (how === "pop") {
+    for (const box of leaving) {
+      if (box.isConnected && box.open && !found.place.some(p => p === box || box.contains(p))) box.open = false;
+    }
+  }
+  if (how === "pop" && typeof state.scroll === "number") scrollTo({ top: state.scroll, behavior: "instant" });
+  else if (found.target && how !== "late") found.target.scrollIntoView({ block: "start", behavior: "instant" });
+  const focus = how === "pop" ? navFocusFind(state.focus) : how === "late" ? null : found.focus;
+  if (focus) focus.focus({ preventScroll: true });
+  NAV.route = found.route;
+  NAV.place = found.place;
+  navNames(found.route);
+  /* The note this resolution wrote is about this address, so the replace
+     that makes it canonical must not take it back. */
+  const said = NAV.said;
+  NAV.said = null;
+  navGo(navPath(found.route), "replace");
+  NAV.said = said;
+}
+
+/* WAITING FOR A LIST. Each loader settles its own name when it has answered,
+   whether it got a list or an error, and a wait gives up after fifteen
+   seconds with `false`: a list that never answers must not hold the address
+   open for ever, and false is "not answered", which decides nothing gone. */
+function navReady(kind) {
+  if (!kind || NAV.settled.has(kind)) return Promise.resolve(true);
+  return new Promise(resolve => {
+    NAV.waiting.set(kind, [...(NAV.waiting.get(kind) || []), resolve]);
+    setTimeout(() => resolve(false), 15000);
+  });
+}
+function navSettle(kind) {
+  NAV.settled.add(kind);
+  for (const resolve of NAV.waiting.get(kind) || []) resolve(true);
+  NAV.waiting.delete(kind);
+}
+
+/* The summary of a <details>: what a place is scrolled to and focused by. */
+function navSummary(box) { return box ? box.querySelector(":scope > summary") : null; }
+/* Opened by the page, so its toggle is nobody's navigation (see above). */
+function navOpen(box) { if (box && !box.open) box.open = true; return box; }
+/* An address resolved to itself or its parent, with nothing opened. */
+function navNothing(route) { return { route, place: [], target: null, focus: null }; }
+
+function navAtTranscribe(route) {
+  if (route.parts[0] !== "expert") return navNothing(route);
+  const box = navOpen($("stt-expert"));
+  return { route, place: [box], target: navSummary(box), focus: navSummary(box) };
+}
+
+/* A VOICE IS A SETTING AND THE SHEET IS A PLACE. A voice the server does not
+   have is said beside the picker and dropped, never swapped for another
+   without a word; the picker keeps whatever it had. A picker drawn from a
+   voice list that did not answer decides nothing: the listing failed, not
+   the voice. */
+function navAtSpeak(route, ready) {
+  if (!ready || !Object.keys(VOICES.kokoro || {}).length) return navNothing(route);
+  const query = { ...route.query };
+  let parts = route.parts;
+  const v = query.voice;
+  if (v) {
+    const option = [...$("voice").options].find(o => o.value === v && !o.disabled
+      && !(o.parentElement && o.parentElement.disabled));
+    if (option) { $("voice").value = v; onVoiceChange(); }
+    else {
+      note($("speak-note"), "flat", `That link names a voice this server does not have: ${v}.`);
+      /* Held as a run's last word is, or the picker's next redraw (estimate(),
+         on every voice change) would clear it before it was read. */
+      speakHeld = true;
+      delete query.voice;
+    }
+  }
+  if (parts[0] === "clone") {
+    if (!CONFIG.cloning) parts = [];
+    else {
+      $("voice").value = "new";
+      onVoiceChange();
+      return { route: { ...route, parts, query: {} }, place: [], target: $("clone"), focus: $("clipname") };
+    }
+  }
+  if (parts[0] === "expert") {
+    const box = [$("tts-expert-fast"), $("tts-expert-clone")].find(b => !b.hidden);
+    if (box) {
+      navOpen(box);
+      return { route: { ...route, parts, query }, place: [box], target: navSummary(box), focus: navSummary(box) };
+    }
+    parts = [];
+  }
+  return navNothing({ ...route, parts, query });
+}
+
+/* A JOB IS FOUND IN THE ROWS, OR ASKED ABOUT. Missing from the rows is not
+   gone: it may be filtered out, or older than the fifty runs the service
+   lists, so the one job is asked for and the answer decides what is said.
+   Only a 404 is gone; anything else keeps the address and says nothing. */
+async function navAtJobs(route, ready) {
+  const id = route.parts[0];
+  const query = navQueryNow("jobs");
+  const whole = { ...route, parts: [], query };
+  if (!id) return navNothing(whole);
+  const row = $("joblist").querySelector(`.job[data-job="${CSS.escape(id)}"]`);
+  if (row) {
+    navJobsDrawn();
+    const body = row.querySelector("[data-text]"), text = body && body.closest("details");
+    navOpen(text);
+    return { route: { ...route, query }, place: text ? [text] : [], target: row, focus: row };
+  }
+  if (!ready) return navNothing({ ...route, query });
+  const said = await jobLookup(id);
+  if (NAV.route !== route) return null;
+  if (said === "gone") {
+    navSay($("jobnote"), `There is no job ${id.slice(0, 8)} here now, so the whole list is shown.`);
+    return navNothing(whole);
+  }
+  if (said === "there") {
+    if (jobFilter() === "all" && jobKind() === "all") {
+      navSay($("jobnote"), `Job ${id.slice(0, 8)} is older than the runs the service lists.`);
+    } else {
+      navSay($("jobnote"), `Job ${id.slice(0, 8)} is not in this list.`);
+      navShowAll(id);
+    }
+  }
+  return navNothing({ ...route, query });
+}
+/* SHOW EVERYTHING, AND THEN THE JOB. The two selects are changed as a person
+   would change them, so the filter's own listener asks again and writes the
+   address; the job's address is then opened afresh against the listing that
+   asks for, which is the one that holds it. */
+function navShowAll(id) {
+  const more = document.createElement("button");
+  more.className = "link";
+  more.type = "button";
+  more.id = "jobshowall";
+  more.textContent = "Show everything";
+  $("jobnote").querySelector(".note").append(" ", more);
+  NAV.said.text = $("jobnote").textContent;
+  more.addEventListener("click", () => {
+    ["jobfilter", "jobkind"].forEach(select => {
+      $(select).value = "all";
+      $(select).dispatchEvent(new Event("change"));
+    });
+    NAV.settled.delete("jobs");
+    navApply({ view: "jobs", parts: [id], query: navQueryNow("jobs") }, "load", {});
+  });
+}
+/* THE JOB THE ADDRESS NAMES, MARKED ON EVERY DRAW. renderJobs rebuilds the
+   rows on each poll, so the mark is put back each time rather than set once. */
+function navJobsDrawn() {
+  const id = NAV.route.view === "jobs" ? NAV.route.parts[0] || "" : "";
+  for (const row of $("joblist").querySelectorAll(".job[data-job]")) {
+    const here = !!id && row.dataset.job === id;
+    row.classList.toggle("here", here);
+    if (here) row.setAttribute("aria-current", "true"); else row.removeAttribute("aria-current");
+  }
+}
+/* A job the page itself just queued: its address replaces the Jobs tab's. */
+function navJobOpened(id) {
+  NAV.route = { view: "jobs", parts: [id], query: navQueryNow("jobs") };
+  NAV.place = [];
+  navNames(NAV.route);
+  navGo(navPath(NAV.route), "replace");
+}
+
+/* A PROFILE IS OPENED AS ITS BUTTON WOULD OPEN IT. Names are lower case on
+   the service, so a link in capitals still finds one. A service that did not
+   answer decides nothing; one that answered without it says so. */
+async function navAtVocab(route, ready) {
+  const name = (route.parts[0] || "").toLowerCase();
+  if (!name) return navNothing(route);
+  const button = () => $("glossnames").querySelector(`[data-open="${CSS.escape(name)}"]`);
+  if (ready && GLOSS_NAME.test(name) && GLOSSARIES.some(g => g.name === name)) {
+    await glossOpen(name, button());
+    if (NAV.route !== route) return null;
+    /* glossRender drew the buttons again, so the one to focus is the new one. */
+    return { route: { ...route, parts: [name] }, place: [], target: $("glossform"), focus: button() };
+  }
+  if (ready && GLOSS_SERVED) {
+    navSay($("glossnote"), `There is no profile called ${name}, so none is open.`);
+    return navNothing({ ...route, parts: [] });
+  }
+  return navNothing({ ...route, parts: [name] });
+}
+/* A profile opened or put away by its own controls. Opening one is a step;
+   saving, deleting and starting a new one rewrite the entry they are on. */
+function navProfile(name, how = "push") {
+  NAV.route = { view: "vocab", parts: name ? [name] : [], query: {} };
+  NAV.place = [];
+  navNames(NAV.route);
+  navGo(navPath(NAV.route), name && how === "push" ? "push" : "replace", "/ui/vocabulary");
+}
+/* THE VOICE IN THE ADDRESS. Rewritten, never pushed: a voice is a setting,
+   and ten voices tried should not be ten presses of Back. Not before the
+   voice list has answered once, because the picker's first draw would put
+   the default voice over the one a link names before navAtSpeak has read it. */
+function navVoice() {
+  if (NAV.route.view !== "speak" || !NAV.settled.has("voices")) return;
+  const v = $("voice").value;
+  const parts = v === "new" ? ["clone"] : NAV.route.parts.filter(p => p !== "clone");
+  NAV.route = { view: "speak", parts, query: v && v !== "new" ? { voice: v } : {} };
+  navNames(NAV.route);
+  navGo(navPath(NAV.route), "replace");
+}
+
+/* A SATELLITES ADDRESS AGAINST THE HUB'S ANSWER. Before the hub has answered
+   once there is nothing to look in, so the address waits (NAV.pending) and
+   the "settled" hook tries again. A satellite is found by the ID on the
+   entry first, so a link made before a rename, from any device, still finds
+   it; a waiting one is only scrolled to and its name box focused, since it
+   has no row to open and no sections. */
+function navAtSatellites(route, state) {
+  if (!SATELLITES.seeded) { NAV.pending = route; return null; }
+  const p = route.parts, at = parts => ({ ...route, parts, query: {} });
+  if (!p.length) return navNothing(at([]));
+  const words = $("sat-wakewords");
+  const wordy = p[0] === "wake-words" || p[0] === "try-a-word" || p[0] === "custom-models";
+  if (wordy && words.hidden) {
+    navSay($("satnote"), SAT_COPY.navNoWords, true);
+    return navNothing(at([]));
+  }
+  if (p[0] === "wake-words" && p[1]) {
+    const row = p[1] === "ptt" ? $("wwptt").querySelector('li[data-name="ptt"]')
+      : $("wwlist").querySelector(`li.ww[data-name="${CSS.escape(p[1])}"]`);
+    const box = row && !row.closest("[hidden]") && row.querySelector(":scope > details.sat-row");
+    if (!box) {
+      note($("wwnote"), "flat", satText("navNoWord", { name: wwLabel(p[1]) }));
+      navOpen(words);
+      return { route: at(["wake-words"]), place: [words], target: navSummary(words), focus: navSummary(words) };
+    }
+    const place = [navOpen(words), navOpen(box)];
+    const more = p[2] === "more" && box.querySelector("details.ww-more");
+    if (more && !more.hidden) place.push(navOpen(more));
+    const deepest = place[place.length - 1];
+    return { route: at(place.length === 3 ? ["wake-words", p[1], "more"] : ["wake-words", p[1]]),
+             place, target: navSummary(deepest), focus: navSummary(deepest) };
+  }
+  if (Object.hasOwn(NAV_HUB, p[0])) {
+    const box = $(NAV_HUB[p[0]]);
+    const place = box === words || !words.contains(box) ? [navOpen(box)] : [navOpen(words), navOpen(box)];
+    return { route: at([p[0]]), place, target: navSummary(box), focus: navSummary(box) };
+  }
+  const list = SATELLITES.list;
+  const n = (state.sat && list.find(x => x.id === state.sat)) || navSatFind(p[0], list);
+  const li = n && SATELLITES.rows.get(n.id);
+  if (!li) {
+    navSay($("satnote"), satText("navGone", { name: p[0] }), true);
+    return navNothing(at([]));
+  }
+  NAV.sat = n.id;
+  const segment = navSatSegment(li._n || n, navSatList(li._n || n));
+  const row = li.querySelector(":scope > details.sat-row");
+  if (!row) {
+    const input = li.querySelector("input");
+    return { route: at([segment]), place: [], target: input, focus: input };
+  }
+  const place = [navOpen(row)];
+  const sub = p[1] && Object.hasOwn(NAV_PART, p[1]) && li.querySelector(`details.sub.${NAV_PART[p[1]]}`);
+  if (sub && !sub.closest("[hidden]")) place.push(navOpen(sub));
+  const deepest = place[place.length - 1];
+  return { route: at(place.length === 2 ? [segment, p[1]] : [segment]), place,
+           target: navSummary(deepest), focus: navSummary(deepest) };
+}
+
+/* WHAT THE SATELLITES SECTION TELLS THE ROUTER, through SATELLITES.hooks.nav,
+   which is the section's one way out (it runs on its own in Node without
+   this). Each is a change of place the page made, not the reader: an adopt,
+   a rename or a forget rewrites the address it happened on; Change wake
+   words is a press, and a step Back undoes. */
+function navSatellites(event, detail) {
+  if (event === "settled") {
+    navSettle("satellites");
+    const route = NAV.pending;
+    if (!route) return;
+    if (NAV.route !== route) { NAV.pending = null; return; }
+    if (!SATELLITES.seeded) return;
+    NAV.pending = null;
+    navApply(route, "late", {});
+    return;
+  }
+  const at = parts => ({ view: "satellites", parts, query: {} });
+  if (event === "adopted" || event === "renamed") {
+    const li = detail;
+    if (event === "adopted" ? location.pathname !== "/ui/satellites" && NAV.sat !== li.dataset.id
+                            : NAV.sat !== li.dataset.id || NAV.route.view !== "satellites") return;
+    NAV.sat = li.dataset.id;
+    const segment = navSatSegment(li._n, navSatList(li._n));
+    NAV.route = at(event === "renamed" ? [segment, ...NAV.route.parts.slice(1)] : [segment]);
+    if (event === "adopted") NAV.place = [li.querySelector(":scope > details.sat-row")].filter(Boolean);
+    navNames(NAV.route);
+    navGo(navPath(NAV.route), "replace");
+    return;
+  }
+  if (event === "forgot") {
+    if (NAV.sat !== detail) return;
+    NAV.sat = null;
+    NAV.route = at([]);
+    NAV.place = [];
+    navNames(NAV.route);
+    navGo(navPath(NAV.route), "replace");
+    return;
+  }
+  if (event === "wake-words" || event === "word-added") {
+    const parts = event === "wake-words" ? ["wake-words"] : ["wake-words", detail];
+    const row = event === "word-added"
+      && $("wwlist").querySelector(`li.ww[data-name="${CSS.escape(detail)}"] > details.sat-row`);
+    NAV.sat = null;
+    NAV.route = at(parts);
+    NAV.place = [$("sat-wakewords"), row].filter(Boolean);
+    navNames(NAV.route);
+    navGo(navPath(NAV.route), event === "wake-words" ? "push" : "replace");
+  }
+}
+
+/* THE FOCUS AS A KEY THAT SURVIVES A REDRAW: which tab, which satellite,
+   which word, which job, which profile, or an element's own ID. Every list
+   on this page is rebuilt by its polls, so a reference to the element would
+   point at one that is gone by the time Back asks for it. */
+function navFocusKey() {
+  const el = document.activeElement;
+  if (!(el instanceof Element) || el === document.body) return null;
+  if (el.getAttribute("role") === "tab" && el.dataset.tab) return "tab:" + el.dataset.tab;
+  const sat = el.closest("li.sat[data-id]");
+  if (sat) return "sat:" + sat.dataset.id;
+  const word = el.closest("li.ww[data-name]");
+  if (word) return "word:" + word.dataset.name;
+  const job = el.closest(".job[data-job]");
+  if (job) return "job:" + job.dataset.job;
+  if (el.dataset.open) return "gloss:" + el.dataset.open;
+  return el.id ? "id:" + el.id : null;
+}
+/* The key back to an element, or null when it is gone or cannot take the
+   focus because something around it is hidden. A TAB KEY GIVES THE SELECTED
+   TAB, whichever it names: a tab is focused before it is chosen, by the
+   press or the arrow key that chooses it, so the key kept on the entry being
+   left names the tab the reader went to. Back to that entry selects its own
+   tab, and the focus belongs on it, the one stop the tablist has. */
+function navFocusFind(key) {
+  const cut = String(key || "").indexOf(":");
+  if (cut < 0) return null;
+  const kind = key.slice(0, cut), raw = key.slice(cut + 1), value = CSS.escape(raw);
+  let el = null;
+  if (kind === "tab") el = document.querySelector('[role=tab][aria-selected="true"]');
+  else if (kind === "sat") {
+    const li = document.querySelector(`li.sat[data-id="${value}"]`);
+    el = li && (li.querySelector(":scope > details > summary") || li.querySelector("input"));
+  } else if (kind === "word") el = document.querySelector(`li.ww[data-name="${value}"] summary`);
+  else if (kind === "job") el = document.querySelector(`.job[data-job="${value}"]`);
+  else if (kind === "gloss") el = document.querySelector(`[data-open="${value}"]`);
+  else if (kind === "id") el = $(raw);
+  return el && !el.closest("[hidden]") ? el : null;
+}
+
+navFirst();
 
 /* ============================================== playback speed ======== */
 /*
@@ -4057,7 +4875,12 @@ const SATELLITES = { rows: new Map(), timer: null, events: null, list: [], firmw
                      otaFailed: new Map(), woke: new Map(),
                      /* Each update's line in Activity, rewritten as it
                         progresses (satellitesListen). */
-                     otaLine: new Map() };
+                     otaLine: new Map(),
+                     /* THE TWO WAYS OUT OF THIS SECTION, and the only two. The
+                        router and the live layer set them from boot(); left as
+                        they are here, the section runs on its own, which is
+                        how test_satellites_writes.py runs it. */
+                     hooks: { nav() {}, live() {} } };
 const JSON_BODY = { "Content-Type": "application/json" };
 
 /* EVERY SENTENCE THE TAB BUILDS IN SCRIPT, IN ONE PLACE. The page's hint test
@@ -4171,6 +4994,10 @@ const SAT_COPY = {
   evHub: "Hub",
   evGap: "reconnected; anything in between is not in this log",
   noHub: "This deployment has no satellite hub: voice-satellites is not running.",
+  /* What a link into this tab found missing (the router). */
+  navGone: "Nothing called {name} is on this hub now, so the whole list is shown.",
+  navNoWords: "This hub keeps no wake word list, so the whole tab is shown.",
+  navNoWord: "There is no wake word called {name} on this hub now.",
   tabPending: "Satellites, {n} waiting to be adopted",
   hubError: "The satellite hub did not answer: {message}",
   hubLost: "The hub stopped answering, so this may be out of date: {message}",
@@ -4514,6 +5341,8 @@ async function satellitesPoll() {
     satellitesHealth();
     satellitesListen();
   }
+  /* ANSWERED, WELL OR BADLY: an address waiting on this tab can look now. */
+  SATELLITES.hooks.nav("settled");
   if (satellitesOpen()) SATELLITES.timer = setTimeout(satellitesRefresh, 3000);
 }
 
@@ -5810,6 +6639,7 @@ function satGoWakeWords() {
   box.open = true;
   box.scrollIntoView({ block: "start", behavior: MENISCUS.calm.matches ? "auto" : "smooth" });
   box.querySelector("summary").focus({ preventScroll: true });
+  SATELLITES.hooks.nav("wake-words");
 }
 
 /* The hub answers a PATCH with the whole satellite, so the row shows the
@@ -5902,6 +6732,7 @@ async function satelliteAct(li, act, button) {
       const row = li.querySelector("details.sat-row");
       row.open = true;
       row.querySelector("summary").focus();
+      SATELLITES.hooks.nav("adopted", li);
       satSaid(row.querySelector(":scope > .body > .sat-note"), satText("adopted", { name: satName(r) }));
     } else if (act === "identify") {
       await json(`/satellites/${id}/identify`, { method: "POST" });
@@ -5938,6 +6769,7 @@ async function satelliteAct(li, act, button) {
       const field = q(".sat-rename input");
       delete field.dataset.edited;
       satPlace(li, r);
+      SATELLITES.hooks.nav("renamed", li);
       satelliteUpdate(li, r);
       field.focus({ preventScroll: true });
       satSaid(host, satText("renamed", { old: name, new: satName(r) }));
@@ -5964,6 +6796,7 @@ async function satelliteAct(li, act, button) {
       await json(`/satellites/${id}/forget`, { method: "POST" });
       SATELLITES.writes++;
       satForgotten(li);
+      SATELLITES.hooks.nav("forgot", id);
     } else if (command) {
       /* The hub answers once the phone has, and says whether the player
          then changed; a refusal is a 502 with the phone's reason. */
@@ -7890,6 +8723,7 @@ $("wwaddgo").addEventListener("click", () => {
   if (row) {
     row.querySelector("details.sat-row").open = true;
     row.querySelector('[data-mode="command"]').focus();
+    SATELLITES.hooks.nav("word-added", name);
   }
 });
 
@@ -8644,6 +9478,7 @@ async function loadGlossaries() {
     });
   });
   glossRender();
+  navSettle("glossaries");
 }
 
 /* ------------------------------------------ managing those profiles --- */
@@ -8733,7 +9568,7 @@ function glossRender() {
        title="${esc(g.source + ", " + g.terms + " terms")}">${esc(g.name)}</button>`
   ).join("");
   $("glossnames").querySelectorAll("button").forEach(b =>
-    b.addEventListener("click", () => glossOpen(b.dataset.open, b)));
+    b.addEventListener("click", () => { navProfile(b.dataset.open); glossOpen(b.dataset.open, b); }));
   glossGuards();
 }
 
@@ -8810,6 +9645,9 @@ function glossNew() {
   $("glossform").hidden = false;
   glossRender();
   $("glossname").focus();
+  /* A new profile has no address until it is saved: the entry goes back to
+     the tab's own. */
+  navProfile(null);
 }
 
 /* The refused lines, as the server numbered them.
@@ -8844,6 +9682,7 @@ async function glossSave(force) {
        toggles on this tab is drawn from it, so both are refreshed from one
        request rather than patched in place. */
     await loadGlossaries();
+    navProfile(written.name, "replace");
     note($("glossnote"), "ok",
          `Saved <strong>${esc(written.name)}</strong>, ${esc(written.terms)} terms.`);
   } catch (err) {
@@ -8865,6 +9704,7 @@ The file is deleted from disk.`)) return;
     await json("/glossaries/" + encodeURIComponent(target.name), { method: "DELETE" });
     $("glossform").hidden = true;
     await loadGlossaries();
+    navProfile(null);
     noteHtml($("glossnote"), "ok", `Deleted <strong>${esc(target.name)}</strong>.`);
   } catch (err) {
     note($("glossnote"), "bad", esc(err.message));
@@ -10682,6 +11522,7 @@ async function loadVoices() {
   if (clips.status === "fulfilled") clones = (clips.value || {}).voices || [];
   VOICES = { kokoro: kokoro || {}, clones };
   renderVoices();
+  navSettle("voices");
 }
 
 function renderVoices() {
@@ -11198,7 +12039,8 @@ function onVoiceChange() {
   /* BEFORE THE EARLY RETURN, so opening the clone sheet takes the engine
      picker off the screen with everything else that belongs to a voice. */
   renderEngines();
-  if (voice.kind === "new") { $("clipname").focus(); return; }
+  /* The sheet is a place, so it is in the address (navVoice) as well. */
+  if (voice.kind === "new") { $("clipname").focus(); navVoice(); return; }
 
   /* TWO QUESTIONS, AND EVERY LINE BELOW BELONGS TO EXACTLY ONE OF THEM.
      `job` is where this runs and how long it takes; `clip` is whether the
@@ -11248,6 +12090,7 @@ function onVoiceChange() {
      Rebuilding a <select> the user may have open, to produce the same options
      it already had, is work that can only lose focus or a selection. */
   estimate();
+  navVoice();
 }
 /* THE READER'S OWN CHANGE, not the twenty programmatic ones. onVoiceChange
    runs whenever the picker is rebuilt, which is on every language change and
@@ -12715,6 +13558,7 @@ async function queueJob(voice, text) {
   adopt(payload.id, body);
   jobs.set(payload.id, Object.assign({ started: Date.now() / 1000 }, payload));
   document.querySelector('[data-tab=jobs]').click();
+  navJobOpened(payload.id);
   renderJobs();
   schedule(0);
   return payload;
@@ -13034,7 +13878,8 @@ function renderJobs() {
       : `${what}.${total
           ? ` ${total} ${total === 1 ? "record is" : "records are"} hidden by this filter.`
           : " Choose Everything to see the rest."}`}</div>`;
-    document.title = "Calliope";
+    NAV.eta = null;
+    navTitle();
     return;
   }
 
@@ -13181,7 +14026,7 @@ function renderJobs() {
       const left = counting ? leftBySegments : budget ? budget - elapsed : null;
       if (left !== null && (soonest === null || left < soonest)) soonest = left;
     }
-    return `<div class="job ${expired ? "expired" : ""}">
+    return `<div class="job ${expired ? "expired" : ""}" data-job="${esc(job.id)}" tabindex="-1">
       <div class="top">
         <span class="status ${statusClass(job.status)}">${stopping ? "stopping…" : job.status}</span>
         <strong>${esc(kind === "transcribe"
@@ -13228,9 +14073,10 @@ function renderJobs() {
   }).join("") + (jobTruncated ? `<div class="hint">The service sent the most
     recent runs only. Narrow the filters to reach the older ones.</div>` : "");
 
-  /* The answer on a background tab, without needing the tab. */
-  document.title = soonest !== null && soonest > 0
-    ? `${Math.max(1, Math.round(soonest / 60))}m left · calliope` : "calliope";
+  /* The answer on a background tab, without needing the tab. The router
+     writes the title, so the time left leads it on every tab. */
+  NAV.eta = soonest !== null && soonest > 0 ? soonest : null;
+  navTitle();
 
   $("joblist").querySelectorAll("[data-play]").forEach(b =>
     b.addEventListener("click", () => playJob(b.dataset.play)));
@@ -13283,6 +14129,8 @@ function renderJobs() {
     const cached = JOBTEXT.get(body.dataset.text);
     if (cached) { body.textContent = cached; body.dataset.loaded = "1"; }
   });
+  /* The job the address names is marked again on every draw. */
+  navJobsDrawn();
 }
 
 let jobUrl = null;
@@ -13654,7 +14502,20 @@ async function refreshJobs() {
       `<div class="note bad">The job list could not be drawn: ` +
       `${esc(err && err.message ? err.message : String(err))}</div>`;
     throw err;
+  } finally {
+    /* The listing has answered, whatever it said: a link to a job can be
+       looked for now (navReady). */
+    navSettle("jobs");
   }
+}
+
+/* WHETHER ONE JOB EXISTS, for a link to a job the listing did not carry. The
+   listing is filtered and capped at fifty, so absence from it proves nothing;
+   the job's own record does. Only a 404 means gone, and anything else (the
+   service restarting, the gateway down) is not known. */
+async function jobLookup(id) {
+  try { await json(`/jobs/${encodeURIComponent(id)}`); return "there"; }
+  catch (err) { return err.status === 404 ? "gone" : "unknown"; }
 }
 
 async function refreshJobsInner() {
@@ -13829,6 +14690,11 @@ $("refresh").addEventListener("click", async () => {
 for (const control of ["jobfilter", "jobkind"]) {
   $(control).addEventListener("change", () => {
     store.set(control, $(control).value);
+    /* A filter is a setting of the list, so it rewrites the list's address
+       rather than adding a step, and a job it named is let go. */
+    NAV.route = { view: "jobs", parts: [], query: navQueryNow("jobs") };
+    navNames(NAV.route);
+    navGo(navPath(NAV.route), "replace");
     syncJobFilters();
     $("joblist").innerHTML = `<div class="hint">Loading…</div>`;
     schedule(0);
@@ -14250,6 +15116,10 @@ $("saveclip").addEventListener("click", async () => {
   /* The expert panels start out matching the empty page rather than matching
      their markup: nothing is picked, so nothing is ruled out yet. */
   updateRouteAvailability();
+  /* THE ADDRESS IS OPENED FROM HERE, NOT AWAITED: each of its waits is in
+     place before the reads below answer, and nothing on this path waits for
+     it. */
+  navStart();
   /* THE THREE READS THAT DO NOT DEPEND ON EACH OTHER GO TOGETHER. They were
      awaited one after the other with a comment saying neither depended on the
      other, which is the argument for running them at once. The jobs this

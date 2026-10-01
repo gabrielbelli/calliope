@@ -634,6 +634,34 @@ async def page() -> Response:
     })
 
 
+# THE PAGE'S OWN ADDRESSES: one per tab and everything under each. Each answers
+# PAGE and nothing else, so each is public exactly as /ui is; the tab reads its
+# own location and opens what the path names. Written out one decorator per
+# path, not added in a loop, because services/gateway/tests reads voice-ui's
+# routes from literal decorators, and a route it cannot see is an allowlist
+# entry it would report as pointing at nothing.
+PAGE_VIEWS = frozenset({"transcribe", "speak", "jobs", "vocabulary", "satellites"})
+
+
+def page_view(path: str) -> bool:
+    return path.startswith("/ui/") and path.removeprefix("/ui/").partition("/")[0] in PAGE_VIEWS
+
+
+@app.get("/ui/transcribe", include_in_schema=False)
+@app.get("/ui/transcribe/{rest:path}", include_in_schema=False)
+@app.get("/ui/speak", include_in_schema=False)
+@app.get("/ui/speak/{rest:path}", include_in_schema=False)
+@app.get("/ui/jobs", include_in_schema=False)
+@app.get("/ui/jobs/{rest:path}", include_in_schema=False)
+@app.get("/ui/vocabulary", include_in_schema=False)
+@app.get("/ui/vocabulary/{rest:path}", include_in_schema=False)
+@app.get("/ui/satellites", include_in_schema=False)
+@app.get("/ui/satellites/{rest:path}", include_in_schema=False)
+async def page_at(rest: str = "") -> Response:
+    """The same document with the same headers; the path is the page's to read."""
+    return await page()
+
+
 @app.get("/ui/config", include_in_schema=False)
 async def ui_config() -> Response:
     """What the page needs before it can draw itself. Deliberately no secrets.
@@ -739,7 +767,13 @@ async def guard_ingestion(request: Request, call_next):
     # data in it, and the config route names which features exist without
     # saying how to reach any of them. Every other /ui/* route either spawns a
     # process or writes a file.
-    if path.startswith("/ui/") and path != "/ui/config":
+    #
+    # AND THE PAGE AT EACH OF ITS ADDRESSES, which is the same markup under
+    # another path. A deep link has to load in exactly the cases /ui loads --
+    # a key the gateway refuses, a gateway that is down -- and it must never
+    # cost the /v1/models round trip the check makes, since a reload of
+    # /ui/satellites/kitchen is still only the static page.
+    if path.startswith("/ui/") and path != "/ui/config" and not page_view(path):
         refused = await authorised(request)
         if refused is not None:
             return refused

@@ -124,6 +124,7 @@ here would quietly undo that.
 | `GET /v1/models/{id}` | answered here, indexed off that same list | — |
 | `GET /health` | every backend, and voice-satellites when `GATEWAY_SATELLITES_URL` is set | — |
 | `GET`, `POST`, `PUT`, `PATCH`, `DELETE` `/satellites/...` | voice-satellites, if deployed | streamed through. Listed one by one in `SATELLITES_PATHS`; the hub's own README has what each does. `POST /satellites/{id}/media` is Home Assistant's music and announcements, a WAV relayed as it is written and answered when it has played: the read timeout starts when the upload ends and is `GATEWAY_SATELLITES_MEDIA_TIMEOUT`, and a write that stalls for `GATEWAY_SATELLITES_TIMEOUT` ends it |
+| `GET /`, `/ui`, `/ui/transcribe[/…]`, `/ui/speak[/…]`, `/ui/jobs[/…]`, `/ui/vocabulary[/…]`, `/ui/satellites[/…]`, and the `/ui/*` routes in `UI_PATHS` | voice-ui | The page answers every path under the five tab names with itself. It is listed one pair per tab, not a wildcard. |
 | `WS /satellites/ws`, `WS /nodes/ws` | voice-satellites | relayed frame for frame, and **not** behind `GATEWAY_API_KEYS` ([ADR 0013](../../docs/adr/0013-satellites-one-door.md)). `/nodes/ws` is the path pre-release firmware from before 2026-09-25 dials, kept until no such board is left |
 
 **Native routes mount flat and unprefixed, and nothing is rewritten.** That is

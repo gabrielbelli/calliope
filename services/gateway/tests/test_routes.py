@@ -51,3 +51,36 @@ def test_proxy_does_not_strip_range_headers():
     for header in ("range", "if-range", "content-range", "accept-ranges"):
         assert header not in DROP_FROM_REQUEST, f"{header} is dropped"
         assert header not in HOP_BY_HOP, f"{header} is treated as hop-by-hop"
+
+
+# ------------------------------------------------------ the page's addresses --
+#
+# The page has an address per tab and per place inside one, and a reload or a
+# pasted link arrives at the gateway first. Each tab name is one GET pair --
+# the bare name and everything under it -- and voice-ui answers all of them
+# with the same static file. The two tests below keep that from widening into
+# the catch-all the UI_PATHS comment forbids.
+
+PAGE_VIEWS = ("transcribe", "speak", "jobs", "vocabulary", "satellites")
+
+
+def test_every_page_view_reaches_the_ui():
+    """A tab address absent here is a 404 on reload from the published port,
+    while the same address works when the page was reached by clicking."""
+    from app.main import UI_PATHS
+
+    for view in PAGE_VIEWS:
+        assert ("GET", f"/ui/{view}") in UI_PATHS, f"/ui/{view} is not routed"
+        assert ("GET", f"/ui/{view}/{{rest:path}}") in UI_PATHS, f"/ui/{view}/... is not routed"
+
+
+def test_every_path_tail_in_ui_paths_sits_under_a_page_view_or_the_api_mount():
+    """A {rest:path} anywhere else would be a door to whatever voice-ui grows
+    next under that prefix, which is the wildcard this table exists to refuse."""
+    from app.main import UI_PATHS
+
+    allowed = ("/ui/api/",) + tuple(f"/ui/{view}/" for view in PAGE_VIEWS)
+    tails = [path for _, path in UI_PATHS if "{rest:path}" in path]
+    assert tails, "found no path tails at all, so this proves nothing"
+    for path in tails:
+        assert path.startswith(allowed), f"{path} is a path tail outside the page and its mount"

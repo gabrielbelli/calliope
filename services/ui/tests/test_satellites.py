@@ -238,11 +238,14 @@ def test_a_poll_never_rebuilds_a_row_so_an_open_disclosure_stays_open():
         body = function(name)
         assert ".open" not in body, f"{name} decides whether a disclosure is open"
         assert "innerHTML" not in body, f"{name} rewrites markup"
-    # The four places the page opens a disclosure: restoring a row the viewer
+    # The five places the page opens a disclosure: restoring a row the viewer
     # left open (or the only satellite), the moment a satellite is adopted,
-    # Change wake words, and a wake word just added. Each is a press or a
+    # Change wake words, a wake word just added, and an address that names
+    # the disclosure (navOpen, run on a load, on Back and Forward, and once
+    # when a hub that was late answers). Each is a press, a navigation or a
     # first render; the word list is kept across polls like the satellites.
-    assert CODE.count(".open = true") == 4
+    assert CODE.count(".open = true") == 5
+    assert "box.open = true;" in function("navOpen")
     assert 'li.querySelector("details.sat-row").open = true;' in render
     assert "row.open = true;" in function("satelliteAct")
     assert "box.open = true;" in function("satGoWakeWords")

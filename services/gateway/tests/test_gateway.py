@@ -774,7 +774,7 @@ async def test_a_json_body_that_is_not_an_object_still_reaches_the_backend(monke
 
 
 @pytest.mark.parametrize("path", ["/docs", "/openapi.json", "/redoc",
-                                  "/anything"])
+                                  "/anything", "/ui/nope", "/ui/transcribex"])
 async def test_everything_outside_the_table_is_404(monkeypatch, backends, path):
     """No catch-all pass-through.
 

@@ -1093,6 +1093,15 @@ UI = Backend(
 UI_PATHS = (
     ("GET", "/"),
     ("GET", "/ui"),
+    # THE PAGE'S ADDRESSES. Each tail is under one literal tab name, and
+    # voice-ui answers every path under it with the static page and nothing
+    # else -- so this is five closed doors to one file, not the wildcard the
+    # comment above forbids. /ui/nope and /ui/api/docs stay 404.
+    ("GET", "/ui/transcribe"), ("GET", "/ui/transcribe/{rest:path}"),
+    ("GET", "/ui/speak"), ("GET", "/ui/speak/{rest:path}"),
+    ("GET", "/ui/jobs"), ("GET", "/ui/jobs/{rest:path}"),
+    ("GET", "/ui/vocabulary"), ("GET", "/ui/vocabulary/{rest:path}"),
+    ("GET", "/ui/satellites"), ("GET", "/ui/satellites/{rest:path}"),
     ("GET", "/ui/health"),
     ("GET", "/ui/config"),
     ("GET", "/ui/clips"),
