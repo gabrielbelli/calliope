@@ -63,7 +63,7 @@ one profile.
 | `/ui/speak?voice=<option value>` | Speak with that voice selected | yes |
 | `/ui/speak/clone` | Clone a new voice, with its sheet open | yes |
 | `/ui/speak/expert` | whichever Expert panel belongs to the voice | yes |
-| `/ui/jobs[?show=<filter>&kind=<kind>]` | Jobs with those filters | `show` omitted when `playable`, `kind` omitted when `all` |
+| `/ui/jobs[?show=<filter>&kind=<kind>]` | Jobs with those filters | `show` omitted when `all`, `kind` omitted when `all` |
 | `/ui/jobs/<id>` | that job: marked, scrolled to, focused, its text opened | yes (query kept) |
 | `/ui/vocabulary` | Vocabulary | yes |
 | `/ui/vocabulary/<name>` | that profile, open in the editor | lower case |
@@ -102,6 +102,44 @@ A deep link loads in every case `/ui` loads. The page server answers each
 path under the five tab names with the same file and the same headers, needs
 no key for it and makes no gateway round trip to decide; the gateway lists
 each tab as one pair of routes (`/ui/<tab>` and `/ui/<tab>/{rest:path}`).
+
+## What updates by itself
+
+The page keeps itself current without a reload, and asks for nothing while
+nobody can see it. The rule: ask when the answer can be seen, and catch up
+once when it can be seen again. Returning to the page fires `focus` and
+`visibilitychange` together; the two count as one return.
+
+| What | Source | When it is read | Paused while hidden |
+|---|---|---|---|
+| Hub events | `EventSource /ui/api/satellites/events` | Opened at load, not on the first visit to Satellites. Closed 60 s after the page is hidden and opened again on return, with a gap line in Activity. A stream closed for good is tried again at 2, 5, 15 and 30 s, then every 30 s. Never tried again once health says the deployment has no hub. | yes, after 60 s |
+| Health, `/ui/health` | poll | Every 30 s, each read scheduled when the last one answered. At once on return or focus, if the last answer is older than 10 s. | yes |
+| Satellites (the three lists) | poll and events | While the tab is open and the page visible: every 3 s while the stream is down, or while a row reads Updating, Restarting, Listening, Answering or In conversation; every 30 s otherwise. A wake word brings the next read forward to 3 s. Also on entering the tab, on return, and on the hub's `config`, `firmware`, `online`, `offline`, `pending`, `ota` and `conversation_*` events. | yes |
+| A satellite's status | the `status` event | Applied to its row at once. No request. | n/a |
+| Chips that run out | local | One timer, to the soonest end: Listening 15 s, Restarting 120 s, Update failed 600 s. | not needed |
+| The Satellites count in the dock | the satellite list | At load, on `pending`, `online` and `offline` events while the tab is closed, and on each health answer while the stream is down. | yes |
+| Jobs | the polling ladder | Only while Jobs is open and the page visible, while a job is live, or after health shows tts-long's `queued + running` changed (a job queued or finished on another device). | yes, except every 30 s while a job is live |
+| Vocabulary profiles | on demand | On entering Vocabulary or Transcribe, if older than 5 s. On return or focus, if older than 30 s. After this page's own writes. | n/a |
+| Voices and cloned voices | on demand | On entering Speak, if older than 5 s. On return or focus, if older than 60 s. After this page's own writes. A change in an engine's readiness redraws the voice groups. | n/a |
+| Telemetry | poll | Every 30 s while its section is open, the tab is open and the page is visible. | yes |
+| A link's download progress | poll, started by the reader | Every 2 s, as before. | no |
+
+Overlapping reads do not undo each other. A listing of the jobs that was
+asked for before a newer one was drawn, before this page wrote to a job, or
+under a filter that is no longer chosen is dropped. The same holds for a
+telemetry read that a change overtook.
+
+What is not live, by decision:
+
+* **Wake words and vocabulary profiles are last-write-wins across devices.**
+  Wake words saved on another device appear with the next poll of the
+  Satellites tab, and an unsaved edit here is kept over them. The vocabulary
+  editor warns when the open profile was changed or deleted elsewhere, and
+  asks before Save puts this version over a newer one. The wake word editor
+  does not warn.
+* **Selecting text inside an open transcript on the Jobs tab is lost** on
+  each redraw while a job is live, every 2 s. The focus on a button or a
+  row's summary is kept.
 
 ---
 
@@ -766,9 +804,12 @@ The fifth tab is the satellite hub's page
 the hub has seen, and below the list it has four closed sections for the
 hub's own settings: **Wake words**, **Activity**, **Telemetry** and
 **Firmware**. A
-deployment without the hub shows one sentence instead. The page asks the hub
-for the lists every 3 s while the tab is open, and keeps its event stream
-open once the tab has been visited.
+deployment without the hub shows one sentence instead. While the tab is
+open, the page asks the hub for the lists every 3 s while something is
+moving, every 30 s otherwise, and at once on the hub's events. The event
+stream opens when the page loads, so the dock's count and Activity are
+current before the tab is visited ([What updates by
+itself](#what-updates-by-itself)).
 
 **A first satellite, start to finish:**
 
@@ -938,15 +979,16 @@ a gap while the stream was down. A wake word the hub's double-check did not
 hear (`wake_rejected`) is a line of its own: "alexa ignored: heard
 “Obrigado.”", or, under Record only, "alexa would have been ignored: heard
 “Obrigado.”". It leaves out the events the hub publishes
-for Home Assistant alone, since the next poll shows what they change: media
-streams, AirPlay commands, the names of the settings changed in the hub's
-record (`config`, after a `PATCH` or a satellite's report), and firmware
-images uploaded or deleted.
+for Home Assistant alone: media streams, AirPlay commands, the names of the
+settings changed in the hub's record (`config`, after a `PATCH` or a
+satellite's report), and firmware images uploaded or deleted. A `config` or
+`firmware` event still asks for the lists at once while the tab is open, so
+a change made in Home Assistant is seen without waiting for the 30 s poll.
 
 **Telemetry** is off until turned on ([the hub's
 Telemetry](../satellites/README.md#telemetry)). Its summary says whether the
-hub is recording, read once with the first list of satellites and not on
-every poll.
+hub is recording, read once with the first list of satellites, and again
+every 30 s while the section is open.
 
 | Control | Field or request |
 |---|---|
@@ -1092,9 +1134,9 @@ engines take.
 ### Vocabulary profiles: reading them, and changing them
 
 The **Vocabulary** row on the Transcribe tab chooses which named profiles a
-request applies. That is one half. The **Vocabulary profiles** panel under it
-is the other: it reads a profile's file, creates one, replaces one and deletes
-one, against `/glossaries` on the gateway.
+request applies. That is one half. The **Vocabulary** tab is the other: it
+reads a profile's file, creates one, replaces one and deletes one, against
+`/glossaries` on the gateway.
 
 Before it existed the page could list the names and nothing else. What a
 profile contains, and every change to one, went through `curl`. The terms a
@@ -1235,12 +1277,19 @@ The Satellites tab has its own suites:
 | `tests/test_satellites_modes.py` | A wake word's mode, language hint and action, set and saved |
 | `tests/test_satellites_llm.py` | A language model word: its provider, model list, key and Test |
 | `tests/test_satellites_states.py` | The state word, chip and line each satellite row shows, over every case |
+| `tests/test_satellites_live.py` | Status events applied without a request, the 3 s and 30 s cadence, the chips' own expiry timer, a closed stream reported to the live layer |
 | `tests/test_wake_words_contract.py` | The wake word fields the page sends against the names the hub's own code reads |
 
 The page's addresses have one of each: `tests/test_navigation.py` runs the
 router's pure half in Node (every address read, cut to its shape and written
 back), and `e2e/test_routes.py` opens each address in a headless browser
 against a local stack (see `e2e/README.md`, which is also how it is run).
+
+What the page reads by itself has two more: `tests/test_live_data.py` runs
+the live section in Node on a fake clock (the stream, health, the catch-up on
+return, the quiet while hidden), and `tests/test_jobs_live.py` the jobs
+listing's rule for which answer is drawn. `e2e/test_live.py` checks the same
+in a headless browser.
 
 The Node suites skip without `node` on PATH. None starts a server or reaches
 the network.

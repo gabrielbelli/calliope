@@ -72,8 +72,13 @@ The hub (`services/satellites`) is real too. It runs with a temporary
 when that is set. If they are missing, the hub starts with no wake words
 instead of downloading them.
 
-The page server runs with `UI_PROBE=0` (no yt-dlp), `UI_METUBE_FORMAT=wav`, and
-a clip store that holds one voice, `narrator`.
+The page server runs with `UI_METUBE_FORMAT=wav`, a clip store that holds one
+voice, `narrator`, and a resolve limit of 600 a minute instead of 12, because
+every request reaches it from the one gateway. Its metadata probe is on, and
+the only `yt-dlp` on its `PATH` is `bin/yt-dlp`, a shell script that prints an
+info-dict and touches nothing. The venv's real `yt-dlp` is left off that
+`PATH`, because it would reach for the network from a process `launch.py` does
+not wall in.
 
 A stack starts in about 2 seconds, once per session. The fake backends and the
 scripted satellites are in one process. Everything is in `stack.py` and
@@ -96,14 +101,14 @@ def test_a_new_glossary_is_saved_and_listed(page, goto, fake, browser_log, scree
 | Fixture | What it is |
 |---|---|
 | `page` | A Playwright `Page`, 1440 x 900, light, in a new context. |
-| `new_page(viewport="desktop", scheme="light", mobile=None, reduced_motion="no-preference", notifications="denied")` | Another page in its own context. `viewport` is `"desktop"`, `"mobile"` (390 x 844, touch, 2x pixels) or `(w, h)`. `notifications="granted"` grants the permission; the default makes `Notification.permission` `"denied"` and `requestPermission()` answer `"denied"`, so queueing a job never waits on a prompt nobody can see. All of them are closed when the test ends. |
+| `new_page(viewport="desktop", scheme="light", mobile=None, reduced_motion="no-preference", notifications="denied")` | Another page in its own context. `viewport` is `"desktop"`, `"mobile"` (390 x 844, touch, 2x pixels) or `(w, h)`. `notifications="granted"` makes `Notification.permission` read `"granted"` (the headless shell itself answers `"denied"` whatever the context grants); the default makes it `"denied"` and `requestPermission()` answer `"denied"`, so queueing a job never waits on a prompt nobody can see. All of them are closed when the test ends. |
 | `goto(path="/ui", target=None)` | Loads a path from the page's origin (the gateway) and waits for `load`, not `networkidle`: the Satellites event stream never goes idle. |
 | `screenshot(name, viewport=None, scheme=None, full_page=False, target=None)` | Writes `WEBUI/shots/<name>.png` and returns its path. `viewport` resizes the page. `scheme` switches `prefers-color-scheme`. CSS animations are stopped for the shot. |
 | `browser_log` | What the test's pages did. `.sent(method, path)` lists the requests that left the page (with the JSON body), and `.responses`, `.failed`, `.console` and `.errors` (uncaught exceptions) hold the rest. `.bad_responses()` returns the 404s, 405s and 5xx responses. `.allow(status, path)` marks one the test caused on purpose (a link to a job that is gone asks for it and gets a 404); `.unexpected()` is the rest. |
 | `dialogs(target=None, answer=True)` | Answers every `confirm()` and `alert()` on `target` (the default page) with Yes, No, or `answer(dialog) -> bool`, and records each one's type and message in `dialogs.seen`. Without it Playwright dismisses them, which is a No the test never chose. |
-| `fresh_hub` | Restarts the hub before the test with an empty data directory, so Kitchen and Lounge are adopted again and Hallway waits. For every test that changes what the hub holds: an adopt, a forget, a rename, a wake word, firmware, telemetry, a setting. |
+| `fresh_hub` | Restarts the hub before the test with an empty data directory, so Kitchen and Lounge are adopted again and Hallway waits. The scripted satellites start over too, as they were when the stack started (a volume, a mute, a forget and a skipped track are gone). For every test that changes what the hub holds: an adopt, a forget, a rename, a wake word, firmware, telemetry, a setting. |
 | `fake` | The fakes' control API (`stack.FakeControl`, below). Failures a test injects are cleared after it. |
-| `stack` | The running stack: `.url` (the gateway), `.ui_direct`, `.hub`, `.restart_hub()`, `.stop_hub()` and `.start_hub()` (the hub down and back, on the same port and with its data), `.describe()`. |
+| `stack` | The running stack: `.url` (the gateway), `.ui_direct`, `.hub`, `.restart_hub()`, `.stop_hub()` and `.start_hub()` (the hub down and back, on the same port and with its data), `.inject(key, wav_bytes, **params)` (a clip through a satellite's listening path, `POST /satellites/{id}/inject` with `play=0`), `.describe()`. |
 
 Each context grants the microphone (a synthetic device, never the real one)
 and the clipboard. It uses `en-GB`, `Europe/London`, and blocks service workers.
@@ -122,11 +127,12 @@ inside it.
 
 | Call | What it does |
 |---|---|
-| `fake.requests(backend=, method=, path=, since=)` | What reached the fake backends, oldest first: method, path, query, the `x-` headers, status, and the JSON body or form fields (a file as its name, type and size). `backend` is `stt`, `tts`, `tts_long` or `metube`. `path` is a regular expression. |
+| `fake.requests(backend=, method=, path=, since=)` | What reached the fake backends, oldest first: method, path, query, the `x-` headers, status, and the JSON body or form fields (a file as its name, type and size). `backend` is `stt`, `tts`, `tts_long`, `metube`, or `ha`, `llm` and `hook` for what the hub sent a wake word's action or a button's webhook. `path` is a regular expression. |
 | `fake.last_seq()`, `fake.clear_requests()` | For "only what happened after this point". |
-| `fake.fail(path, status=500, method=, backend=, json_body=, times=, delay=)` | Answers matching requests with an error instead. With `status=None`, it only delays them, which is useful for loading states. |
+| `fake.fail(path, status=500, method=, backend=, json_body=, times=, delay=, headers=, cut_after=)` | Answers matching requests with an error instead. With `status=None`, it only delays them, which is useful for loading states; with `status=None` and `cut_after=n`, a streamed `/v1/audio/speech` sends n deltas and then tts-stack's in-band error frame, with `headers` on its response (tts-long's `X-Job-Id`, say). |
 | `fake.health(backend, **fields)` | Merges fields over a backend's `/health` (`None` removes one). For example, `fake.health("tts_long", runner=None)` hides the GPU runner panel. |
 | `fake.transcript(text)` | What every transcription returns from now on. |
+| `fake.glossaries(writable=True, reason=None, strict=False)` | How profile writes are treated until `reset()`. `writable=False` lists `writable: false` (with the server's `reason` when one is given) and answers a `PUT` or `DELETE` with 503, as a deployment with no volume does. `strict=True` refuses a one-word left-hand side (`belly = Belli`) unless the `PUT` sends `force`, with a reason that says "send force", as the real service does. |
 | `fake.add_job(**fields)` | A tts-long job. Scripted by default: it is queued for 1 s, then finishes one segment every 1.2 s. Use `scripted=False, status="failed"` for a fixed state. |
 | `fake.metube()` | The fake MeTube's downloads. |
 | `fake.reset()` | Restores the request log, failures, health, transcript, jobs, glossaries and MeTube to their start state. The hub is not reset. `stack.restart_hub()` gives a fresh one in about a second. |
@@ -157,7 +163,9 @@ byte must be `0xE9`, as in an ESP32 application image.
 | `fake.satellite_status(key, cause=None, **fields)` | Changes what the device reports and sends a status now. `cause="local"` is a change made on the device, such as a phone's AirPlay slider. `status_every=` changes the clock. |
 | `fake.satellite_received(key, type=None, since=0)` | The JSON messages the hub sent it. |
 | `fake.satellite_airplay(key, state=, on_command=)` | `state` is `playing`, `paused` or `idle`. `on_command` is `answer`, `refuse` (403 from the phone) or `ignore` (the hub answers 504). |
-| `fake.satellite_mic(key, seconds)` | Microphone frames in real time, for the Listen button. |
+| `fake.satellite_mic(key, seconds, clip=None)` | Microphone frames in real time, for the Listen button: a quiet tone, or `clip`, one of `services/satellites/tests/fixtures` by file name (`hey_jarvis_en_gb.wav`), as the room heard it. A clip is a wake word heard live, so the hub's double-check runs on it, which it never does on `/inject`. |
+| `fake.satellite_caps(key, **caps)` | Changes what a satellite says it is (merged into its caps; `None` takes one out) and connects it again. A Korvo whose `mic` reports 48 kHz is one the hub will not listen to. |
+| `fake.ha_url`, `fake.llm_url`, `fake.hook_url(name)` | Where a wake word's action or a button's webhook can point: Home Assistant (`POST /api/conversation/process`, and the websocket's auth and `assist_pipeline/pipeline/list`), an OpenAI-compatible server (`GET /models` in two pages, `POST /chat/completions` streamed), and a receiver that answers 200. All three are on the control port. `fake.fail(path, backend="llm", status=401)` breaks one. |
 | `fake.satellite_button(key, button, action)` | A button press on the device. |
 | `fake.satellite_drop(key)`, `fake.satellite_start(key)` | Takes it offline, and brings it back. |
 | `fake.satellite_send(key, message)` | Any message, as is. |
@@ -169,10 +177,10 @@ Their wire shapes are copied from the real services.
 
 | Backend | Routes |
 |---|---|
-| stt-stack | `GET /health`; `POST /v1/audio/transcriptions` (`json`, `text`, `srt`, `vtt`, `verbose_json` with `words` and `segments` spread over the upload's length); `POST /v1/audio/translations` (Parakeet's 400); `POST /transcribe`; `GET /glossaries`; `GET`, `PUT` and `DELETE /glossaries/{name}` (`dictation` and `tech` are built in and answer 409; a line without both sides of `=` is refused with its number) |
+| stt-stack | `GET /health`; `POST /v1/audio/transcriptions` (`json`, `text`, `srt`, `vtt`, `verbose_json` with `words` and `segments` spread over the upload's length); `POST /v1/audio/translations` (Parakeet's 400); `POST /transcribe`. Both transcription routes apply the profiles named in a `glossary` field to the transcript, and report the terms that changed it: `/transcribe` as `repaired`, `/v1` as the `x-glossary-repaired` header; `GET /glossaries`; `GET`, `PUT` and `DELETE /glossaries/{name}` (`dictation` and `tech` are built in and answer 409; a line without both sides of `=` is refused with its number) |
 | tts-stack | `GET /health`; `GET /voices` (Kokoro's names and the OpenAI aliases); `POST /v1/audio/speech` (`pcm` and `wav` are real; `mp3`, `opus`, `aac` and `flac` are WAV bytes under their own content type; `stream_format=sse` sends half-second deltas); `POST /speak` (with `X-Segment-Offsets`) |
 | tts-long | `GET /health` (the engines from `voice_common.engines`, both lanes, an idle GPU runner); `POST /jobs`; `GET /jobs` (with `kind`, `audio`, `status` and `limit`, and the counts); `GET` and `DELETE /jobs/{id}`; `GET` and `DELETE /jobs/{id}/audio`; `POST /v1/audio/speech` |
-| MeTube | `POST /add` (a URL containing `unsupported` is refused), `/start`, `/delete`; `GET /history` (a download finishes 3 s after it starts); `GET /audio_download/…` and `/download/…` (one exact path per finished file, with ranges) |
+| MeTube | `POST /add` (a URL containing `unsupported` is refused), `/start`, `/delete`; `GET /history` (a download finishes 3 s after it starts, and one whose URL contains `broken` fails then, with MeTube's error); `GET /audio_download/…` and `/download/…` (one exact path per finished file, with ranges) |
 
 At the start, the Jobs tab has five jobs: a finished clone with audio, one
 whose audio was deleted, a failed clone, a Kokoro run and a transcription.
@@ -180,6 +188,17 @@ whose audio was deleted, a failed clone, a Kokoro run and a transcription.
 Links are resolved without the network. `launch.py` answers
 `example.com`, `example.org` and `example.net` with a public address, so use
 those in link tests. Any other name fails, as it would with no network.
+
+The probe answers by a word in the link, so each branch of the confirm card can
+be reached:
+
+| Word in the link | What `bin/yt-dlp` reports |
+|---|---|
+| `unprobed` | Nothing: it exits 1, as a stale extractor does, and the card has no length or size |
+| `live` | A live stream, with no length and no size |
+| `long` | 7200 s |
+| `subs` | 180 s, with subtitles a person wrote |
+| anything else | 180 s and 2.7 MB of audio |
 
 ## Running the stack without a browser
 

@@ -600,9 +600,10 @@ def test_the_cost_on_a_group_is_dropped_for_the_groups_own_ambiguity():
     """
     voices = SCRIPT[SCRIPT.index("function renderVoices()"):
                     SCRIPT.index("function currentVoice()")]
-    assert "const clipEngines = engineIds().filter(id => !presetVoices(id));" in voices, \
+    assert "function clipEngines() { return engineIds().filter(id => !presetVoices(id)); }" in SCRIPT
+    assert "const readers = clipEngines();" in voices, \
         "the rule does not count the engines that read the group's voices"
-    assert "clipEngines.length === 1 ? costWords(clipEngines[0])" in voices, \
+    assert "readers.length === 1 ? costWords(readers[0])" in voices, \
         "one clip engine no longer gets its figure back"
     assert "engineIds().length > 1 ?" not in voices, \
         "the deployment-wide suppression is back"

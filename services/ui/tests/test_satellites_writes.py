@@ -64,6 +64,17 @@ const SPEAK = [piece("const PREFIX = {", "const CLONE_DEFAULTS"),
                piece("const KOKORO_SPELLING = {", "/* Script first"),
                piece("function voicesForLanguage(", "\n}\n") + "\n}\n"].join("\n");
 const SCENARIO = fs.readFileSync(process.argv[3], "utf8");
+// LONG TIMERS DO NOT HOLD THE PROCESS. With its tab open the section schedules
+// its next poll, a chip's expiry and the next telemetry read seconds to
+// minutes ahead; a scenario is over when its last step has printed, not when
+// those would have fired. The fake hub's own delays are milliseconds and still
+// hold it.
+const timeout = setTimeout;
+globalThis.setTimeout = (fn, ms, ...args) => {
+  const timer = timeout(fn, ms, ...args);
+  if (ms >= 1000) timer.unref();
+  return timer;
+};
 
 function stand() {
   const own = {};
@@ -96,6 +107,7 @@ let confirming = true;
 const confirm = question => { asked.push(String(question)); return confirming; };
 const note = (host, kind, text) => { if (text) notes.push([kind, String(text)]); };
 const busy = () => () => {};
+const focusWithin = box => box.contains(document.activeElement);
 const reason = (p, fallback) => fallback;
 const saved = new Map();
 const store = { get: (k, d) => saved.has(k) ? saved.get(k) : d, set: (k, v) => saved.set(k, v) };

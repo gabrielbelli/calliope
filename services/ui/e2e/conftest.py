@@ -323,10 +323,16 @@ class BrowserLog:
                            for status, path in self.allowed)]
 
 
-DENY_NOTIFICATIONS = """
+# THE PERMISSION THE PAGE READS, SAID BY THE PAGE ITSELF EITHER WAY. Denied,
+# because an unanswered request is a prompt the test cannot see. Granted as
+# well, because chrome-headless-shell answers "denied" whatever the context
+# grants: measured with "notifications" in the context's permissions,
+# Notification.permission still read "denied", so a test of what the page does
+# for a reader who allowed notifications could never reach that branch.
+NOTIFICATIONS = """
 if (window.Notification) {
-  Object.defineProperty(Notification, "permission", { get: () => "denied", configurable: true });
-  Notification.requestPermission = () => Promise.resolve("denied");
+  Object.defineProperty(Notification, "permission", { get: () => "%s", configurable: true });
+  Notification.requestPermission = () => Promise.resolve("%s");
 }
 """
 
@@ -353,11 +359,10 @@ class Pages:
             is_mobile=mobile, has_touch=mobile, device_scale_factor=2 if mobile else 1,
             locale="en-GB", timezone_id="Europe/London", service_workers="block",
             accept_downloads=True, permissions=permissions, **options)
-        # NOTIFICATIONS ARE A NO THAT NOBODY IS ASKED FOR. Queueing a job asks
-        # for the permission, and an unanswered request is a prompt the test
-        # cannot see; "denied" is said by the page itself, before it runs.
-        if notifications != "granted":
-            context.add_init_script(DENY_NOTIFICATIONS)
+        # NOTIFICATIONS ARE AN ANSWER NOBODY IS ASKED FOR. Queueing a job asks
+        # for the permission; the answer is said before the page runs (above).
+        answer = "granted" if notifications == "granted" else "denied"
+        context.add_init_script(NOTIFICATIONS % (answer, answer))
         context.set_default_timeout(10_000)
         context.set_default_navigation_timeout(20_000)
         self.contexts.append(context)
@@ -495,6 +500,31 @@ def page_stayed_healthy(request, browser_log):
         problems.append(f"requests that failed outright: {broken}")
     if problems:
         pytest.fail("\n".join(problems), pytrace=False)
+
+
+# THE PAGE IN THE BACKGROUND, AS FAR AS ITS SCRIPT CAN TELL. A headless page
+# is never hidden, and the only way to make it so would be a second tab in
+# front of it. The page reads document.hidden and visibilityState and listens
+# for visibilitychange, so those three are what is changed; nothing else about
+# the page is.
+VISIBILITY = """hidden => {
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+  Object.defineProperty(document, "visibilityState", { configurable: true,
+                                                       get: () => hidden ? "hidden" : "visible" });
+  document.dispatchEvent(new Event("visibilitychange"));
+}"""
+
+
+@pytest.fixture
+def hide() -> Callable[[Any], None]:
+    """hide(page): the page as a browser leaves it behind another tab."""
+    return lambda page: page.evaluate(VISIBILITY, True)
+
+
+@pytest.fixture
+def show() -> Callable[[Any], None]:
+    """show(page): the page in front again, after hide(page)."""
+    return lambda page: page.evaluate(VISIBILITY, False)
 
 
 @pytest.fixture

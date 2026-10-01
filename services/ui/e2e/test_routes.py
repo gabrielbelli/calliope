@@ -394,7 +394,8 @@ def test_a_job_filtered_out_offers_to_show_everything(page, goto, stack):
     expect(page.locator("#jobnote")).to_contain_text(f"Job {job[:8]} is not in this list.")
     assert here(page) == f"/ui/jobs/{job}?show=failed", "a job that exists keeps its address"
     page.locator("#jobshowall").click()
-    wait_for_address(page, f"/ui/jobs/{job}?show=all")
+    # Everything is the default, so its address carries no filter at all.
+    wait_for_address(page, f"/ui/jobs/{job}")
     expect(page.locator("#jobfilter")).to_have_value("all")
     expect(page.locator("#jobkind")).to_have_value("all")
     card = page.locator(f'.job[data-job="{job}"]')
@@ -410,8 +411,8 @@ def test_a_job_that_is_gone_says_so_and_drops_the_id(page, goto, browser_log):
     expect(page.locator("#jobnote")).to_have_text(
         "There is no job 00000000 here now, so the whole list is shown.")
     # The note is about the link, so the next move takes it back.
-    page.locator("#jobfilter").select_option("all")
-    wait_for_address(page, "/ui/jobs?show=all")
+    page.locator("#jobfilter").select_option("failed")
+    wait_for_address(page, "/ui/jobs?show=failed")
     expect(page.locator("#jobnote")).to_have_text("")
 
 
@@ -562,6 +563,25 @@ def test_back_restores_the_scroll_and_focus_of_the_list(new_page, goto):
     expect(row(page, LOUNGE)).not_to_have_attribute("open", "")
 
 
+def test_a_tab_chosen_from_deep_in_another_opens_at_its_title(new_page, goto):
+    """Scroll restoration is manual, so a tab chosen from far down another
+    opened at the old offset, clamped to the new page, with the masthead that
+    says where you are off screen. Back still has the old offset."""
+    page = new_page((1000, 500))
+    goto("/ui/satellites", target=page)
+    settled(page)
+    room = page.evaluate("document.documentElement.scrollHeight - innerHeight")
+    assert room > 40, "the page is too short to scroll, so this proves nothing"
+    page.evaluate(f"scrollTo(0, {min(160, room)})")
+    page.wait_for_function("() => scrollY > 0")
+    open_tab(page, "speak")
+    page.wait_for_function("() => scrollY === 0")
+    expect(page.locator("#word")).to_be_in_viewport()
+    page.go_back()
+    wait_for_address(page, "/ui/satellites")
+    page.wait_for_function("() => scrollY > 0")
+
+
 def test_back_closes_what_the_entry_being_left_opened(page, goto):
     goto("/ui/satellites")
     settled(page)
@@ -638,6 +658,78 @@ def test_change_wake_words_is_a_step_back_can_undo(page, goto):
     wait_for_address(page, "/ui/satellites/kitchen")
     expect(page.locator("#sat-wakewords")).not_to_have_attribute("open", "")
     expect(row(page, KITCHEN)).to_have_attribute("open", "")
+
+
+# ---- the dock, as drawn ---------------------------------------------------------------
+
+
+def contrast(fore: list[float], back: list[float]) -> float:
+    """WCAG 2.1 contrast between two sRGB colours given as 0-255 channels."""
+    def lum(rgb):
+        r, g, b = [c / 255 / 12.92 if c / 255 <= 0.04045 else ((c / 255 + 0.055) / 1.055) ** 2.4
+                   for c in rgb[:3]]
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    high, low = sorted((lum(fore), lum(back)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+RGB = "c => getComputedStyle(c)[PROP].match(/[\\d.]+/g).slice(0, 3).map(Number)"
+
+
+def test_pointing_at_a_tab_names_it(page, goto):
+    """Four of the five tabs are a glyph until chosen; resting the pointer on
+    one shows its name, and moving away hides it again."""
+    goto("/ui")
+    settled(page)
+    label = page.locator('[role=tab][data-tab="vocab"] .label')
+    assert float(label.evaluate("e => getComputedStyle(e).opacity")) < 0.05
+    page.locator('[role=tab][data-tab="vocab"]').hover()
+    page.wait_for_function("e => getComputedStyle(e).opacity === '1'", arg=label.element_handle())
+    page.mouse.move(5, 5)
+    page.wait_for_function("e => Number(getComputedStyle(e).opacity) < 0.05", arg=label.element_handle())
+
+
+def test_the_dock_focus_ring_encloses_the_whole_tab(page, goto):
+    """The keyboard's ring is drawn round the tab and its name, not inset over
+    the icon and through the name; the icon of the chosen tab has risen into
+    the bead, above the bar, by the time the ring is read."""
+    goto("/ui")
+    settled(page)
+    page.locator("body").click(position={"x": 5, "y": 5})
+    page.keyboard.press("Tab")
+    tab = page.locator('[role=tab][data-tab="transcribe"]')
+    expect(tab).to_be_focused()
+    page.keyboard.press("ArrowRight")
+    tab = page.locator('[role=tab][data-tab="speak"]')
+    expect(tab).to_be_focused()
+    page.wait_for_timeout(700)
+    ring = tab.evaluate("""b => {
+      const after = getComputedStyle(b, "::after"), box = b.getBoundingClientRect();
+      const inset = k => parseFloat(after[k]);
+      return { content: after.content, shadow: after.boxShadow, outline: getComputedStyle(b).outlineStyle,
+               left: box.left + inset("left"), right: box.right - inset("right"),
+               top: box.top + inset("top"), bottom: box.bottom - inset("bottom") };
+    }""")
+    assert ring["content"] not in ("none", "normal"), "no ring is drawn on the focused tab"
+    assert "2px" in ring["shadow"] and ring["outline"] == "none"
+    box = tab.locator(".label").bounding_box()
+    assert ring["left"] <= box["x"] and box["x"] + box["width"] <= ring["right"], "the ring cuts the name"
+    assert ring["top"] <= box["y"] and box["y"] + box["height"] <= ring["bottom"], "the ring cuts the name"
+    assert tab.locator(".label").evaluate("e => getComputedStyle(e).opacity") == "1"
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark"])
+def test_the_satellites_badge_is_a_readable_pill_in_both_themes(new_page, goto, scheme):
+    """The plate is dark in both themes and the badge followed the page's ink,
+    which in light was 1.01:1 on the plate. Hallway waits to be adopted, so the
+    badge reads 1 from the first load."""
+    page = new_page(scheme=scheme)
+    goto("/ui", target=page)
+    badge = page.locator("#satellitecount")
+    expect(badge).to_have_text("1")
+    ink = badge.evaluate(RGB.replace("PROP", '"color"'))
+    ground = badge.evaluate(RGB.replace("PROP", '"backgroundColor"'))
+    assert contrast(ink, ground) >= 7, f"{scheme}: the numeral is {contrast(ink, ground):.2f}:1 on its pill"
 
 
 def test_a_rename_replaces_the_address_with_the_new_name(page, goto, fresh_hub):

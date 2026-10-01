@@ -236,7 +236,11 @@ def test_an_event_the_log_has_no_words_for_is_left_out_and_asks_for_nothing(tmp_
     AirPlay command, a setting changed (after every PATCH, so every slider
     let go), an image uploaded. Each reached Activity as the protocol's own
     word, the image's with no name at all, and asked the hub for its three
-    lists. An event the page has words for is still logged."""
+    lists. An event the page has words for is still logged.
+
+    A setting or an image still asks, without a line: with the stream open
+    the tab polls every 30 s, and a change made in Home Assistant has to be
+    seen sooner than that (test_satellites_live.py)."""
     got = run(tmp_path, """
       let source = null;
       globalThis.EventSource = window.EventSource = class { constructor() { source = this; } };
@@ -251,14 +255,16 @@ def test_an_event_the_log_has_no_words_for_is_left_out_and_asks_for_nothing(tmp_
       send({ type: "media", satellite: id, source: id, id: "f".repeat(32), announce: false,
              state: "playing", reason: null, played_s: 0 });
       send({ type: "airplay_command", satellite: id, command: "next", ok: true, status: 204, confirmed: true });
+      const unknown = { added, refreshed, row: row._last === before };
       send({ type: "config", satellite: id, changed: ["volume"] });
       send({ type: "firmware", action: "added", sha256: "e".repeat(64), model: "raspberry-pi", version: "v1" });
-      const unknown = { added, refreshed, row: row._last === before };
+      const changed = { added, refreshed, row: row._last === before };
       send({ type: "offline", satellite: id });
-      console.log(JSON.stringify({ unknown, known: { added, refreshed, row: row._last } }));
+      console.log(JSON.stringify({ unknown, changed, known: { added, refreshed, row: row._last } }));
     """)
     assert got["unknown"] == {"added": 0, "refreshed": 0, "row": True}, got
-    assert got["known"]["added"] == 1 and got["known"]["refreshed"] == 1, got
+    assert got["changed"] == {"added": 0, "refreshed": 2, "row": True}, got
+    assert got["known"]["added"] == 1 and got["known"]["refreshed"] == 3, got
     assert got["known"]["row"].startswith("Last event: went offline, "), got
 
 

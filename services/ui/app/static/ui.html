@@ -177,6 +177,11 @@
      reading as a lit object. A dark console on a creme faceplate is what the
      hardware this page is dressed as actually looks like. */
   --plate:#1B1512; --plate-hi:#241C18; --plate-lo:#120C0A;
+  /* THE BADGE FOLLOWS THE PLATE, NOT THE PAGE. It sat on --ink with --panel
+     for its numeral, and the plate is dark in both themes while the page's
+     ink is dark only in light: there it was #1A1714 on #1B1512, 1.01:1, a
+     numeral in a hole. One pale pill on the one dark plate, 15.9:1. */
+  --count-bg:#EBE5DA; --count-ink:#1A1210;
   --icon-off:#B3A69E; --icon-on:#1A1210;
   --bloom-a:.10; --bloom-top:#EFE7DA;
   /* Geometry. JS measures the bar and overwrites all four; these are only
@@ -225,18 +230,22 @@
    --bg is only ever a recess cut into it, which is why the head, the tab strip
    and the content column are one continuous surface with a seam drawn on it
    rather than three things piled up. */
-/* THE PAGE IS COMPOSED AGAINST THE DOCK, not stacked from the top of the
-   viewport. Top-aligned, a short panel left 300px of nothing between the last
-   card and the bar, and two objects with a void between them read as
-   unrelated no matter what their widths are -- "the div and the nav feel
-   disconnected" was the note, and the width was only half of it.
+/* THE PAGE IS STACKED FROM THE TOP, and the card sits directly under the
+   title that names it, at the same height on every tab.
 
-   safe center IS THE WHOLE TRICK. Plain `center` on a column taller than the
-   viewport overflows in BOTH directions, and the half that goes off the top is
-   unreachable -- no scrollbar reaches above the scroll origin. `safe` falls
-   back to flex-start the moment the content does not fit, so Transcribe with a
-   wall of transcript behaves exactly as it did before: top-aligned, scrolling.
-   The centring only ever applies when there is room for it.
+   TWO EARLIER COMPOSITIONS ARE WITHDRAWN HERE, and both answered real notes.
+   Top-aligned, a short panel left 300px between the last card and the dock,
+   and "the div and the nav feel disconnected" asked for the column to be
+   centred against the bar. Centred whole, the masthead moved with the
+   panel's height -- the lamp sat at y=104 on Speak and 275 on Vocabulary, a
+   171px jump from pressing a tab. An auto margin on the panel then held the
+   masthead still and moved the CARD instead: on a short panel it opened a
+   void between the title and the thing it titles, about 250px on Vocabulary
+   at 1440x900, and the next note named exactly that gap. A heading belongs
+   to what it heads, and that outranks meeting the dock: the dock is a fixed
+   object over the page, so the room under a short card is simply page, the
+   way a list in any app ends above its tab bar. The card's top edge now stays
+   put between tabs as well, which is the rule the masthead already obeys.
 
    The dialog is untouched by this: it is display:none closed and position:
    absolute open, so it is never a flex item. */
@@ -245,15 +254,6 @@ body{margin:0;background:var(--panel);color:var(--ink);
   font-optical-sizing:auto;
   min-height:100svh;display:flex;flex-direction:column;
   justify-content:flex-start}
-/* THE MASTHEAD USED TO BE CENTRED WITH THE PANEL, so it moved whenever the
-   panel's height changed: the lamp sat at y=104 on Speak, 179 on Transcribe,
-   254 on Jobs, 275 on Vocabulary -- a 171px jump from switching tab, at one
-   width. Opening a disclosure moved it too. The mark and the page's title are
-   the two things that must not move, because they are what the eye returns to.
-   An auto margin on the panel absorbs the slack instead, and resolves to 0 the
-   moment free space goes negative -- so a tall panel still top-aligns and
-   still scrolls, which is exactly the `safe` behaviour this replaces. */
-main.wrap{margin-block:auto}
 /* width:100% IS NOT REDUNDANT BESIDE max-width AND margin:0 auto, and it cost
    a render to see. A flex item with an auto margin on the CROSS axis does not
    stretch -- the auto margin wins -- so the column stopped resolving against
@@ -266,15 +266,23 @@ main.wrap{margin-block:auto}
    the other way -- 1.15 display, 1.25 title, 1.55 body, 1.45 label, 1.3 micro
    -- with body deliberately looser than the 12px labels, because 14px is the
    size read continuously and a hint is one or two lines. */
-h1,h2,h3{margin:0;font-weight:600}
+h1,h2{margin:0;font-weight:600}
 h2{font-size:var(--t-title);line-height:1.25;letter-spacing:-.011em}
-h3{font-size:var(--t-label);line-height:1.3;color:var(--dim);
+/* A SECTION INSIDE AN EXPERT PANEL IS AN h2 DRAWN AS A LABEL. They were h3s
+   straight under the masthead's h1, which a screen reader's list of headings
+   shows as a level skipped; the outline is h1 for the tab and h2 for what is
+   in it, whatever size each is drawn at. */
+h2.minor{font-size:var(--t-label);line-height:1.3;color:var(--dim);
   text-transform:uppercase;letter-spacing:.07em}
 /* AN ACHROMATIC ACCENT MEANS A LINK CANNOT BE MARKED BY HUE. Graphite on a
    warm face is a material difference, not a colour one, and a material
    difference is invisible inside a line of prose. The underline is the cue and
    the colour is the reinforcement, which is the right way round anyway. */
 a{color:var(--accent);text-decoration-thickness:2px;text-underline-offset:2px}
+/* THE PARTS NOBODY DREW STILL CARRY THE PALETTE. The browser's own blue
+   selection was the one cold colour on a warm page, and selecting a line of a
+   transcript to copy it is one of the commonest things done here. */
+::selection{background:color-mix(in oklab,var(--accent) 24%,var(--panel));color:var(--ink)}
 code,.num{font-family:var(--mono)}
 /* The dictation clock and the clone countdown both repaint every 100 ms, and
    proportional digits made them jitter sideways as the glyphs changed width. */
@@ -419,7 +427,13 @@ code,.num{font-family:var(--mono)}
 .tabs button{position:relative;flex:1;display:block;height:100%;padding:0;
   border:0;background:none;font:inherit;color:inherit;cursor:pointer;
   border-radius:14px;--t:0}
-.tabs button:focus-visible{outline:2px solid var(--acc);outline-offset:-3px}
+/* THE RING ENCLOSES THE WHOLE TAB, ICON AND NAME. An outline inset by 3px
+   on a 76px-tall button drew a box around the icon and cut through the label
+   under it, so the keyboard's mark said "this glyph" rather than "this tab".
+   A drawn ring outside the button's sides reaches round both. */
+.tabs button:focus-visible{outline:none}
+.tabs button:focus-visible::after{content:"";position:absolute;inset:6px -6px;
+  border-radius:16px;box-shadow:0 0 0 2px var(--acc);pointer-events:none}
 /* The icon is ink while it sits on the plate and ink-on-accent once it is in
    the bead, interpolated by --t so a drag reads as continuous rather than as
    a step change at the halfway mark. */
@@ -438,6 +452,12 @@ code,.num{font-family:var(--mono)}
    previews, so you can see what you are about to land on. */
 .tabs button[aria-selected=true] .label,
 .dock.dragging .label{opacity:var(--t)}
+/* WHERE CAN I GO, ANSWERED WITHOUT TRYING EACH ICON. Four of five tabs were
+   an unnamed glyph. Pointing at one, or tabbing to it, names it; the 7px
+   offset at t=0 keeps the word clear of the icon (label 58-73px, icon
+   26-50px in a 76px bar). */
+@media (hover:hover){ .tabs button:hover .label{opacity:1} }
+.tabs button:focus-visible .label{opacity:1}
 
 /* THE RUNNING-JOB COUNT, readable from the other three tabs without opening
    them. It was a numeral in a recess beside the word "Jobs"; the word is an
@@ -445,8 +465,8 @@ code,.num{font-family:var(--mono)}
    dot, because a dot that means "some" is a dot that means nothing. */
 .tabs .count{position:absolute;left:50%;top:50%;
   margin:-22px 0 0 4px;min-width:1.25em;padding:0 .25em;
-  border-radius:999px;background:var(--ink);color:var(--panel);
-  font-size:.5625rem;font-weight:700;line-height:1.5;letter-spacing:0;
+  border-radius:999px;background:var(--count-bg);color:var(--count-ink);
+  font-size:.625rem;font-weight:700;line-height:1.5;letter-spacing:0;
   text-align:center;pointer-events:none;
   transform:translateY(calc(var(--t) * var(--rise) * -1))}
 .tabs .count:empty{display:none}
@@ -468,6 +488,11 @@ input[type=text],input[type=password],input[type=number],select,textarea{
   background:var(--sunk);border:1px solid var(--field-line);
   border-radius:var(--radius-s);padding:.4375rem .5625rem;width:100%}
 textarea{resize:vertical;min-height:7.5rem;font-family:inherit;line-height:1.55}
+/* A NUMBER FIELD IS A FIELD. The spin buttons are the platform's, drawn in
+   its own grey inside a slot cut in this card, and the values they step --
+   days kept, a threshold, seconds -- are typed, never nudged by one. */
+input[type=number]{appearance:textfield}
+input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
 /* Never declared, so it was whatever the engine felt like -- and both
    engines pick a grey that fails AA on this ground. */
 ::placeholder{color:var(--dim);opacity:1}
@@ -665,6 +690,11 @@ input:disabled,select:disabled,textarea:disabled{opacity:.5;cursor:not-allowed;
   outline:2px solid var(--accent);outline-offset:2px}
 label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
   margin-bottom:var(--s1);letter-spacing:.005em}
+/* A LABEL'S LOOK FOR A GROUP'S NAME. A <label> names one control, and the
+   two it stood over here name a set of toggles and a line of pills, so the
+   element is a span with an id the group points at and the type is the
+   label's own. */
+.label-like{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);margin-bottom:var(--s1);letter-spacing:.005em}
 .row{display:flex;gap:var(--s2) var(--s3);align-items:flex-end;flex-wrap:wrap}
 /* Anything sharing a row with a field matches its height: Jobs' Refresh was
    30.6 against two 37.7 selects, agreeing at the centre and at neither edge. */
@@ -678,6 +708,10 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
 .row > *:has(> select){min-width:min(100%,15rem)}
 .row>*{flex:1;min-width:8.125rem}
 .row>.tight{flex:0 0 auto;min-width:0}
+/* A SPACER HAS NO WIDTH OF ITS OWN. It had no rule at all, so .row>* gave it
+   the 130px floor a field gets: on a narrow card an empty span could push the
+   button after it onto a line of its own. */
+.spacer{flex:1 1 0;min-width:0}
 /* GROUPING: two field-level controls and one primary action used to sit on one
    baseline, so Transcribe read as a fourth segment of the control beside it.
    The fields are their own row now, --s2 inside each label+control pair and
@@ -694,10 +728,35 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
    nothing. Same for a gap. */
 .hint:empty{display:none}
 .actions{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center}
+/* "Set up the ring…" sat flush on the select above it, the one stack in a
+   satellite's body with no gap between its controls. */
+.sat-ringparts .actions{margin-top:var(--s2)}
+#glossman:is(:has(#glossform:not([hidden])),:has(#glossnames:empty)) #glossidle{display:none}
+/* THE RUNNER'S HEADLINE TAKES THE ROW. With the mode hidden the spacer still
+   took half of it, and on a phone "GPU runner: not answering" wrapped beside
+   an empty right half. */
+#runnerstate{flex:1 1 auto;min-width:0}
+/* First in the card now, so the filters under it get the gap a section does. */
+.jobsrunner{margin-bottom:var(--s4);padding-bottom:var(--s3);border-bottom:1px solid var(--line)}
+/* THE PAGE'S FEW GLYPHS ARE DRAWN, in the dock's stroke, so a button's mark is
+   one family with the icons rather than whichever font had a square in it. */
+.glyph{width:.75em;height:.75em;vertical-align:-.06em;margin-right:.45em;fill:currentColor}
+.glyph.line{fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;margin:0}
+/* An arrow is the whole of its button, so the button is at least as wide as a
+   control is tall: a 9px glyph inside the small padding was a sliver to aim at. */
+button:has(> .glyph.line){min-width:var(--control-h)}
 .seg{display:inline-flex;border:1px solid var(--line);
   border-radius:var(--radius-s);overflow:hidden}
 .seg button{border:none;border-radius:0;background:var(--bg);
   padding:.375rem .875rem}
+/* A SEAM BETWEEN SEGMENTS. Two unpressed segments were one --bg slab, so
+   "dictation" and "tech" read as one control with two words in it. */
+.seg button+button{border-left:1px solid var(--line)}
+/* THE VOCABULARY CHOOSER IS NOT ONE-OF-MANY. Any number of profiles can be
+   ticked, and a joined strip is the shape of a choice of one, so each
+   profile is a toggle of its own with its own edge. */
+#gloss.seg{border:0;border-radius:0;overflow:visible;flex-wrap:wrap;gap:var(--s1)}
+#gloss.seg button{border:1px solid var(--line);border-radius:var(--radius-s)}
 .seg button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink)}
 /* THE RING IS DRAWN INSIDE THE SEGMENT, as the dock's is. The shared ring
    stands 2px outside its button, and .seg{overflow:hidden} clipped it to a
@@ -727,6 +786,7 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
   .dock{background:ButtonFace;border:1px solid ButtonBorder}
   .tabs button svg{transform:translate(-50%,-50%)}
   .tabs .label{opacity:1;color:ButtonText}
+  .tabs button:focus-visible::after{box-shadow:none;outline:2px dotted ButtonText}
   /* NOT Highlight/HighlightText, AND THAT PAIR WAS UNREADABLE. HighlightText
      resolves to black in the common high-contrast schemes, and Chromium paints
      a Canvas-coloured backplate behind text that sits over a background-image
@@ -803,14 +863,15 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
 /* --t-display HAD EXACTLY ONE CONSUMER AND THE BRAND WAS IT. Demoting the
    wordmark to a silkscreen legend would have taken the top step of the type
    scale off the page with it, leaving a five-step scale with four steps in
-   use. .lead puts it back where it belongs: on the heading that opens a
-   panel, which is the one string per tab that says what you are looking at.
-   STRUCTURE AND NOT A CLASS, because test_jobs.py pins `<h2 class="tight">
-   Jobs</h2>` byte for byte and a heading that cannot take the class would have
-   left one tab a size below the other three. .well is excluded on purpose: the
-   clone sheet's heading names a SUB-task inside Speak, and giving a recess the
-   same weight as the panel that contains it is the stacking this pass is
-   here to remove. */
+   use. This puts it back on the heading that opens a card.
+   FEWER CARDS HAVE ONE NOW. Jobs, Vocabulary and Satellites each opened with
+   their tab's name again, under a masthead already saying it at twice the
+   size; those headings are gone, and a card heading is kept only for what the
+   masthead does not name, which today is the Transcript. Written as structure
+   rather than a class so a heading added later takes the step without being
+   told to. .well is excluded on purpose: the clone sheet's heading names a
+   SUB-task inside Speak, and giving a recess the same weight as the panel
+   that contains it is the stacking this pass is here to remove. */
 .card:not(.well) > h2,.card:not(.well) > .row > h2{
   font-size:var(--t-display);line-height:1.15;letter-spacing:-.021em}
 .note .acts{margin-top:var(--s2);display:flex;gap:var(--s2);flex-wrap:wrap}
@@ -866,13 +927,26 @@ details.jobtext>summary{font-weight:400;color:var(--dim);
 details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
   border-left:2px solid var(--line);font-size:var(--t-body);line-height:1.7;
   white-space:pre-wrap;max-height:14em;overflow:auto}
-/* The vocabulary panel's rows are plain block children of a details body,
-   which carries no spacing rule of its own: the expert panels get theirs from
-   .grid2's gap, and this one has no grid. Same owl rule the card uses, with
-   the same label guard, so a label stays welded to its control. */
-#glossman .body > * + *{margin-top:var(--s3)}
-#glossman .body label + *{margin-top:0}
-#glossman .body *:empty{margin-top:0}
+/* THE PANEL OPENS ITS CARD. It and #glossnone are never shown together, and
+   with the heading gone the line before it is always the hidden one, so the
+   card's own spacing rule would have left 12px of nothing at its top. */
+#glossman{margin-top:0}
+/* THE EDITOR'S GROUPS ARE SPACED BY THE CARD'S OWN OWL RULE, with the same
+   label guard so a label stays welded to its control. The three rules this
+   replaces reached into a details `.body` the editor lost when Vocabulary
+   became a tab, so they matched nothing and the profile chips, Name, Terms
+   and the actions sat flush against one another. */
+#glossman>*+*,#glossform>*+*{margin-top:var(--s3)}
+#glossform>label+*{margin-top:0}
+#glossman>:empty,#glossform>:empty{margin-top:0}
+/* SOURCE, TERMS AND SIZE ARE THREE FACTS, so three pills. Unstyled they ran
+   together as one line of words with no edges. As tall as the Name field
+   beside them so the two groups share a centre line. */
+.pills{display:flex;flex-wrap:wrap;gap:var(--s1);align-items:center;min-height:var(--control-h)}
+.pill{font-size:var(--t-micro);line-height:1.3;letter-spacing:.02em;padding:1px 7px;
+  border-radius:999px;background:var(--sunk);border:1px solid var(--line)}
+.pill:empty{display:none}
+.pill.bad{color:var(--bad);border-color:var(--bad)}
 /* AN EMPTY .seg IS A 2px BOX. #glossnames is empty on a deployment holding no
    profiles at all, and an inline-flex with a border and nothing in it draws a
    sliver that means nothing. */
@@ -988,11 +1062,24 @@ details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
 .job{border:0;border-top:1px solid var(--line);border-radius:0;
   padding:var(--s3) 0;margin-bottom:0;background:transparent}
 #joblist > .job:first-child{border-top:0;padding-top:0}
-.job.expired{opacity:.55}
+/* AN EXPIRED ROW DIMS ITS WORDS, NOT ITSELF. opacity:.55 took Retry and
+   Delete down with the text, and this sheet's rule is that nothing says "off"
+   in alpha -- those two are live controls on that row. */
+.job.expired :is(.hint,details.jobtext>summary,strong){color:var(--dim)}
+/* THE JOB AN ADDRESS NAMES. A wash, not a border, so the row still sits in
+   the hairline column; the negative margin lets the wash reach past the text
+   without moving it. Its own hairline goes, or it would stick out past the
+   column by the same margin and curve round the wash's top corners. */
+.job.here{background:color-mix(in oklab,var(--accent) 7%,transparent);margin-inline:calc(var(--s2) * -1);padding-inline:var(--s2);border-radius:var(--radius-s);border-top-color:transparent}
 .job .top{display:flex;gap:var(--s2);align-items:baseline;flex-wrap:wrap}
 .job .id{font-family:var(--mono);font-size:var(--t-micro);letter-spacing:.02em;
   color:var(--dim)}
 .job .acts{display:flex;gap:var(--s1);margin-top:var(--s2);flex-wrap:wrap}
+/* Delete is last and pushed to the line end, where a hand travelling along
+   the row does not land on it by momentum -- the Satellites rule, for the
+   same reason. Two deletes stay together at the end. */
+.job .acts>:is([data-delaudio],[data-forget]){margin-left:auto}
+.job .acts>[data-delaudio]~[data-forget]{margin-left:0}
 .status{font-size:var(--t-micro);line-height:1.3;letter-spacing:.02em;
   padding:1px 7px;border-radius:999px;background:var(--sunk);
   border:1px solid var(--line)}
@@ -1095,9 +1182,9 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
    names. The second is that listening rates are chosen from a short list;
    nobody wants 1.07x, and a range invites it. */
 .rate{width:auto;min-width:6rem;padding-right:6px;border-radius:var(--radius-s)}
-/* The two job filters sit on the card header beside an h2 and a button, so
-   they size to their own longest option rather than taking the width:100%
-   every other select on this page is given. Same reason .rate exists. */
+/* The two job filters open the card beside a button, so they size to their
+   own longest option rather than taking the width:100% every other select on
+   this page is given. Same reason .rate exists. */
 .jobsel{width:auto;min-width:0;max-width:13rem}
 
 /* -------------------------------------------------------- karaoke ----- */
@@ -1265,6 +1352,9 @@ details>summary:active{opacity:.72}
    and not how wide it is: a tablet is wide and still has no cursor.
    min-height, so existing padding and the dock's own sizing are untouched. */
 @media (pointer:coarse){
+  /* The token, not only the floor below: .row > button.small (0,2,1) sets
+     min-height from it and outranked this block's (0,1,1). */
+  :root{--control-h:44px}
   button:not(.link),select,input[type=range],input[type=text],input[type=password],
   input[type=number]{min-height:44px}
   /* A link inside a sentence has to keep reading as a word, so it grows
@@ -1283,12 +1373,23 @@ details>summary:active{opacity:.72}
   /* Tracking is size-specific, including when the viewport forces the size. */
   .brand{letter-spacing:.14em}
   .tabs button svg{width:22px;height:22px}
-  /* rem, NOT px. Below 30rem the dock IS the navigation, and an absolute
-     font-size made the tab names the one thing on a phone that ignored the
-     reader's text setting entirely. */
-  .tabs .label{font-size:.625rem}
+  /* THE TAB NAMES KEEP --t-micro HERE, which is rem and so follows the
+     reader's text setting. They dropped to 10px on a phone, under the 11px
+     floor for words that name a control, on the one screen where the dock is
+     the whole of the navigation. */
   .masthead{padding-top:clamp(1.25rem,4vh,2rem)}
   .wrap{padding-top:var(--s4)}
+}
+/* ON A PHONE THE KIND TAKES A LINE AND THE FILTER SHARES THE NEXT WITH
+   REFRESH, which asks again for what that filter shows. Three controls of
+   their own widths wrapped Refresh onto a line alone, and two selects
+   squeezed onto one line cut their own labels, which a select cannot
+   ellipsis. A long job id gives way the same way, with the whole id kept in
+   its title. */
+@media (max-width:30rem){
+  .jobfilters>#jobkind{flex-basis:100%;max-width:none}
+  .jobfilters>#jobfilter{flex:1 1 0;max-width:none}
+  .job .id{max-width:14ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 }
 
 /* ------------------------------------------------------- satellites -- */
@@ -1311,8 +1412,13 @@ details>summary:active{opacity:.72}
    a chip appears only for something happening now (the lamp dot) or something
    wrong, so the one deviation in a column of calm rows is the thing the eye
    finds. The same rule runs down the wake words. */
-.sat-headrow{align-items:baseline}
-#sathealth{margin:0 0 0 auto;text-align:right}
+/* THE FIRST THING THE CARD SHOWS SITS AT ITS TOP. With the heading gone, four
+   hosts that are usually silent come before the list (health, a lost hub, a
+   link's note, the "asking" line), and `.card > * + *` spaced the list from
+   them whether they showed or not: 12px of nothing over every list. The gap
+   is now owed only to a line above that is actually showing. */
+#satellitesnone,#satellitesman{margin-top:0}
+#tab-satellites .card>:not(:empty,[hidden])~:is(#satellitesnone,#satellitesman){margin-top:var(--s3)}
 .sat-empty{margin:0;font-weight:600}
 /* A cover at its own shape, whole: a square album, or a video's 16:9. */
 .sat-apart{display:block;width:auto;height:auto;max-width:min(100%,320px);max-height:180px;
@@ -1379,7 +1485,11 @@ details.sat-row>.body>*:empty,details.sub>.body>*:empty,.sat-hub .body>*:empty{m
 details.sat-row>.body>details.sub{margin-top:var(--s4)}
 details.sat-row>.body>details.sub+details.sub{margin-top:0}
 details.sub>.body{padding:0 0 var(--s4)}
-#satellitesman>.sat-hub{margin-top:var(--s5)}
+/* NO BAND BEFORE THE HUB'S DISCLOSURES. A bare --s5 after the last
+   satellite, with no line or label, read as the same accidental gap as the
+   one under the masthead; the first disclosure's own hairline is the break,
+   as each row's is between satellites. */
+#satellitesman>.sat-hub{margin-top:0}
 .sat-hub>details{margin-top:0}
 /* One left edge down the card: the hub's bodies are indented by the chevron
    as the satellites' are, so a wake word's name lines up with a satellite's. */
@@ -1652,8 +1762,11 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
   <!-- ONE <h1>, AND IT NAMES THE SECTION YOU ARE ON. The page used to have no
        first-level heading at all, then had one that said the product name --
        a string nobody navigates by. The four panels write this between them
-       rather than carrying an <h1> each, so the document never has two. -->
-  <h1 class="word" id="word">Transcribe</h1>
+       rather than carrying an <h1> each, so the document never has two.
+       tabindex="-1" because it is where focus goes when what held it is gone
+       and nothing near it can take it (satForgotten): the name of the place
+       you are still in, which no card heading repeats any more. -->
+  <h1 class="word" id="word" tabindex="-1">Transcribe</h1>
   <p class="tagline" id="tagline">Speech in, text out.</p>
 </div>
 
@@ -1678,13 +1791,14 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
         <div class="row" id="sttrecrow" hidden style="justify-content:center;align-items:center;margin-top:8px">
           <span class="ring tight" id="sttring">0:00</span>
           <div style="min-width:10rem"><div class="meter"><div id="sttlevel"></div></div></div>
-          <button class="primary tight" id="sttrecstop" type="button">■ Stop and transcribe</button>
+          <button class="primary tight" id="sttrecstop" type="button"><svg class="glyph" viewBox="0 0 12 12" aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="1.5"/></svg>Stop and transcribe</button>
         </div>
         <input type="file" id="file" hidden
                accept="audio/*,video/*,.mkv,.mp4,.mov,.webm,.m4a,.opus,.flac">
         <div id="linkrow" style="margin-top:12px" hidden>
           <div class="row">
-            <input type="text" id="url" placeholder="…or paste a link">
+            <input type="text" id="url" placeholder="…or paste a link"
+                   aria-label="Link to a video or audio page">
             <button class="tight" id="resolve" type="button">Resolve</button>
           </div>
           <div class="hint" id="linkhint" aria-live="polite"></div>
@@ -1719,8 +1833,8 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
            gives it -- a gap above the button with nothing in it. -->
       <div class="row fields" id="glossbox" hidden>
         <div class="tight">
-          <label>Vocabulary</label>
-          <div class="seg" id="gloss"></div>
+          <span class="label-like" id="gloss-h">Vocabulary</span>
+          <div class="seg" id="gloss" role="group" aria-labelledby="gloss-h"></div>
         </div>
       </div>
       <div class="actions">
@@ -1751,7 +1865,11 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
       </div>
 
       <details id="stt-expert">
-        <summary>Expert: transcription</summary>
+        <!-- "Expert", NOT "Expert: transcription". The panel is on the
+             Transcribe tab under a title that says so; the qualifier was the
+             tab's name again. Speak keeps its qualifiers, because there they
+             say which engine's controls are inside. -->
+        <summary>Expert</summary>
         <div class="body">
           <div class="grid2">
             <div>
@@ -1839,7 +1957,7 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
                THE GLOSSARY IS A STARTUP FILE (/etc/stt-stack/glossary.txt),
                not a request field: prompt and keywords[] are both 400 on
                Parakeet. loadGlossaries() carries the WER figures. -->
-          <h3 style="margin-top:14px">Voice activity detection</h3>
+          <h2 class="minor" style="margin-top:14px">Voice activity detection</h2>
           <div class="grid2">
             <div><label for="x-vad-t">threshold</label>
               <div class="slider"><input type="range" id="x-vad-t" min="0" max="1" step="0.01" value="0.5"><output>0.50</output></div></div>
@@ -2017,7 +2135,7 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
         <div class="hint">10–30 seconds, one speaker, no music, in the
           language you want.</div>
         <div class="row" style="align-items:center">
-          <button class="primary tight" id="rec" type="button">● Record 15 s</button>
+          <button class="primary tight" id="rec" type="button"><svg class="glyph" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.5"/></svg>Record 15 s</button>
           <span class="ring tight" id="ring">15</span>
           <div><div class="meter"><div id="level"></div></div></div>
           <button class="tight" id="cliporfile" type="button">Upload a clip instead</button>
@@ -2027,7 +2145,8 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
              source, so taking twenty seconds out of a two-hour interview
              downloads twenty seconds. -->
         <div class="row">
-          <input type="text" id="cliplink" placeholder="…or paste a link">
+          <input type="text" id="cliplink" placeholder="…or paste a link"
+                 aria-label="Link to a recording of your voice">
           <button class="tight" id="clipresolve" type="button">Resolve</button>
         </div>
         <div class="row" id="cliprange" hidden>
@@ -2171,7 +2290,7 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
                 <option value="sse">sse</option></select>
             </div>
           </div>
-          <h3 style="margin-top:14px">Segments</h3>
+          <h2 class="minor" style="margin-top:14px">Segments</h2>
           <div class="hint">One row is one segment with a pause after it.
             <code>/speak</code> only.</div>
           <div id="segments"></div>
@@ -2262,25 +2381,48 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
   <!-- ======================================================== JOBS == -->
   <section id="tab-jobs" role="tabpanel" aria-labelledby="tab-btn-jobs" hidden>
     <div class="card">
-      <div class="row" style="align-items:center">
+      <!-- THE GPU RUNNER, when there is one. Hidden entirely when no runner
+           is configured, because a panel that always says "none" is furniture.
+           Everything in it comes from /ui/health, which this page already
+           polls, so there is no second request and no second thing to fail.
+           ABOVE THE FILTERS, NOT BETWEEN THEM AND THE ROWS. A control sits on
+           what it changes: with the panel under the selects, the filters read
+           as governing the runner and were cut off from the list they act on. -->
+      <div id="runnerbox" class="jobsrunner" hidden>
+        <div class="row" style="align-items:baseline">
+          <strong id="runnerstate"></strong>
+          <span class="spacer"></span>
+          <span class="hint tight" id="runnerwhere"></span>
+        </div>
+        <div class="hint" id="runnerwhy"></div>
+        <div class="hint" id="runnergpu"></div>
+      </div>
+
+      <div class="row jobfilters" style="align-items:center">
         <!-- THE HEADER HINT IS GONE. It read "Chatterbox runs at about
              0.138x realtime, so a job is minutes. You can close this page --
              they run on the server." The rate is a measurement, and every live
              row in renderJobs() already prints the close-the-page line beside
              the job it applies to. A card-level copy said it again for a list
-             that was often empty. -->
-        <h2 class="tight">Jobs</h2>
-        <span class="spacer"></span>
+             that was often empty.
+             THE HEADING WENT AFTER IT, FOR THE SAME REASON. It read "Jobs"
+             one line under the masthead's "Jobs", with the dock's label
+             saying it a third time: one word three times on one screen, and
+             the second said nothing the first had not. The masthead names the
+             tab; a card heading is for something it does not name, like the
+             Transcript. The filters open the card instead, at the left edge
+             where the rows under them start, with Refresh beside what it
+             asks again. -->
+
         <!-- ALWAYS ON SCREEN, AND THAT IS A DELIBERATE REVERSAL. The
              checkbox these replace appeared only when it would actually hide
              something, which was right while it defaulted to off: a control
-             that can change nothing is furniture. These default to something
-             OTHER than everything, so the same rule inverted would hide the
-             only explanation on the page for why a row somebody remembers is
+             that can change nothing is furniture. A filter chosen once is
+             remembered, so the same rule inverted would hide the only
+             explanation on the page for why a row somebody remembers is
              missing. The counts in the option text are the second half of
-             that -- "Everything (412)" is legible on the closed select without
-             opening it, which is what stops a default filter reading as data
-             loss.
+             that -- "Playable (12)" is legible on the closed select without
+             opening it, which is what stops a filter reading as data loss.
 
              BOTH ARE SENT TO tts-long AS QUERY PARAMETERS, and the answer is
              NOT filtered again here. The service returns every live job and
@@ -2297,8 +2439,8 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
         </select>
         <select class="tight jobsel" id="jobfilter"
                 aria-label="Which runs to list">
-          <option value="playable">Playable</option>
           <option value="all">Everything</option>
+          <option value="playable">Playable</option>
           <option value="deleted">Audio deleted</option>
           <option value="expired">Audio expired</option>
           <option value="failed">Failures</option>
@@ -2337,20 +2479,6 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
         </div>
       </div>
 
-      <!-- THE GPU RUNNER, when there is one. Hidden entirely when no runner
-           is configured, because a panel that always says "none" is furniture.
-           Everything in it comes from /ui/health, which this page already
-           polls, so there is no second request and no second thing to fail. -->
-      <div id="runnerbox" hidden>
-        <div class="row" style="align-items:baseline">
-          <strong id="runnerstate"></strong>
-          <span class="spacer"></span>
-          <span class="hint tight" id="runnerwhere"></span>
-        </div>
-        <div class="hint" id="runnerwhy"></div>
-        <div class="hint" id="runnergpu"></div>
-      </div>
-
       <!-- Hoisted out of the job row: it rendered once per live job, so
            three running jobs said it three times. It is one fact about this
            page, not about any one job. -->
@@ -2376,20 +2504,29 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
        answer there is nothing honest to draw. -->
   <section id="tab-vocab" role="tabpanel" aria-labelledby="tab-btn-vocab" hidden>
     <div class="card">
-      <h2 class="tight">Vocabulary profiles</h2>
-      <!-- A HEADING OVER NOTHING IS A BUG THE READER HAS TO DIAGNOSE. The
-           panel below is hidden until GET /glossaries answers, so on a
-           deployment without the vocabulary service this card rendered as a
-           title above 40px of empty ground. It says which of the two it is
-           now, and the standing rule applies: the reason sits beside the
-           absence rather than being left to be inferred. -->
+      <!-- NO HEADING: it read "Vocabulary profiles" under the masthead's
+           "Vocabulary", the tab's name said twice before anything else. The
+           name it carried is the profile buttons' group name now, which is
+           the one place a screen reader needs it.
+           AN EMPTY CARD IS A BUG THE READER HAS TO DIAGNOSE. The panel below
+           is hidden until GET /glossaries answers, so on a deployment without
+           the vocabulary service this card rendered as a title above 40px of
+           empty ground. It says which of the two it is now, and the standing
+           rule applies: the reason sits beside the absence rather than being
+           left to be inferred. -->
       <div class="hint" id="glossnone">Asking the transcription service for its vocabulary profiles…</div>
       <div id="glossman" hidden>
           <div class="row" style="align-items:center">
-            <div class="seg tight" id="glossnames"></div>
+            <div class="seg tight" id="glossnames" role="group" aria-label="Vocabulary profiles"></div>
             <span class="spacer"></span>
             <button class="small tight" id="glossnew" type="button">New profile</button>
           </div>
+          <!-- WHAT THE BUTTONS ARE, IN WORDS, while none is open. Without the
+               heading the card at rest was two unpressed buttons and "New
+               profile", with nothing saying what they hold. Not a heading
+               again: that would repeat the tab's name. Hidden by CSS while
+               the editor is open, which says it by itself. -->
+          <div class="hint" id="glossidle">Choose a profile to read or change its words, or start a new one.</div>
 
           <div id="glossform" hidden>
             <div class="row fields">
@@ -2401,8 +2538,8 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
                        autocomplete="off" spellcheck="false">
               </div>
               <div class="tight">
-                <label>Source</label>
-                <div class="pills"><span class="pill" id="glosssource"></span>
+                <span class="label-like" id="glosssource-h">Source</span>
+                <div class="pills" role="group" aria-labelledby="glosssource-h"><span class="pill" id="glosssource"></span>
                   <span class="pill" id="glossterms"></span>
                   <span class="pill" id="glossbytes"></span></div>
               </div>
@@ -2455,15 +2592,16 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
          [role=tab], and a strip in this panel would join it.
          Everything hub-dependent is inside #satellitesman, hidden until the
          hub answers, so a deployment with no hub shows one sentence and not an
-         empty heading over nothing. -->
+         empty list over nothing.
+         NO HEADING. It read "Satellites" under the masthead's "Satellites",
+         the tab's name twice before a single satellite. The list takes its
+         name from an aria-label, and a forgotten last row hands the focus to
+         the masthead's <h1>, which is where this heading used to send it. -->
     <div class="card">
-      <div class="row sat-headrow">
-        <h2 class="tight" id="sat-h" tabindex="-1">Satellites</h2>
-        <!-- Written only when its words change (satellitesHealth), so it
-             announces "1 offline" once and not on every 3 s poll. Empty when
-             all is well. -->
-        <span class="hint tight" id="sathealth" aria-live="polite"></span>
-      </div>
+      <!-- Written only when its words change (satellitesHealth), so it
+           announces "1 offline" once and not on every poll. Empty when
+           all is well, and then it takes no room (.hint:empty). -->
+      <div class="hint" id="sathealth" aria-live="polite"></div>
       <div class="hint" id="satellitesnone">Asking the satellite hub what is on the network…</div>
       <!-- A hub that has answered and then stops: the list stays, with this
            beside it, until the next poll that reaches it. -->
@@ -2479,7 +2617,7 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
         </div>
         <!-- role="list" because Safari drops list semantics under
              list-style:none. -->
-        <ul class="sats" id="satellitelist" role="list" aria-labelledby="sat-h"></ul>
+        <ul class="sats" id="satellitelist" role="list" aria-label="Satellites"></ul>
 
         <div class="sat-hub" role="group" aria-label="Hub settings">
 
@@ -2819,6 +2957,13 @@ function noteHtml(host, kind, html) {
 function busy(button, label) {
   if (!button) return () => {};
   const was = button.textContent, wasDisabled = button.disabled;
+  /* A DISABLED BUTTON DROPS THE FOCUS. Chrome moves it to <body> the moment
+     the pressed button is disabled, so a keyboard press left the reader at
+     the top of the document, and every hand-off that asks "was the focus in
+     what is about to hide?" found it already gone. The button is remembered
+     as holding it (focusWithin), and given it back when it is released. */
+  const focused = document.activeElement === button;
+  if (focused) BUSY_FOCUS = button;
   if (label) button.textContent = label;
   button.disabled = true;
   button.setAttribute("aria-busy", "true");
@@ -2826,8 +2971,32 @@ function busy(button, label) {
     button.disabled = wasDisabled;
     button.removeAttribute("aria-busy");
     if (label) button.textContent = was;
+    if (BUSY_FOCUS === button) {
+      BUSY_FOCUS = null;
+      const lost = !document.activeElement || document.activeElement === document.body;
+      if (lost && button.isConnected && !button.disabled && button.getClientRects().length)
+        button.focus({ preventScroll: true });
+    }
   };
 }
+/* The button busy() took the focus from, while it is still busy. */
+let BUSY_FOCUS = null;
+/* WHETHER THE FOCUS IS IN `box`, counting a focus a busy button lost to the
+   page as still being where that button is. */
+function focusWithin(box) {
+  const at = document.activeElement;
+  if (box.contains(at)) return true;
+  return (!at || at === document.body) && !!BUSY_FOCUS && box.contains(BUSY_FOCUS);
+}
+
+/* THE GLYPHS THIS PAGE USED FROM A FONT, drawn in the dock's own stroke so
+   they are one family with it. aria-hidden: the label says it. These two are
+   written by script into the clone recorder's button; the ring's arrows are
+   the same drawing written straight into satAdoptedMarkup, whose only hole is
+   its counter (test_satellites.py holds it to that). */
+const GLYPH = {
+  stop: '<svg class="glyph" viewBox="0 0 12 12" aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="1.5"/></svg>',
+  rec: '<svg class="glyph" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.5"/></svg>' };
 
 /* The two error shapes this stack emits, and both really occur: /v1 routes and
    everything the gateway itself generates use {"error":{...}}, while native
@@ -2853,6 +3022,30 @@ function reason(payload, fallback) {
   return fallback;
 }
 
+/* A FAILURE THAT CAME WITH NO REASON OF ITS OWN, SAID IN WORDS. The fallback
+   was the status line -- "502 Bad Gateway", or under HTTP/2 a bare "502 "
+   because the status text is empty there -- which is the protocol talking to
+   somebody who asked for a transcript. The number picks the sentence and is
+   never the sentence. A reason the service did write still wins, in reason()
+   above. */
+function failure(status) {
+  if (status === 401 || status === 403) return "The server would not allow that.";
+  if (status === 404 || status === 410) return "The server does not have that any more.";
+  if (status === 408 || status === 504) return "The service took too long to answer.";
+  if (status === 409) return "That is not ready yet.";
+  if (status === 413) return "That is too large for the server to take.";
+  if (status === 429) return "The service is busy. Try again in a minute.";
+  /* THREE DIFFERENT 5xx, THREE DIFFERENT THINGS TO DO. "Did not answer" for
+     all of them sent a reader to check whether a machine was on when it was
+     up and failing: a 500 is an answer, an error the service hit; a 503 is a
+     service starting up or full; only 502 means nothing answered behind the
+     gateway. */
+  if (status === 503) return "The service is starting up or busy. Try again in a moment.";
+  if (status === 500) return "The service ran into a problem with that. Try again, and if it keeps happening, check its log.";
+  if (status >= 500) return "The service behind this page did not answer.";
+  return "The server refused that.";
+}
+
 /* NO Authorization HEADER IS SET HERE, and that is the change rather than an
    omission. The browser used to hold the key and sign every request with it;
    the key now lives on the voice-ui container as UI_GATEWAY_API_KEY and
@@ -2872,11 +3065,26 @@ function reason(payload, fallback) {
 
    Both mounts are live on the UI service, so this also works unchanged when
    the page is opened on that service's own port directly. */
-const GATEWAY_ROUTES = /^\/(v1|transcribe|speak|voices|jobs|glossaries|satellites)(\/|$)/;
+/* The end of the first segment may also be a query: "/jobs?status=failed"
+   is the filtered listing, and without the "?" alternative below it matched
+   nothing, went to the gateway's own GET /jobs with no key, and was answered
+   401 wherever GATEWAY_API_KEYS is set. */
+const GATEWAY_ROUTES = /^\/(v1|transcribe|speak|voices|jobs|glossaries|satellites)(\/|\?|$)/;
 
+/* A REQUEST THAT NEVER ARRIVED IS SAID IN WORDS TOO. fetch() rejects with
+   the browser's own text, "Failed to fetch" in Chrome and "Load failed" in
+   Safari, and every caller pasted that after its own sentence. A stopped
+   request is still an AbortError, because the callers that offered Stop read
+   that name to say "Stopped." rather than call it a failure. */
 async function api(path, options) {
   const target = GATEWAY_ROUTES.test(path) ? "/ui/api" + path : path;
-  return fetch(target, options || {});
+  try { return await fetch(target, options || {}); }
+  catch (err) {
+    if (err && err.name === "AbortError") throw err;
+    const lost = new Error("This page could not reach the server. Check the connection and try again.");
+    lost.status = 0;
+    throw lost;
+  }
 }
 
 async function json(path, options) {
@@ -2884,7 +3092,7 @@ async function json(path, options) {
   let payload = null;
   try { payload = await response.json(); } catch {}
   if (!response.ok) {
-    const err = new Error(reason(payload, `${response.status} ${response.statusText}`));
+    const err = new Error(reason(payload, failure(response.status)));
     err.status = response.status;
     err.retryAfter = Number(response.headers.get("Retry-After")) || null;
     /* THE WHOLE BODY, not just the sentence taken out of it. A refused
@@ -2903,6 +3111,18 @@ let CONFIG = { ingestion:false, probe:false, cloning:false, stt_rtf_seed:8.5,
                confirm_bytes:52428800, max_upload_bytes:2147483648 };
 let VOICES = { kokoro:{}, clones:[] };
 let HEALTH = null;
+/* WHEN EACH ON-DEMAND LIST WAS LAST ASKED FOR, for the live layer's max-age
+   rule. Stamped by the loaders themselves, so boot's own reads count. */
+const LOADED = { glossaries: 0, voices: 0, jobs: 0 };
+/* WHY THE LAST READ OF THE VOICES FAILED, in the words the note uses, and ""
+   once one succeeds. Kept rather than written once, because every redraw of
+   the picker selects a voice and selecting a voice rewrites the note under
+   it (estimate): the reason has to survive that until a read succeeds. */
+let VOICES_FAILED = "";
+/* The note under Speak with nothing to say, which is not the same as empty
+   while the voices could not be listed: that reason stands until a read
+   succeeds, through every redraw that would otherwise clear it. */
+function speakNoteClear() { note($("speak-note"), VOICES_FAILED ? "bad" : "", VOICES_FAILED); }
 
 /* EVERY NUMBER HERE WAS MEASURED AGAINST THE DEPLOYED STACK, not quoted from
    a README. The previous set was quoted, and three of the four were wrong:
@@ -2999,6 +3219,33 @@ function currentEngine() {
 function presetVoices(id) {
   const spec = engineSpec(id);
   return spec && Array.isArray(spec.voices) ? spec.voices : null;
+}
+
+/* THE OPTION A CLIP VOICE IS DRAWN AS. A clip is not one engine's voice, so
+   its value carries the engine that will read it: "c:" until /ui/health has
+   named the engines, the first engine that reads clips after. Everything that
+   selects a clip by name goes through here, because "c:" + name written by
+   hand matched no option once health had answered, and saving a clip left the
+   picker with nothing selected. */
+function clipEngines() { return engineIds().filter(id => !presetVoices(id)); }
+function clipValue(name) { return `${clipEngines()[0] || defaultEngine() || "c"}:${name}`; }
+
+/* AN OPTION FOR A VOICE VALUE, OR NULL. Exact first; then, for a clip, the
+   same clip under whichever engine prefix the picker carries now. The prefix
+   changes when health answers, so a link the page wrote as
+   "chatterbox:narrator" meets "c:narrator" when health is slower than the
+   voice list, and a selection of "c:narrator" meets "chatterbox:narrator"
+   after: the voice is the same one, and neither is a voice gone. Kokoro and
+   preset voices belong to one engine and are only ever matched exactly. */
+function voiceOption(value) {
+  const options = [...$("voice").options];
+  const exact = options.find(o => o.value === value);
+  if (exact || !value) return exact || null;
+  const cut = value.indexOf(":");
+  const head = value.slice(0, cut);
+  if (cut < 0 || head === "k" || presetVoices(head)) return null;
+  const clip = clipValue(value.slice(cut + 1));
+  return options.find(o => o.value === clip) || null;
 }
 
 /* WHAT KIND OF VOICE AN ENGINE HAS, DERIVED AND NEVER STORED IN AN OPTION.
@@ -3401,11 +3648,15 @@ function dockLoop(now) {
   draf = 0;
   const step0 = Math.min((now - dlast) / 1000, 1 / 30);
   dlast = now;
-  /* A tap travels 1.5x slower than a drag so the socket has time to read. K
-     scales by 1/1.5^2 and C by 1/1.5, which holds the damping ratio at .81 --
-     same overshoot, same settle, just stretched. Dragging stays stiff so the
-     surface tracks the finger. */
-  const K = ddragging ? 900 : 142, C = ddragging ? 52 : 19.3;
+  /* A TAP SETTLES WITHOUT OVERSHOOT. It travels 1.5x slower than a drag so
+     the socket has time to read, and its damping is critical: 2·√142 is
+     23.83, and 24 is the round number at or above it. It was 19.3, a ratio
+     of .81, which swung the bead past the tab it was sent to and back -- an
+     overshoot on a control that was merely pressed, carrying no momentum,
+     which is the misuse the rest of this page's springs refuse. The drag keeps
+     its stiffer pair, so the surface tracks the finger and a release carries
+     the finger's own velocity. */
+  const K = ddragging ? 900 : 142, C = ddragging ? 52 : 24;
   let step = step0;
   while (step > 0) {                            /* substep, for stability */
     const h = Math.min(step, 1 / 240);
@@ -3678,6 +3929,7 @@ async function poll() {
      after that -- an engine whose runner has just gone away goes disabled with
      the reason on it rather than staying selectable until the job fails. */
   renderEngines();
+  liveHealth();
 }
 
 /* THE RUNNER, AS A PERSON WOULD ASK ABOUT IT: is it there, will it take work,
@@ -3695,7 +3947,7 @@ function paintRunner() {
      switched off, asleep and rebooting are all ordinary. */
   if (!r.reachable) {
     $("runnerstate").textContent = "GPU runner: not answering";
-    $("runnerwhy").textContent = r.error ? "The last attempt gave " + r.error + "." : "";
+    $("runnerwhy").textContent = runnerTrouble(r.error);
     $("runnerwhere").textContent = "";
     $("runnergpu").textContent = "";
     return;
@@ -3707,7 +3959,11 @@ function paintRunner() {
      authentication, the gateway inlines this document into it, and it was
      publishing a private workstation's LAN address to anybody who asked. The
      address also told this page's reader nothing they did not know. */
-  $("runnerwhere").textContent = r.mode || "";
+  /* AND NOT THE MODE WHEN IT IS THE USUAL ONE. "auto" alone at the right
+     edge of the panel was the runner's own enum, saying nothing a reader
+     needs: the runner starting work when there is work is what a runner
+     does. Another mode is unusual enough to show, as the runner names it. */
+  $("runnerwhere").textContent = r.mode && r.mode !== "auto" ? r.mode : "";
 
   /* The runner's own prose is gone from the payload for the same reason: on
      the live deployment `reason` read "…and <account> is signed in: cannot
@@ -3718,7 +3974,7 @@ function paintRunner() {
     busy: "Busy with something else.",
     occupied: "Somebody is using that machine.",
     unknown: "That machine is not answering.",
-  }[r.machine_state] || (r.machine_state ? "Machine state: " + r.machine_state + "." : ""));
+  }[r.machine_state] || (r.machine_state ? "It cannot take work right now." : ""));
   if (!r.can_run && r.seconds_until_available > 0)
     why += (why ? " " : "") + "Free again in " + clock(r.seconds_until_available) + ".";
   $("runnerwhy").textContent = why;
@@ -3730,10 +3986,33 @@ function paintRunner() {
   if (g.mem_used_mib) bits.push(g.mem_total_mib
     ? human(g.mem_used_mib * 1048576) + " of " + human(g.mem_total_mib * 1048576)
     : human(g.mem_used_mib * 1048576));
-  if (g.temperature_c) bits.push(g.temperature_c + " C");
-  const svc = (r.services || []).filter(x => x.running).map(x => x.id);
+  if (g.temperature_c) bits.push(g.temperature_c + " °C");
+  /* BY THE ENGINE A SERVICE RUNS, where the page knows it: "chatterbox-runner"
+     is a container on the other machine, and the reader chose an engine. An
+     id this page cannot name is said as the runner spells it. */
+  const svc = (r.services || []).filter(x => x.running).map(x => {
+    const engine = String(x.id).replace(/-runner$/, "");
+    return engineSpec(engine) ? engineLabel(engine) : x.id;
+  });
   if (svc.length) bits.push("running " + svc.join(", "));
   $("runnergpu").textContent = bits.join(" · ");
+}
+
+/* WHY THE RUNNER DID NOT ANSWER, IN WORDS. tts-long reports the exception's
+   class name -- RemoteUnavailable, ConnectTimeout, IncompleteRead -- which is
+   a fact for a log and noise on this panel: "The last attempt gave
+   RemoteUnavailable" told the reader nothing they could act on. A person can
+   tell three cases apart -- too slow, an answer that was an error ("HTTP
+   503", the one tts-long writes itself), a reply that broke off -- and every
+   other name, or none, is the ordinary case for a desktop: it is off, asleep
+   or restarting. */
+function runnerTrouble(error) {
+  const name = String(error || "");
+  if (/timeout/i.test(name)) return "It did not reply in time. It may be asleep or busy.";
+  if (/^HTTP \d/.test(name)) return "It answered with an error. It may be starting up or shutting down.";
+  if (/incomplete|disconnect|protocol|decode|json|badstatus/i.test(name))
+    return "Its reply broke off or could not be read. It may be restarting.";
+  return "Nothing replied. The machine may be switched off, asleep or restarting.";
 }
 
 /* ============================================================ router === */
@@ -3885,7 +4164,8 @@ function navTitleText(parts) { return parts.filter(Boolean).concat("Calliope").j
    it back. */
 const NAV = { route: { view: "transcribe", parts: [], query: {} }, silent: false,
               touched: null, touchedAt: 0, settled: new Set(), waiting: new Map(),
-              pending: null, place: [], sat: null, item: "", section: "", eta: null, said: null };
+              pending: null, place: [], sat: null, item: "", section: "", eta: null, said: null,
+              picking: false };
 /* Which list each tab's places are found in. Transcribe's are in the markup. */
 const NAV_WAITS = { speak: "voices", jobs: "jobs", vocab: "glossaries", satellites: "satellites" };
 /* THE PAGE PUTS THE SCROLL BACK ITSELF. The browser's own restoration runs
@@ -3942,14 +4222,23 @@ function navStart() {
    them write the same entry. The masthead is written here and only here, so
    the name under the dock and the tab under the bead cannot disagree. A tab
    chosen by Back itself (NAV.silent) writes nothing: the entry is already
-   the one it is on. */
+   the one it is on. It still asks the live layer whether what the tab shows
+   is stale, which is why that line comes before the silent one: arriving by
+   Back is arriving all the same. */
 function navTabSelected(button, changed) {
   dockMasthead(button);
   if (!changed) return;
+  liveEnter(button.dataset.tab, true);
   if (NAV.silent) return;
   NAV.route = { view: button.dataset.tab, parts: [], query: navQueryNow(button.dataset.tab) };
   NAV.place = []; NAV.sat = null; NAV.item = NAV.section = "";
   navGo(navPath(NAV.route), "push");
+  /* A NEW VIEW OPENS AT ITS TITLE. Scroll restoration is manual, so a tab
+     chosen from deep in Jobs opened at the old offset, clamped to the new
+     page, with the masthead that says where you are off screen. The push
+     above has kept the old entry's scroll for Back; a pop restores its own
+     and never comes here (NAV.silent). */
+  scrollTo({ top: 0, behavior: "instant" });
 }
 
 /* THE FILTERS THE JOBS TAB IS SHOWING, as they belong in its address: only
@@ -3959,7 +4248,7 @@ function navTabSelected(button, changed) {
 function navQueryNow(tab) {
   if (tab !== "jobs") return {};
   const query = {};
-  if (jobFilter() !== "playable") query.show = jobFilter();
+  if (jobFilter() !== JOB_FILTER_DEFAULT) query.show = jobFilter();
   if (jobKind() !== "all") query.kind = jobKind();
   return query;
 }
@@ -4173,7 +4462,7 @@ async function navApply(route, how, state) {
     NAV.silent = true;
     try { button.click(); } finally { NAV.silent = false; }
     /* An entry without a filter was written while the default was showing. */
-    const show = route.query.show || "playable", kind = route.query.kind || "all";
+    const show = route.query.show || JOB_FILTER_DEFAULT, kind = route.query.kind || "all";
     if (route.view === "jobs" && (show !== jobFilter() || kind !== jobKind())) {
       store.set("jobfilter", show);
       store.set("jobkind", kind);
@@ -4254,10 +4543,11 @@ function navAtSpeak(route, ready) {
   let parts = route.parts;
   const v = query.voice;
   if (v) {
-    const option = [...$("voice").options].find(o => o.value === v && !o.disabled
-      && !(o.parentElement && o.parentElement.disabled));
-    if (option) { $("voice").value = v; onVoiceChange(); }
-    else {
+    const option = voiceOption(v);
+    if (option && !option.disabled && !(option.parentElement && option.parentElement.disabled)) {
+      navPickVoice(option.value);
+      query.voice = option.value;
+    } else {
       note($("speak-note"), "flat", `That link names a voice this server does not have: ${v}.`);
       /* Held as a run's last word is, or the picker's next redraw (estimate(),
          on every voice change) would clear it before it was read. */
@@ -4268,8 +4558,7 @@ function navAtSpeak(route, ready) {
   if (parts[0] === "clone") {
     if (!CONFIG.cloning) parts = [];
     else {
-      $("voice").value = "new";
-      onVoiceChange();
+      navPickVoice("new");
       return { route: { ...route, parts, query: {} }, place: [], target: $("clone"), focus: $("clipname") };
     }
   }
@@ -4330,10 +4619,7 @@ function navShowAll(id) {
   $("jobnote").querySelector(".note").append(" ", more);
   NAV.said.text = $("jobnote").textContent;
   more.addEventListener("click", () => {
-    ["jobfilter", "jobkind"].forEach(select => {
-      $(select).value = "all";
-      $(select).dispatchEvent(new Event("change"));
-    });
+    jobsShowEverything();
     NAV.settled.delete("jobs");
     navApply({ view: "jobs", parts: [id], query: navQueryNow("jobs") }, "load", {});
   });
@@ -4361,7 +4647,32 @@ function navJobOpened(id) {
    answer decides nothing; one that answered without it says so. */
 async function navAtVocab(route, ready) {
   const name = (route.parts[0] || "").toLowerCase();
-  if (!name) return navNothing(route);
+  /* THE TAB'S OWN ADDRESS IS NO PROFILE OPEN. Back from /ui/vocabulary/<name>
+     left that profile in the editor under an address saying none was open,
+     and a reload then showed something else. Put away, unless it holds edits
+     not yet saved: those stay, and so does their profile's address. */
+  if (!name) {
+    if (glossDirty()) {
+      return navNothing({ ...route, parts: GLOSS_OPEN ? [GLOSS_OPEN.name] : [] });
+    }
+    if (!$("glossform").hidden) {
+      $("glossform").hidden = true;
+      GLOSS_OPEN = null;
+      note($("glossnote"), "", "");
+      glossRender();
+    }
+    return navNothing(route);
+  }
+  /* A swipe back on a phone is enough to land here, so it never throws away
+     what was typed without asking; and the profile being edited is not read
+     again over its own edits. */
+  if (glossDirty() && GLOSS_OPEN && GLOSS_OPEN.name === name) {
+    return { route: { ...route, parts: [name] }, place: [], target: $("glossform"), focus: null };
+  }
+  if (glossDirty()
+      && !confirm("Your changes to this profile are not saved. Open another and lose them?")) {
+    return navNothing({ ...route, parts: GLOSS_OPEN ? [GLOSS_OPEN.name] : [] });
+  }
   const button = () => $("glossnames").querySelector(`[data-open="${CSS.escape(name)}"]`);
   if (ready && GLOSS_NAME.test(name) && GLOSSARIES.some(g => g.name === name)) {
     await glossOpen(name, button());
@@ -4383,12 +4694,25 @@ function navProfile(name, how = "push") {
   navNames(NAV.route);
   navGo(navPath(NAV.route), name && how === "push" ? "push" : "replace", "/ui/vocabulary");
 }
+/* A VOICE CHOSEN BY THE ROUTER, NOT BY THE READER. onVoiceChange() ends in
+   navVoice(), which replaced NAV.route; navApply then read the new object as
+   the reader having moved on and returned before its scroll, focus and Back
+   clean-up. So /ui/speak/expert?voice=... (the address the page writes while a
+   panel is open) opened the panel and left the focus where it was, and Back
+   to any Speak entry with a voice left open what it should have closed. The
+   route navApply resolves becomes the address when it finishes. */
+function navPickVoice(value) {
+  NAV.picking = true;
+  try { $("voice").value = value; onVoiceChange(); }
+  finally { NAV.picking = false; }
+}
+
 /* THE VOICE IN THE ADDRESS. Rewritten, never pushed: a voice is a setting,
    and ten voices tried should not be ten presses of Back. Not before the
    voice list has answered once, because the picker's first draw would put
    the default voice over the one a link names before navAtSpeak has read it. */
 function navVoice() {
-  if (NAV.route.view !== "speak" || !NAV.settled.has("voices")) return;
+  if (NAV.picking || NAV.route.view !== "speak" || !NAV.settled.has("voices")) return;
   const v = $("voice").value;
   const parts = v === "new" ? ["clone"] : NAV.route.parts.filter(p => p !== "clone");
   NAV.route = { view: "speak", parts, query: v && v !== "new" ? { voice: v } : {} };
@@ -4841,6 +5165,26 @@ document.addEventListener("paste", ev => {
   available; opting in per recording is the only one the numbers support.
 */
 let GLOSSARIES = [];
+/* WHAT THE LIVE LAYER NEEDS TO READ THE LIST AGAIN WITHOUT DISTURBING ANYONE.
+   GLOSS_FAILED is the status the last failed read got (0 for no answer at
+   all, null after a good one), so the tab can tell "no vocabulary service
+   here" from "it did not answer just now". GLOSS_SIG is the last listing
+   drawn, so a read that finds nothing new redraws nothing: the toggles keep
+   their focus and the editor its caret. GLOSS_OPEN is the profile in the
+   editor as it was when opened or last saved, the base a change made on
+   another device is measured against (glossLive). */
+let GLOSS_FAILED = null, GLOSS_SIG = "", GLOSS_OPEN = null;
+/* Which glossOpen is the latest: two quick Backs sent two reads, and the one
+   that answered last filled the editor under the other's address. */
+let GLOSS_ASKED = 0;
+/* WHICH LISTING WINS, by the same counters as JOBS_SEQ. A read started on the
+   way into a tab could answer after the read a save makes itself, and its
+   older listing then redrew the profiles without the one just saved; for
+   voices, it said a clip just saved "is no longer on this server". A listing
+   older than one already drawn, or one that was out while this page wrote,
+   is dropped: the write's own read follows it. */
+const GLOSS_SEQ = { asked: 0, applied: 0, writes: 0 };
+const VOICES_SEQ = { asked: 0, applied: 0, writes: 0 };
 
 function chosenGlossaries() {
   return [...$("gloss").querySelectorAll('[aria-pressed="true"]')]
@@ -4848,8 +5192,9 @@ function chosenGlossaries() {
 }
 
 /* ========================================================= satellites === */
-/* The satellite hub, services/satellites. Polled every 3 s while this tab is
-   open and not at all otherwise. Rows are built once per satellite and updated
+/* The satellite hub, services/satellites. Polled while this tab is open and
+   the page in front (satellitesCadence: every 3 s while something moves,
+   every 30 s otherwise), and not at all otherwise. Rows are built once per satellite and updated
    in place, so a poll never takes a slider out from under a finger, empties a
    box somebody is typing in, or shuts a disclosure somebody opened. A row's
    markup is rebuilt only when the satellite is adopted or forgotten, because a
@@ -4863,6 +5208,9 @@ const SATELLITES = { rows: new Map(), timer: null, events: null, list: [], firmw
                      writes: 0, asked: 0, applied: 0,
                      /* The refresh out now, and the one waiting for it. */
                      polling: null, next: null, counting: null,
+                     /* The one timer that repaints a chip when it runs out
+                        (satellitesExpiry). */
+                     expiry: null,
                      /* What the page itself saw. The hub keeps a satellite's
                         last_seen and firmware after it disconnects, but only
                         in memory, so these stand in across a hub restart.
@@ -4917,7 +5265,7 @@ const SAT_COPY = {
      stock board does not wire it, and the firmware makes Rec the mute. */
   btnNoMute: "Keep Mute mic on one button other than Side, or a muted satellite could never be unmuted.",
   sideNeeds: "Needs R37 fitted and R50 removed on the board.",
-  ringTop: "Move the lit LED with ◀ ▶ until it is at 12 o'clock, then press That's the top.",
+  ringTop: "Move the lit LED with the arrows until it is at 12 o'clock, then press That's the top.",
   ringWay: "The bar runs from the brightest LED. Which way does it go, as you look at it?",
   ringSaved: "Saved: the volume bar starts at 12 o'clock and fills clockwise.",
   ringMuted: "It is muted, so the ring shows red: unmute it with its button first.",
@@ -4939,7 +5287,7 @@ const SAT_COPY = {
   adopted: "{name} adopted.",
   renamed: "{old} is now called {new}.",
   lastEvent: "Last event: {what}, {time}",
-  linePending: "Waiting to be adopted · ID {id}",
+  linePending: "Waiting to be adopted",
   lineSeen: "Seen {clock}, now offline · ID {id}",
   lineGone: "Now offline · ID {id}",
   lineUpdating: "Updating to {v}. It reboots when the transfer ends.",
@@ -5232,7 +5580,11 @@ function satLatency(n) {
   return satText("latency", { s: (l.p50_first_audio_ms / 1000).toFixed(1),
                               n: satCount(l.turns || 0, "reply", "replies") });
 }
-function satName(n) { return n.name || (n.adopted ? n.id : "New satellite"); }
+/* ONE FACT, SAID ONCE. A satellite waiting to be adopted read "New
+   satellite", then a "New" chip, then "Waiting to be adopted · ID …": three
+   ways of saying it is new on one row. The chip says it; the title names the
+   one thing it has, its ID; the line says what it waits for. */
+function satName(n) { return n.name || (n.adopted ? n.id : `Satellite ${n.id}`); }
 /* The hub reports the firmware an offline satellite last ran until the hub
    restarts; after that, the page's own memory of it is all there is. */
 function satFirmware(n) { return n.firmware || SATELLITES.fw.get(n.id) || null; }
@@ -5254,7 +5606,7 @@ function satSaid(host, text) {
   host.append(line);
 }
 /* A STANDING CONDITION, WRITTEN ONCE. These hosts announce, and the poll
-   that finds the same failure every 3 s must not announce it every 3 s.
+   that finds the same failure every time must not announce it every time.
    "hint" is satSaid's quiet line, for a condition that is not a fault. */
 function satNoteOnce(host, kind, text) {
   const said = text ? `${kind}:${text}` : "";
@@ -5343,7 +5695,56 @@ async function satellitesPoll() {
   }
   /* ANSWERED, WELL OR BADLY: an address waiting on this tab can look now. */
   SATELLITES.hooks.nav("settled");
-  if (satellitesOpen()) SATELLITES.timer = setTimeout(satellitesRefresh, 3000);
+  satellitesExpiry();
+  /* NOTHING IS ASKED FOR WHILE NOBODY CAN SEE IT. A hidden page used to keep
+     this at 3 s for as long as the tab was left open, three requests each
+     time, for a list no one was reading; returning asks at once (the live
+     layer's catch-up). */
+  if (satellitesOpen() && !document.hidden) SATELLITES.timer = setTimeout(satellitesRefresh, satellitesCadence());
+}
+
+/* HOW SOON TO ASK THE HUB AGAIN: 3 s ONLY WHILE SOMETHING MOVES THAT NO EVENT
+   REPORTS. With the stream open, everything else on a row arrives as it
+   happens: a status every ten seconds with the levels and switches, online
+   and offline, a wake word, a conversation starting and ending, each step of
+   an update. What an event does not carry is the step from routing to
+   replying, a progress bar the firmware stops reporting, and the moment a
+   restart is over, so those states keep the 3 s; a calm list is asked every
+   30 s, as a reconcile against anything the stream missed. Without a stream,
+   or with one still connecting, the poll is all there is, and it stays at
+   3 s. The chips that run out on their own (Listening, Restarting, Update
+   failed) do not wait for either: satellitesExpiry repaints them. */
+const SAT_MOVING = ["updating", "restarting", "listening", "answering", "talking"];
+function satellitesCadence() {
+  const source = SATELLITES.events;
+  if (!source || source.readyState !== 1) return 3000;
+  const mem = satMem();
+  return SATELLITES.list.some(n => SAT_MOVING.includes(satState(n, mem).key)) ? 3000 : 30000;
+}
+
+/* A CHIP THAT RUNS OUT IS REPAINTED WHEN IT RUNS OUT, not by courtesy of a
+   poll. Listening lasts 15 s after a wake word, Restarting two minutes after
+   a reboot, Update failed ten minutes; each was cleared by the next 3 s poll
+   that happened to repaint the row, and with the poll at 30 s a Listening
+   chip would have stayed lit for up to half a minute after it ended. One
+   timer, set to the soonest of them, and set again after each repaint for
+   the next. Only while the tab is open: a closed tab paints nothing, and
+   entering it paints from scratch. Only ends still to come: the maps keep an
+   entry after its chip has gone (a wake word nothing answered stays in
+   `woke`), and counting one would set the timer in the past, every 250 ms,
+   for ever. */
+function satellitesExpiry() {
+  clearTimeout(SATELLITES.expiry);
+  if (!satellitesOpen()) return;
+  const now = Date.now();
+  let next = Infinity;
+  const ends = at => { if (at > now) next = Math.min(next, at); };
+  for (const at of SATELLITES.woke.values()) ends(at + 15000);
+  for (const r of SATELLITES.restarting.values()) ends(r.at + 120000);
+  for (const f of SATELLITES.otaFailed.values()) ends(f.at + 600000);
+  if (next === Infinity) return;
+  SATELLITES.expiry = setTimeout(() => { satellitesPaint(); satellitesExpiry(); },
+                                 Math.max(250, next - now + 50));
 }
 
 /* A ROW MOVES ONLY WHEN IT IS ADDED, ADOPTED OR RENAMED, never on a poll, so
@@ -5417,10 +5818,12 @@ function satellitesBadge(list) {
    Assistant meanwhile left the dock saying what it said when the tab was
    left. The stream stays open, so one of its events that can change the
    count asks for the satellite list alone, and only the count is taken
-   from it. */
+   from it. It settles with whether the hub answered, which is the live
+   layer's question before it opens the stream: a hub that does not answer a
+   list will not answer a stream either. */
 function satellitesCount() {
   SATELLITES.counting = SATELLITES.counting || json("/satellites")
-    .then(r => satellitesBadge((r && r.satellites) || []), () => {})
+    .then(r => { satellitesBadge((r && r.satellites) || []); return true; }, () => false)
     .finally(() => { SATELLITES.counting = null; });
   return SATELLITES.counting;
 }
@@ -5750,8 +6153,8 @@ function satAdoptedMarkup(u) {
           <div class="sat-ringset" id="${u}-ringset" hidden>
             <p class="hint sat-ringsay" aria-live="polite"></p>
             <div class="actions sat-ringtop">
-              <button class="small" type="button" data-act="ring-prev" aria-label="Move the lit LED back">◀</button>
-              <button class="small" type="button" data-act="ring-next" aria-label="Move the lit LED on">▶</button>
+              <button class="small" type="button" data-act="ring-prev" aria-label="Move the lit LED back"><svg class="glyph line" viewBox="0 0 12 12" aria-hidden="true"><path d="M7.5 2.5 4 6l3.5 3.5"/></svg></button>
+              <button class="small" type="button" data-act="ring-next" aria-label="Move the lit LED on"><svg class="glyph line" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6 4.5 9.5"/></svg></button>
               <button class="small" type="button" data-act="ring-top">That's the top</button>
             </div>
             <div class="actions sat-ringway" hidden>
@@ -6137,7 +6540,7 @@ function satAirPlay(li, n, cfg) {
      under the focus, which fell to the page: it goes to the section's own
      summary, as Update's does to Device's. */
   const shown = !!(on && ap && ap.session && remote);
-  if (!shown && !ctl.hidden && ctl.contains(document.activeElement)) {
+  if (!shown && !ctl.hidden && focusWithin(ctl)) {
     q(".sat-ap > summary").focus({ preventScroll: true });
   }
   ctl.hidden = !shown;
@@ -6584,7 +6987,7 @@ function satDevice(li, n, s) {
      the focus, which then fell to the page: the next Tab began at the top
      of the document, and nothing was said. Device's own summary takes it,
      as Set up the ring hands it back to its button. */
-  if (!img && !box.hidden && box.contains(document.activeElement)) {
+  if (!img && !box.hidden && focusWithin(box)) {
     li.querySelector(".sat-device > summary").focus({ preventScroll: true });
   }
   box.hidden = !img;
@@ -6751,7 +7154,7 @@ async function satelliteAct(li, act, button) {
       if (!r.ok) {
         let p = null;
         try { p = await r.json(); } catch {}
-        throw new Error(reason(p, `${r.status} ${r.statusText}`));
+        throw new Error(reason(p, failure(r.status)));
       }
       const player = q(".sat-try audio");
       if (player.src) URL.revokeObjectURL(player.src);
@@ -6778,6 +7181,7 @@ async function satelliteAct(li, act, button) {
          remembered, so the row reads Restarting and not Offline. */
       await json(`/satellites/${id}/reboot`, { method: "POST" });
       SATELLITES.restarting.set(id, { at: Date.now(), v: null, reboot: true });
+      satellitesExpiry();
       satSaid(host, satText("rebootSent", { name }));
     } else if (act === "movego") {
       /* The other hub sees it as new and waiting, with nothing carried over,
@@ -6812,7 +7216,7 @@ async function satelliteAct(li, act, button) {
 }
 
 /* SETTING UP THE RING WITHOUT ITS NUMBERS. The hub's own lights draw on the
-   LEDs by their number, so the page lights one, moves it with ◀ ▶ until it is
+   LEDs by their number, so the page lights one, moves it with the arrows until it is
    at 12 o'clock, then shows a bar running on from it, bright to dim, and asks
    which way that is. The answers are ring_top and ring_upside_down; the ring
    goes back off when it is done, cancelled, or left alone for two minutes. */
@@ -6832,7 +7236,7 @@ function satRingDraw(li) {
    Cancel and the idle cancel hide the whole panel, and each time the focus
    fell to the page, so a keyboard started again from the top of the
    document. It goes to the next step's first button, or back to Set up the
-   ring when the panel shuts; and from Set up the ring to ▶ when it opens,
+   ring when the panel shuts; and from Set up the ring to the forward arrow when it opens,
    as Move puts it in its field. Otherwise it is left where it is. */
 function satRingShow(li, step) {
   const box = li.querySelector(".sat-ringset"), open = li.querySelector('[data-act="ring"]');
@@ -6925,7 +7329,7 @@ function satForgotten(li) {
   SATELLITES.rows.delete(li.dataset.id);
   const target = next && [...next.querySelectorAll("summary, input, button")]
     .find(el => !el.disabled && !el.closest("[hidden]"));
-  (target || $("sat-h")).focus();
+  (target || $("word")).focus();
 }
 
 /* Rows that did not change on the hub but read something that did: the
@@ -7023,7 +7427,7 @@ const WAKE_HA = ["ha_assist", "ha_conversation"];
 const WAKE_MODE_WORD = { command: "Command", conversation: "Conversation", trigger: "Trigger" };
 const WAKE_MODE_HINT = { command: "modeCommand", conversation: "modeConversation", trigger: "modeTrigger" };
 const WAKE_DEST_WORD = { ha_assist: "Home Assistant Assist", ha_conversation: "Home Assistant",
-                         llm: "language model", webhook: "webhook", echo: "echo" };
+                         llm: "language model", webhook: "webhook", echo: "echo what it heard" };
 
 /* ONE WAKE WORD WRITE AT A TIME. Save, Try again and a model upload each
    answer with the whole list, so two in flight at once would each carry the
@@ -8048,6 +8452,9 @@ function wakeSummary(dirty) {
    as the provider's key, so every turn answered 401. So autocomplete is off,
    and data-1p-ignore, data-lpignore, data-bwignore and data-form-type="other"
    are each a password manager's own word for leaving a field alone. */
+/* The scope's legend says "Listens on", not "Satellites": that was the
+   masthead's word again, once per wake word, and its two choices already say
+   whose. */
 function wakeRowMarkup(u) {
   return `
   <details class="sat-row">
@@ -8074,7 +8481,7 @@ function wakeRowMarkup(u) {
           <div class="hint">A higher threshold ignores more false wakes, and misses more real ones.</div>
           <div class="hint ww-last"></div></div>
         <fieldset class="ww-sats">
-          <legend>Satellites</legend>
+          <legend>Listens on</legend>
           <div class="seg" role="group">
             <button type="button" aria-pressed="true" data-scope="all">Every satellite</button>
             <button type="button" aria-pressed="false" data-scope="chosen">Chosen</button>
@@ -8665,7 +9072,13 @@ function wakeLlmUpdate(row, w, words) {
   const can = (WAKE.server && WAKE.server.tools) || {};
   for (const box of row.querySelectorAll("[data-tool]")) {
     if (box !== document.activeElement) box.checked = (d.tools || []).includes(box.dataset.tool);
-    box.disabled = can[box.dataset.tool] === false && !box.checked;
+    /* data-off, NOT disabled: wakeRowUpdate's loop runs after this and sets
+       every control's disabled from data-off, so a box disabled here was
+       switched straight back on and Web search could be ticked and saved on
+       a hub with no search server, beside the hint saying it needs one. */
+    const off = can[box.dataset.tool] === false && !box.checked;
+    box.toggleAttribute("data-off", off);
+    box.disabled = off;
   }
   satSet(q(".ww-toolhint"), can.web_search === false ? SAT_COPY.toolsNoSearch : SAT_COPY.toolsHint);
   satFillSelect(q('[data-f="preset"]'), LLM_PRESETS);
@@ -9032,8 +9445,12 @@ $("fwupload").addEventListener("click", firmwareUpload);
    OFF UNTIL TURNED ON, and kept on the hub (services/satellites/app/
    telemetry.py). Read once with the first list of satellites, so the summary
    says whether it is recording without being opened, then when opened and
-   after each change: nobody watches it while it records, so no poll. */
-const TELEMETRY = { state: null, busy: false };
+   after each change. While it is open, and only then, it is read again every
+   30 s (tmTick), so the size beside Download follows what is being recorded
+   rather than saying what it was when the section was opened. `writes`
+   counts the changes sent, for the same reason SATELLITES counts its own: a
+   read that left before a change and lands after it is the old state. */
+const TELEMETRY = { state: null, busy: false, writes: 0, timer: null };
 
 function tmBytes(n) {
   return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
@@ -9056,14 +9473,27 @@ function tmShow() {
 }
 
 async function tmLoad() {
+  const since = TELEMETRY.writes;
   try {
-    TELEMETRY.state = await json("/satellites/telemetry");
+    const state = await json("/satellites/telemetry");
+    if (TELEMETRY.writes !== since) return;
+    TELEMETRY.state = state;
     note($("tmnote"), "", "");
   } catch (e) {
     /* A hub from before telemetry answers 404 here: nothing to say. */
     if (e.status !== 404) note($("tmnote"), "bad", satText("tmFailed", { message: e.message }));
   }
   tmShow();
+  tmTick();
+}
+
+/* THE NEXT READ, while somebody can see the answer: the section open, the tab
+   open, the page in front. Opening the section reads at once (its toggle),
+   and coming back to the page does (the live layer's catch-up). */
+function tmTick() {
+  clearTimeout(TELEMETRY.timer);
+  if ($("sat-telemetry").open && satellitesOpen() && !document.hidden)
+    TELEMETRY.timer = setTimeout(tmLoad, 30000);
 }
 
 async function tmSend(method, changes) {
@@ -9072,6 +9502,7 @@ async function tmSend(method, changes) {
   try {
     TELEMETRY.state = await json("/satellites/telemetry", changes === undefined ? { method }
       : { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes) });
+    TELEMETRY.writes++;
     note($("tmnote"), "", "");
   } catch (e) {
     note($("tmnote"), "bad", satText("tmFailed", { message: e.message }));
@@ -9081,7 +9512,9 @@ async function tmSend(method, changes) {
   }
 }
 
-$("sat-telemetry").addEventListener("toggle", () => { if ($("sat-telemetry").open) tmLoad(); });
+/* Opened, it is read at once; closed, the read already scheduled is let go
+   (tmTick clears it and, closed, sets no other). */
+$("sat-telemetry").addEventListener("toggle", () => { if ($("sat-telemetry").open) tmLoad(); else tmTick(); });
 $("tmon").addEventListener("change", () => tmSend("PUT", { enabled: $("tmon").checked }));
 $("tmlevel").addEventListener("change", () => tmSend("PUT", { level: $("tmlevel").value }));
 $("tmdays").addEventListener("change", () => {
@@ -9095,8 +9528,10 @@ $("tmdelete").addEventListener("click", () => {
 
 /* ================================================================ events == */
 /* THE EVENT LOG IS A STREAM, NOT A POLL: a button press is gone by the next
-   three-second tick. EventSource reconnects on its own; it is opened the first
-   time the tab is and left open, one connection, for the page's life. The
+   three-second tick. EventSource reconnects on its own; it is opened when the
+   page loads (liveStream), so the dock's count and Activity are live before
+   the tab is ever visited, and it is one connection: closed a minute after
+   the page is hidden and opened again on return (liveVisibility). The
    same stream feeds the rows: a wake word lights Listening at once, the
    reply, the end of a conversation or a trigger clears it, a conversation
    starting or ending asks the hub again so its row says so, and "rebooting"
@@ -9109,8 +9544,9 @@ $("tmdelete").addEventListener("click", () => {
    silent until a reload: rows stopped lighting Listening, Last heard stopped
    arriving, and the empty log still said to press a button, which sent
    people to hardware that was working. A closed stream is let go, so the next
-   poll that reaches the hub opens another (satellitesRefresh calls this),
-   and Activity says it is not connected until one opens. */
+   poll that reaches the hub opens another (satellitesRefresh calls this), or
+   with the tab shut the live layer's retry does, and Activity says it is not
+   connected until one opens. */
 function satellitesListen() {
   if (SATELLITES.events || !window.EventSource) return;
   const source = new EventSource("/ui/api/satellites/events");
@@ -9132,14 +9568,44 @@ function satellitesListen() {
   };
   source.onerror = () => {
     SATELLITES.evGap = true;
-    /* 2 is EventSource.CLOSED: it will not try again by itself. */
-    if (source.readyState === 2 && SATELLITES.events === source) SATELLITES.events = null;
+    /* 2 is EventSource.CLOSED: it will not try again by itself. The live
+       layer is told, because with the tab shut no poll comes along to open
+       another, and it retries on a ladder of its own. */
+    if (source.readyState === 2 && SATELLITES.events === source) {
+      SATELLITES.events = null;
+      SATELLITES.hooks.live("closed");
+    }
+    /* THE POLL TAKES OVER AT ONCE. The next poll was set while the stream
+       still read as open, so at the calm 30 s, and with the tab open the live
+       layer leaves the stream to that poll: the tab said "The hub stopped
+       answering" for up to half a minute after the hub was back. Without a
+       stream the cadence is 3 s, so the timer is brought forward to it. */
+    if (satellitesOpen() && !document.hidden) {
+      clearTimeout(SATELLITES.timer);
+      SATELLITES.timer = setTimeout(satellitesRefresh, satellitesCadence());
+    }
     satEventsSay(SAT_COPY.evLost);
   };
   source.onmessage = m => {
     let ev; try { ev = JSON.parse(m.data); } catch { return; }
-    /* Every ten seconds per satellite: noise here. */
-    if (ev.type === "status") return;
+    /* EVERY TEN SECONDS PER SATELLITE, AND IT IS THE POLL'S OWN ANSWER. The
+       hub sends each satellite's status as it arrives, about 2 KB, and the
+       page threw it away while asking for 7.4 KB of lists every 3 s to learn
+       the same thing. It is applied to the row now, as the poll's copy of that
+       satellite would be (satelliteUpdate leaves a slider under a finger
+       alone), and kept in the list so the health line and the next cadence
+       read it too. No line in Activity: it is a reading, not an event. */
+    if (ev.type === "status") {
+      const row = SATELLITES.rows.get(ev.satellite);
+      if (row && row._n && ev.status && typeof ev.status === "object") {
+        const n = { ...row._n, status: ev.status };
+        const at = SATELLITES.list.findIndex(x => x.id === ev.satellite);
+        if (at >= 0) SATELLITES.list[at] = n;
+        satelliteUpdate(row, n);
+        satellitesHealth();
+      }
+      return;
+    }
     /* A word finished downloading, or failed. The list takes each word's
        state from the event rather than waiting for the next poll, and the log
        leaves it out: it belongs to no one satellite. ONLY the states: the
@@ -9160,8 +9626,11 @@ function satellitesListen() {
     /* A satellite the page has no row for yet is named from the event, as
        the hub names it (online carries `name`, a trigger `satellite_name`);
        a bare twelve-character ID was the log's name for it. */
-    const who = row && row._n ? satName(row._n) : ev.name || ev.satellite_name
-      || (ev.type === "pending" ? "New satellite" : ev.satellite);
+    /* A pending one is "New satellite" here, whatever its row's title: the
+       line goes on to give its ID, and the row's "Satellite <ID>" would say
+       it twice. */
+    const who = ev.type === "pending" ? "New satellite"
+      : row && row._n ? satName(row._n) : ev.name || ev.satellite_name || ev.satellite;
     const ota = row && row._n && row._n.ota;
     const what = satEventWhat(ev, ota && ota.version);
     /* AN EVENT THE LOG HAS NO WORDS FOR IS LEFT OUT, and changes nothing
@@ -9169,8 +9638,16 @@ function satellitesListen() {
        an AirPlay command, the names of settings changed in its record, a
        firmware image uploaded or deleted), and each reached the log as the
        protocol's own word and asked for a refresh: "config" once for every
-       slider let go. The poll brings what they change. */
-    if (what === null) return;
+       slider let go. The poll brings what they change.
+       EXCEPT THAT THE POLL IS 30 s NOW, while the list is calm and the stream
+       open. A setting changed in Home Assistant, or an image another device
+       uploaded, would sit unseen for up to half a minute, so these two still
+       ask, while somebody can see the answer. Still no line in the log, and
+       satellitesRefresh folds a burst of them into one request. */
+    if (what === null) {
+      if ((ev.type === "config" || ev.type === "firmware") && satellitesOpen() && !document.hidden) satellitesRefresh();
+      return;
+    }
     if (ev.type === "wake" && !ev.injected) {
       SATELLITES.woke.set(ev.satellite, Date.now());
       if (typeof ev.score === "number" && ev.wake_word !== "ptt") {
@@ -9200,6 +9677,19 @@ function satellitesListen() {
       SATELLITES.otaFailed.set(ev.satellite, { v: ev.version || (ota && ota.version), error: ev.error,
                                                at: Date.now() });
       SATELLITES.restarting.delete(ev.satellite);
+    }
+    /* Whatever of the three time-bound chips this event started or ended,
+       the timer that clears them is set again for the soonest. Three small
+       maps, so it is simply run for every event rather than kept in step
+       with a list of which ones touch them. */
+    satellitesExpiry();
+    /* A WAKE WORD STARTS WHAT NO EVENT FINISHES REPORTING: the step from
+       routing to replying, Answering on the row, comes only from a poll. So
+       the next poll is brought forward to the moving cadence rather than left
+       up to 30 s away. Not while a poll is out: its end schedules the next. */
+    if (ev.type === "wake" && satellitesOpen() && !document.hidden && !SATELLITES.polling) {
+      clearTimeout(SATELLITES.timer);
+      SATELLITES.timer = setTimeout(satellitesRefresh, satellitesCadence());
     }
     /* ONE LINE PER UPDATE, AND NO REFRESH PER TEN PER CENT. The firmware
        reports progress every 10%, so an update wrote about fifteen lines of
@@ -9447,12 +9937,26 @@ async function loadGlossaries() {
   /* THE WHOLE LISTING, not just the names. The same document says whether this
      deployment has anywhere to write a profile at all, and in its own words
      why not when it has not, so both halves come from one request. */
-  let listing = null;
-  try { listing = await json("/glossaries"); } catch {}
+  LOADED.glossaries = Date.now();
+  const asked = ++GLOSS_SEQ.asked, writes = GLOSS_SEQ.writes;
+  let listing = null, failed = null;
+  try { listing = await json("/glossaries"); }
+  catch (e) { failed = e.status || 0; }
+  if (asked < GLOSS_SEQ.applied || writes !== GLOSS_SEQ.writes) return;
+  GLOSS_SEQ.applied = asked;
+  GLOSS_FAILED = failed;
   GLOSSARIES = (listing && listing.glossaries) || [];
   GLOSS_SERVED = !!listing;
   GLOSS_WRITABLE = !!(listing && listing.writable);
   GLOSS_REASON = (listing && listing.reason) || "";
+  /* NOTHING NEW, NOTHING REDRAWN. This is read again on the way into two tabs
+     now, and a rebuild for an identical answer took the focus off a toggle
+     and closed nothing but cost a redraw each time. The open profile is still
+     checked against the server, which is the one thing a same listing
+     cannot say. */
+  const sig = JSON.stringify([GLOSS_SERVED, GLOSS_WRITABLE, GLOSS_REASON, GLOSS_FAILED, GLOSSARIES]);
+  if (sig === GLOSS_SIG) { glossLive(); navSettle("glossaries"); return; }
+  GLOSS_SIG = sig;
 
   /* WHAT THE READER HAD TICKED, carried over the rebuild. Saving or deleting a
      profile calls this function again, and without this the row of toggles is
@@ -9467,7 +9971,7 @@ async function loadGlossaries() {
   $("glossbox").hidden = !GLOSSARIES.length;
   $("gloss").innerHTML = GLOSSARIES.map(g =>
     `<button type="button" data-gloss="${esc(g.name)}" aria-pressed="false"
-       title="${esc(g.terms + " terms")}">${esc(g.name)}</button>`).join("");
+       title="${esc(termCount(g.terms))}">${esc(g.name)}</button>`).join("");
   $("gloss").querySelectorAll("button").forEach(b => {
     if (kept.indexOf(b.dataset.gloss) >= 0) b.setAttribute("aria-pressed", "true");
     b.addEventListener("click", () => {
@@ -9478,6 +9982,7 @@ async function loadGlossaries() {
     });
   });
   glossRender();
+  glossLive();
   navSettle("glossaries");
 }
 
@@ -9556,8 +10061,14 @@ function glossRender() {
   const none = $("glossnone");
   if (none) {
     none.hidden = GLOSS_SERVED;
-    none.textContent = "This deployment has no vocabulary service, so there "
-      + "are no profiles to manage here.";
+    /* A 404 is a deployment without the service; anything else is a service
+       that did not answer this time, and the tab reads it again on the way
+       back in, so it says that instead of calling it absent. */
+    none.textContent = GLOSS_FAILED !== null && GLOSS_FAILED !== 404
+      ? "The transcription service did not answer, so its profiles cannot be listed. "
+        + "This tab asks again when you come back to it."
+      : "This deployment has no vocabulary service, so there "
+        + "are no profiles to manage here.";
   }
   if (!GLOSS_SERVED) return;
   const open = !$("glossform").hidden;
@@ -9565,12 +10076,18 @@ function glossRender() {
   $("glossnames").innerHTML = GLOSSARIES.map(g =>
     `<button type="button" data-open="${esc(g.name)}"
        aria-pressed="${g.name === here ? "true" : "false"}"
-       title="${esc(g.source + ", " + g.terms + " terms")}">${esc(g.name)}</button>`
+       title="${esc(glossSource(g.source) + ", " + termCount(g.terms))}">${esc(g.name)}</button>`
   ).join("");
   $("glossnames").querySelectorAll("button").forEach(b =>
     b.addEventListener("click", () => { navProfile(b.dataset.open); glossOpen(b.dataset.open, b); }));
   glossGuards();
 }
+
+/* THE SERVICE'S WORDS FOR A PROFILE, SAID IN THE PAGE'S. "builtin" sat in a
+   pill above a hint saying "a built-in profile", and one term read "1 terms". */
+const GLOSS_SOURCE = { builtin: "Built-in", custom: "Custom" };
+function glossSource(source) { return GLOSS_SOURCE[source] || source; }
+function termCount(n) { return Number(n) === 1 ? "1 term" : `${n} terms`; }
 
 /* Every control in the panel, settled from the name box and the listing. Runs
    on load, on every keystroke in either field, and after every write. */
@@ -9581,8 +10098,8 @@ function glossGuards() {
   const bytes = glossBytes($("glosstext").value);
   const kb = (bytes / 1024).toFixed(1) + " KB";
 
-  $("glosssource").textContent = profile ? profile.source : "new";
-  $("glossterms").textContent = profile ? profile.terms + " terms" : "not saved";
+  $("glosssource").textContent = profile ? glossSource(profile.source) : "New";
+  $("glossterms").textContent = profile ? termCount(profile.terms) : "not saved";
   $("glossbytes").textContent = kb;
   $("glossbytes").className = "pill" + (bytes > GLOSS_MAX_BYTES ? " bad" : "");
 
@@ -9621,8 +10138,10 @@ async function glossOpen(name, button) {
       other.setAttribute("aria-pressed", String(other === button));
     }
   }
+  const asked = ++GLOSS_ASKED;
   try {
     const profile = await json("/glossaries/" + encodeURIComponent(name));
+    if (asked !== GLOSS_ASKED) return;
     $("glossname").value = profile.name;
     /* THE FILE TEXT, not the parsed replacements and hotwords. The comments in
        a glossary are where it says why a rule is a hotword rather than a
@@ -9630,11 +10149,20 @@ async function glossOpen(name, button) {
        field would drop every one of them. */
     $("glosstext").value = profile.text || "";
     $("glossform").hidden = false;
+    GLOSS_OPEN = { name: profile.name, text: profile.text || "" };
   } catch (err) {
+    if (asked !== GLOSS_ASKED) return;
     $("glossform").hidden = true;
-    note($("glossnote"), "bad", esc(err.message));
+    note($("glossnote"), "bad", err.message);
   }
   glossRender();
+}
+
+/* EDITS NOT SAVED: the editor is open and its text is not what was opened
+   (or, for a new profile, not empty). */
+function glossDirty() {
+  if ($("glossform").hidden) return false;
+  return $("glosstext").value !== (GLOSS_OPEN ? GLOSS_OPEN.text : "");
 }
 
 function glossNew() {
@@ -9643,6 +10171,7 @@ function glossNew() {
   $("glossname").value = "";
   $("glosstext").value = "";
   $("glossform").hidden = false;
+  GLOSS_OPEN = null;
   glossRender();
   $("glossname").focus();
   /* A new profile has no address until it is saved: the entry goes back to
@@ -9662,7 +10191,10 @@ function glossRefused(detail) {
   const lines = detail.rejected || [];
   const forceable = lines.length > 0 &&
     lines.every(r => String(r.reason || "").indexOf("send force") >= 0);
-  note($("glossnote"), "bad", esc(detail.message || "") +
+  /* MARKUP, SO noteHtml, AND EVERY VALUE ESCAPED. It went through note(),
+     which writes text, so the reader saw the tags as typed and every quote
+     as &#39;. */
+  noteHtml($("glossnote"), "bad", esc(detail.message || "") +
     lines.map(r => `<div class="hint">Line ${esc(r.line)}: ${esc(r.text)}
       <br>${esc(r.reason)}</div>`).join(""));
   $("glossforce").hidden = !forceable;
@@ -9671,24 +10203,40 @@ function glossRefused(detail) {
 async function glossSave(force) {
   const target = glossTarget();
   $("glosssave").disabled = true;
+  /* LAST WRITE WINS ACROSS DEVICES, SO THE READER CHOOSES WHICH. The profile
+     this editor opened is read again first; if somebody changed it elsewhere
+     since, to something other than what is about to be saved, the save would
+     put this version over theirs without either of them knowing. Asked, and
+     a No changes nothing. */
+  if (GLOSS_OPEN && target.name === GLOSS_OPEN.name) {
+    let now = null;
+    try { now = await json("/glossaries/" + encodeURIComponent(target.name)); } catch {}
+    const theirs = now ? now.text || "" : null;
+    if (theirs !== null && theirs !== GLOSS_OPEN.text && theirs !== $("glosstext").value
+        && !confirm(`"${target.name}" was changed on another device since you opened it. Save yours over it?`)) {
+      $("glosssave").disabled = false;
+      return;
+    }
+  }
   note($("glossnote"), "flat", "Saving…");
   try {
     const written = await json(
       "/glossaries/" + encodeURIComponent(target.name) + (force ? "?force=true" : ""),
       { method: "PUT", headers: { "content-type": "application/json" },
         body: JSON.stringify({ text: $("glosstext").value }) });
+    GLOSS_SEQ.writes++;
     $("glossforce").hidden = true;
     /* The listing carries the term counts and the source, and the row of
        toggles on this tab is drawn from it, so both are refreshed from one
        request rather than patched in place. */
+    GLOSS_OPEN = { name: written.name, text: $("glosstext").value };
     await loadGlossaries();
     navProfile(written.name, "replace");
-    note($("glossnote"), "ok",
-         `Saved <strong>${esc(written.name)}</strong>, ${esc(written.terms)} terms.`);
+    note($("glossnote"), "ok", `Saved ${written.name}, ${termCount(written.terms)}.`);
   } catch (err) {
     const detail = err.payload && err.payload.detail;
     if (err.status === 400 && detail && detail.rejected) glossRefused(detail);
-    else note($("glossnote"), "bad", esc(err.message));
+    else note($("glossnote"), "bad", err.message);
   }
   glossGuards();
 }
@@ -9702,14 +10250,40 @@ async function glossDelete() {
 The file is deleted from disk.`)) return;
   try {
     await json("/glossaries/" + encodeURIComponent(target.name), { method: "DELETE" });
+    GLOSS_SEQ.writes++;
     $("glossform").hidden = true;
+    GLOSS_OPEN = null;
     await loadGlossaries();
     navProfile(null);
     noteHtml($("glossnote"), "ok", `Deleted <strong>${esc(target.name)}</strong>.`);
   } catch (err) {
-    note($("glossnote"), "bad", esc(err.message));
+    note($("glossnote"), "bad", err.message);
   }
   glossGuards();
+}
+
+/* A PROFILE CHANGED ON ANOTHER DEVICE WHILE IT IS OPEN HERE. Run whenever the
+   listing is read, which the live layer does on the way into the tab. An
+   editor nobody has touched is brought up to date in place; one with edits in
+   it is left alone and told, because those edits are the reader's and the
+   save after them would be last-write-wins. */
+async function glossLive() {
+  const open = GLOSS_OPEN;
+  if (!open || $("glossform").hidden) return;
+  let now = null;
+  try { now = await json("/glossaries/" + encodeURIComponent(open.name)); }
+  catch (e) { if (e.status !== 404) return; }
+  if (GLOSS_OPEN !== open || (now && (now.text || "") === open.text)) return;
+  const clean = $("glosstext").value === open.text && $("glossname").value === open.name;
+  if (clean && now) {
+    $("glosstext").value = now.text || "";
+    GLOSS_OPEN = { name: open.name, text: now.text || "" };
+    glossGuards();
+    return;
+  }
+  note($("glossnote"), "warn", now
+    ? "This profile was changed on another device since you opened it. Saving puts your version over it."
+    : "This profile was deleted on another device. Saving puts it back.");
 }
 
 $("glossnew").addEventListener("click", glossNew);
@@ -10094,14 +10668,24 @@ async function startFetch(options) {
 
 async function watchDownload() {
   const host = $("stt-note");
+  /* ONE DOWNLOAD PER WATCH. "Stop and forget it" clears stt.token, and a new
+     link replaces it; either way this loop is no longer about the download on
+     screen. It was checked only before the two-second sleep, so a press during
+     the sleep still sent one more poll, for token "null", and the 404 that
+     came back was written as "Lost track of the download" right after the
+     reader had chosen to stop. Checked after every wait now. */
+  const token = stt.token;
+  const gone = () => stt.token !== token;
   for (;;) {
     let state;
     try {
-      state = await json("/ui/progress?token=" + encodeURIComponent(stt.token));
+      state = await json("/ui/progress?token=" + encodeURIComponent(token));
     } catch (err) {
+      if (gone()) return;
       note(host, "bad", "Lost track of the download: " + err.message);
       return;
     }
+    if (gone()) return;
     if (state.ready) {
       if (stt.captions) {
         note(host, "ok", "Reading the subtitles…");
@@ -10131,18 +10715,23 @@ async function watchDownload() {
       return;
     }
     const percent = Number(state.percent) || 0;
-    /* esc() on both: speed and eta come out of MeTube's /history like the
-       error text did, so they are a remote server's strings, not numbers this
-       page produced. human() and clock() format whatever they are given. */
-    noteHtml(host, "flat", `Downloading ${percent.toFixed(0)}%${
-      state.speed ? " · " + esc(human(state.speed)) + "/s" : ""}${
-      state.eta ? " · " + esc(clock(state.eta)) + " left" : ""}
-      <div class="bar-track"><div class="bar-fill" style="transform:scaleX(${(percent / 100).toFixed(4)})"></div></div>
-      <button class="link" id="stopdl" type="button">Stop and forget it</button>`);
-    const stop = $("stopdl");
-    if (stop) stop.addEventListener("click", abandon, { once: true });
-    if (!stt.token) return;                       /* abandoned mid-poll */
+    /* BUILT ONCE, THEN WRITTEN INTO. The whole note used to be rewritten every
+       2 s, Stop and forget it included, so a keyboard on that button lost it
+       at the next tick and a press landing on the tick hit a button that was
+       already gone. The note is made the first time (or again if something
+       else wrote this host meanwhile) and each tick changes only the words
+       and the bar. textContent, not esc() into markup: speed and eta come out
+       of MeTube's /history like the error text did, so they are a remote
+       server's strings, and now they are never parsed as markup at all.
+       human() and clock() format whatever they are given. */
+    if (!$("stopdl") || !host.querySelector(".dlsaid")) {
+      noteHtml(host, "flat", '<span class="dlsaid"></span><div class="bar-track"><div class="bar-fill"></div></div><button class="link" id="stopdl" type="button">Stop and forget it</button>');
+      $("stopdl").addEventListener("click", abandon, { once: true });
+    }
+    host.querySelector(".dlsaid").textContent = `Downloading ${percent.toFixed(0)}%${state.speed ? " · " + human(state.speed) + "/s" : ""}${state.eta ? " · " + clock(state.eta) + " left" : ""}`;
+    host.querySelector(".bar-fill").style.transform = `scaleX(${(percent / 100).toFixed(4)})`;
     await new Promise(r => setTimeout(r, 2000));
+    if (gone()) return;
   }
 }
 
@@ -11036,10 +11625,21 @@ async function render(response, format) {
   if (!response.ok) {
     let payload = null;
     try { payload = JSON.parse(await response.text()); } catch {}
-    throw new Error(reason(payload, response.status + " " + response.statusText));
+    throw new Error(reason(payload, failure(response.status)));
   }
   const engine = response.headers.get("x-stt-engine");
   let text = "", meta = [], repaired = null, timed = null, lines = [];
+  /* THE REWRITES ON /v1 COME AS A HEADER, because that surface may not change
+     a response's shape and text, srt and vtt have nowhere to put a key. Each
+     term is percent-encoded, so a comma inside one cannot split it, and the
+     header is absent when nothing fired. The native body's own `repaired`
+     below takes its place on that route. */
+  const rewrote = response.headers.get("x-glossary-repaired");
+  if (rewrote) {
+    repaired = rewrote.split(", ").map(term => {
+      try { return decodeURIComponent(term); } catch { return term; }
+    });
+  }
 
   if (type.includes("json")) {
     const body = await response.json();
@@ -11056,7 +11656,10 @@ async function render(response, format) {
          what rate.stt() returned. See the comment on `rate`. */
     } else {
       text = body.text !== undefined ? body.text : JSON.stringify(body, null, 2);
-      if (body.duration) meta.push(clock(body.duration) + " of audio");
+      /* "10 s", as Jobs and the native route write it; clock() past a minute,
+         where "1m 30s" reads faster than "90 s". */
+      if (body.duration) meta.push((body.duration < 60 ? secondsSaid(body.duration)
+                                                       : clock(body.duration)) + " of audio");
       if (body.usage && body.usage.seconds) meta.push(body.usage.seconds + " s billed");
       timed = timedFromJson(body, text);
       lines = linesFromJson(body);
@@ -11072,7 +11675,9 @@ async function render(response, format) {
       lines = parseSubtitles(text);
     }
   }
-  if (engine) meta.push("engine: " + engine);
+  /* THE ENGINE BY ITS NAME. "engine: parakeet-tdt-0.6b-v3" was a checkpoint
+     id behind a field label; the family is the name a reader chose by. */
+  if (engine) meta.push(engineName(engine.split("-")[0]));
 
   /* THE EXTENSION FOLLOWS WHAT THE SERVER WAS ACTUALLY ASKED FOR, and that is
      now the whole rule. It used to follow a separate `wanted`, because the
@@ -11096,11 +11701,8 @@ async function render(response, format) {
 
   /* THE GLOSSARY SUBSTITUTIONS, SURFACED. A silent rewrite is worse than no
      rewrite, and this field is the only thing in the stack that says one
-     happened. It exists only on the native route today, which is exactly why
-     the browser-side 16 kHz extraction above matters: it is what makes the
-     native route reachable for a file that was not already 16 kHz. Until
-     an X-Glossary-Repaired header lands on /v1 (about five lines in stt), the
-     /v1 path genuinely cannot report this.
+     happened. The native route carries it in its body and /v1 in the
+     x-glossary-repaired header read at the top of this function.
 
      IT USED TO SAY SO ON THE CARD: "Glossary changes are not reported on this
      route -- only /transcribe returns them." That is a gap in another service,
@@ -11507,6 +12109,7 @@ let _detectedStem = "";
    network calls per character. The list is already in VOICES, so rendering is
    free and only the fetch needs to stay rare. */
 async function loadVoices() {
+  LOADED.voices = Date.now();
   let kokoro = null, clones = [];
   /* TOGETHER, NOT ONE AFTER THE OTHER. One read is tts-stack's voice list
      through the gateway and the other is this service's own clip directory;
@@ -11514,15 +12117,44 @@ async function loadVoices() {
      on the LAN before the picker can be drawn at all. allSettled rather than
      all, because a failed clip listing is an empty list and must not take the
      Kokoro voices down with it, which is what the two separate catches said. */
+  const asked = ++VOICES_SEQ.asked, writes = VOICES_SEQ.writes;
   const [listed, clips] = await Promise.allSettled(
     [json("/voices"), json("/ui/clips")]);
+  if (asked < VOICES_SEQ.applied || writes !== VOICES_SEQ.writes) return;
+  VOICES_SEQ.applied = asked;
   if (listed.status === "fulfilled") kokoro = listed.value;
-  else note($("speak-note"), "bad",
-            "Could not list voices: " + (listed.reason || {}).message);
   if (clips.status === "fulfilled") clones = (clips.value || {}).voices || [];
+  /* THE FAILURE IS TAKEN BACK WHEN A LATER READ SUCCEEDS. The list is read
+     again on the way into Speak now, so a page that loaded while tts-stack
+     was restarting recovers by itself, and the note saying it could not list
+     voices would otherwise stay above a list that is full. Only this note is
+     cleared, never one a press wrote. */
+  const failed = kokoro ? "" : "Could not list voices: " + (listed.reason || {}).message;
+  if (VOICES_FAILED && !failed) note($("speak-note"), "", "");
+  VOICES_FAILED = failed;
   VOICES = { kokoro: kokoro || {}, clones };
-  renderVoices();
+  voicesRedraw();
+  /* SAID AFTER THE REDRAW, NOT BEFORE IT. Drawing the picker selects a voice,
+     and selecting one rewrites this note: written first, the one sentence
+     explaining an empty Kokoro group was wiped in the same tick and never
+     seen. speakNoteClear keeps it from then on. */
+  if (failed) note($("speak-note"), "bad", failed);
   navSettle("voices");
+}
+
+/* NEVER UNDER THE READER. A select rebuilt while open closes in their hand, so
+   a focused picker is redrawn when it is left. A cloned voice that has gone
+   from the server is said, rather than swapped silently for another: the
+   next Generate would otherwise speak in a voice nobody chose. Gone means
+   gone from the clip listing, by name: the option's value carries the engine
+   it runs on, which can change under a voice that is still there. */
+function voicesRedraw() {
+  const select = $("voice");
+  if (document.activeElement === select) { select.addEventListener("blur", voicesRedraw, { once: true }); return; }
+  const was = currentVoice();
+  renderVoices();
+  if (was.kind === "clone" && was.name !== "default" && !VOICES.clones.some(c => c.name === was.name))
+    note($("speak-note"), "warn", `${was.name} is no longer on this server, so another voice is selected.`);
 }
 
 function renderVoices() {
@@ -11597,10 +12229,10 @@ function renderVoices() {
      the reader is choosing on. So the test is how many engines read the voices
      in the group, and for a deployment that publishes no engine block at all
      it is the figure this page has always shown. */
-  const clipEngines = engineIds().filter(id => !presetVoices(id));
+  const readers = clipEngines();
   const clipCost = !engineIds().length
     ? `about ${(1 / rate.clone()).toFixed(0)}× the audio length`
-    : clipEngines.length === 1 ? costWords(clipEngines[0]) : "";
+    : readers.length === 1 ? costWords(readers[0]) : "";
   const factor = clipCost ? clipCost + ", " : "";
   /* THE PREFIX IS THE ENGINE THE VOICE BELONGS TO, and for a clip that is not
      a property of the voice at all -- so it carries the deployment's default
@@ -11608,10 +12240,9 @@ function renderVoices() {
      engine block gets: the value this page has always written, the one stored
      jobs and remembered selections are keyed on, and the one currentVoice
      still reads. */
-  const clipPrefix = clipEngines[0] || defaultEngine() || "c";
   html += `<optgroup label="Chatterbox, slow: ${factor}queued as a job">` +
-    `<option value="${esc(clipPrefix)}:default">default (no clip needed)</option>` +
-    clones.map(c => `<option value="${esc(clipPrefix)}:${esc(c.name)}">${esc(c.name)}</option>`).join("") +
+    `<option value="${esc(clipValue("default"))}">default (no clip needed)</option>` +
+    clones.map(c => `<option value="${esc(clipValue(c.name))}">${esc(c.name)}</option>`).join("") +
     "</optgroup>";
 
   /* ------------------------------------------------------------------------
@@ -11663,8 +12294,9 @@ function renderVoices() {
      an engine that cannot run. */
   const first = [...select.options].find(o =>
     !o.disabled && !(o.parentElement && o.parentElement.disabled));
-  select.value = previous && [...select.options].some(o => o.value === previous)
-    ? previous
+  const kept = voiceOption(previous);
+  select.value = kept
+    ? kept.value
     : (all.includes("bm_george") && (!chosenLang || chosenLang === "auto")
         ? "k:bm_george" : (first || select.options[0]).value);
   onVoiceChange();
@@ -11863,6 +12495,9 @@ function engineSummary(id) {
 let engineSaid = "";
 function noteEngine(said) { if (said) engineSaid = said; }
 
+/* The markup last written into #engineopts, so a redraw that would write the
+   same thing does not (renderEngines). */
+let ENGINES_DRAWN = "";
 function renderEngines() {
   const row = $("enginerow");
   if (!row) return;
@@ -11890,7 +12525,7 @@ function renderEngines() {
      speak stays disabled on the control after the reader moves to a Kokoro
      voice, and the sliders stay gone with it. Hiding a control must not leave
      its consequences behind. */
-  if (row.hidden) { $("engineopts").innerHTML = ""; syncEngineControls(); return; }
+  if (row.hidden) { $("engineopts").innerHTML = ""; ENGINES_DRAWN = ""; syncEngineControls(); return; }
 
   const before = currentEngine();
   let chosen = before;
@@ -11915,8 +12550,20 @@ function renderEngines() {
       `<span><strong>${esc(engineLabel(id))}</strong> ` +
       (said ? `<span class="why">${esc(said)}</span>` : "") + `</span></label>`;
   });
-  $("engineopts").innerHTML = drawn.join("");
-  engineInputs().forEach(input => input.addEventListener("change", onEngineChange));
+  /* REBUILT ONLY WHEN IT CHANGED. This runs on every health answer, and a
+     rewrite took the focus off a radio somebody was moving through with the
+     arrow keys, every 30 s, for a list that had not changed. When it has
+     changed (a runner went away, so an engine is disabled now), the focus is
+     put back on the same engine if it can still be chosen. */
+  const html = drawn.join("");
+  if (html !== ENGINES_DRAWN) {
+    const had = $("engineopts").contains(document.activeElement) ? document.activeElement.value : null;
+    $("engineopts").innerHTML = html;
+    ENGINES_DRAWN = html;
+    engineInputs().forEach(input => input.addEventListener("change", onEngineChange));
+    const again = had && engineInputs().find(i => i.value === had && !i.disabled);
+    if (again) again.focus({ preventScroll: true });
+  }
   syncEngineControls();
   /* AND THE ETA FOLLOWS THE ENGINE IT IS NOW FOR. This runs on the thirty
      second poll as well as on a voice change, so a runner that goes away while
@@ -12030,7 +12677,19 @@ function onEngineChange() {
      between here and the paint may add a new sentence. */
   engineSaid = "";
   syncEngineControls();
+  nameClonePanel();
   estimate();
+}
+
+/* THE ENGINE THE PANEL IS FOR, ON THE PANEL. It said "Expert: Chatterbox
+   voices" in the markup, so a preset voice from a third engine opened a panel
+   titled after a model that was not going to run -- the same failure the
+   optgroup labels were renamed to fix. Named from both the picker and the
+   engine radio, because the radio changes the engine without the voice. */
+function nameClonePanel() {
+  const summary = $("tts-expert-clone").querySelector("summary");
+  if (summary && engineLabel(currentEngine()))
+    summary.textContent = `Expert: ${engineLabel(currentEngine())} voices`;
 }
 
 function onVoiceChange() {
@@ -12039,8 +12698,10 @@ function onVoiceChange() {
   /* BEFORE THE EARLY RETURN, so opening the clone sheet takes the engine
      picker off the screen with everything else that belongs to a voice. */
   renderEngines();
-  /* The sheet is a place, so it is in the address (navVoice) as well. */
-  if (voice.kind === "new") { $("clipname").focus(); navVoice(); return; }
+  /* The sheet is a place, so it is in the address (navVoice) as well. And it
+     greys Generate through estimate(), which returned unreached here, so with
+     text typed both buttons stayed enabled on the sheet and did nothing. */
+  if (voice.kind === "new") { $("clipname").focus(); estimate(); navVoice(); return; }
 
   /* TWO QUESTIONS, AND EVERY LINE BELOW BELONGS TO EXACTLY ONE OF THEM.
      `job` is where this runs and how long it takes; `clip` is whether the
@@ -12063,13 +12724,7 @@ function onVoiceChange() {
   const builtin = clip && voice.name === "default";
   $("tts-expert-fast").hidden = job;
   $("tts-expert-clone").hidden = !job;
-  /* THE ENGINE THE PANEL IS FOR, ON THE PANEL. It said "Expert: Chatterbox
-     voices" in the markup, so a preset voice from a third engine opened a
-     panel titled after a model that was not going to run -- the same failure
-     the optgroup labels were renamed to fix. */
-  const summary = $("tts-expert-clone").querySelector("summary");
-  if (summary && engineLabel(currentEngine()))
-    summary.textContent = `Expert: ${engineLabel(currentEngine())} voices`;
+  nameClonePanel();
   /* CLIP-SHAPED, NOT JOB-SHAPED. Without this a bad clip is stuck in the
      picker for ever and the only way out is shelling into a container to
      delete a file -- and a preset embedding has no file to delete, so offering
@@ -12195,6 +12850,7 @@ $("delvoice").addEventListener("click", async () => {
   if (!confirm(`Delete the voice "${voice.name}"? The clip is deleted from disk.`)) return;
   try {
     await json("/ui/clips/" + encodeURIComponent(voice.name), { method: "DELETE" });
+    VOICES_SEQ.writes++;
     await loadVoices();
     noteHtml($("speak-note"), "ok", `Deleted <strong>${esc(voice.name)}</strong>.`);
   } catch (err) { note($("speak-note"), "bad", err.message); }
@@ -12310,7 +12966,7 @@ function estimate() {
     $("go-tts").textContent = "Generate & listen";
     $("go-tts-quiet").textContent = "Generate";
     /* NOT WHILE A RUN IS IN FLIGHT, and not over what the last one said. */
-    if (!speaking && !speakHeld) note($("speak-note"), "", "");
+    if (!speaking && !speakHeld) speakNoteClear();
   } else {
     /* rate.clone() WITH NO ARGUMENT IS THE ENGINE THIS VOICE WILL RUN ON --
        cloneRate falls back to currentEngine(), which a preset voice carries --
@@ -12322,15 +12978,17 @@ function estimate() {
        just says "Speak"; the asymmetry is the message. */
     $("go-tts-quiet").textContent = text.trim()
       ? "Generate (" + roughly(compute) + ")" : "Generate";
-    if (compute > 600) {
+    if (compute > 600 && !speaking) {
       /* A WARNING WITH NO ESCAPE IS JUST AN OBSTACLE. The cheap path is
-         offered as a button, not described in a sentence. */
+         offered as a button, not described in a sentence. MARKUP, SO
+         noteHtml: through note() the buttons were printed as text, #anyway
+         never existed, and the listener below threw on every keystroke. */
       const quick = nearestKokoro();
-      note($("speak-note"), "warn",
-        `This is ${roughly(compute)} of compute.${quick ? ` <strong>${quick}</strong>
+      noteHtml($("speak-note"), "warn",
+        `This is ${roughly(compute)} of compute.${quick ? ` <strong>${esc(quick)}</strong>
          would take ${roughly(speechSeconds(text, "kokoro") / rate.kokoro())}.` : ""}
          <div class="acts">
-           ${quick ? `<button class="small" id="useq" type="button">Use ${quick} instead</button>` : ""}
+           ${quick ? `<button class="small" id="useq" type="button">Use ${esc(quick)} instead</button>` : ""}
            <button class="small" id="anyway" type="button">Queue it anyway</button>
          </div>`);
       const use = $("useq");
@@ -12349,8 +13007,12 @@ function estimate() {
            precisely the failure the warning's own comment was written about. */
         $("go-tts-quiet").click();
       });
-    } else {
-      note($("speak-note"), "", "");
+    } else if (!speaking && !speakHeld) {
+      /* THE SAME GUARD AS KOKORO'S. A refusal ("The queue is full… Try again
+         in 30 s."), the "is ready" note after a clip is saved, and a link's
+         "names a voice this server does not have" were wiped in the tick they
+         were written, and again whenever the live layer redrew the picker. */
+      speakNoteClear();
     }
   }
   codeSwitchNote(text);
@@ -12417,7 +13079,7 @@ function addSegment(text) {
   const row = document.createElement("div");
   row.className = "row";
   row.style.marginTop = "8px";
-  row.innerHTML = `<input type="text" class="seg-text" placeholder="segment text" value="${esc(text || "")}">
+  row.innerHTML = `<input type="text" class="seg-text" placeholder="segment text" aria-label="Text of this segment" value="${esc(text || "")}">
     <div class="tight" style="min-width:110px"><label>pause after (s)</label>
       <input type="number" class="seg-pause" min="0" max="10" step="0.1" value="0"></div>
     <div class="tight" style="min-width:150px"><label>voice</label>
@@ -13258,7 +13920,7 @@ async function speakNow(voice, text, listen) {
       body: JSON.stringify(body) });
     if (!response.ok) {
       let payload = null; try { payload = await response.json(); } catch {}
-      throw new Error(reason(payload, response.status + " " + response.statusText));
+      throw new Error(reason(payload, failure(response.status)));
     }
 
     const type = response.headers.get("content-type") || "";
@@ -13309,7 +13971,7 @@ async function speakNow(voice, text, listen) {
       const payload = await response.json();
       if (payload.id) { adopt(payload.id); throw new Error(
         "That came back as a job. Open the Jobs tab."); }
-      throw new Error(reason(payload, "unexpected JSON from a speech request"));
+      throw new Error(reason(payload, "The speech service answered with something this page cannot play."));
     } else {
       blob = await response.blob();
     }
@@ -13532,6 +14194,7 @@ async function queueJob(voice, text) {
   try {
     payload = await json("/jobs", { method:"POST",
       headers:{ "content-type":"application/json" }, body: JSON.stringify(body) });
+    JOBS_SEQ.writes++;
   } catch (err) {
     if (err.status === 429) {
       throw new Error(`The queue is full. Nothing was queued.${err.retryAfter
@@ -13618,19 +14281,30 @@ function hasAudio(job) {
    the service spelled it rather than dropped. */
 const ENGINE_REASON = {
   pinned: "asked for by name",
-  default: "the deployment's default",
+  default: "default",
   "alias:tts-long": "via the tts-long alias",
   "alias:openai": "via an OpenAI model name",
 };
 
+/* AN ENGINE BY ITS NAME. tts-long's engines carry a label in /health; Kokoro
+   and Parakeet are not tts-long's and have none here, so their id is said
+   with a capital, as a name is, rather than as the service spells it. */
+function engineName(id) {
+  if (!id) return "";
+  return engineSpec(id) ? engineLabel(id) : id.charAt(0).toUpperCase() + id.slice(1);
+}
+
 function ranOn(job) {
   const host = job.host || "";
-  const engine = job.engine || "";
+  const engine = engineName(job.engine);
   const why = job.engine_reason
     ? ` (${ENGINE_REASON[job.engine_reason] || job.engine_reason})` : "";
   if (job.backend === "runner") {
     const where = job.runner_host || "the runner";
-    const what = job.runner_service || engine;
+    /* THE ENGINE, NOT THE SERVICE. `runner_service` is a container's name
+       on the other machine ("chatterbox-runner"), which says less than the
+       engine it serves and says it in the deployment's words. */
+    const what = engine || job.runner_service;
     return what ? `GPU ${where} · ${what}${why}` : `GPU ${where}`;
   }
   /* A JOB THAT NEVER RAN MUST NOT NAME A MACHINE. An engine with no lane on
@@ -13692,6 +14366,20 @@ function secondsSaid(seconds) {
 
 const JOBTEXT = new Map();
 
+/* A FAILED RUN'S REASON, WITH THE PLUMBING TAKEN OFF. tts-long words most
+   failures itself ("the runner went away in the middle of segment 3"), but one
+   that escaped the runner's transport arrives as the request and the
+   exception -- "GET /v1/status: IncompleteRead(0 bytes read)" -- a path and a
+   class name for somebody who asked for a voice. remote.py raises that shape
+   for one thing only, the runner going missing, so it is said as that; every
+   other reason is the service's own sentence. */
+function jobTrouble(error) {
+  const said = String(error || "").trim();
+  if (!said) return "no reason given";
+  if (/^(GET|POST|PUT|PATCH|DELETE) \/\S*: /.test(said)) return "The GPU runner stopped answering during this run.";
+  return said;
+}
+
 /* THE JOBS WHOSE STOP HAS BEEN ASKED FOR AND NOT YET ANSWERED. A separate set
    rather than a flag on the job object, because refreshJobsInner clears `jobs`
    and refills it from the listing on every poll, so a flag written onto a job
@@ -13709,6 +14397,13 @@ const STOPPING = new Set();
    live: tts-long returns every live job and every failed job under EVERY
    filter, on purpose, and repeating those rules in the query would make this
    page the second place they can drift. */
+/* EVERYTHING BY DEFAULT. Playable was the default, and under it a stack whose
+   audio had all been swept opened this tab on "No playable runs. 5000 records
+   are hidden by this filter." -- a default that shows nothing reads as a
+   stack that has lost everything, however carefully the sentence explains
+   it. The list a person arrives at is the whole list; a filter is something
+   they choose, and it is remembered once chosen. */
+const JOB_FILTER_DEFAULT = "all";
 const JOB_FILTERS = {
   playable: { label: "Playable",      empty: "No playable runs",
               query: { audio: "present,pending" } },
@@ -13716,7 +14411,7 @@ const JOB_FILTERS = {
               query: {} },
   deleted:  { label: "Audio deleted", empty: "No runs whose audio was deleted",
               query: { audio: "deleted" } },
-  expired:  { label: "Audio expired", empty: "No runs whose audio was swept",
+  expired:  { label: "Audio expired", empty: "No runs whose audio expired",
               query: { audio: "expired" } },
   failed:   { label: "Failures",      empty: "No failed runs",
               query: { status: "failed,cancelled" } },
@@ -13735,8 +14430,18 @@ const JOB_KINDS = { all: "All kinds", clone: "Cloned voices",
    somebody typed into localStorage, must fall back to a real filter rather
    than send a query nothing answers. */
 function jobFilter() {
-  const value = store.get("jobfilter", "playable");
-  return JOB_FILTERS[value] ? value : "playable";
+  const value = store.get("jobfilter", JOB_FILTER_DEFAULT);
+  return JOB_FILTERS[value] ? value : JOB_FILTER_DEFAULT;
+}
+
+/* THE WAY OUT OF A FILTER THAT HIDES WHAT WAS WANTED. Both selects are set as
+   a person would set them, so their own listener remembers the choice, writes
+   the address and asks again. */
+function jobsShowEverything() {
+  ["jobfilter", "jobkind"].forEach(select => {
+    $(select).value = "all";
+    $(select).dispatchEvent(new Event("change"));
+  });
 }
 function jobKind() {
   const value = store.get("jobkind", "all");
@@ -13819,13 +14524,20 @@ function syncJobFilters() {
        on, rather than a lookup that quietly returns null for ever. */
     const spec = option.value in FILTER_COUNT ? FILTER_COUNT[option.value]
                                               : ["", option.value];
-    const n = spec ? jobCount(spec[0], spec[1]) : null;
+    const n = spec && kind.value === "all" ? jobCount(spec[0], spec[1]) : null;
     option.textContent = JOB_FILTERS[option.value].label
       + (n === null ? "" : ` (${n})`);
   }
+  /* A NUMBER ONLY WHERE IT DESCRIBES WHAT THE OPTION WOULD SHOW. The counts
+     tts-long sends are over every record, one axis at a time, so with
+     Transcriptions chosen "Audio deleted (1)" counted a cloned voice, and the
+     list under it said "No runs whose audio was deleted among transcriptions"
+     beside a number promising one. With the other select narrowed, neither
+     select's numbers are true, so neither says any. */
   for (const option of kind.options) {
-    const n = option.value === "all" ? jobCount("", "all")
-                                     : jobCount("kind", option.value);
+    const n = filter.value !== "all" ? null
+            : option.value === "all" ? jobCount("", "all")
+            : jobCount("kind", option.value);
     option.textContent = JOB_KINDS[option.value] + (n === null ? "" : ` (${n})`);
   }
 }
@@ -13861,6 +14573,14 @@ function renderJobs() {
   meniscusBusy("jobs", running > 0);
   $("jobsafe").hidden = !running;
 
+  if (!list.length && jobsFailed) {
+    /* NOTHING TO SHOW BECAUSE NOTHING ANSWERED, which is not "no runs". */
+    $("joblist").innerHTML = `<div class="note bad">The runs could not be listed: `
+      + `${esc(jobsFailed.message || String(jobsFailed))} The list is asked for again by itself.</div>`;
+    NAV.eta = null;
+    navTitle();
+    return;
+  }
   if (!list.length) {
     /* THE EMPTY STATE NAMES THE FILTER AND SAYS WHAT IT IS HOLDING BACK. An
        empty card under a default that hides things is indistinguishable from
@@ -13873,11 +14593,19 @@ function renderJobs() {
        when the two are made to be the same string. */
     const what = JOB_FILTERS[filter].empty
       + (kindFilter === "all" ? "" : ` among ${JOB_KINDS[kindFilter].toLowerCase()}`);
+    /* AND IT OFFERS THE WAY OUT, not only the explanation. "Choose Everything
+       to see the rest" sent the reader to a select to do by hand what one
+       press can; the button is that press. The focus goes to the filter it
+       changed, because the button it was on is about to be redrawn away. */
     $("joblist").innerHTML = `<div class="hint">${plain
       ? "No runs yet. Cloned voices, instant speech and transcriptions all land here."
       : `${what}.${total
           ? ` ${total} ${total === 1 ? "record is" : "records are"} hidden by this filter.`
-          : " Choose Everything to see the rest."}`}</div>`;
+          : ""} <button class="link" type="button" id="jobsemptyall">Show everything</button>`}</div>`;
+    if (!plain) $("jobsemptyall").addEventListener("click", () => {
+      jobsShowEverything();
+      $("jobfilter").focus({ preventScroll: true });
+    });
     NAV.eta = null;
     navTitle();
     return;
@@ -13887,6 +14615,12 @@ function renderJobs() {
     .map(d => d.querySelector("[data-text]")?.dataset.text).filter(Boolean));
   const now = Date.now() / 1000;
   let soonest = null;
+  /* THE FOCUS SURVIVES THE REDRAW. The list is rewritten on every poll, every
+     2 s while a job is live, and a button with the keyboard on it was replaced
+     by a copy without it: focus fell to <body> and the next Tab started from
+     the top of the page. It is found again by what it is, never by where it
+     was, because rows move as jobs finish. */
+  const held = $("joblist").contains(document.activeElement) ? jobsFocusKey(document.activeElement) : null;
   $("joblist").innerHTML = list.map(job => {
     /* ABSENT MEANS CLONE. Every sidecar tts-long wrote before this release has
        no `kind`, and defaulting it here is what makes all of them valid rows
@@ -13917,6 +14651,11 @@ function renderJobs() {
                   : job.created_at ? now - job.created_at : 0;
     const budget = job.estimated_seconds || 0;
     const live = job.status === "queued" || job.status === "running";
+    /* NO DELETE WHILE IT RUNS. tts-long answers DELETE /jobs/{id} on a queued
+       or running job by CANCELLING it and keeping the record, so "Delete the
+       record" took the row away and the next listing drew it back as
+       cancelled. Stop is the press a live run has; the record can be deleted
+       once it has ended. */
     /* The server has answered and the job is finished, so whatever this page
        asked for has happened one way or the other. */
     if (!live) STOPPING.delete(job.id);
@@ -13972,12 +14711,15 @@ function renderJobs() {
        row on the tab read "1 chunks" -- a plural over one thing, in a word
        that on the same row means pieces of text. */
     const pieces = typeof job.chunks === "number" ? job.chunks : 0;
-    const piece = kind === "transcribe" ? "window" : "segment";
+    /* NONE FOR A TRANSCRIPTION. Parakeet's windows are how it cuts the audio
+       to fit its memory, which is nothing the reader chose or can act on; a
+       clone's segments are the text they wrote, and the bar counts them. */
+    const piece = kind === "transcribe" ? "" : "segment";
     /* JOINED, NOT CONCATENATED. The separator was glued to the front of the
        queue position, so a row with a place in the queue and no piece count
        yet -- which is exactly what the OpenAI route's 202 hands back --
        opened with a bare "· 2 ahead". */
-    const pieceHint = [pieces ? `${pieces} ${piece}${pieces === 1 ? "" : "s"}` : "",
+    const pieceHint = [pieces && piece ? `${pieces} ${piece}${pieces === 1 ? "" : "s"}` : "",
                    job.queued_ahead ? `${job.queued_ahead} ahead` : ""]
                   .filter(Boolean).join(" · ");
     const madeCount = Array.isArray(job.offsets) ? job.offsets.length : 0;
@@ -14000,7 +14742,11 @@ function renderJobs() {
        class of failure as the panel that rendered nothing while thirteen
        checks agreed it was fine. */
     const measured = [];
-    if (typeof job.audio_seconds === "number")
+    /* A RUN THAT FAILED BEFORE IT MADE ANYTHING MEASURED NOTHING, and "0 s of
+       speech · 0 s of compute" under its reason reads as a result. */
+    const nothing = job.status === "failed";
+    const shown = value => !(nothing && value === 0);
+    if (typeof job.audio_seconds === "number" && shown(job.audio_seconds))
       measured.push(`${secondsSaid(job.audio_seconds)} of audio`);
     /* THE CLIP AND THE SPEECH IN IT ARE TWO NUMBERS, AND ONLY ONE KIND HAS
        BOTH. `audio_seconds` means the same thing on all three -- how much
@@ -14011,11 +14757,11 @@ function renderJobs() {
        nothing. Guarded like its neighbours: a record carrying one of these
        without the others must not throw inside list.map and take the tab with
        it. */
-    if (typeof job.speech_seconds === "number")
+    if (typeof job.speech_seconds === "number" && shown(job.speech_seconds))
       measured.push(`${secondsSaid(job.speech_seconds)} of speech`);
-    if (typeof job.compute_seconds === "number")
+    if (typeof job.compute_seconds === "number" && shown(job.compute_seconds))
       measured.push(`${secondsSaid(job.compute_seconds)} of compute`);
-    if (typeof job.realtime_factor === "number")
+    if (typeof job.realtime_factor === "number" && shown(job.realtime_factor))
       measured.push(rateWords(job.realtime_factor));
     if (typeof job.chars === "number" && kind === "transcribe")
       measured.push(`${job.chars} character${job.chars === 1 ? "" : "s"}`);
@@ -14030,9 +14776,9 @@ function renderJobs() {
       <div class="top">
         <span class="status ${statusClass(job.status)}">${stopping ? "stopping…" : job.status}</span>
         <strong>${esc(kind === "transcribe"
-          ? (job.language ? "transcript · " + job.language : "transcript")
+          ? (job.language ? "Transcript · " + job.language : "Transcript")
           : (job.voice || (job.recovered ? "voice unknown" : "default")))}</strong>
-        <span class="id">${esc(job.id)}</span>
+        <span class="id" title="${esc(job.id)}">${esc(job.id.slice(0, 8))}</span>
         <span class="spacer"></span>
         <span class="hint">${pieceHint}</span>
       </div>
@@ -14049,8 +14795,8 @@ function renderJobs() {
         <div class="body" data-text="${esc(job.id)}">Loading…</div></details>`
         : job.recovered ? `<div class="hint">The server recovered this job after a
             restart. It did not keep the text or the voice.</div>` : ""}
-      ${job.status === "failed" ? `<div class="note bad">${esc(job.error || "no reason given")}</div>` : ""}
-      ${expired ? `<div class="hint">The audio was swept. This record was kept.</div>` : ""}
+      ${job.status === "failed" ? `<div class="note bad">${esc(jobTrouble(job.error))}</div>` : ""}
+      ${expired ? `<div class="hint">The audio expired and was removed. This record was kept.</div>` : ""}
       ${ranOn(job) ? `<div class="hint">${esc(ranOn(job))}</div>` : ""}
       ${(job.audio ? job.audio.state === "deleted" : job.audio_deleted)
         ? `<div class="hint">The audio was deleted. This record was kept.</div>` : ""}
@@ -14064,10 +14810,10 @@ function renderJobs() {
         ${kind === "speech" && !queued ? `<button class="small" data-again="${esc(job.id)}" type="button">Speak again</button>` : ""}
         ${queued && job.status === "failed" ? `<button class="small" data-retry="${esc(job.id)}" type="button">Retry</button>` : ""}
         ${audio ? `<button class="small" data-delaudio="${esc(job.id)}" type="button">Delete the audio</button>` : ""}
-        <button class="small" data-forget="${esc(job.id)}" type="button">${
+        ${live ? "" : `<button class="small" data-forget="${esc(job.id)}" type="button">${
           audio ? "Delete the record too"
           : kind === "transcribe" ? "Delete the transcript"
-          : "Delete the record"}</button>
+          : "Delete the record"}</button>`}
       </div>
     </div>`;
   }).join("") + (jobTruncated ? `<div class="hint">The service sent the most
@@ -14112,7 +14858,7 @@ function renderJobs() {
       try {
         const full = await json(`/jobs/${encodeURIComponent(body.dataset.text)}`);
         const said = full.text
-          || (full.segments || []).map(x => x.text).filter(Boolean).join("\n\n");
+          || (full.segments || []).map(x => segmentOf(x).text).filter(Boolean).join("\n\n");
         /* textContent, not innerHTML: this is the text somebody typed, and it
            is the largest piece of user-supplied data on this tab. */
         body.textContent = said || "The text was not kept for this job.";
@@ -14129,8 +14875,26 @@ function renderJobs() {
     const cached = JOBTEXT.get(body.dataset.text);
     if (cached) { body.textContent = cached; body.dataset.loaded = "1"; }
   });
+  if (held) { const again = $("joblist").querySelector(held); if (again) again.focus({ preventScroll: true }); }
   /* The job the address names is marked again on every draw. */
   navJobsDrawn();
+}
+
+/* A SELECTOR FOR THE ELEMENT IN A JOB ROW THAT HOLDS THE FOCUS, by what it is
+   and which job it belongs to: an action button by its data attribute, which
+   carries the job's id; the summary of a row's text by the text it opens; the
+   row itself by its id. Anything else is not kept, and the focus goes where
+   the browser puts it. */
+function jobsFocusKey(el) {
+  for (const attr of ["play", "get", "stop", "copy", "again", "retry", "delaudio", "forget"]) {
+    const value = el.dataset && el.dataset[attr];
+    if (value) return `[data-${attr}="${CSS.escape(value)}"]`;
+  }
+  const box = el.tagName === "SUMMARY" && el.parentElement && el.parentElement.matches("details.jobtext")
+    ? el.parentElement.querySelector("[data-text]") : null;
+  if (box) return `details.jobtext:has([data-text="${CSS.escape(box.dataset.text)}"]) > summary`;
+  if (el.matches(".job[data-job]")) return `.job[data-job="${CSS.escape(el.dataset.job)}"]`;
+  return null;
 }
 
 let jobUrl = null;
@@ -14195,8 +14959,7 @@ async function playJob(id) {
   try { response = await api(`/jobs/${encodeURIComponent(id)}/audio`); }
   catch (err) { $("jobplaying").textContent = "Could not load it: " + (err.message || err); return; }
   if (!response.ok) {
-    /* 409 while it is still running, 404 once the sweeper has been through. */
-    $("jobplaying").textContent = `That audio is not available (${response.status}).`;
+    $("jobplaying").textContent = audioMissing(response.status);
     return;
   }
   playBlob(await response.blob(), "Playing " + id.slice(0, 8));
@@ -14210,18 +14973,30 @@ $("jobclose").addEventListener("click", () => {
   $("jobplay").hidden = true;
 });
 
+/* WHY A JOB'S AUDIO DID NOT COME, IN WORDS. 409 while the job is still
+   running, 404 once the sweeper has been through. The code itself used to be
+   the message -- "Not ready: 409" -- which tells a listener nothing. */
+function audioMissing(status) {
+  return status === 409 ? "That audio is not ready yet."
+    : status === 404 ? "That audio is no longer on the server."
+    : "The audio could not be fetched.";
+}
+
 async function downloadJob(id, button) {
   /* The audio is megabytes off a NAS, so the wait is real and the press had
      nothing to show for it: measured at NEVER with the route delayed 300 ms. */
   const release = busy(button, "Fetching…");
   try {
     const response = await api(`/jobs/${encodeURIComponent(id)}/audio`);
-    if (!response.ok) { alert("Not ready: " + response.status); return; }
+    if (!response.ok) { alert(audioMissing(response.status)); return; }
     const url = URL.createObjectURL(await response.blob());
     const a = document.createElement("a");
     a.href = url; a.download = id + ".wav"; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
-  } finally { release(); }
+  /* A request that never arrived is said, as Play, Retry and Copy say it; it
+     used to escape the click handler and the press ended in silence. */
+  } catch (err) { alert("Could not download it: " + (err.message || err)); }
+  finally { release(); }
 }
 
 /* FREE THE DISK, KEEP THE HISTORY. The other button removes both, which is
@@ -14237,6 +15012,7 @@ async function deleteAudio(id) {
       + `The audio cannot be recovered.`)) return;
   try {
     await json(`/jobs/${encodeURIComponent(id)}/audio`, { method: "DELETE" });
+    JOBS_SEQ.writes++;
   } catch (err) {
     /* A 404 means the service does not have it either, which is the same
        outcome. Anything else is worth saying rather than swallowing, and the
@@ -14299,6 +15075,7 @@ async function forgetJob(id) {
   }
   try {
     await json(`/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
+    JOBS_SEQ.writes++;
   } catch (err) {
     if (err.status !== 404) {
       alert("Could not forget it: " + err.message);
@@ -14325,7 +15102,7 @@ async function stopJob(id, button) {
   busy(button, "Stopping…");
   STOPPING.add(id);
   renderJobs();
-  try { await json(`/jobs/${encodeURIComponent(id)}`, { method: "DELETE" }); }
+  try { await json(`/jobs/${encodeURIComponent(id)}`, { method: "DELETE" }); JOBS_SEQ.writes++; }
   catch (err) { STOPPING.delete(id); renderJobs();
                 alert("Could not stop it: " + err.message); }
   refreshJobs();
@@ -14343,6 +15120,16 @@ async function stopJob(id, button) {
    4096 characters and the listing holds fifty rows, so sending it with every
    poll would be a couple of hundred kilobytes every few seconds for something
    nobody is reading. */
+/* ONE SEGMENT, IN EITHER SHAPE IT ARRIVES IN. tts-long's record keeps each
+   segment as a [text, pause_after] pair, while what this browser sent (kept by
+   adopt() for Retry) is { text, pause_after }. Reading x.text off a pair gave
+   undefined, so Retry posted segments with no text and was refused with a
+   422 for every job, and the row's text said "not kept" when it was. */
+function segmentOf(x) {
+  return Array.isArray(x) ? { text: x[0], pause_after: x[1] || 0 }
+                          : { text: x && x.text, pause_after: (x && x.pause_after) || 0 };
+}
+
 async function recordFor(id) {
   try { return await json(`/jobs/${encodeURIComponent(id)}`); }
   catch (err) {
@@ -14403,8 +15190,7 @@ async function retryJob(id, button) {
     if (record.language && !(spec && spec.language_from_voice))
       params.language = record.language;
     if (Array.isArray(record.segments) && record.segments.length) {
-      params.segments = record.segments.map(x =>
-        ({ text: x.text, pause_after: x.pause_after || 0 }));
+      params.segments = record.segments.map(segmentOf);
     } else if (record.text) {
       params.text = record.text;
     } else {
@@ -14413,6 +15199,7 @@ async function retryJob(id, button) {
     }
     const payload = await json("/jobs", { method:"POST",
       headers:{ "content-type":"application/json" }, body: JSON.stringify(params) });
+    JOBS_SEQ.writes++;
     adopt(payload.id, params);
     jobs.set(payload.id, payload);
     renderJobs(); schedule(0);
@@ -14445,7 +15232,7 @@ async function speakAgain(id, button) {
       headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     if (!response.ok) {
       let payload = null; try { payload = await response.json(); } catch {}
-      throw new Error(reason(payload, response.status + " " + response.statusText));
+      throw new Error(reason(payload, failure(response.status)));
     }
     playBlob(await response.blob(), "Speaking " + id.slice(0, 8) + " again");
     /* The new run writes its own record, so the list has grown. */
@@ -14495,17 +15282,21 @@ async function refreshJobs() {
      with no rows AND no explanation, which is what a reader saw while the
      server was holding twenty-one jobs and serving them correctly. An empty
      list has a sentence; a broken one now has one too. */
+  /* SETTLED ONLY BY AN ANSWER THAT WAS DRAWN OR FAILED. A listing dropped as
+     stale (a filter changed while it was out) drew nothing, and settling on
+     it let a link to a job be looked for among the old filter's rows, or
+     under "Loading…", and be called "not in this list" by an answer to a
+     question nobody was asking any more. The newer listing settles it. */
+  let answered = true;
   try {
-    await refreshJobsInner();
+    answered = await refreshJobsInner();
   } catch (err) {
     $("joblist").innerHTML =
       `<div class="note bad">The job list could not be drawn: ` +
       `${esc(err && err.message ? err.message : String(err))}</div>`;
     throw err;
   } finally {
-    /* The listing has answered, whatever it said: a link to a job can be
-       looked for now (navReady). */
-    navSettle("jobs");
+    if (answered) navSettle("jobs");
   }
 }
 
@@ -14516,6 +15307,30 @@ async function refreshJobs() {
 async function jobLookup(id) {
   try { await json(`/jobs/${encodeURIComponent(id)}`); return "there"; }
   catch (err) { return err.status === 404 ? "gone" : "unknown"; }
+}
+
+/* WHICH LISTING WINS. Refreshes overlap: the tab opening, the ladder, Refresh, a
+   filter change, and every action's own follow-up. The last answer to LAND
+   used to win, so a Playable listing that left before a switch to Failures
+   could draw under the Failures label, and a row deleted while a poll was out
+   came back for one interval. Same counters as SATELLITES. */
+const JOBS_SEQ = { asked: 0, applied: 0, writes: 0 };
+/* SOMETHING CHANGED THAT THIS PAGE DID NOT DO. Set when health shows
+   tts-long's queue moving (a job queued or finished on another device), and
+   cleared by the next listing that is drawn; until then the list is asked for
+   whichever tab is open, so the dock's count of live jobs follows it. */
+let JOBS_STALE = false;
+/* THE LAST LISTING FAILED, and with what; null once one is drawn. */
+let jobsFailed = null;
+function jobsStale() { JOBS_STALE = true; schedule(0); }
+/* WHETHER THE LADDER'S TICK ASKS AT ALL: when the list is being looked at,
+   when a job is live (the count in the dock and the chime depend on it,
+   whatever tab is open), or when it is known to be stale. Nothing else: a
+   hidden page with nothing running asks for nothing. */
+function jobsDue() {
+  if (JOBS_STALE) return true;
+  if ([...jobs.values()].some(j => j.status === "queued" || j.status === "running")) return true;
+  return !$("tab-jobs").hidden && !document.hidden;
 }
 
 async function refreshJobsInner() {
@@ -14535,13 +15350,28 @@ async function refreshJobsInner() {
   /* WHETHER THE SERVER WAS ASKED ABOUT EVERYTHING, which is the precondition
      for every conclusion drawn below from an id being absent. */
   const unfiltered = query === "";
+  const asked = ++JOBS_SEQ.asked, writes = JOBS_SEQ.writes, filter = jobFilter();
+  LOADED.jobs = Date.now();
   let payload;
   try { payload = await json("/jobs" + (query ? "?" + query : "")); }
   catch (err) {
     /* A 503 while tts-long restarts must not empty the list — the jobs are
-       still queued on the other side of it. */
-    renderJobs(); return;
+       still queued on the other side of it. Kept for renderJobs, which with
+       no rows drawn yet would otherwise say "No runs yet", a claim about the
+       service made at the one moment it did not answer. A stale failure is
+       still a failure, so it is recorded whatever the counters say. */
+    jobsFailed = err;
+    renderJobs(); return true;
   }
+  /* DROPPED, AND NOT MERGED, when a newer listing has already been drawn,
+     when this page wrote to a job while it was out (the write's own refresh
+     follows it), or when it answers a filter that is no longer the one on
+     screen. The newer answer is on its way in every case. */
+  if (asked < JOBS_SEQ.applied || writes !== JOBS_SEQ.writes
+      || filter !== jobFilter() || kind !== jobKind()) return false;
+  JOBS_SEQ.applied = asked;
+  JOBS_STALE = false;
+  jobsFailed = null;
   const listed = payload.jobs || [];
   /* Absent is a first-class answer: jobCount() then prints no number rather
      than one this page worked out for itself. */
@@ -14611,6 +15441,7 @@ async function refreshJobsInner() {
     }
   }
   renderJobs();
+  return true;
 }
 
 function ping(job) {
@@ -14657,13 +15488,19 @@ function interval() {
 }
 function schedule(delay) {
   clearTimeout(jobTimer);
-  jobTimer = setTimeout(async () => {
-    if (!$("tab-jobs").hidden || [...jobs.values()].some(j =>
-        j.status === "queued" || j.status === "running")) {
-      await refreshJobs();
-    }
-    schedule(interval());
+  /* A TICK RE-ARMS ONLY IF IT IS STILL THE CURRENT TIMER. A filter change
+     while a tick's listing was out armed schedule(0); the tick then came back,
+     dropped its stale answer, and its own schedule(interval()) cleared that
+     0 ms timer and waited 30 s, leaving the list on "Loading…" all that time.
+     A newer schedule() owns the ladder, and an older tick leaves it alone. */
+  const me = setTimeout(async () => {
+    /* jobsDue() says when the list is worth asking for; a page in the
+       background with nothing running is not, whichever tab it was left on. */
+    try { if (jobsDue()) await refreshJobs(); }
+    catch {}
+    finally { if (jobTimer === me) schedule(interval()); }
   }, delay === undefined ? interval() : delay);
+  jobTimer = me;
 }
 document.addEventListener("visibilitychange", () => schedule(0));
 $("refresh").addEventListener("click", async () => {
@@ -14675,6 +15512,10 @@ $("refresh").addEventListener("click", async () => {
   /* refreshJobs puts its own failure in the card and then rethrows, so the
      reason is already on screen and there is nothing to report here. */
   try { await refreshJobs(); } catch {} finally { done(); }
+  /* AND THE LADDER STARTS AGAIN FROM WHAT IT FOUND. The pending tick was armed
+     with the delay chosen when nothing was live, so a run Refresh found would
+     not be asked about again for up to 30 s rather than every 2 s. */
+  schedule();
 });
 /* PERSISTED, AND RE-ASKED RATHER THAN REDRAWN. This line used to read
    "filtering is a question about the rows on this page, not a question for the
@@ -14701,7 +15542,7 @@ for (const control of ["jobfilter", "jobkind"]) {
   });
 }
 /* The stored choice reaches the controls before the first listing, so the page
-   does not open on "Playable" and then jump to whatever was remembered. */
+   does not open on the default and then jump to whatever was remembered. */
 syncJobFilters();
 
 /* ================================================= the clone sheet ===== */
@@ -14810,7 +15651,7 @@ $("clipresolve").addEventListener("click", async () => {
       $("clipname").value = facts.title.toLowerCase()
         .replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
     }
-    note($("cliplinkhint"), "ok", esc(facts.title)
+    note($("cliplinkhint"), "ok", facts.title
       + (facts.duration ? ` · ${clock(facts.duration)}` : ""));
   } catch (err) {
     cliplink = null;
@@ -14850,12 +15691,13 @@ $("clipimport").addEventListener("click", async () => {
     const out = await json("/ui/clips/from-link", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ token: cliplink.token, name, replace: true }) });
-    note($("cliplinkhint"), "ok", `Saved as ${esc(out.voice.name || name)}.`);
+    VOICES_SEQ.writes++;
+    note($("cliplinkhint"), "ok", `Saved as ${out.voice.name || name}.`);
     cliplink = null;
     $("cliprange").hidden = true;
     $("cliplink").value = "";
     await loadVoices();
-    $("voice").value = "c:" + (out.voice.name || name);
+    $("voice").value = clipValue(out.voice.name || name);
     onVoiceChange();
     $("clone").hidden = true;
   } catch (err) {
@@ -14945,7 +15787,7 @@ $("rec").addEventListener("click", async () => {
     stream.getTracks().forEach(t => t.stop());
     clearInterval(recTimer);
     if (levelStop) { levelStop(); levelStop = null; }
-    $("rec").textContent = "● Record 15 s";
+    $("rec").innerHTML = GLYPH.rec + "Record 15 s";
     await prepareClip(new File(chunks, "recording", { type: recorder.mimeType }), "my-voice");
   };
 
@@ -14958,7 +15800,7 @@ $("rec").addEventListener("click", async () => {
   const data = new Uint8Array(analyser.frequencyBinCount);
 
   recorder.start();
-  $("rec").textContent = "■ Stop";
+  $("rec").innerHTML = GLYPH.stop + "Stop";
   levelStop = meter($("level"), analyser, data);
   let left = 15;
   $("ring").textContent = left;
@@ -15010,6 +15852,11 @@ $("sttrec").addEventListener("click", async () => {
     const type = sttRecorder.mimeType || "audio/webm";
     const ext = type.includes("mp4") ? "m4a" : "webm";
     await pick(new File(chunks, `recording.${ext}`, { type }));
+    /* THE BUTTON SAID "STOP AND TRANSCRIBE" and the page stopped at preparing
+       the file, leaving a second press on Transcribe for what the first had
+       already promised. A file that could not be used leaves Transcribe off,
+       with pick()'s own reason beside it, and nothing is sent. */
+    if (!$("go-stt").disabled) $("go-stt").click();
   };
 
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -15066,9 +15913,10 @@ $("saveclip").addEventListener("click", async () => {
                                { type: clip.type || "audio/wav" }));
   try {
     const payload = await json("/ui/clips", { method: "POST", body: form });
+    VOICES_SEQ.writes++;
     clip = null; $("clippreview").hidden = true; note($("clipnote"), "", "");
     await loadVoices();
-    $("voice").value = "c:" + payload.voice.name;
+    $("voice").value = clipValue(payload.voice.name);
     onVoiceChange();
     /* It used to add what a cloned voice costs. The voice is now selected,
        so the optgroup holding it says that, and estimate() has already put the
@@ -15079,6 +15927,183 @@ $("saveclip").addEventListener("click", async () => {
     $("saveclip").disabled = false;
   }
 });
+
+/* ============================================================== live === */
+/* WHAT KEEPS THE PAGE TRUE WITHOUT A RELOAD, AND WHAT KEEPS IT QUIET. Before
+   this, each tab looked after itself: health on a bare 30 s interval that ran
+   in a background tab all night, the hub's stream opened only once somebody
+   visited Satellites (so the dock's count of satellites waiting was whatever
+   it was at load), the satellite lists every 3 s for as long as the tab was
+   open, hidden page or not, and the profiles and voices read once at load and
+   never again unless this page wrote them. A profile saved on the phone, a
+   voice cloned there, a job queued from another device: none of it appeared
+   here until a reload.
+
+   THE RULE IS ONE SENTENCE: ask when somebody can see the answer, and catch
+   up the moment they can again. A hidden page stops asking (health at once,
+   the stream after a minute); coming back asks for what the open view shows,
+   once, and marks the gap in Activity. Lists that change only when somebody
+   changes them (profiles, voices) are read on the way into the tab that shows
+   them, when the copy here is older than a few seconds, rather than polled.
+
+   No hub change: the page catches up by asking again, and the stream it
+   already had says when to. Code only in this section; liveStart(), called
+   from boot(), installs every listener. */
+const LIVE = { healthTimer: null, healthAt: 0, hiddenTimer: null, streamTimer: null,
+               streamTries: 0, caughtUp: 0, queue: null, engines: null };
+/* THE MINUTE A HIDDEN PAGE KEEPS ITS STREAM, and why there is one at all. A
+   phone switching apps for a few seconds should not lose Activity and pay a
+   reconnect; a tab left in the background all evening should not hold a
+   connection, which costs a phone its battery and, on HTTP/1.1, one of the
+   six connections a browser allows per origin -- a few background tabs of
+   this page would leave none for the one in front. */
+const LIVE_GRACE = 60000, LIVE_HEALTH_EVERY = 30000, LIVE_LADDER = [2000, 5000, 15000, 30000];
+
+/* EVERY LISTENER THE LIVE LAYER NEEDS, installed once from boot(), after the
+   first health read has left. The Satellites section reaches this layer only
+   through its hook, so it still runs on its own in the Node harness. */
+function liveStart() {
+  SATELLITES.hooks.live = what => { if (what === "closed") liveStreamLater(); };
+  document.addEventListener("visibilitychange", liveVisibility);
+  window.addEventListener("focus", () => liveCatchUp());
+  window.addEventListener("pageshow", ev => { if (ev.persisted) liveCatchUp(); });
+  window.addEventListener("online", () => liveCatchUp());
+  liveHealthNext();
+  liveStream();
+}
+
+/* HEALTH ON A CHAIN, NOT AN INTERVAL. Each read is scheduled when the one
+   before it has answered, so a slow gateway (it fans out to four backends at a
+   5 s timeout each) never has two reads out at once, and a hidden page
+   schedules nothing: the chain simply is not continued, and returning starts
+   it again. */
+function liveHealthNext() {
+  clearTimeout(LIVE.healthTimer);
+  if (document.hidden) return;
+  LIVE.healthTimer = setTimeout(async () => { await poll(); liveHealthNext(); }, LIVE_HEALTH_EVERY);
+}
+
+/* WHAT A HEALTH ANSWER SAYS BESIDES HEALTH. Called at the end of poll(), with
+   whatever it got. Three things on this page change elsewhere and show up
+   here first: an engine's runner coming or going (the voice groups are drawn
+   disabled with its reason, so they are redrawn), tts-long's queue moving
+   when no job of this page's did (somebody queued or finished one from
+   another device, so the jobs are asked for), and the hub becoming reachable
+   (so a stream that could not open can). The first answer only records the
+   engines: there is nothing yet for it to differ from, and boot draws the
+   voices itself. */
+function liveHealth() {
+  LIVE.healthAt = Date.now();
+  const engines = engineIds().map(id => id + ":" + engineOffline(id)).join("|");
+  if (LIVE.engines !== null && engines !== LIVE.engines) voicesRedraw();
+  LIVE.engines = engines;
+  const h = ttsLongHealth();
+  const queue = typeof h.queued === "number" ? h.queued + (Number(h.running) || 0) : null;
+  if (queue !== null && LIVE.queue !== null && queue !== LIVE.queue) jobsStale();
+  LIVE.queue = queue;
+  if (!SATELLITES.events && liveHub() && !document.hidden) liveStream();
+}
+
+/* true: the gateway reaches a hub; false: none is deployed or it is down;
+   null: health has not answered. Three answers, because "not yet known" must
+   not stop the first attempts the way "there is none" stops them for good. */
+function liveHub() {
+  const g = HEALTH && HEALTH.gateway && HEALTH.gateway.health;
+  if (!g || !g.backends) return null;
+  const hub = g.backends.satellites;
+  return hub ? !!hub.reachable : false;
+}
+
+/* THE HUB'S STREAM, OPENED AT LOAD AND NOT ON THE FIRST VISIT TO ITS TAB, so
+   a satellite that turns up while somebody is on Transcribe raises the dock's
+   count then, and Activity has what happened before the tab was opened. It
+   asks for the satellite list first: that is the badge's count at load, and a
+   hub that does not answer it would not answer a stream, which would close
+   for good on its first error. With the tab open, the tab's own poll opens
+   the stream, so this leaves it to that. */
+async function liveStream() {
+  clearTimeout(LIVE.streamTimer);
+  if (SATELLITES.events || document.hidden || !window.EventSource || satellitesOpen()) return;
+  const answered = await satellitesCount();
+  if (!answered) { liveStreamLater(); return; }
+  LIVE.streamTries = 0;
+  if (!SATELLITES.events && !document.hidden) satellitesListen();
+}
+
+/* A STREAM THAT CLOSED FOR GOOD IS TRIED AGAIN ON A LADDER: 2, 5, 15 and 30 s,
+   then every 30 s, so a hub restart is picked up within seconds and a hub
+   that is gone for an hour costs two requests a minute. Never on a hidden
+   page, and never once health says this deployment has no hub to reach: the
+   health chain opens the stream itself when one becomes reachable. */
+function liveStreamLater() {
+  clearTimeout(LIVE.streamTimer);
+  if (document.hidden || liveHub() === false) return;
+  LIVE.streamTimer = setTimeout(liveStream, LIVE_LADDER[Math.min(LIVE.streamTries++, LIVE_LADDER.length - 1)]);
+}
+
+/* HIDDEN: STOP ASKING; SHOWN: CATCH UP. Health and the stream's retry stop at
+   once. The stream itself is kept for LIVE_GRACE (see there) and then
+   closed. Every other poll on the page checks document.hidden for itself
+   before it schedules the next one. */
+function liveVisibility() {
+  if (document.hidden) {
+    clearTimeout(LIVE.healthTimer);
+    clearTimeout(LIVE.streamTimer);
+    clearTimeout(LIVE.hiddenTimer);
+    LIVE.hiddenTimer = setTimeout(liveStreamPause, LIVE_GRACE);
+    return;
+  }
+  clearTimeout(LIVE.hiddenTimer);
+  liveCatchUp();
+}
+
+/* THE STREAM CLOSED BY THE PAGE, NOT LOST. Marked as a gap all the same,
+   because events were missed: the line in Activity says so when it opens
+   again, as it does after a hub restart. */
+function liveStreamPause() {
+  const source = SATELLITES.events;
+  if (!source) return;
+  source.close();
+  SATELLITES.events = null;
+  SATELLITES.evGap = true;
+}
+
+/* BACK IN FRONT: EVERYTHING THE OPEN VIEW SHOWS, ASKED FOR ONCE. Health if its
+   last answer is more than 10 s old, the stream if it is closed, and the
+   lists of whichever tab is open. ONCE because returning to a window fires
+   `focus` and `visibilitychange` together, and both arrive here; the 2 s
+   debounce makes them one catch-up rather than two of everything. */
+function liveCatchUp() {
+  if (document.hidden) return;
+  const now = Date.now();
+  if (now - LIVE.caughtUp < 2000) return;
+  LIVE.caughtUp = now;
+  if (now - LIVE.healthAt > 10000) poll();
+  liveHealthNext();
+  if (!SATELLITES.events) { LIVE.streamTries = 0; liveStream(); }
+  const tab = (TABS.find(b => b.getAttribute("aria-selected") === "true") || TABS[0]).dataset.tab;
+  if (tab === "jobs") schedule(0);
+  if (tab === "satellites") { satellitesRefresh(); tmTick(); }
+  liveEnter(tab, false);
+}
+
+/* THE ON-DEMAND LISTS, read on the way into the tab that shows them. Entering
+   a tab is a reader asking to see it, so 5 s is old enough; a window coming
+   back to the front is not, and waits for 30 s (profiles) or 60 s (voices,
+   which change less and cost two reads). Transcribe shows the profiles too,
+   as its row of toggles. */
+function liveEnter(tab, entering) {
+  if (tab === "vocab" || tab === "transcribe") liveFresh("glossaries", entering ? 5000 : 30000);
+  if (tab === "speak") liveFresh("voices", entering ? 5000 : 60000);
+}
+/* Asked again only when the copy here is older than `maxAge`. LOADED is
+   stamped by the loaders, so a read this page just made for its own write
+   counts as fresh. */
+function liveFresh(what, maxAge) {
+  if (Date.now() - LOADED[what] < maxAge) return;
+  if (what === "glossaries") loadGlossaries(); else loadVoices();
+}
+/* ============================================================= /live === */
 
 /* ============================================================== boot === */
 (async function boot() {
@@ -15104,9 +16129,12 @@ $("saveclip").addEventListener("click", async () => {
      Measured 2,517 ms on the first read of a session and 50 to 165 ms after.
      Nothing below it needs the answer except one optgroup label, so awaiting
      it put a status card in front of the voice picker: measured on the fake
-     clock, 2,690 ms before there was a voice anyone could choose. */
+     clock, 2,690 ms before there was a voice anyone could choose.
+     The reads after it are the live layer's: chained, paused while the page
+     is hidden, and with the hub's stream opened from here rather than on the
+     first visit to Satellites. */
   const health = poll();
-  setInterval(poll, 30000);
+  liveStart();
   /* BEFORE loadVoices, and once only. The voice list is filtered by whatever
      $("lang") holds, so the language options have to exist before the first
      filter runs -- otherwise the value read is "" and the fallback shows every

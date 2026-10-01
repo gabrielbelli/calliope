@@ -184,7 +184,7 @@ def test_chatterbox_appears_even_with_nothing_cloned():
     body = _load_voices()
     group = body[body.index("Chatterbox, slow"):]
     head = group[:group.index("</optgroup>")]
-    assert "${esc(clipPrefix)}:default" in head, "the built-in voice is not offered"
+    assert '${esc(clipValue("default"))}' in head, "the built-in voice is not offered"
     # Comments are stripped first: this file's own comment explains the old
     # `if (clones.length)` behaviour, and matching prose would make the test
     # assert against its own documentation rather than against the code.
@@ -1018,13 +1018,18 @@ def test_the_vocabulary_row_still_says_what_it_is():
     about this control goes on passing, because the control is still there.
 
     The row is also the only field left on its line, so there is no neighbour
-    to borrow a heading from.
+    to borrow a heading from. The name is a span now, not a <label>, because a
+    label names one control and this names a group of toggles -- so the group
+    has to point at it, or the name is only drawn and never announced.
     """
     box = HTML.index('id="glossbox"')
     row = HTML[box:HTML.index('id="gloss"', box)]
-    found = re.search(r"<label[^>]*>([^<]*)</label>", row)
-    assert found, "the vocabulary row has no label at all"
-    assert found.group(1).strip(), "the vocabulary label lost its text"
+    found = re.search(r'<span class="label-like" id="([^"]+)">([^<]*)</span>', row)
+    assert found, "the vocabulary row has no name at all"
+    assert found.group(2).strip(), "the vocabulary name lost its text"
+    group = HTML[HTML.index('id="gloss"', box):]
+    group = group[:group.index(">")]
+    assert f'aria-labelledby="{found.group(1)}"' in group, "the toggles do not carry the row's name"
 
 
 def test_nothing_is_selected_by_default():
@@ -1220,7 +1225,7 @@ def test_no_profile_name_reaches_innerhtml_unescaped():
     for raw in ("${g.name}", "${written.name}", "${r.text}", "${r.reason}",
                 "${r.line}"):
         offenders = [n for n, line in enumerate(HTML.splitlines(), 1)
-                     if raw in line and "esc(" not in line]
+                     if raw in line and "esc(" not in line and 'note($(' not in line]
         assert not offenders, f"{raw} reaches innerHTML unescaped at line(s) {offenders}"
     # Deleted <strong>name</strong> is markup, so that one is escaped too.
     assert "Deleted <strong>${esc(target.name)}</strong>" in HTML
@@ -1257,5 +1262,6 @@ def test_note_puts_text_on_the_page_and_never_markup():
         for interpolation in re.findall(r"\$\{([^}]*)\}", call):
             assert ("esc(" in interpolation
                     or "toFixed" in interpolation
+                    or interpolation.startswith("roughly(")
                     or "CONFIG." in interpolation), \
                 f"noteHtml interpolates {interpolation!r} without escaping it"

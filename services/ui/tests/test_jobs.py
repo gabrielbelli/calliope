@@ -109,12 +109,12 @@ def test_a_live_row_and_a_failed_row_are_never_hidden_on_this_side():
 def test_the_filter_controls_are_always_on_screen():
     """A DELIBERATE REVERSAL of the rule that governed the checkbox they
     replace. That control appeared only when it would actually hide something,
-    which was right while it defaulted to OFF. These default to something other
-    than everything, so the same rule inverted removes the only explanation on
-    the page for why a row somebody remembers is missing.
+    which was right while it defaulted to OFF. A filter chosen once is
+    remembered, so the same rule inverted removes the only explanation on the
+    page for why a row somebody remembers is missing.
     """
     assert "onlyaudiowrap" not in HTML, "the only-when-it-hides wrapper is back"
-    header = HTML[HTML.index('<h2 class="tight">Jobs</h2>'):HTML.index('id="jobplay"')]
+    header = HTML[HTML.index('<section id="tab-jobs"'):HTML.index('id="jobplay"')]
     for control in ('id="jobkind"', 'id="jobfilter"'):
         assert control in header, f"{control} is not in the card header"
     selects = re.findall(r"<select[^>]*id=\"job(?:kind|filter)\"[^>]*>", header)
@@ -127,13 +127,36 @@ def test_the_filter_controls_are_always_on_screen():
 def test_the_choice_survives_a_reload():
     """A filter that resets on every reload has to be set again every time
     somebody comes back to look for the thing they were filtering for."""
-    assert 'store.get("jobfilter", "playable")' in HTML
+    assert 'store.get("jobfilter", JOB_FILTER_DEFAULT)' in HTML
     assert 'store.get("jobkind", "all")' in HTML
     assert 'store.set(control, $(control).value);' in HTML
     # Validated on the way out: a value from an older build, or one typed into
     # localStorage, must not become a query nothing answers.
-    assert "JOB_FILTERS[value] ? value : \"playable\"" in HTML
+    assert "JOB_FILTERS[value] ? value : JOB_FILTER_DEFAULT" in HTML
     assert "JOB_KINDS[value] ? value : \"all\"" in HTML
+
+
+def test_the_tab_opens_on_every_run_and_an_empty_filter_offers_the_way_out():
+    """"No playable runs. 5000 records are hidden by this filter." was the
+    whole tab on a stack whose audio had been swept: a default that shows
+    nothing reads as a stack that has lost everything, however well the
+    sentence explains it. Everything is the default, the first option, and
+    the address of the default carries no filter; a filter that empties the
+    list ends its sentence with the press that undoes it."""
+    assert 'const JOB_FILTER_DEFAULT = "all";' in BARE
+    header = HTML[HTML.index('id="jobfilter"'):HTML.index("</select>", HTML.index('id="jobfilter"'))]
+    options = re.findall(r'<option value="(\w+)">', header)
+    assert options[0] == "all", f"the default is not the first option: {options}"
+    assert "jobFilter() !== JOB_FILTER_DEFAULT" in BARE
+    assert 'route.query.show || JOB_FILTER_DEFAULT' in BARE
+    empty = RENDER[RENDER.index("if (!list.length)"):]
+    empty = empty[:empty.index("NAV.eta = null;")]
+    assert 'id="jobsemptyall">Show everything</button>' in empty
+    assert "jobsShowEverything();" in empty
+    assert "Choose Everything to see the rest." not in empty, "the empty state points at a control again"
+    both = code(body_of("function jobsShowEverything()", "\n}\n"))
+    assert 'dispatchEvent(new Event("change"))' in both, \
+        "the selects are set behind their listener, so nothing is asked or remembered"
 
 
 def test_changing_a_filter_asks_the_server_again():
@@ -176,7 +199,7 @@ def test_the_empty_card_says_which_filter_is_holding_rows_back():
     for value in ("playable", "deleted", "expired", "failed"):
         assert f"{value}:" in HTML and "empty:" in HTML
     assert "No runs whose audio was deleted" in HTML
-    assert "No runs whose audio was swept" in HTML
+    assert "No runs whose audio expired" in HTML
     assert "hidden by this filter" in empty
     assert "No jobs. Cloned voices queue here." not in HTML, \
         "the empty state still says the tab is only for clones"

@@ -75,7 +75,7 @@ def test_the_state_table_first_match_wins(tmp_path):
     # A standing condition outranks the ten minutes an update's result is kept.
     assert (got["muted_updated"], got["mic_off_updated"]) == ("Muted", "Mic off"), got
     assert got["pending"]["word"] == "New" and got["pending"]["kind"] == "warn"
-    assert got["pending"]["line"] == "Waiting to be adopted · ID aaaaaaaaaaaa"
+    assert got["pending"]["line"] == "Waiting to be adopted"
     assert got["seen"]["word"] == "Seen" and got["seen"]["kind"] == "neutral"
 
 

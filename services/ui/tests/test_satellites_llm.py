@@ -404,8 +404,9 @@ def test_web_search_is_greyed_and_said_on_a_hub_without_searxng(tmp_path):
       const row = WAKE.rows.get("hey_jarvis");
       const els = new Map(), find = row.querySelector;
       row.querySelector = sel => { if (!els.has(sel)) els.set(sel, find(sel)); return els.get(sel); };
-      const search = { dataset: { tool: "web_search" }, checked: false, disabled: false };
-      const weather = { dataset: { tool: "weather" }, checked: false, disabled: false };
+      const toggleAttribute = () => {};
+      const search = { dataset: { tool: "web_search" }, checked: false, disabled: false, toggleAttribute };
+      const weather = { dataset: { tool: "weather" }, checked: false, disabled: false, toggleAttribute };
       row.querySelectorAll = sel => sel === "[data-tool]" ? [search, weather] : [];
       wakeRender();
       const off = { search: search.disabled, weather: weather.disabled,

@@ -64,7 +64,7 @@ def test_a_run_made_of_one_piece_is_not_reported_as_1_chunks():
         "nothing in the row pluralises the piece count"
 
 
-def test_the_pieces_are_named_in_the_word_the_engine_that_made_them_uses():
+def test_a_clone_counts_its_segments_and_a_transcription_counts_nothing():
     """A CLONE'S CHUNKS AND A TRANSCRIPTION'S ARE NOT THE SAME THING.
 
     tts-long splits the TEXT and calls the parts segments -- the live bar two
@@ -74,8 +74,10 @@ def test_the_pieces_are_named_in_the_word_the_engine_that_made_them_uses():
     "segments" about the same number underneath, and tells a reader of a
     transcription that their recording was cut into pieces of text.
     """
-    assert 'kind === "transcribe" ? "window"' in ROW, \
-        "a transcription's windows are still called something else"
+    # A transcription's windows are not counted at all now: how Parakeet cuts
+    # the audio to fit its memory is nothing the reader chose or can act on.
+    assert 'kind === "transcribe" ? ""' in ROW, \
+        "a transcription's windows are counted on its row again"
     assert '"segment"' in ROW, "the clone's own word for this field is not used"
     # And the bar underneath still counts the same field the same way.
     assert "madeCount} of ${job.chunks} segments" in ROW

@@ -98,7 +98,7 @@ def test_the_comment_strip_does_not_swallow_the_page_it_is_reading():
     gone" assertion pass by deleting the place the string would have been.
     These four markers sit either side of the accept attribute that caused it.
     """
-    for marker in ("<summary>Expert: transcription</summary>",
+    for marker in ("<summary>Expert</summary>",
                    "<summary>Expert: Kokoro voices</summary>",
                    "<summary>Expert: Chatterbox voices</summary>",
                    '<label for="x-route">Route</label>'):
@@ -113,6 +113,14 @@ def rule(selector: str) -> str:
     """
     start = BARE_CSS.index("\n" + selector) + 1
     return BARE_CSS[start:BARE_CSS.index("}", start)]
+
+
+def function(name: str) -> str:
+    """One top-level function of the script, from its signature to the brace
+    that closes it at column zero."""
+    found = re.search(r"\n(?:async )?function " + re.escape(name) + r"\(", SCRIPT)
+    assert found, f"{name}() is gone from the page"
+    return SCRIPT[found.start():SCRIPT.index("\n}\n", found.start()) + 2]
 
 
 # --------------------------------------------------------------- hierarchy --
@@ -355,12 +363,14 @@ def test_the_asserted_reduced_motion_rule_is_still_one_line_by_itself():
 
 
 def test_a_progress_bar_moves_a_transform_and_not_a_width():
-    """THE SILENT ONE. Both write sites are template literals inside an
-    innerHTML string -- the MeTube download bar and renderJobs -- so missing one
-    leaves a bar frozen at zero with no error anywhere. width also animated
-    layout on a two-second timer, and its transition was dead code besides:
-    renderJobs reassigns #joblist.innerHTML, so a transition on an element
-    created this tick never fires.
+    """THE SILENT ONE. Both write sites -- the MeTube download bar and
+    renderJobs -- set the bar from script, so missing one leaves a bar frozen
+    at zero with no error anywhere. width also animated layout on a two-second
+    timer, and its transition was dead code besides: renderJobs reassigns
+    #joblist.innerHTML, so a transition on an element created this tick never
+    fires. The download bar is built once and written into on each tick now
+    (test_the_download_progress_keeps_its_stop_button), so its transform is a
+    style property rather than markup.
 
     THE COUNT IS ALSO A CEILING, and that half is new. The jobs tab lists
     instant speech and transcriptions now, and both are terminal by
@@ -368,9 +378,11 @@ def test_a_progress_bar_moves_a_transform_and_not_a_width():
     nothing left for a bar to be a fraction of. A third bar here would be one
     drawn at 100% the moment its row appeared, which teaches a reader to
     distrust the two that mean something."""
-    assert HTML.count('class="bar-fill" style="transform:scaleX(') == 2, (
-        "one of the two progress bars still writes a width, "
-        "or a finished row has grown a bar of its own")
+    assert HTML.count('class="bar-fill" style="transform:scaleX(') == 1, (
+        "the jobs bar writes a width, or a finished row has grown a bar of its own")
+    download = function("watchDownload")
+    assert 'querySelector(".bar-fill").style.transform = `scaleX(' in download, \
+        "the download bar no longer moves a transform"
     assert 'class="bar-fill" style="width:' not in HTML
     fill = rule(".bar-fill{")
     assert "transform-origin:left" in fill and "width:100%" in fill
@@ -1856,7 +1868,12 @@ def test_the_live_state_survives_the_surface_being_switched_off():
     # --live and --bad share a hue, so a count sitting in a --live ground on
     # the one tab that shows both running and failed jobs is the collision this
     # palette exists to avoid. The numeral is on ink; .live rings it.
-    assert "background:var(--ink)" in rule(".tabs .count{")
+    assert "background:var(--count-bg)" in rule(".tabs .count{")
+    # AND IT IS READABLE ON THE PLATE IN BOTH THEMES. The plate is dark in
+    # both, so the badge has its own pair rather than the page's ink, which
+    # was 1.01:1 against the plate in light.
+    assert "--count-bg:#EBE5DA;" in BARE_CSS and "--count-ink:#1A1210;" in BARE_CSS
+    assert _ratio("#1A1210", "#EBE5DA") >= 7, "the badge's numeral is not readable on its pill"
     assert "box-shadow:0 0 0 2px var(--live)" in rule(".tabs .count.live{")
 
 
@@ -1905,12 +1922,21 @@ def test_the_mark_does_not_move_when_you_change_tab():
     page's title are the two things that must not move, because they are what
     the eye comes back to.
 
-    An auto margin on the panel absorbs the slack instead, and it resolves to 0
-    once free space goes negative -- so a tall panel still top-aligns and still
-    scrolls, which is the `safe center` behaviour this replaced."""
+    The column is stacked from the top, so neither the masthead nor the card
+    under it depends on how tall the panel is."""
     assert "justify-content:flex-start" in rule("body{"), "the masthead is centred again"
-    assert "margin-block:auto" in rule("main.wrap{"), \
-        "nothing absorbs the slack, so short panels sit against the masthead"
+
+
+def test_the_first_card_sits_under_the_title_that_names_it():
+    """An auto margin on the panel held the masthead still and moved the card
+    instead: on a short panel it opened about 250px of nothing between the
+    title and the thing it titles (Vocabulary at 1440x900), which is the gap
+    the owner's note named. The room under a short card is page; the dock is a
+    fixed object and needs no content to meet it."""
+    assert not re.search(r"main\.wrap\{[^}]*margin-block:auto", BARE_CSS), \
+        "an auto margin pushes the first card away from its title again"
+    assert not re.search(r"\.wrap\{[^}]*margin(-top|-block)?:auto", BARE_CSS), \
+        "the column is centred against the dock again"
 
 
 def test_a_field_is_never_narrower_than_the_value_it_shows():
@@ -2234,7 +2260,7 @@ def test_the_page_has_a_heading_and_a_landmark():
     # which is a string nobody navigates by; it is the tab you are on now, and
     # the four panels write it between them from one element rather than
     # carrying an <h1> each, so the document never has two.
-    assert '<h1 class="word" id="word">' in HTML
+    assert '<h1 class="word" id="word" tabindex="-1">' in HTML
     assert visible().count("<h1") == 1, "a second first-level heading is two subjects"
     for name in ("Transcribe", "Speak", "Jobs", "Vocabulary"):
         assert f'"{name}"' in SCRIPT, f"the heading never says {name}"
@@ -2243,6 +2269,32 @@ def test_the_page_has_a_heading_and_a_landmark():
     # visible(), not HTML: the comment above the change quotes the thing the
     # change removed, which is the trap bare()'s own docstring is about.
     assert '<div class="wrap">' not in visible()
+
+
+def test_no_card_heading_repeats_the_name_of_its_tab():
+    """"Repetitions like this seem bad." Jobs opened with an <h2> reading
+    Jobs one line under the masthead's Jobs, with the dock's label saying it a
+    third time; Satellites did the same, and Vocabulary said "Vocabulary
+    profiles". The masthead names the tab, so a heading inside the panel is
+    for something it does not name, such as the Transcript."""
+    masthead = dict(re.findall(r'^\s*(\w+):\s*\["([^"]+)"', SCRIPT[SCRIPT.index("const MASTHEAD = {"):], re.M)[:5])
+    assert set(masthead) == {"transcribe", "speak", "jobs", "vocab", "satellites"}
+    page = visible()
+    for tab, name in masthead.items():
+        start = page.index(f'<section id="tab-{tab}"')
+        panel = page[start:page.index("</section>", start)]
+        # A disclosure's summary and a fieldset's legend are headings too, and
+        # the name counts in its other form: "Expert: transcription" on the
+        # Transcribe tab was the tab's name again in a section title. The
+        # Transcript is not -- it is the thing the tab makes.
+        forms = [name.lower()] + {"transcribe": ["transcription"]}.get(tab, [])
+        for heading in re.findall(r"<(h2|h3|summary|legend)[^>]*>(.*?)</\1>", panel, re.S):
+            for form in forms:
+                assert form not in heading[1].lower(), \
+                    f"the {tab} panel says its own name again in a heading: {heading[1]!r}"
+    # What the headings carried that something needed is carried elsewhere.
+    assert 'id="satellitelist" role="list" aria-label="Satellites"' in page
+    assert 'id="glossnames" role="group" aria-label="Vocabulary profiles"' in page
 
 
 def test_the_vocabulary_panel_closes_the_elements_it_opens():
@@ -2359,3 +2411,266 @@ def test_every_new_status_host_announces_what_it_writes():
         tag = HTML[HTML.index(f'id="{host}"'):]
         tag = tag[:tag.index(">")]
         assert 'aria-live="polite"' in tag, f"#{host} changes silently"
+
+
+# ------------------------------------------------------------------ live --
+
+
+def test_the_health_poll_is_chained_and_paused_rather_than_an_interval():
+    """setInterval(poll, 30000) ran in a background tab all night, and with a
+    slow gateway two reads could be out at once. The live layer chains each
+    read on the last one's answer and stops while the page is hidden
+    (test_live_data.py drives it)."""
+    boot = SCRIPT[SCRIPT.index("(async function boot()"):]
+    assert "liveStart();" in boot
+    assert "setInterval(poll" not in SCRIPT
+    assert boot.index("const health = poll();") < boot.index("liveStart();")
+    # poll() hands every answer to the live layer, which is how a change in
+    # tts-long's queue or an engine's runner is noticed.
+    assert function("poll").rstrip().endswith("liveHealth();\n}")
+
+
+def test_the_engine_radios_are_rebuilt_only_when_they_change():
+    """renderEngines runs on every health answer, and a rewrite took the focus
+    off a radio somebody was moving through with the arrow keys every 30 s."""
+    body = function("renderEngines")
+    write = body.index('$("engineopts").innerHTML = html;')
+    guard = body.index("if (html !== ENGINES_DRAWN) {")
+    assert guard < write
+    assert "ENGINES_DRAWN = html;" in body[write:]
+    assert "again.focus({ preventScroll: true })" in body
+    # Hidden, the radios are emptied, so the next draw is a change.
+    assert '$("engineopts").innerHTML = ""; ENGINES_DRAWN = "";' in body
+    assert body.count('$("engineopts").innerHTML =') == 2
+
+
+def test_the_download_progress_keeps_its_stop_button():
+    """The download note was rewritten whole every 2 s, Stop and forget it
+    with it, so the keyboard on that button lost it at the next tick. It is
+    built once and written into; the remote strings go in as text."""
+    body = function("watchDownload")
+    loop = body[body.index("const percent"):]
+    build = loop.index('if (!$("stopdl") || !host.querySelector(".dlsaid")) {')
+    built = loop.index("noteHtml(", build)
+    assert loop.count("noteHtml(") == 1 and built > build, "the note is rebuilt on every tick"
+    assert 'id="stopdl"' in loop[built:loop.index("}", built)]
+    said = loop[loop.index('host.querySelector(".dlsaid").textContent = `Downloading'):]
+    assert "esc(" not in said[:said.index("\n")], "the remote strings are escaped into markup again"
+
+
+# ------------------------------------------------------- design refinement --
+
+
+def test_every_tab_names_itself_on_hover_and_focus():
+    """Four of five tabs were an unnamed glyph until pressed, so "where can I
+    go" was answered by trying each one. A pointer resting on a tab, or the
+    keyboard arriving at it, shows its name."""
+    assert "@media (hover:hover){ .tabs button:hover .label{opacity:1} }" in BARE_CSS
+    assert ".tabs button:focus-visible .label{opacity:1}" in BARE_CSS
+
+
+def test_the_dock_focus_ring_is_drawn_around_the_whole_tab_and_survives_forced_colours():
+    """An outline inset on the button boxed the icon and cut through the name
+    under it. The ring is drawn outside both, and under forced colours, where
+    a box-shadow is not painted, it becomes an outline in the system colour."""
+    assert "outline:none" in rule(".tabs button:focus-visible{")
+    ring = rule(".tabs button:focus-visible::after{")
+    assert "inset:6px -6px" in ring and "box-shadow:0 0 0 2px var(--acc)" in ring
+    block = BARE_CSS[BARE_CSS.index("@media (forced-colors:active)"):]
+    block = block[:block.index("\n}\n")]
+    assert ".tabs button:focus-visible::after{box-shadow:none;outline:2px dotted ButtonText}" in block
+
+
+def test_a_thumb_gets_44px_in_every_row():
+    """.row > button.small takes its height from --control-h and outranks the
+    coarse-pointer floor, so Refresh, New profile and every small button in a
+    row stayed at 38px under a thumb. The token itself is raised there."""
+    block = BARE_CSS[BARE_CSS.index("@media (pointer:coarse)"):]
+    block = block[:block.index("\n}\n")]
+    assert ":root{--control-h:44px}" in block
+    assert "min-height:var(--control-h)" in rule(".row > button.small{")
+
+
+def test_an_expired_job_dims_its_words_and_not_its_buttons():
+    """opacity:.55 on the row took Retry and Delete down with the text, and
+    nothing on this page says "off" in alpha."""
+    assert ".job.expired{opacity" not in BARE_CSS
+    assert ".job.expired :is(.hint,details.jobtext>summary,strong){color:var(--dim)}" in BARE_CSS
+
+
+def test_a_spacer_has_no_minimum_width():
+    """With no rule of its own a spacer took the 130px floor every field in a
+    row gets, and on a narrow card that floor alone could wrap the button
+    after it."""
+    spacer = rule(".spacer{")
+    assert "flex:1 1 0" in spacer and "min-width:0" in spacer
+    assert BARE_CSS.index(".row>*{") < BARE_CSS.index("\n.spacer{"), \
+        "the field floor comes after the spacer and wins"
+
+
+def test_a_jobs_destructive_buttons_sit_at_the_end_of_the_row():
+    """Delete was in the middle of the row, where a hand moving along the
+    buttons lands on it by momentum. The Satellites rows already end with
+    theirs; the two deletes on a job row stay together at the end."""
+    assert ".job .acts>:is([data-delaudio],[data-forget]){margin-left:auto}" in BARE_CSS
+    assert ".job .acts>[data-delaudio]~[data-forget]{margin-left:0}" in BARE_CSS
+
+
+def test_the_vocabulary_editor_rules_point_at_elements_that_exist():
+    """Three rules spaced a `.body` the editor lost when Vocabulary became a
+    tab, so they matched nothing and its groups sat flush."""
+    rules = re.findall(r"\n([^{}\n]*#gloss(?:man|form)[^{}]*)\{", BARE_CSS)
+    assert rules, "the editor has no spacing rules at all"
+    for selector in rules:
+        assert ".body" not in selector, f"{selector} reaches for a .body that is not there"
+        for ident in re.findall(r"#([\w-]+)", selector):
+            assert f'id="{ident}"' in HTML, f"{selector} names #{ident}, which the page lacks"
+    assert "#glossman>*+*,#glossform>*+*{margin-top:var(--s3)}" in BARE_CSS
+    assert "display:flex" in rule(".pills{") and "border-radius:999px" in rule(".pill{")
+
+
+def test_the_vocabulary_chooser_is_a_group_of_toggles_with_a_name():
+    """Any number of profiles can be ticked, and a joined strip is the shape of
+    a choice of one. Each is a toggle with its own edge, and the group carries
+    the name the <label> used to draw without naming anything."""
+    page = visible()
+    assert '<span class="label-like" id="gloss-h">Vocabulary</span>' in page
+    assert '<div class="seg" id="gloss" role="group" aria-labelledby="gloss-h">' in page
+    assert '<span class="label-like" id="glosssource-h">Source</span>' in page
+    assert '<div class="pills" role="group" aria-labelledby="glosssource-h">' in page
+    assert "border:0" in rule("#gloss.seg{") and "gap:var(--s1)" in rule("#gloss.seg{")
+    assert "border:1px solid var(--line)" in rule("#gloss.seg button{")
+    assert "border-left:1px solid var(--line)" in rule(".seg button+button{")
+
+
+def test_every_text_field_has_a_name_that_survives_typing():
+    """A placeholder is a name only until the first keystroke. The link box
+    had nothing else, so a screen reader announced an unnamed edit field the
+    moment a link was pasted into it."""
+    page = visible()
+    labelled = set(re.findall(r'<label[^>]*\bfor="([^"]+)"', page))
+    for tag in re.findall(r'<input\b[^>]*type="text"[^>]*>', page):
+        ident = re.search(r'\bid="([^"]+)"', tag)
+        named = ("aria-label=" in tag or "aria-labelledby=" in tag
+                 or (ident and ident.group(1) in labelled))
+        assert named, f"a text field has no name once typed into: {tag}"
+    assert 'aria-label="Link to a video or audio page"' in page
+
+
+def test_a_tapped_tab_settles_without_overshoot():
+    """At C=19.3 against K=142 the damping ratio was .81, and the bead swung
+    past the tab it was sent to and back. A tap carries no momentum, so its
+    spring is critically damped: C is at least 2 times the root of K."""
+    import math
+    line = re.search(r"const K = ddragging \? (\d+) : (\d+), C = ddragging \? (\d+) : ([\d.]+);", SCRIPT)
+    assert line, "the dock's spring constants moved"
+    k_tap, c_tap = float(line.group(2)), float(line.group(4))
+    assert c_tap >= 2 * math.sqrt(k_tap), f"a tap overshoots: C={c_tap} under {2 * math.sqrt(k_tap):.2f}"
+
+
+def test_no_unicode_glyph_stands_in_for_an_icon():
+    """Square, dot and two triangles came from whatever font had them, at that
+    font's weight, beside a dock drawn in one stroke. They are drawn now."""
+    page = visible()
+    for glyph in "■●◀▶":
+        assert glyph not in page, f"{glyph} is still standing in for an icon"
+    assert 'innerHTML = GLYPH.rec + "Record 15 s"' in page
+    assert 'innerHTML = GLYPH.stop + "Stop"' in page
+    assert ".glyph{" in BARE_CSS and "stroke:currentColor" in rule(".glyph.line{")
+
+
+def test_stop_and_transcribe_transcribes():
+    """The button promised a transcription and the page stopped at preparing
+    the file, so the reader pressed Transcribe for something already asked."""
+    handler = SCRIPT[SCRIPT.index('$("sttrec").addEventListener'):SCRIPT.index('$("sttrecstop")')]
+    assert '$("go-stt").click()' in handler
+    assert handler.index("await pick(") < handler.index('$("go-stt").click()')
+    assert 'if (!$("go-stt").disabled) $("go-stt").click();' in handler
+
+
+def test_the_page_draws_its_own_selection_and_number_fields():
+    """The browser's blue selection was the one cold colour on the page, and
+    the spin buttons on a number field were the platform's grey in a slot cut
+    into this card."""
+    assert "::selection{" in BARE_CSS and "var(--accent)" in rule("::selection{")
+    assert "input[type=number]{appearance:textfield}" in BARE_CSS
+
+
+def test_a_failure_with_no_reason_of_its_own_is_said_in_words():
+    """The fallback was the status line, "502 Bad Gateway" -- or "502 " under
+    HTTP/2, where the status text is empty -- and a request that never arrived
+    was the browser's own "Failed to fetch". Neither is a sentence."""
+    code = bare(SCRIPT)
+    assert "statusText" not in code, "a status line reaches the reader again"
+    assert "reason(payload, failure(response.status))" in code
+    api = function("api")
+    assert 'if (err && err.name === "AbortError") throw err;' in api, "Stop would read as a failure"
+    assert "could not reach the server" in api
+    said = function("failure")
+    for status in ("404", "409", "413", "429", "500", "503", "504"):
+        assert status in said
+    assert "${status}" not in said and "+ status" not in said, "the number is the sentence again"
+
+
+def test_a_service_that_answered_with_an_error_is_not_said_to_have_not_answered():
+    """Every 5xx read "did not answer", which sent the reader to check a
+    machine that was up and failing. A 500 is the service's own error and a
+    503 one starting or full; only the rest mean nothing answered."""
+    said = function("failure")
+    assert '503) return "The service is starting up or busy. Try again in a moment."' in said
+    assert '500) return "The service ran into a problem with that.' in said
+    assert said.index("status === 500") < said.index("status >= 500")
+
+
+def test_the_runner_never_shows_an_exception_name():
+    """"GPU runner: not answering. The last attempt gave RemoteUnavailable."
+    The class name is for a log; the panel says what it means for a desktop
+    that may be off, asleep or restarting."""
+    paint = function("paintRunner")
+    assert "r.error +" not in paint and "+ r.error" not in paint
+    assert '$("runnerwhy").textContent = runnerTrouble(r.error);' in paint
+    trouble = function("runnerTrouble")
+    assert "${" not in trouble and "+ name" not in trouble and "name +" not in trouble, \
+        "the exception's name is pasted into the sentence"
+
+
+def test_a_failed_run_never_shows_the_request_and_exception_it_died_of():
+    """A run that failed in the runner's transport carried "GET /v1/status:
+    IncompleteRead(0 bytes read)" as its reason: a path and a class name. That
+    shape is the runner going missing and is said as that; a reason tts-long
+    wrote in words is shown as it wrote it."""
+    trouble = function("jobTrouble")
+    assert "(GET|POST|PUT|PATCH|DELETE)" in trouble
+    assert '"The GPU runner stopped answering during this run."' in trouble
+    assert "${esc(jobTrouble(job.error))}" in HTML
+
+
+def test_a_job_whose_audio_did_not_come_says_why_in_words():
+    """"Not ready: 409" was the whole message, in an alert, for a job still
+    running; the code is now the choice of sentence and never the sentence."""
+    code = bare(SCRIPT)
+    assert "Not ready: " not in code
+    missing = function("audioMissing")
+    assert '"That audio is not ready yet."' in missing
+    assert '"That audio is no longer on the server."' in missing
+    assert "alert(audioMissing(response.status))" in function("downloadJob")
+    assert "audioMissing(response.status)" in function("playJob")
+
+
+
+def test_no_heading_level_is_skipped():
+    """The Expert panels' sections were h3s directly under the masthead's h1,
+    which a screen reader's heading list shows as a level missing. They are
+    h2s drawn as labels."""
+    page = visible()
+    assert "<h3" not in page, "an h3 sits under the h1 with no h2 between"
+    assert page.count('<h2 class="minor"') == 2
+    assert "text-transform:uppercase" in rule("h2.minor{")
+
+
+def test_the_tab_names_never_drop_under_eleven_pixels():
+    """On a phone the dock is the whole of the navigation, and its names were
+    shrunk to 10px there, under the floor for words that name a control."""
+    assert "font-size:var(--t-micro)" in rule(".tabs .label{")
+    assert "--t-micro:.6875rem" in BARE_CSS
+    assert not re.search(r"\.tabs \.label\{[^}]*font-size:\.625rem", BARE_CSS)

@@ -547,8 +547,11 @@ def test_a_forgotten_row_hands_focus_on():
     assert "rows[at + 1] || rows[at - 1]" in body
     # To something that can take it: not a hidden name field or a greyed Adopt.
     assert '.find(el => !el.disabled && !el.closest("[hidden]"));' in body
-    assert '(target || $("sat-h")).focus();' in body
-    assert 'id="sat-h" tabindex="-1"' in PANEL
+    # With nothing left to take it, to the name of the tab: the masthead's
+    # <h1>, since the card no longer repeats that name in a heading of its own.
+    assert '(target || $("word")).focus();' in body
+    assert '<h1 class="word" id="word" tabindex="-1">' in HTML
+    assert 'id="sat-h"' not in HTML, "the card's own heading is back"
 
 
 def test_a_control_that_hides_itself_hands_the_focus_on():
@@ -556,7 +559,10 @@ def test_a_control_that_hides_itself_hands_the_focus_on():
     image may have nothing due; either way the focus fell to the page. A
     seen satellite's Forget was hidden under the focus when it came back."""
     device = function("satDevice")
-    guard = "if (!img && !box.hidden && box.contains(document.activeElement)) {"
+    # focusWithin, not box.contains(document.activeElement): busy() disables
+    # the pressed Update, and Chrome drops a disabled button's focus to <body>
+    # before the answer arrives, so the plain test never found it in the box.
+    guard = "if (!img && !box.hidden && focusWithin(box)) {"
     assert guard in device and device.index(guard) < device.index("box.hidden = !img;")
     assert 'li.querySelector(".sat-device > summary").focus({ preventScroll: true });' in device
     assert 'satSaid(host, satText("updStarted", { v: img.version }));' in function("satelliteAct")
@@ -596,7 +602,7 @@ def test_the_update_bar_moves_a_transform_and_is_hidden_from_a_reader():
 
 
 def test_the_health_line_announces_once_and_only_when_it_changes():
-    assert '<span class="hint tight" id="sathealth" aria-live="polite"></span>' in PANEL
+    assert '<div class="hint" id="sathealth" aria-live="polite"></div>' in PANEL
     assert 'satSet($("sathealth"), parts.join(" · "));' in function("satellitesHealth")
     assert "if (el.textContent !== text) el.textContent = text;" in function("satSet")
     # And a standing failure is written once, not on every poll.

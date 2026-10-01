@@ -54,6 +54,7 @@ import uuid
 import wave
 import zlib
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any
 
 import httpx
@@ -156,6 +157,9 @@ class World:
         self.transcript = DEFAULT_TRANSCRIPT
         self.jobs: dict[str, dict[str, Any]] = {}
         self.glossaries: dict[str, dict[str, Any]] = {}
+        self.gloss_writable = True
+        self.gloss_reason: str | None = None
+        self.gloss_strict = False
         self.metube: dict[str, dict[str, Any]] = {}
         self.satellites: dict[str, Satellite] = {}
         self.hub: str | None = None
@@ -169,6 +173,7 @@ class World:
         self.jobs.clear()
         self.metube.clear()
         self.glossaries = {name: g for name, g in self.glossaries.items() if g["source"] == "builtin"}
+        self.gloss_writable, self.gloss_reason, self.gloss_strict = True, None, False
         if not self.glossaries:
             for path in sorted((self.repo / "services/stt/glossaries").glob("*.txt")):
                 self.glossaries[path.stem] = glossary(path.stem, path.read_text("utf-8"), "builtin")
@@ -289,6 +294,12 @@ class Observed:
                 entry["injected"] = True
                 await response(scope, receive, watched)
                 return
+            # A RULE THAT ANSWERS NOTHING ITSELF is handed to the fake, which
+            # may still act on it: speech() reads cut_after and the rule's
+            # headers to break a stream half-way, as only the fake that is
+            # writing the stream can.
+            if rule:
+                scope["fake.rule"] = rule
             await self.app(scope, tapped, watched)
         finally:
             body = b"".join(chunks)
@@ -314,10 +325,17 @@ PARAKEET_LANGUAGES = ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr"
                       "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"]
 
 
-def glossary(name: str, text: str, source: str) -> dict[str, Any]:
+def glossary(name: str, text: str, source: str, strict: bool = False) -> dict[str, Any]:
     """services/stt/app/profiles.py's reading of a file, at the depth the page
     sees: `heard = intended` is a replacement, a bare term a hotword, and a
-    replacement missing either side is refused with its line number."""
+    replacement missing either side is refused with its line number.
+
+    `strict` is the service's single-word rule for a PUT without force: a
+    one-word left-hand side (`belly = Belli`) is refused, and its reason
+    says "send force", which is the only thing the page reads to offer Save
+    anyway. It is a switch rather than the default because the other files
+    write `alpha = Alpha` as shorthand for any profile; the built-ins never
+    get it, as the service reads a file already on disk with force."""
     replacements: dict[str, str] = {}
     hotwords: list[str] = []
     rejected: list[dict[str, Any]] = []
@@ -330,6 +348,12 @@ def glossary(name: str, text: str, source: str) -> dict[str, Any]:
             if not heard or not intended:
                 rejected.append({"line": number, "text": raw,
                                  "reason": "a replacement needs text on both sides of '='"})
+                continue
+            if strict and len(heard.split()) == 1:
+                rejected.append({"line": number, "text": line, "reason": (
+                    f"{heard.lower()!r} is a single word, so this rule would rewrite any sentence "
+                    f"that says it correctly. Use the bare form ({intended!r} on a line of its own) "
+                    "to bias the decoder without rewriting, or send force to accept it.")})
                 continue
             replacements[heard] = intended
         else:
@@ -380,6 +404,25 @@ def subtitles(segments: list[dict[str, Any]], vtt: bool) -> str:
     return "\n".join(lines)
 
 
+def repair(world: World, chosen: Any, text: str) -> tuple[str, list[str]]:
+    """services/stt/app/glossary.apply over the profiles a request named in its
+    `glossary` field: each `heard = intended` rewrites whole words whatever
+    their case, and a rule is listed as fired only when it changed the text.
+    Both routes run it; /transcribe returns the list as `repaired`, and /v1
+    sends it as the `x-glossary-repaired` header, percent-encoded, as the
+    service does."""
+    fired: list[str] = []
+    for name in str(chosen or "").split(","):
+        profile = world.glossaries.get(name.strip())
+        for heard, intended in (profile["replacements"] if profile else {}).items():
+            changed = re.sub(rf"\b{re.escape(heard)}\b", lambda _: intended, text,
+                             flags=re.IGNORECASE)
+            if changed != text:
+                fired.append(intended)
+            text = changed
+    return text, fired
+
+
 def stt_app(world: World) -> FastAPI:
     app = FastAPI(openapi_url=None)
 
@@ -410,10 +453,12 @@ def stt_app(world: World) -> FastAPI:
     async def transcriptions(request: Request) -> Response:
         fields, seconds = await heard(request)
         fmt = fields.get("response_format", "json")
-        text = world.transcript
+        text, fired = repair(world, fields.get("glossary"), world.transcript)
         segments, words = timed(text, seconds)
         headers = {"x-stt-engine": "parakeet-tdt-0.6b-v3", "x-realtime-factor": "8.8",
                    "x-audio-seconds": f"{seconds:.2f}"}
+        if fired:
+            headers["x-glossary-repaired"] = ", ".join(quote(term, safe=" ") for term in fired)
         if fmt == "text":
             return PlainTextResponse(text, headers=headers)
         if fmt in ("srt", "vtt"):
@@ -440,17 +485,31 @@ def stt_app(world: World) -> FastAPI:
 
     @app.post("/transcribe")
     async def transcribe(request: Request) -> dict[str, Any]:
-        _, seconds = await heard(request)
-        return {"text": world.transcript, "raw": world.transcript.lower(), "repaired": [],
+        fields, seconds = await heard(request)
+        text, fired = repair(world, fields.get("glossary"), world.transcript)
+        return {"text": text, "raw": world.transcript.lower(), "repaired": fired,
                 "model": "parakeet", "audio_seconds": round(seconds, 2),
                 "speech_seconds": round(seconds * 0.86, 2), "compute_seconds": round(seconds / 8.8, 2),
                 "realtime_factor": 8.8}
 
     @app.get("/glossaries")
     async def list_glossaries() -> dict[str, Any]:
-        return {"glossaries": [glossary_summary(g) for _, g in sorted(world.glossaries.items())],
-                "writable": True, "default": [], "builtin_dir": "/app/glossaries",
+        body = {"glossaries": [glossary_summary(g) for _, g in sorted(world.glossaries.items())],
+                "writable": world.gloss_writable, "default": [], "builtin_dir": "/app/glossaries",
                 "custom_dir": "/glossaries"}
+        # As the service: `reason` only when it cannot write, and only if it
+        # has one (fake.glossaries(reason=None) is a server that gave none).
+        if not world.gloss_writable and world.gloss_reason:
+            body["reason"] = world.gloss_reason
+        return body
+
+    def read_only() -> Response | None:
+        """The service's 503 for a write on a deployment with no volume."""
+        if world.gloss_writable:
+            return None
+        return JSONResponse({"detail": "glossary profiles are read-only here: "
+                                       + (world.gloss_reason or "no custom glossary directory")},
+                            status_code=503)
 
     @app.get("/glossaries/{name}")
     async def get_glossary(name: str) -> Response:
@@ -477,9 +536,11 @@ def stt_app(world: World) -> FastAPI:
         if existing is not None and existing["source"] == "builtin":
             return JSONResponse({"detail": f"{name!r} is built in and cannot be written. Copy it to a "
                                            "new name and edit that."}, status_code=409)
+        if (refused := read_only()) is not None:
+            return refused
         if len(text.encode()) > 65536:
             return JSONResponse({"detail": "that profile is over 64 KB"}, status_code=413)
-        g = glossary(name, text, "custom")
+        g = glossary(name, text, "custom", strict=world.gloss_strict and not force)
         if g["rejected"] and not force:
             accepted = len(g["replacements"]) + len(g["hotwords"])
             return JSONResponse({"detail": {
@@ -498,6 +559,8 @@ def stt_app(world: World) -> FastAPI:
             return JSONResponse({"detail": f"no glossary profile called {name!r}"}, status_code=404)
         if g["source"] == "builtin":
             return JSONResponse({"detail": f"{name!r} is built in and cannot be deleted"}, status_code=409)
+        if (refused := read_only()) is not None:
+            return refused
         del world.glossaries[g["name"]]
         return JSONResponse({"name": g["name"], "deleted": True})
 
@@ -550,10 +613,26 @@ async def speech(world: World, request: Request, rtf: float) -> Response:
                      param="response_format")
     seconds = round(spoken_seconds(text) / float(body.get("speed") or 1.0), 1)
     if body.get("stream_format") == "sse":
+        # A STREAM THAT BREAKS HALF-WAY, on a fake.fail(..., status=None,
+        # cut_after=n) rule: n deltas, then the in-band error frame
+        # services/tts writes when synthesis fails after the 200 has gone
+        # (_sse_body), which is the only way a failure can reach a client
+        # through the gateway -- a connection dropped under it is relayed as
+        # a stream that simply ended. The rule's headers go on the response,
+        # so a test can give it tts-long's X-Job-Id.
+        rule = request.scope.get("fake.rule") or {}
+        cut = rule.get("cut_after")
+
         async def frames():
             data = pcm(seconds) if fmt == "pcm" else wav(seconds)
             step = 24000  # half a second of 24 kHz s16le mono per delta
-            for i in range(0, len(data), step):
+            for n, i in enumerate(range(0, len(data), step)):
+                if cut is not None and n >= int(cut):
+                    failed = {"error": {"message": "synthesis failed: the fake was told to stop here",
+                                        "type": "server_error", "param": None,
+                                        "code": "synthesis_failed"}}
+                    yield f"data: {json.dumps(failed)}\n\n"
+                    return
                 chunk = base64.b64encode(data[i:i + step]).decode()
                 yield f"data: {json.dumps({'type': 'speech.audio.delta', 'audio': chunk})}\n\n"
                 await asyncio.sleep(0.12)
@@ -563,7 +642,7 @@ async def speech(world: World, request: Request, rtf: float) -> Response:
             yield f"data: {json.dumps(done)}\n\n"
 
         return StreamingResponse(frames(), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache"})
+                                 headers={"Cache-Control": "no-cache"} | (rule.get("headers") or {}))
     return audio_answer(fmt, seconds, rtf)
 
 
@@ -770,7 +849,21 @@ def long_app(world: World) -> FastAPI:
         body = await request.json()
         text = str(body.get("text") or "")
         if body.get("segments"):
-            text = " ".join(str(s.get("text") if isinstance(s, dict) else s) for s in body["segments"])
+            # EACH SEGMENT AS voice_common.models.Segment READS IT: `text` is
+            # required, `pause_after` optional, and nothing else is allowed. This
+            # took a segment without text and spoke the word "None", so a page
+            # that sent one was answered with a job where tts-long answers 422.
+            wrong = []
+            for i, s in enumerate(body["segments"]):
+                s = s if isinstance(s, dict) else {}
+                if not isinstance(s.get("text"), str):
+                    wrong.append({"type": "missing", "loc": ["body", "segments", i, "text"],
+                                  "msg": "Field required"})
+                wrong += [{"type": "extra_forbidden", "loc": ["body", "segments", i, key],
+                           "msg": "Extra inputs are not permitted"} for key in set(s) - {"text", "pause_after"}]
+            if wrong:
+                return JSONResponse({"detail": wrong}, status_code=422)
+            text = " ".join(s["text"] for s in body["segments"])
         if not text.strip():
             return JSONResponse({"detail": "provide either text or segments"}, status_code=400)
         engine = (body.get("model") or "chatterbox").strip().lower()
@@ -821,7 +914,15 @@ def long_app(world: World) -> FastAPI:
         job = world.jobs.get(job_id)
         if job is None:
             return JSONResponse({"detail": "no such job"}, status_code=404)
-        return JSONResponse(public(job) | {"text": job.get("text"), "segments": job.get("segments")})
+        # THE SEGMENTS AS THE WORKER HOLDS THEM, (text, pause_after) pairs, which
+        # is what tts-long's GET /jobs/{id} returns: main.py's _segments() builds
+        # them and get_job() hands them over as they are. This answered a list of
+        # bare strings, a shape no service sends, so a page reading the record
+        # was tested against a contract that does not exist. Pauses are not
+        # modelled here, so each is 0.0. A record with no text keeps none, as a
+        # job recovered from disk does.
+        pairs = [[piece, 0.0] for piece in job.get("segments") or []] if job.get("text") else []
+        return JSONResponse(public(job) | {"text": job.get("text"), "segments": pairs})
 
     @app.delete("/jobs/{job_id}")
     async def delete_job(job_id: str) -> Response:
@@ -880,7 +981,13 @@ def metube_entry(world: World, url: str) -> tuple[str, dict[str, Any]] | None:
         return None
     if entry["where"] == "queue":
         elapsed = time.time() - entry["started"]
-        if elapsed >= DOWNLOAD_SECONDS:
+        if elapsed >= DOWNLOAD_SECONDS and "broken" in url:
+            # A LINK THAT RESOLVES AND THEN FAILS TO DOWNLOAD, as a video taken
+            # down between the two does: MeTube files it under done with an
+            # error status and its message, and no file.
+            entry.update(where="done", status="error", percent=None, speed=None, eta=None,
+                         msg="ERROR: [generic] Unable to download webpage: HTTP Error 403: Forbidden")
+        elif elapsed >= DOWNLOAD_SECONDS:
             entry.update(where="done", status="finished", percent=100, speed=None, eta=None,
                          filename=entry["_filename"])
         else:
@@ -1330,10 +1437,12 @@ class Satellite:
                          "status": 204, "confirmed": True, "error": None})
         await self.send_status()
 
-    async def mic(self, seconds: float) -> None:
-        """Microphone frames at real time: 20 ms, a quiet tone on every channel."""
+    async def mic(self, seconds: float, clip: bytes | None = None) -> None:
+        """Microphone frames at real time: 20 ms, a quiet tone on every channel,
+        or `clip` (a 16 kHz mono WAV) as the room heard it (heard_in_room)."""
         channels = self.caps["mic"]["channels"]
-        tone = pcm(seconds, 16000, channels, pitch=220.0)
+        tone = pcm(seconds, 16000, channels, pitch=220.0) if clip is None \
+            else heard_in_room(clip, seconds, channels)
         step = 320 * channels * 2
         t0 = time.monotonic()
         for i, offset in enumerate(range(0, len(tone) - step + 1, step)):
@@ -1346,11 +1455,191 @@ class _Reconnect(Exception):
         self.after = after
 
 
+# The recordings a scripted microphone can play: the hub's own test fixtures,
+# a person saying a wake word, by file name and nothing else.
+FIXTURES = Path(__file__).resolve().parents[2] / "satellites" / "tests" / "fixtures"
+FIXTURE_NAME = re.compile(r"^[A-Za-z0-9_-]+\.wav$")
+
+
+def heard_in_room(clip: bytes, seconds: float, channels: int) -> bytes:
+    """A recorded voice as a satellite's microphones hear it, for `seconds`:
+    half a second of a quiet room, the clip, then the room again. Every
+    microphone hears it; the loopback (channel 0 on a satellite with more
+    than one) is silent, because nothing is playing. Interleaved s16le, as
+    the satellite sends its frames.
+
+    WHY A RECORDING AND NOT /inject. The hub's double-check runs on a wake
+    word heard live, from a satellite's microphones, and nowhere else; a clip
+    sent to /inject goes through a detector of its own and is never checked,
+    and the page marks its events as a test and lights nothing for them. So
+    the one way to hear a wake word as a satellite hears it is through its
+    microphones."""
+    with wave.open(io.BytesIO(clip)) as w:
+        voice = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32)
+    rate = 16000
+    total = int(seconds * rate)
+    rng = np.random.default_rng(7)
+    room = rng.normal(0.0, 30.0, total).astype(np.float32)
+    start = rate // 2
+    end = min(total, start + len(voice))
+    room[start:end] += voice[:end - start]
+    mono = np.clip(room, -32768, 32767).astype("<i2")
+    frames = np.repeat(mono[:, None], channels, axis=1)
+    if channels > 1:
+        frames[:, 0] = 0
+    return frames.tobytes()
+
+
+# ---- what a wake word's action reaches -----------------------------------------------
+#
+# HOME ASSISTANT, A LANGUAGE MODEL SERVER AND A WEBHOOK RECEIVER, under /__ha,
+# /__llm and /__hook on the control port. The hub calls them for a wake word's
+# action (Try a word, the model picker and its Test, the pipeline picker) and
+# for a button set to Webhook, and launch.py lets it reach nothing but
+# loopback, so these are what a test points an action at; an address anywhere
+# else would be a refused connection and a line in network-violations.log.
+# Each is wrapped in Observed, so what the hub sent is in the request log
+# under backend "ha", "llm" or "hook" with its body and its Authorization
+# header, and fake.fail(path, backend="llm", status=401) breaks one as a
+# provider would. The wire shapes are the ones services/satellites/app/
+# destinations.py reads: Home Assistant's POST /api/conversation/process and
+# its websocket's auth handshake and assist_pipeline/pipeline/list; an
+# OpenAI-compatible GET /models that pages as Anthropic's does (has_more,
+# last_id, after_id) and a POST /chat/completions that streams; a webhook that
+# answers 200 with nothing to say.
+
+HA_REPLY = "Turned on the kitchen lights."
+HA_PIPELINES = {
+    "preferred_pipeline": "01home",
+    "pipelines": [
+        {"id": "01home", "name": "Home", "language": "en", "conversation_language": "en",
+         "stt_engine": "stt.faster_whisper", "stt_language": "en",
+         "tts_engine": "tts.piper", "tts_language": "en-GB", "tts_voice": "en_GB-alba-medium"},
+        {"id": "02kitchen", "name": "Kitchen pipeline", "language": "pt", "conversation_language": "*",
+         "stt_engine": None, "stt_language": None,
+         "tts_engine": "tts.google_translate", "tts_language": "pt", "tts_voice": None}]}
+LLM_REPLY = ["Hello", " there,", " friend."]
+# Two pages: the first says there is more after its last id, as Anthropic's does.
+LLM_PAGES = [["fake-large", "fake-small"], ["fake-tiny"]]
+
+
+def bearer(request: Request) -> str:
+    return request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+
+
+def ha_app(world: World) -> FastAPI:
+    from starlette.routing import WebSocketRoute
+    from starlette.websockets import WebSocketDisconnect
+
+    app = FastAPI(openapi_url=None)
+
+    @app.post("/api/conversation/process")
+    async def conversation(request: Request) -> Response:
+        # Read, as HA reads it: Observed records only the body the app took.
+        await request.body()
+        if not bearer(request):
+            return JSONResponse({"message": "Invalid authentication"}, status_code=401)
+        return JSONResponse({
+            "conversation_id": "01e2e", "response": {
+                "response_type": "action_done", "language": "en",
+                "data": {"targets": [], "success": [{"id": "light.kitchen", "name": "Kitchen"}],
+                         "failed": []},
+                "speech": {"plain": {"speech": HA_REPLY, "extra_data": None}}}})
+
+    async def websocket(ws) -> None:
+        """Home Assistant's handshake, then the one command the picker sends.
+        Each message the hub sends is recorded, the token as the fact of one.
+        A Starlette route and not FastAPI's decorator: this module's
+        annotations are strings, and FastAPI, unable to resolve a WebSocket
+        imported here, took the parameter for a query and refused the
+        handshake with a 403."""
+        await ws.accept()
+        try:
+            await ws.send_json({"type": "auth_required", "ha_version": "2026.9.0"})
+            auth = await ws.receive_json()
+            token = str(auth.get("access_token") or "")
+            world.record({"t": time.time(), "backend": "ha", "method": "WS", "path": "/__ha/api/websocket",
+                          "query": "", "headers": {}, "status": 101,
+                          "json": {"type": auth.get("type"), "token": bool(token)}})
+            if not token:
+                await ws.send_json({"type": "auth_invalid", "message": "Invalid access token or password"})
+                return
+            await ws.send_json({"type": "auth_ok", "ha_version": "2026.9.0"})
+            while True:
+                msg = await ws.receive_json()
+                world.record({"t": time.time(), "backend": "ha", "method": "WS",
+                              "path": "/__ha/api/websocket", "query": "", "headers": {}, "status": 101,
+                              "json": msg})
+                if msg.get("type") == "assist_pipeline/pipeline/list":
+                    await ws.send_json({"id": msg.get("id"), "type": "result", "success": True,
+                                        "result": HA_PIPELINES})
+                else:
+                    await ws.send_json({"id": msg.get("id"), "type": "result", "success": False,
+                                        "error": {"code": "unknown_command", "message": "Unknown command."}})
+        except WebSocketDisconnect:
+            return
+
+    app.router.routes.append(WebSocketRoute("/api/websocket", websocket))
+    return app
+
+
+def llm_app(world: World) -> FastAPI:
+    app = FastAPI(openapi_url=None)
+
+    @app.get("/v1/models")
+    async def models(request: Request) -> dict[str, Any]:
+        after = request.query_params.get("after_id")
+        page = 1 if after == LLM_PAGES[0][-1] else 0
+        ids = LLM_PAGES[page]
+        return {"data": [{"id": i, "object": "model", "created": 1767225600} for i in ids],
+                "has_more": page + 1 < len(LLM_PAGES), "first_id": ids[0], "last_id": ids[-1]}
+
+    @app.post("/v1/chat/completions")
+    async def completions(request: Request) -> Response:
+        body = await request.json()
+        model = body.get("model") or "fake-small"
+        if not body.get("stream"):
+            return JSONResponse({"id": "chatcmpl-e2e", "object": "chat.completion", "model": model,
+                                 "choices": [{"index": 0, "finish_reason": "stop",
+                                              "message": {"role": "assistant", "content": "".join(LLM_REPLY)}}],
+                                 "usage": {"prompt_tokens": 12, "completion_tokens": 4}})
+
+        async def chunks():
+            for piece in LLM_REPLY:
+                delta = {"id": "chatcmpl-e2e", "object": "chat.completion.chunk", "model": model,
+                         "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}]}
+                yield f"data: {json.dumps(delta)}\n\n"
+                await asyncio.sleep(0.05)
+            end = {"id": "chatcmpl-e2e", "object": "chat.completion.chunk", "model": model,
+                   "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+            yield f"data: {json.dumps(end)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(chunks(), media_type="text/event-stream")
+
+    return app
+
+
+def hook_app(world: World) -> FastAPI:
+    app = FastAPI(openapi_url=None)
+
+    @app.post("/{name}")
+    async def hook(name: str, request: Request) -> dict[str, Any]:
+        # Read, as a receiver does: Observed records only the body the app took.
+        await request.body()
+        return {"ok": True}
+
+    return app
+
+
 # ---- the control API ---------------------------------------------------------------
 
 
 def control_app(world: World) -> FastAPI:
     app = FastAPI(openapi_url=None)
+    for prefix, backend, make in (("/__ha", "ha", ha_app), ("/__llm", "llm", llm_app),
+                                  ("/__hook", "hook", hook_app)):
+        app.mount(prefix, Observed(make(world), backend, world))
 
     def sat(key: str) -> Satellite:
         found = world.satellites.get(key) or next(
@@ -1406,6 +1695,14 @@ def control_app(world: World) -> FastAPI:
         world.transcript = str((await request.json())["text"])
         return {"ok": True}
 
+    @app.post("/__fake/glossaries")
+    async def glossary_rules(request: Request) -> dict[str, Any]:
+        body = await request.json()
+        world.gloss_writable = bool(body.get("writable", True))
+        world.gloss_reason = body.get("reason")
+        world.gloss_strict = bool(body.get("strict", False))
+        return {"ok": True}
+
     @app.post("/__fake/jobs")
     async def seed_job(request: Request) -> dict[str, Any]:
         body = await request.json()
@@ -1423,6 +1720,17 @@ def control_app(world: World) -> FastAPI:
         body = await request.json()
         world.hub = body["hub"].rstrip("/")
         keys = body.get("satellites") or list(SCRIPTED)
+        # AS THEY START, for a hub that starts with nothing on it
+        # (stack.restart_hub). A device keeps what it was told across a
+        # reconnect, as a real one does: a volume, a muted mic, the track its
+        # phone skipped to, and a forget, after which it never adopts itself
+        # again. So a fresh hub met the devices the last test left, and
+        # Kitchen forgotten by one test stayed waiting for every test after.
+        if body.get("fresh"):
+            for key in keys:
+                old = world.satellites.pop(key, None)
+                if old is not None:
+                    await old.stop()
         for key in keys:
             world.satellites.setdefault(key, Satellite(world, key)).start()
         deadline = time.monotonic() + float(body.get("timeout", 20))
@@ -1486,8 +1794,27 @@ def control_app(world: World) -> FastAPI:
     @app.post("/__fake/satellites/{key}/mic")
     async def mic(key: str, request: Request) -> dict[str, Any]:
         s = sat(key)
-        s.spawn(s.mic(float((await request.json()).get("seconds", 6.0))))
+        body = await request.json()
+        clip = body.get("clip")
+        if clip is not None and not FIXTURE_NAME.match(str(clip)):
+            return JSONResponse({"error": f"not a fixture's name: {clip!r}"}, status_code=400)
+        data = (FIXTURES / clip).read_bytes() if clip else None
+        s.spawn(s.mic(float(body.get("seconds", 6.0)), data))
         return {"ok": True}
+
+    @app.post("/__fake/satellites/{key}/caps")
+    async def caps(key: str, request: Request) -> dict[str, Any]:
+        """Change what the device says it is, and connect it again: caps are
+        said once, in its hello. A key given null is taken out."""
+        s = sat(key)
+        for name, value in (await request.json()).items():
+            if value is None:
+                s.caps.pop(name, None)
+            else:
+                s.caps[name] = value
+        await s.stop()
+        s.start()
+        return s.view()
 
     @app.post("/__fake/satellites/{key}/button")
     async def button(key: str, request: Request) -> dict[str, Any]:

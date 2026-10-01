@@ -290,17 +290,20 @@ class FakeControl:
 
     def fail(self, path: str, *, status: int | None = 500, method: str | None = None,
              backend: str | None = None, json_body: Any = None, body: str | None = None,
-             times: int | None = None, delay: float = 0.0, headers: dict[str, str] | None = None) -> None:
+             times: int | None = None, delay: float = 0.0, headers: dict[str, str] | None = None,
+             cut_after: int | None = None) -> None:
         """Answer requests matching `path` (a regular expression) with `status`
         instead of the fake's answer, `times` times or for ever; or, with
         status=None, only hold them for `delay` seconds first. backend is one
-        of stt, tts, tts_long, metube."""
+        of stt, tts, tts_long, metube. With status=None, cut_after=n breaks a
+        streamed /v1/audio/speech after n deltas with the service's in-band
+        error frame, and `headers` go on that stream's response."""
         if json_body is None and body is None and status and status >= 400:
             json_body = {"error": {"message": f"injected {status}", "type": "server_error",
                                    "param": None, "code": "injected"}}
         self._ok(self.http.post("/__fake/fail", json={
             "path": path, "status": status, "method": method, "backend": backend, "json": json_body,
-            "body": body, "times": times, "delay": delay, "headers": headers}))
+            "body": body, "times": times, "delay": delay, "headers": headers, "cut_after": cut_after}))
 
     def clear_failures(self) -> None:
         self._ok(self.http.delete("/__fake/fail"))
@@ -311,6 +314,15 @@ class FakeControl:
 
     def transcript(self, text: str) -> None:
         self._ok(self.http.put("/__fake/transcript", json={"text": text}))
+
+    def glossaries(self, writable: bool = True, reason: str | None = None, strict: bool = False) -> None:
+        """How the fake stt-stack treats profile writes until reset():
+        writable=False lists `writable: false` with `reason` (when given) and
+        answers a PUT or DELETE 503, as a deployment with no volume does;
+        strict=True refuses a one-word left-hand side unless the PUT sends
+        force, with a reason that says so, as the real service does."""
+        self._ok(self.http.post("/__fake/glossaries",
+                                json={"writable": writable, "reason": reason, "strict": strict}))
 
     def add_job(self, **fields: Any) -> dict[str, Any]:
         """A tts-long job. Scripted by default: queued for 1 s, then one segment
@@ -344,9 +356,33 @@ class FakeControl:
         self._ok(self.http.post(f"/__fake/satellites/{key}/airplay",
                                 json={k: v for k, v in (("state", state), ("on_command", on_command)) if v}))
 
-    def satellite_mic(self, key: str, seconds: float = 6.0) -> None:
-        """Microphone frames at real time, for the Listen button."""
-        self._ok(self.http.post(f"/__fake/satellites/{key}/mic", json={"seconds": seconds}))
+    def satellite_mic(self, key: str, seconds: float = 6.0, clip: str | None = None) -> None:
+        """Microphone frames at real time, for the Listen button: a quiet
+        tone, or `clip`, one of services/satellites/tests/fixtures by file name
+        (hey_jarvis_en_gb.wav), as the room heard it."""
+        self._ok(self.http.post(f"/__fake/satellites/{key}/mic", json={"seconds": seconds, "clip": clip}))
+
+    def satellite_caps(self, key: str, **caps: Any) -> dict[str, Any]:
+        """Change what a satellite says it is (merged into its caps; None
+        takes a key out) and connect it again, since caps are said only in its
+        hello. A restart_hub() puts it back as it started."""
+        return self._ok(self.http.post(f"/__fake/satellites/{key}/caps", json=caps))
+
+    # -- what a wake word's action or a button's webhook reaches (fakes.py) --
+
+    @property
+    def ha_url(self) -> str:
+        """Home Assistant's address, as an action's Address field takes it."""
+        return f"{self.base}/__ha"
+
+    @property
+    def llm_url(self) -> str:
+        """A language model server's base URL, as an action's Base URL takes it."""
+        return f"{self.base}/__llm/v1"
+
+    def hook_url(self, name: str) -> str:
+        """A webhook receiver's address; what reaches it is under backend "hook"."""
+        return f"{self.base}/__hook/{name}"
 
     def satellite_button(self, key: str, button: str, action: str = "press") -> None:
         self._ok(self.http.post(f"/__fake/satellites/{key}/button", json={"button": button, "action": action}))
@@ -421,9 +457,23 @@ class Stack:
                             # serves a WAV, and a name that says so keeps the
                             # content type honest all the way to <audio>.
                             "UI_METUBE_FORMAT": "wav",
-                            # No yt-dlp: it would reach for the network, and the
-                            # confirm card is drawn from MeTube's title without it.
-                            "UI_PROBE": "0",
+                            # THE PROBE ON, AND THE REAL yt-dlp OUT OF REACH. The
+                            # venv holds a real one, and it would reach for the
+                            # network from a subprocess launch.py does not wall
+                            # in, so the venv is left off this PATH altogether:
+                            # the only yt-dlp the page server can find is
+                            # e2e/bin/yt-dlp, which prints an info-dict chosen by
+                            # a word in the link (live, subs, long, unprobed) and
+                            # lets the confirm card's every branch be reached.
+                            # The page server itself is started by absolute path
+                            # and spawns nothing else.
+                            "UI_PROBE": "1",
+                            "PATH": f"{HERE / 'bin'}:/usr/bin:/bin",
+                            # Twelve a minute is the deployment's rate limit for
+                            # one client, and every request here comes from the
+                            # one gateway: a file of link tests passes it in
+                            # under a minute and would read 429s it did not cause.
+                            "UI_RESOLVE_PER_MINUTE": "600",
                             "UI_VOICE_DIR": str(self.run / "voices"),
                             "UI_LOG_LEVEL": "WARNING"})
             self._wait("gateway", f"{self.url}/health")
@@ -434,7 +484,7 @@ class Stack:
             raise
         return self
 
-    def _start_hub(self) -> None:
+    def _start_hub(self, fresh: bool = False) -> None:
         data = self.run / "hub-data"
         models = data / "models"
         models.mkdir(parents=True, exist_ok=True)
@@ -457,16 +507,31 @@ class Stack:
                         "SATELLITES_LOG_LEVEL": "WARNING",
                         "ORT_DISABLE_TELEMETRY": "1"})
         self._wait("hub", f"{self.hub}/health")
-        self.fake._ok(self.fake.http.post("/__fake/satellites/connect", json={"hub": self.hub}))
+        self.fake._ok(self.fake.http.post("/__fake/satellites/connect",
+                                          json={"hub": self.hub, "fresh": fresh}))
 
     def restart_hub(self, wipe: bool = True) -> None:
         """A fresh hub (and a fresh adoption of the satellites) for a test that
         needs one. About a second, and every open page loses its event stream
-        for that second, so only where the hub's state matters."""
+        for that second, so only where the hub's state matters. Wiped, the
+        scripted satellites start over too, as they were when the stack
+        started: a hub with nothing on it meeting a Kitchen that an earlier
+        test had forgotten is not the hub the test asked for."""
         self.stop_hub()
         if wipe:
             shutil.rmtree(self.run / "hub-data", ignore_errors=True)
-        self.start_hub()
+        self._start_hub(fresh=wipe)
+
+    def inject(self, key: str, wav_bytes: bytes, **params: Any) -> dict[str, Any]:
+        """A recorded clip through a satellite's listening path, as POST
+        /satellites/{id}/inject runs it, with play=0: nothing is sent to any
+        satellite. `params` are the route's own (wake_word=...). The hub
+        marks what it publishes as injected."""
+        nid = next(s["id"] for s in self.fake.satellites() if s["key"] == key)
+        r = httpx.post(f"{self.hub}/satellites/{nid}/inject", params={"play": 0} | params,
+                       content=wav_bytes, headers={"Content-Type": "audio/wav"}, timeout=60)
+        r.raise_for_status()
+        return r.json()
 
     def stop_hub(self) -> None:
         """The hub gone, as a restart or a crash looks from the page: the
