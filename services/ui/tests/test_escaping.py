@@ -7,12 +7,14 @@ agree about `<`.
 
 The hole was real. `$("picked").innerHTML = ...${facts.title}...` took the
 title of the page behind a pasted link -- yt-dlp's probe or MeTube's record --
-and interpolated it raw. The CSP this page sets is script-src 'self'
-'unsafe-inline', because the page's own script block is inline, so an injected
-event handler EXECUTES; connect-src 'self' stops an XHR exfiltrating, but not a
-navigation or a form POST, and the API key sits in localStorage. It needs only
-that the user paste a link to media somebody else named, which is the ordinary
-use of that box.
+and interpolated it raw. The CSP this page was served with then was script-src
+'self' 'unsafe-inline', so an injected event handler EXECUTED; connect-src
+'self' stops an XHR exfiltrating, but not a navigation or a form POST. It needs
+only that the user paste a link to media somebody else named, which is the
+ordinary use of that box. The page's script is now allowed by its hash alone,
+which blocks an injected handler too -- and that is the second lock, not a
+reason to drop this one: the bytes that reach innerHTML are still the page's
+to get right.
 """
 
 import re
@@ -1061,11 +1063,15 @@ def test_the_control_is_hidden_when_the_service_offers_none():
     assert '$("glossbox").hidden = !GLOSSARIES.length' in body
 
 
-def test_the_page_can_reach_the_glossary_listing():
-    """It is a gateway route, so a bare relative call would land on the gateway
-    and skip the UI's key. /ui/api is what brings it back through."""
-    assert "glossaries" in HTML[HTML.index("const GATEWAY_ROUTES"):
-                                HTML.index("const GATEWAY_ROUTES") + 200]
+def test_the_page_calls_the_gateways_own_paths_with_no_prefix():
+    """The glossary listing, like every gateway route, was reached through
+    /ui/api, a proxy in voice-ui that signed requests with the container's
+    key. The page is behind a session now and calls the gateway's paths
+    directly (§4.2): a prefix left anywhere would be a 404 from a route that
+    no longer exists."""
+    script = re.sub(r"/\*.*?\*/|<!--.*?-->|(?<!:)//[^\n]*", "", HTML, flags=re.S)
+    assert "/ui/api" not in script and "GATEWAY_ROUTES" not in script
+    assert 'json("/glossaries")' in script
 
 
 # ------------------------------------------------ managing the profiles --
@@ -1241,10 +1247,11 @@ def test_note_puts_text_on_the_page_and_never_markup():
     it straight into note(). A link to a host whose failure text carries
     `<img src=x onerror=…>` ran that handler.
 
-    It ran on the origin that holds the credential: the UI server signs every
-    outgoing request with UI_GATEWAY_API_KEY, so injected script could start
-    jobs, delete clips and read transcripts as the container. The CSP allows
-    'unsafe-inline', so nothing downstream stopped it.
+    It ran on the origin that holds the credential -- then a container key the
+    UI server signed every request with, now the signed-in person's session
+    cookie -- so injected script could start jobs, delete clips and read
+    transcripts as them. The CSP allowed 'unsafe-inline' then, so nothing
+    downstream stopped it.
 
     This page closed exactly this hole once before — see the comment above esc()
     about a media title that executed — and left the error path open. Twelve

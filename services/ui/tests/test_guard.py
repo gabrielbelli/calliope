@@ -88,7 +88,7 @@ def test_internal_names_are_refused_before_resolution_is_even_asked():
     def explode(*args, **kwargs):
         raise AssertionError("resolution should not have been attempted")
     for host in ("http://localhost/", "http://x.localhost/",
-                 "http://orko.local/", "http://metadata.google.internal/"):
+                 "http://nas.local/", "http://metadata.google.internal/"):
         assert "internal host" in refuse(host, explode)
 
 

@@ -1,18 +1,20 @@
-"""Mock gateway and mock MeTube, wired in through httpx's own transport layer.
+"""A signing gateway, the gateway's internal listener and MeTube, all without a socket.
 
 NO SERVER IS STARTED BY ANY TEST HERE, and none may be: the app is exercised
 as the real ASGI app through fastapi.testclient, and the two things it talks to
-are replaced at the httpx transport rather than at a socket. So the forwarding
-code, the header filtering, the streaming and the error mapping are the real
-ones — only the wire is fake.
+are replaced at the httpx transport rather than at a socket. So the identity
+check, the ownership checks, the outbound headers, the streaming and the error
+mapping are the real ones -- only the wire is fake.
 
-That is the same shape services/gateway/tests uses, and it is why httpx was
-worth the dependency in both: a hand-rolled fake client would have tested this
-service's idea of httpx rather than httpx.
+WHO IS ASKING comes from voice_common.conformance's FakeGateway, which writes
+identity.pub and service.key where this service reads them and signs
+assertions with the matching key, exactly as the real gateway does. Every
+request a test sends carries one; the default is ALICE, a speech user, so a
+test that needs more than a speech user says so.
 
 The app is reloaded per test because its configuration is read at import,
-exactly as it is in the four siblings and exactly as it is in the container,
-where the process is the unit of configuration.
+exactly as it is in the container, where the process is the unit of
+configuration.
 """
 
 from __future__ import annotations
@@ -22,50 +24,61 @@ import importlib
 import ipaddress
 import json
 import socket
+from collections.abc import Callable, Iterable
 
 import httpx
 from urllib.parse import unquote
 import pytest
 from fastapi.testclient import TestClient
+from voice_common.identity import ASSERTION_HEADER, DELEGATION_HEADER
+from voice_common.scopes import session_scopes
 
-GATEWAY = "http://gateway.test"
+# The `calliope_gateway` fixture: a FakeGateway whose credential directory
+# this process reads, as the real gateway writes one into each service's
+# volume.
+pytest_plugins = ("voice_common.conformance",)
+
 METUBE = "http://metube.test"
+INTERNAL_HOST = "voice-gateway"
+
+ALICE = "u_aaaaaaaaaaaaaaaa"
+BOB = "u_bbbbbbbbbbbbbbbb"
+SPEECH = session_scopes("speech")
+ADMIN = session_scopes("admin")
 
 
-class FakeGateway:
-    """Just enough of services/gateway to exercise this one."""
+class FakeInternalListener:
+    """The gateway's :8081, as /ui/fetch meets it: a service key and a delegation token.
 
-    def __init__(self) -> None:
-        self.keys: tuple[str, ...] = ()
+    It refuses a request that does not carry this service's own key, as the
+    real listener does, so a test can see the key was sent -- and a test can
+    hand it a different key to stand for a rotation the service has not read.
+    """
+
+    def __init__(self, key: str) -> None:
+        self.key = key
         self.seen: list[httpx.Request] = []
-        self.reply: dict[str, tuple[int, dict[str, str], bytes]] = {}
-        # A path whose answer arrives in PIECES rather than as one body, keyed
-        # the same way `reply` is. An SSE response is the only kind this
-        # service carries where the pieces are the product: if the relay
-        # collects them and sends one body, the client sees the whole stream
-        # at the end and the feature is gone with nothing to see in a log.
-        self.streams: dict[str, tuple[dict[str, str], httpx.AsyncByteStream]] = {}
+        self.reply: tuple[int, dict[str, str], bytes] | None = None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.seen.append(request)
-        path = request.url.path
-        if path == "/health":
-            return httpx.Response(200, json={"status": "ok", "gateway": "ok",
-                                             "backends": {}})
-        if self.keys:
-            header = request.headers.get("authorization", "")
-            if header.removeprefix("Bearer ").strip() not in self.keys:
-                return httpx.Response(401, json={"error": {
-                    "message": "Incorrect API key provided.",
-                    "type": "invalid_request_error", "param": None,
-                    "code": "invalid_api_key"}})
-        if path in self.reply:
-            status, headers, body = self.reply[path]
+        if request.headers.get("authorization") != f"Bearer {self.key}":
+            return httpx.Response(401, json={"error": {
+                "message": "Incorrect API key provided.",
+                "type": "invalid_request_error", "param": None,
+                "code": "invalid_api_key"}})
+        if DELEGATION_HEADER.lower() not in request.headers:
+            return httpx.Response(403, json={"error": {
+                "message": "no delegation", "type": "invalid_request_error",
+                "param": None, "code": "insufficient_scope"}})
+        if self.reply is not None:
+            status, headers, body = self.reply
             return httpx.Response(status, headers=headers, content=body)
-        if path == "/v1/models":
-            return httpx.Response(200, json={"object": "list", "data": []})
-        return httpx.Response(200, json={"gateway": path,
-                                         "method": request.method})
+        return httpx.Response(200, json={"text": "transcribed",
+                                         "path": request.url.path})
+
+    def transcriptions(self) -> list[httpx.Request]:
+        return [r for r in self.seen if r.url.path == "/v1/audio/transcriptions"]
 
 
 class FakeMeTube:
@@ -108,8 +121,15 @@ class FakeMeTube:
         # test_an_unreachable_metube_is_still_a_502.
         self.down: bool = False
         self.calls: list[tuple[str, dict]] = []
+        # Every request MeTube received, headers and all, so a test can assert
+        # what this service told it about the caller: nothing.
+        self.requests: list[httpx.Request] = []
+        # A finished file whose body is still being produced, for the tests
+        # that tell a relay from a buffer. Served as it is, never read first.
+        self.paced: httpx.AsyncByteStream | None = None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
         if self.down:
             raise httpx.ConnectError("connection refused", request=request)
         path = request.url.path
@@ -240,9 +260,8 @@ class Bytes(httpx.AsyncByteStream):
 
     httpx.Response(json=...) arrives with its content already loaded, and
     aiter_raw() on such a response raises StreamConsumed. The service under
-    test streams every forwarded response — that is the whole point of it — so
-    a mock that hands back a pre-read body tests the wrong thing and fails for
-    the wrong reason.
+    test streams what it relays, so a mock that hands back a pre-read body
+    tests the wrong thing and fails for the wrong reason.
     """
 
     def __init__(self, data: bytes) -> None:
@@ -253,26 +272,30 @@ class Bytes(httpx.AsyncByteStream):
 
 
 class Router(httpx.AsyncBaseTransport):
-    def __init__(self, gateway: FakeGateway, tube: FakeMeTube) -> None:
-        self.gateway, self.tube = gateway, tube
+    """Every outbound request this service makes, to whichever fake it was addressed to.
+
+    Anything else is refused as unreachable, so an outbound request to an
+    address nobody configured fails the test that made it.
+    """
+
+    def __init__(self, internal: FakeInternalListener, tube: FakeMeTube) -> None:
+        self.internal, self.tube = internal, tube
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         # Read the body here, once, so the fakes below can be plain synchronous
         # functions and can still assert on it. Uploads through this service
-        # are STREAMED — that is deliberate, a 131 MB ingest must not be
-        # buffered — so `request.content` raises RequestNotRead until it is.
+        # are STREAMED -- a 131 MB ingest must not be buffered -- so
+        # `request.content` raises RequestNotRead until it is.
         if request.method in {"POST", "PUT", "PATCH"}:
             await request.aread()
         host = request.url.host
-        if host == "gateway.test":
-            streamed = self.gateway.streams.get(request.url.path)
-            if streamed is not None:
-                # Returned as it is, NOT rewrapped in Bytes below: the whole
-                # point of this branch is that the body is still being made.
-                self.gateway.seen.append(request)
-                headers, body = streamed
-                return httpx.Response(200, headers=headers, stream=body)
-            answer = self.gateway.handle(request)
+        if (host == "metube.test" and self.tube.paced is not None
+                and request.url.path.startswith("/audio_download/")):
+            self.tube.requests.append(request)
+            return httpx.Response(200, stream=self.tube.paced, headers={
+                "content-type": self.tube.content_type, "accept-ranges": "bytes"})
+        if host == INTERNAL_HOST and request.url.port == 8081:
+            answer = self.internal.handle(request)
         elif host == "metube.test":
             answer = self.tube.handle(request)
         else:
@@ -284,7 +307,7 @@ class Router(httpx.AsyncBaseTransport):
 def fake_getaddrinfo(host, port, **kwargs):
     """DNS, without DNS.
 
-    The guard resolves before it decides, which is the point of it — so a test
+    The guard resolves before it decides, which is the point of it -- so a test
     suite that let it use the real resolver would depend on the network, and
     `media.example` does not resolve anywhere. A literal address answers as
     itself, exactly as getaddrinfo does, so the private-range rules are still
@@ -302,49 +325,65 @@ def fake_getaddrinfo(host, port, **kwargs):
 
 
 @pytest.fixture
-def build(monkeypatch, tmp_path):
+def sign(calliope_gateway) -> Callable[..., dict[str, str]]:
+    """The headers the gateway forwards for one person: their assertion and a delegation.
+
+    The delegation token rides on every request because the gateway attaches
+    one only to /ui/fetch and this service reads it only there; carrying it
+    everywhere proves the second half.
+    """
+    def headers(sub: str = ALICE, scopes: Iterable[str] = SPEECH,
+                **assertion: object) -> dict[str, str]:
+        return {ASSERTION_HEADER: calliope_gateway.assertion(
+                    "ui", sub=sub, scopes=scopes, **assertion),
+                DELEGATION_HEADER: calliope_gateway.delegation(sub=sub)}
+    return headers
+
+
+@pytest.fixture
+def build(monkeypatch, tmp_path, calliope_gateway):
     """Reload the app with an environment, and hand back its pieces."""
     def make(**environment):
-        environment.setdefault("UI_GATEWAY_URL", GATEWAY)
         environment.setdefault("UI_METUBE_URL", METUBE)
         environment.setdefault("UI_VOICE_DIR", str(tmp_path / "voices"))
         environment.setdefault("UI_PROBE", "0")
         for name, value in environment.items():
             monkeypatch.setenv(name, value)
 
-        from app import config, guard, main, metube, probe, clips, ingest
-        for module in (config, guard, probe, metube, clips, ingest, main):
+        from app import clips, config, guard, ingest, main, metube, owners, probe
+        for module in (config, guard, probe, metube, clips, owners, ingest, main):
             importlib.reload(module)
 
         monkeypatch.setattr(guard.socket, "getaddrinfo", fake_getaddrinfo)
 
-        gateway, tube = FakeGateway(), FakeMeTube()
-        transport = Router(gateway, tube)
+        internal, tube = FakeInternalListener(calliope_gateway.service_key), FakeMeTube()
+        transport = Router(internal, tube)
         # The one thing replaced: the factory, not httpx.AsyncClient itself.
         # Patching the class means the replacement's own call to it recurses,
         # which is a stack overflow inside the lifespan and a confusing one.
         monkeypatch.setattr(main, "new_client",
                             lambda: httpx.AsyncClient(transport=transport))
-        return main, gateway, tube
+        return main, internal, tube
     return make
 
 
 @pytest.fixture
-def client(build):
-    """A TestClient with the LIFESPAN RUN, which is not the default.
+def client(build, sign):
+    """A TestClient with the LIFESPAN RUN, signed as ALICE unless a test says otherwise.
 
     TestClient only runs startup and shutdown when it is used as a context
     manager, and this app builds its one httpx client in the lifespan. Without
-    this, every test sees `'State' object has no attribute 'client'` — which is
+    this, every test sees `'State' object has no attribute 'client'` -- which is
     also exactly what a production process would do if the lifespan were
     skipped, so it is worth failing loudly rather than lazily constructing one.
+    A request that passes its own identity headers replaces the default ones.
     """
     stack = contextlib.ExitStack()
 
     def make(**environment):
-        main, gateway, tube = build(**environment)
-        api = stack.enter_context(TestClient(main.app))
-        return api, gateway, tube
+        main, internal, tube = build(**environment)
+        api = stack.enter_context(TestClient(main.app, headers=sign()))
+        return api, internal, tube
 
     yield make
     stack.close()

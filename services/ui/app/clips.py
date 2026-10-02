@@ -46,6 +46,14 @@ OfflineAudioContext at 24 kHz mono -> a hand-written WAV header is about fifty
 lines of vanilla JS, needs no dependency on either side, and means the server
 receives one format it is certain to read -- which is also what lets the
 validation below be the stdlib `wave` module rather than librosa.
+
+A VOICE IS PERSONAL DATA, SO EACH PERSON HAS A DIRECTORY (D35). A person's
+clips live in `users/<user id>/` and the top level is the SYSTEM namespace,
+which keeps every clip that existed before ownership did. `owner` below is a
+user ID or None for the system, and every path is built from a validated ID:
+nothing a caller types reaches a path join but the whitelisted stem.
+tts-long resolves a voice in the requesting user's directory only, so a clip
+here is usable by the person who saved it and nobody else.
 """
 
 from __future__ import annotations
@@ -57,11 +65,18 @@ import re
 import wave
 from pathlib import Path
 
+from voice_common.identity import Claims
+from voice_common.scopes import USER_ID
+
 from . import config
 
 log = logging.getLogger("voice-ui.clips")
 
-__all__ = ["ClipError", "SUFFIX", "SUFFIXES", "slug", "listing", "save", "remove"]
+__all__ = ["ClipError", "SUFFIX", "SUFFIXES", "USERS", "slug", "owner_of",
+           "listing", "listing_all", "save", "remove", "writable"]
+
+# The directory under the store that holds one subdirectory per person.
+USERS = "users"
 
 SUFFIX = ".wav"
 
@@ -121,14 +136,27 @@ def _dir() -> Path:
     return Path(config.VOICE_DIR)
 
 
-def listing() -> list[dict[str, object]]:
-    """Every clip in the store, newest first. Never raises.
+def owner_of(claims: Claims) -> str | None:
+    """The namespace a caller's OWN clips live in: a person's ID, or the system's for a service.
 
-    A missing or unwritable directory is a configuration state, not an error:
-    it means no voices, the picker shows none, and the page says why. Raising
-    would take the whole Speak tab down over a volume that was not mounted.
+    A service owns system data everywhere in this stack (D31, D32), and holds
+    no voice scope anyway; giving it a namespace of its own would invent one.
     """
-    directory = _dir()
+    return claims.sub if claims.kind == "user" else None
+
+
+def _namespace(owner: str | None) -> Path:
+    """One owner's directory: users/<id>/ for a person, the top level for the system."""
+    if owner is None:
+        return _dir()
+    if not isinstance(owner, str) or not USER_ID.fullmatch(owner):
+        # Never a path join on an unchecked value (D32), even one the
+        # assertion vouched for: this is the line that would carry `../`.
+        raise ClipError("that is not a user ID")
+    return _dir() / USERS / owner
+
+
+def _clips(directory: Path, owner: str | None) -> list[dict[str, object]]:
     if not directory.is_dir():
         return []
     out: list[dict[str, object]] = []
@@ -139,11 +167,43 @@ def listing() -> list[dict[str, object]]:
             stat = entry.stat()
         except OSError:
             continue
-        out.append({"name": entry.stem, "bytes": stat.st_size,
+        out.append({"name": entry.stem, "owner": owner, "bytes": stat.st_size,
                     "modified": stat.st_mtime,
                     "seconds": _duration(entry)})
-    out.sort(key=lambda clip: -float(clip["modified"]))  # type: ignore[arg-type]
     return out
+
+
+def _newest_first(found: list[dict[str, object]]) -> list[dict[str, object]]:
+    found.sort(key=lambda clip: -float(clip["modified"]))  # type: ignore[arg-type]
+    return found
+
+
+def listing(owner: str | None) -> list[dict[str, object]]:
+    """One owner's clips, newest first. Never raises.
+
+    A missing or unwritable directory is a configuration state, not an error:
+    it means no voices, the picker shows none, and the page says why. Raising
+    would take the whole Speak tab down over a volume that was not mounted.
+    `owner` is None for the system namespace; each row carries it, so a list
+    that mixes namespaces still says whose each clip is.
+    """
+    return _newest_first(_clips(_namespace(owner), owner))
+
+
+def listing_all() -> list[dict[str, object]]:
+    """Every clip in every namespace, for a holder of `voices:write:all`.
+
+    A subdirectory of users/ whose name is not a user ID is skipped rather
+    than listed: nothing this service writes is named that way, so it is
+    something else's, and its name would not survive the delete route's check.
+    """
+    found = _clips(_dir(), None)
+    people = _dir() / USERS
+    if people.is_dir():
+        for entry in sorted(people.iterdir()):
+            if entry.is_dir() and USER_ID.fullmatch(entry.name):
+                found += _clips(entry, entry.name)
+    return _newest_first(found)
 
 
 def _trim(path: Path, seconds: float) -> float | None:
@@ -198,23 +258,33 @@ def _duration(path: Path) -> float | None:
 
 
 def writable() -> bool:
+    """Is the store mounted and writable? Each person's directory is made under it on first save."""
     directory = _dir()
     return directory.is_dir() and os.access(directory, os.W_OK)
 
 
-def save(name: str, data: bytes, *, replace: bool = False,
+def save(name: str, data: bytes, *, owner: str | None, replace: bool = False,
          suffix: str = SUFFIX) -> dict[str, object]:
-    """Write one clip, or raise ClipError with something a person can act on."""
-    directory = _dir()
-    if not directory.is_dir():
+    """Write one clip into `owner`'s namespace, or raise ClipError a person can act on.
+
+    `owner` is keyword-only and has no default: which namespace a clip lands
+    in is never something a call site gets by leaving an argument out.
+    """
+    root = _dir()
+    if not root.is_dir():
         raise ClipError(
-            f"the voice directory {directory} is not mounted, so a cloned "
+            f"the voice directory {root} is not mounted, so a cloned "
             "voice would vanish on the next restart. Mount the `voices` "
             "volume -- see this service's README.")
-    if not os.access(directory, os.W_OK):
-        raise ClipError(f"the voice directory {directory} is not writable")
-
+    if not os.access(root, os.W_OK):
+        raise ClipError(f"the voice directory {root} is not writable")
+    directory = _namespace(owner)
     stem = slug(name)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ClipError(f"could not make a voice directory: {exc}") from None
+
     if not data:
         raise ClipError("that clip is empty")
     if len(data) > config.MAX_CLIP_BYTES:
@@ -262,7 +332,7 @@ def save(name: str, data: bytes, *, replace: bool = False,
             log.info("stored %s%s without a duration check", stem, suffix)
             os.replace(temporary, target)
             stat = target.stat()
-            return {"name": stem, "bytes": stat.st_size,
+            return {"name": stem, "owner": owner, "bytes": stat.st_size,
                     "modified": stat.st_mtime, "seconds": None}
         if seconds > config.MAX_CLIP_SECONDS:
             trimmed = _trim(temporary, config.MAX_CLIP_SECONDS)
@@ -289,16 +359,17 @@ def save(name: str, data: bytes, *, replace: bool = False,
         raise ClipError(f"could not write the clip: {exc}") from None
 
     log.info("saved reference clip %s (%.1f s, %d bytes)", stem, seconds, len(data))
-    return {"name": stem, "bytes": len(data), "seconds": seconds,
+    return {"name": stem, "owner": owner, "bytes": len(data), "seconds": seconds,
             "modified": target.stat().st_mtime}
 
 
-def remove(name: str) -> bool:
-    """Delete one clip. False if it was not there."""
+def remove(name: str, *, owner: str | None) -> bool:
+    """Delete one clip from `owner`'s namespace. False if it was not there."""
     stem = slug(name)
-    matches = [p for p in _dir().glob(stem + ".*")
+    directory = _namespace(owner)
+    matches = [p for p in directory.glob(stem + ".*")
                if p.suffix.lower() in SUFFIXES]
-    target = matches[0] if matches else _dir() / (stem + SUFFIX)
+    target = matches[0] if matches else directory / (stem + SUFFIX)
     try:
         target.unlink()
     except FileNotFoundError:

@@ -1,26 +1,29 @@
 # voice-ui
 
-One page in front of the gateway, and the three things a browser cannot do for
+One page behind the gateway, and the three things a browser cannot do for
 itself.
 
 ```
-  https://calliope.example.com/ui   (the gateway, or a proxy in front of it)
+  https://calliope.example/ui     the gateway: sign-in, then every page address
         |
-        |  every XHR, same origin, no credential in the browser
+        |  the page itself calls the gateway's own paths, same origin, with
+        |  its session cookie: /v1, /jobs, /glossaries, /satellites, /health
         v
-  voice-ui:8090  ──── + Authorization: Bearer <UI_GATEWAY_API_KEY> ────►
-                                       voice-gateway:8080 ──► stt-stack / tts-stack / tts-long
-        │
-        ├─ /ui/resolve /commit /abandon /progress /fetch /captions ──► MeTube (by host address)
-        └─ /ui/clips                                     ──► the shared `voices` volume
+  voice-gateway:8080 ──── /ui/* + X-Calliope-Identity ────►  voice-ui:8090
+                                                                 │
+        /ui/resolve /commit /abandon /progress /media /captions ─┼──► MeTube (by host address)
+        /ui/clips                                                ├──► the shared `voices` volume
+        /ui/fetch ─── its own key + the person's delegation ─────┴──► voice-gateway:8081 ──► stt-stack
 ```
 
-Five tabs, **Transcribe**, **Speak**, **Jobs**, **Vocabulary** and
-**Satellites**. The speech tabs have an easy mode that needs no manual, and an
-*Expert* `<details>` panel at the foot holding the real knobs beneath the
-controls already on screen. Opening one does not swap pages or lose what you
-typed. The Satellites tab is the satellite hub's page, and needs the hub
-([The Satellites tab](#the-satellites-tab)).
+Seven tabs: **Transcribe**, **Speak**, **Jobs**, **Vocabulary**,
+**Satellites**, **Account** and **Admin**. A speech user sees the first four
+and Account; an admin sees all seven. The speech tabs have an easy mode that
+needs no manual, and an *Expert* `<details>` panel at the foot holding the
+real knobs beneath the controls already on screen. Opening one does not swap
+pages or lose what you typed. The Satellites tab is the satellite hub's page,
+and needs the hub ([The Satellites tab](#the-satellites-tab)). Account and
+Admin are the gateway's ([Account and Admin](#account-and-admin)).
 
 > There used to be an **Expert** checkbox in the header as well, gating those
 > same panels. It was a second, global control over one thing, so a setting
@@ -28,9 +31,10 @@ typed. The Satellites tab is the satellite hub's page, and needs the hub
 > collapsed `<details>` titled *Expert — …*; a disclosure triangle already
 > means "hidden until you want it".
 
-> There used to be an **API key box** in the header too. The key now lives on
-> the container as `UI_GATEWAY_API_KEY` and this service adds the header
-> itself. **That moves the trust boundary from :30080 to :30081** — see below.
+> There used to be an **API key box** in the header, and later a key held by
+> this container on every reader's behalf. Both are gone. A person signs in,
+> and the page holds no key of any kind
+> ([Who is asking](#who-is-asking)).
 
 ---
 
@@ -38,12 +42,12 @@ typed. The Satellites tab is the satellite hub's page, and needs the hub
 
 | | |
 |---|---|
-| **Reached at** | `http://<host>:30081/ui` — 30081, next to the gateway's 30080 |
-| **Talks to** | the gateway, and MeTube. Never `:8000`, `:8001` or `:8002` |
-| **Auth** | the gateway's; this service holds no key list and compares no token, but it now *presents* `UI_GATEWAY_API_KEY`. **That makes :30081 the trust boundary** |
+| **Reached at** | `https://<host>/ui`, through the gateway, after signing in. This service publishes no port |
+| **Talks to** | MeTube, and the gateway's internal listener for one thing: transcribing a download. Never `:8000`, `:8001` or `:8002`, and it shares no network with them |
+| **Auth** | the gateway's. Every request arrives with the gateway's signed assertion of who is asking, and anything without one is refused. This service decides whose data a request touches, never whether it may be made |
 | **Image** | 320 MB, measured. The gateway is 286 MB on the same machine and `python:3.13-slim-trixie` is 215 MB |
 | **Build step** | none. One HTML file, inline CSS and JS, no framework, no `node_modules`, no CDN |
-| **Degrades** | MeTube down or unset → link box hidden or disabled, uploads and TTS unaffected. Gateway down → the page still loads and says so |
+| **Degrades** | MeTube down or unset → link box hidden or disabled, uploads and TTS unaffected. A backend down → the page loads and its health pills say which |
 
 ---
 
@@ -76,6 +80,9 @@ one profile.
 | `/ui/satellites/try-a-word` | Wake words and Try a word | reserved |
 | `/ui/satellites/custom-models` | Wake words and Custom models | reserved |
 | `/ui/satellites/activity`, `/telemetry`, `/firmware` | that section | reserved |
+| `/ui/account` | Account: password, sessions, API keys | yes |
+| `/ui/admin` | Admin, on its Users section | yes |
+| `/ui/admin/<section>` | `users`, `keys`, `roles`, `secrets` or `audit` | yes |
 
 The tab's slug is `vocabulary`; its `data-tab` in the markup is still `vocab`.
 A path the tab has no place for is cut back to the part it has, and an unknown
@@ -99,9 +106,12 @@ service lists is said to be. A satellite's address found by its ID survives a
 rename made anywhere.
 
 A deep link loads in every case `/ui` loads. The page server answers each
-path under the five tab names with the same file and the same headers, needs
-no key for it and makes no gateway round trip to decide; the gateway lists
-each tab as one pair of routes (`/ui/<tab>` and `/ui/<tab>/{rest:path}`).
+path under the seven tab names with the same file and the same headers. The
+gateway lists each tab as one pair of routes (`/ui/<tab>` and
+`/ui/<tab>/{rest:path}`), each needing a session and the tab's own scope: a
+navigation without a session goes to `/login` and comes back, and one to a
+tab the role does not have lands on `/ui`. A link with a query string changes
+nothing until somebody presses something.
 
 ## What updates by itself
 
@@ -112,8 +122,8 @@ once when it can be seen again. Returning to the page fires `focus` and
 
 | What | Source | When it is read | Paused while hidden |
 |---|---|---|---|
-| Hub events | `EventSource /ui/api/satellites/events` | Opened at load, not on the first visit to Satellites. Closed 60 s after the page is hidden and opened again on return, with a gap line in Activity. A stream closed for good is tried again at 2, 5, 15 and 30 s, then every 30 s. Never tried again once health says the deployment has no hub. | yes, after 60 s |
-| Health, `/ui/health` | poll | Every 30 s, each read scheduled when the last one answered. At once on return or focus, if the last answer is older than 10 s. | yes |
+| Hub events | `EventSource /satellites/events` | Opened at load, not on the first visit to Satellites. Closed 60 s after the page is hidden and opened again on return, with a gap line in Activity. A stream closed for good is tried again at 2, 5, 15 and 30 s, then every 30 s. Never tried again once health says the deployment has no hub. | yes, after 60 s |
+| Health, `GET /health` | poll | Every 30 s, each read scheduled when the last one answered. At once on return or focus, if the last answer is older than 10 s. | yes |
 | Satellites (the three lists) | poll and events | While the tab is open and the page visible: every 3 s while the stream is down, or while a row reads Updating, Restarting, Listening, Answering or In conversation; every 30 s otherwise. A wake word brings the next read forward to 3 s. Also on entering the tab, on return, and on the hub's `config`, `firmware`, `online`, `offline`, `pending`, `ota` and `conversation_*` events. | yes |
 | A satellite's status | the `status` event | Applied to its row at once. No request. | n/a |
 | Chips that run out | local | One timer, to the soonest end: Listening 15 s, Restarting 120 s, Update failed 600 s. | not needed |
@@ -128,6 +138,11 @@ Overlapping reads do not undo each other. A listing of the jobs that was
 asked for before a newer one was drawn, before this page wrote to a job, or
 under a filter that is no longer chosen is dropped. The same holds for a
 telemetry read that a change overtook.
+
+A session that ends while the page is open (signed out elsewhere, expired,
+the account disabled) is noticed by the next request, or by a stream or an
+image that fails: the page asks `GET /auth/me`, and on a `401` goes to
+`/login` with the way back, once.
 
 What is not live, by decision:
 
@@ -154,78 +169,70 @@ Two things decided otherwise.
 The gateway's Containerfile makes a specific promise — **283 MB**, described in
 its own comment as *"the cheap check on this file — an audio or model library
 arriving by accident moves it by gigabytes, not megabytes"*. Ingestion needs
-`yt-dlp`. Putting `yt-dlp` in the gateway would make the process that holds
-every API key also the process that spawns a subprocess on a URL a browser
+`yt-dlp`. Putting `yt-dlp` in the gateway would make the process that checks
+every credential also the process that spawns a subprocess on a URL a browser
 chose. Separate images keep that blast radius where it is.
 
 And the brief asked for `services/ui` with a Containerfile, a compose entry, a
 workflow matrix row and a README like its siblings.
 
-**What it costs is a second `ports` entry**, and `compose.yaml` says at the top
-that one appearing means the file has stopped doing its job. That sentence was
-written about 8000, 8001 and 8002 — three backends reachable *directly*,
-skipping the only process in the stack that checks a token. Those three are
-still closed. This one is a browser origin, not a bypass:
+**What it costs is nothing at the door.** This service publishes no port, and
+`compose.yaml` puts it on the `edge` network alone, so the gateway is the only
+Calliope service it can reach. If a future edit gives this container a URL
+for `stt-stack`, `tts-stack` or `tts-long`, or a network they are on, that is
+the moment the container that runs yt-dlp can reach them directly.
 
-- it reaches the gateway and nothing else;
-- it holds no key *list* — it asks the gateway whether the credential in play
-  is good, using `GET /v1/models`, the cheapest authenticated call in the stack
-  (a static table, no backend contacted), cached for 60 s;
-- it can answer nothing the gateway would not have answered.
+### Why the page calls the gateway's paths directly
 
-If a future edit gives this container a URL for `stt-stack`, `tts-stack` or
-`tts-long`, that is the moment the three points above stop being true.
-
-One line of that list **is** no longer true and was removed: "it forwards the
-caller's `Authorization` header untouched". With `UI_GATEWAY_API_KEY` set it
-presents its own instead — see the next section. Unset, it is the passthrough
-it always was.
-
-### Why the page's XHRs come back here rather than going straight to :30080
-
-One origin means no CORS on the gateway, no preflight on every upload, and no
-second base URL for someone to get wrong. The forwarding table in `app/main.py`
-is a **fixed allowlist** — no wildcard, no catch-all, for the reason the
-gateway has none: a wildcard would proxy `/docs` and `/openapi.json` to
-services that deliberately do not publish them.
+The page and the gateway are one origin, so the session cookie goes with
+every call and there is no CORS, no preflight on an upload, and no second
+base URL for someone to get wrong. The page asks for `/v1/...`, `/jobs`,
+`/glossaries`, `/satellites/...` and `/health` exactly as an API client
+would, and the gateway checks each against the person's scopes. This service
+used to forward those calls through `/ui/api/*` with a key of its own
+attached; that table, the mount and the key are gone.
 
 ---
 
-## Authentication, and the boundary that moved
+## Who is asking
 
-The page has no API key box. It used to: the browser kept a key in
-`localStorage`, put it on every XHR, and this service forwarded it untouched.
-The user's decision is that this is not a bring-your-own-key tool, so the
-credential moved into the container as **`UI_GATEWAY_API_KEY`**, and
-`app/main.py` adds `Authorization: Bearer …` on the way past — on proxied
-routes, on the `GET /v1/models` key probe, and on the ingest hand-off, all
-through one function (`config.gateway_authorization`) so the three cannot
-drift apart. An inbound header is *replaced*, not joined: HTTP lets a field
-name repeat, and two `Authorization` headers on the wire would let a caller
-choose which key the gateway read.
+**People sign in; this service never sees a password or a key.** The gateway
+forwards each `/ui/*` request with `X-Calliope-Identity`, a signed assertion
+of who is asking and what they may do, valid for 60 s and for this service
+only. `voice_common.identity` verifies it with the public key on this
+container's own volume (`/run/calliope`), refuses everything without a valid
+one except `/health`, and removes the header before any handler runs, so
+nothing this service sends onward can carry it. `/docs` and `/openapi.json`
+are off.
 
-**The consequence, stated rather than discovered: the trust boundary is now
-:30081.** Anyone who can reach that port is authenticated by this service,
-because it signs their requests for them. On a LAN behind a firewall, for a
-tool one person uses, that is a reasonable trade. It is not one anywhere else,
-and **publishing 30081 somewhere 30080 is not already reachable from now grants
-more access, not less.** `voice-ui` logs a `WARNING` at startup whenever
-`UI_GATEWAY_API_KEY` is set, saying exactly this.
+**The gateway decides whether a request may be made; this service decides
+whose data it touches.**
 
-What did *not* change: this service still compares no token and holds no key
-list. The gateway is the only thing that decides whether a credential is good.
+- **Voice clips.** A clip is saved into the caller's own directory,
+  `/voices/users/<user id>/`. Listing and deleting show the caller's own; a
+  holder of `voices:write:all` may list and delete anyone's with `?owner=`
+  (`me`, `all`, `system` or a user ID; anything else is a `400`). The top
+  level of `/voices` is the system's. Nobody can speak in another person's
+  voice, an admin included: tts-long resolves `voice` among the caller's own.
+- **Links.** `/ui/resolve` records who resolved each link, and every route
+  that takes a link answers `404` to anyone else, before MeTube is asked
+  anything. A link someone else has in progress is a `409
+  pending_for_another_user`, and so is one MeTube holds that nobody here
+  owns (after a restart): only `jobs:read:all` may take those. Two people
+  resolving one link at once are answered in turn. The resolve allowance is
+  per person, and the map of owners is bounded (64 links per person, 4,096
+  in all, forgotten after 24 hours unused).
+- **`/ui/fetch`**, which sends a finished download to be transcribed, is the
+  one call this service makes with a credential. It sends the file to the
+  gateway's internal listener, `http://voice-gateway:8081`, with this
+  service's own key and the delegation token the gateway gave for that one
+  request. The gateway accepts the token twice at most and checks again that
+  the person is still signed in, so the transcript is recorded as theirs. A
+  key the gateway refuses is a `503 service_key_refused`, not a `401`: the
+  person is still signed in, and the fault is the deployment's.
 
-`UI_GATEWAY_API_KEY` is **unset by default**, like `GATEWAY_API_KEYS`, and for
-the same reason — a key invented in a deployed file is how a placeholder
-becomes production credentials. Unset means no header is added and an inbound
-one is forwarded as before, so a stack with `GATEWAY_API_KEYS` also unset
-behaves precisely as it did. If `GATEWAY_API_KEYS` **is** set and this is not,
-every route in the page is a 401 and there is no box to fix it in; the key
-probe turns that into a `503 misconfigured_api_key` naming the variable rather
-than passing the gateway's "Incorrect API key provided" through to a page with
-nowhere to type one.
-
----
+Every outbound request, to MeTube or to the gateway, is built from named
+headers and never from the inbound request's.
 
 ## Security: read this before setting `UI_METUBE_URL`
 
@@ -234,10 +241,9 @@ nowhere to type one.
 `/history` are all open, and an unauthenticated `GET /history` from off-NAS
 answers 200. That is true today, with or without this service.
 
-This service does not widen it — our ingestion routes are key-checked, so we
-are a strictly narrower client of something already open to the LAN. Note that
-with `UI_GATEWAY_API_KEY` set, "key-checked" means *this container's* key: the
-gate on ingestion is reaching :30081, not knowing a secret.
+This service does not widen it. Our ingestion routes need a signed-in person
+with `ingest:links`, and a link answers only the person who pasted it, so we
+are a narrower client of something already open to the LAN.
 
 But **shipping a UI that makes MeTube load-bearing is the moment to close it**:
 after this deploys, an outage or an abuse of port 30097 becomes an Calliope
@@ -273,8 +279,15 @@ internal host; MeTube documents that exact limitation in its own docstring.
 The impact is *blind* SSRF — the probe's output is parsed into five scalars,
 nothing is written to disk, and no response body is ever returned to a caller.
 **The real backstop is network isolation:** this container has no business
-reaching the NAS's other services, and an egress rule on the Calliope app is
-the fix. Write it down; do not assume it.
+reaching the NAS's other services. `compose.yaml` keeps it off the network the
+backends are on, but the NAS's own LAN is still reachable, and an egress rule
+on the Calliope app is the fix for that. Write it down; do not assume it.
+
+The probe now checks the destination itself as well: it resolves the host
+again right before starting yt-dlp and refuses, with `400
+destination_not_allowed`, any address that is loopback, link-local, private,
+CGNAT, unique-local or unspecified. yt-dlp runs with a fixed environment of
+three variables, so nothing in this container's environment reaches it.
 
 `UI_PROBE=0` removes the probe entirely, at the cost of a title-only confirm
 card.
@@ -548,9 +561,8 @@ spinner is the correct UI.
 
 ## Playback speed, and following along
 
-Both are entirely client-side. No route changed, nothing was added to the
-`PROXIED` allowlist, and no request carries a new field except one that the
-expert panel could already send by hand.
+Both are entirely client-side. No route changed, and no request carries a
+new field except one that the expert panel could already send by hand.
 
 ### Two things called speed, and how they stopped colliding
 
@@ -871,7 +883,7 @@ through one:
 | **Say** | `POST /satellites/{id}/say` `{"text"}`, in the hub's default voice |
 | **Blink** | `POST /satellites/{id}/identify`. **Chime** on a satellite without a ring (a Raspberry Pi), which plays its wake sound three times |
 | **Play a tone** | `POST /satellites/{id}/tone` |
-| **Listen 5 s** | `GET /satellites/{id}/listen?seconds=5`, played back in the page |
+| **Listen 5 s** | `POST /satellites/{id}/listen?seconds=5`, played back in the page. A POST because opening a microphone is a side effect; it needs `satellites:listen` and is audited |
 | **Stop** | `POST /satellites/{id}/flush`: what the satellite's Set button does. It also stops music Home Assistant is playing on it |
 | **Colour**, **Light pattern** (Solid, Pulse, Spin, Off), **Show** | `POST /satellites/{id}/lights` `{"mode", "color"}` |
 
@@ -879,8 +891,13 @@ through one:
 Play, Set, Vol −, Vol +, and Side), and a **When pressed** and a **When
 released** choice for each. The choices are Nothing, Talk (`ptt`), Stop,
 Mute mic (`mute`), Volume up, Volume down, Lights on/off (`lights`), Dimmer,
-Brighter and Webhook, which asks for its address. Every change sends the
-whole mapping as `buttons` in one `PATCH`. The hub refuses a mapping with no
+Brighter and Webhook. A webhook's address is a secret (a Home Assistant
+webhook ID is a bearer credential), so the choice names a `secret_url` secret
+from the gateway's store, `webhook:secret:<NAME>`, and never holds the
+address. **Store the address** stores a new one under that name through
+`PUT /admin/secrets/{name}`, bound to the address's host. Every change sends
+the whole mapping as `buttons` in one `PATCH`; the hub refuses a raw address
+with `422 use_secret`, and the page moves the focus to the name box. The hub refuses a mapping with no
 mute on a button other than Side, since a stock board does not wire Side, and
 the page says so before it sends one
 ([Buttons](../satellites/README.md#buttons)).
@@ -916,7 +933,7 @@ field is in the hub's
 | **Language**, **Language tag** | `language`: unset for Auto, or a BCP 47 tag | |
 | **Action** | `action.destination.type`: `ha_assist`, `ha_conversation`, `llm`, `webhook`, `echo` | |
 | **Address** | `action.destination.url` | |
-| **Token variable**; **Key name** for a language model | `token_env`, or `api_key_env` | A variable's name, never a value. Optional for a webhook |
+| **Token variable**; **Key name** for a language model | `token_env`, or `api_key_env` | A secret's name in the gateway's store, never a value. Optional for a webhook |
 | **Assist pipeline**, **Ask again** | `pipeline`, listed by `POST /satellites/ha/pipelines` | |
 | **Conversation agent** (under More) | `agent_id` | |
 | **If not understood, continue as a conversation with** | `action.fallback` | A conversation word |
@@ -941,7 +958,7 @@ adds:
 | **Provider** | Fills **Base URL** for a known provider | |
 | **Base URL** | `base_url` | |
 | **Model**, **List models** | `model`, from `POST /satellites/llm/models` | |
-| **API key**, **Store key**, **Clear key** | `PUT /satellites/secrets` `{"name", "value"}`, under the key variable's name. The page is never sent a key back ([Keys](../satellites/README.md#keys)) | |
+| **API key**, **Store key**, **Clear key** | `PUT` and `DELETE /admin/secrets/{name}` on the gateway, under the key variable's name, after the password again. A new secret may go only to the word's host; storing into an existing one sends only the value and keeps its hosts. The page is never sent a key back ([Keys](../satellites/README.md#keys)) | |
 | **Tools**: Web search, Weather | `tools` ([Tools and the date](../satellites/README.md#tools-and-the-date)) | |
 | **Reply limit, tokens** (under More) | `max_tokens` | 1 to 8192 |
 | **System prompt** (under More) | `system` | Up to 8000 characters |
@@ -1009,24 +1026,17 @@ every 30 s while the section is open.
 
 ### The routes behind it
 
-`app/main.py` forwards these to the gateway, and nothing else under
-`/satellites`:
+The page calls the hub's routes on the gateway itself, at `/satellites/...`,
+with the person's session; nothing goes through this service. Each needs its
+scope ([the gateway's route table](../gateway/README.md#what-each-route-needs)):
+`satellites:read` to see the tab at all, `satellites:control` for the
+controls, `satellites:listen` for **Listen**, `satellites:firmware` and
+`satellites:update` for **Firmware**, and `satellites:admin` for adoption,
+wake words, telemetry and a satellite's name and buttons. Without
+`satellites:admin` the hub leaves the button mapping out of its answers
+altogether. The secrets an action names are on Admin › Secrets.
 
-- `GET /satellites`, `GET /satellites/events`, and `GET`, `PATCH /satellites/{id}`
-- `POST /satellites/{id}/` `adopt`, `forget`, `identify`, `reboot`,
-  `lights`, `tone`, `say`, `flush`, `set-hub`, and `GET /satellites/{id}/listen`
-- `GET /satellites/{id}/airplay/artwork` and `POST /satellites/{id}/airplay/{command}`
-- `GET` and `PUT /satellites/wake-words`, `POST /satellites/wake-words/models`
-  and `DELETE /satellites/wake-words/models/{name}`
-- `GET` and `PUT /satellites/routing`, and `POST /satellites/routing/test`
-- `POST /satellites/ha/pipelines`, `POST /satellites/llm/models`,
-  `POST /satellites/llm/test`, `PUT /satellites/secrets`
-- `GET` and `POST /satellites/firmware`, `DELETE /satellites/firmware/{sha256}`
-  and `POST /satellites/ota`
-- `GET`, `PUT` and `DELETE /satellites/telemetry`, `GET /satellites/telemetry/records`
-  and `GET /satellites/telemetry/summary`
-
-Five hub routes are left out on purpose. `POST /satellites/{id}/inject` runs a
+Five hub routes are not used by the page, on purpose. `POST /satellites/{id}/inject` runs a
 recorded clip through a satellite's real actions, which is a script's job: a
 button for it would be one press from Home Assistant acting on a clip.
 `POST /satellites/{id}/ptt` is Home Assistant's way to start listening, and
@@ -1036,10 +1046,63 @@ player and its announcements upload audio it has already converted with its
 own ffmpeg. The page has Say for speech, and its Stop (`/flush`) stops that
 music as well. `GET /satellites/telemetry/clips/{name}` serves the audio of a
 wake word the double-check did not hear, which is for tuning and retraining
-the word's model from the records, not for the page. The device socket `/satellites/ws` is not here either,
-because a browser never opens it. A firmware image or a wake word model is
-held whole by the hub before it can refuse it, so this service refuses
-either upload over 8 MB before it forwards a byte.
+the word's model from the records, not for the page. The device socket
+`/satellites/ws` is not here either, because a browser never opens it, and
+the gateway refuses one that tries.
+
+## Account and Admin
+
+Both tabs are the gateway's own routes, drawn by this page. They need a
+session: no API key can reach them.
+
+**Account** (`/ui/account`) is every person's:
+
+| Control | Request |
+|---|---|
+| **Change password**: current, new, again | `POST /auth/password`. 15 to 128 characters, not a common password, not the username. Every other session ends |
+| **Sessions**, **Sign out**, **Sign out other sessions** | `GET`, `DELETE /auth/sessions[/{ref}]` |
+| **API keys**: name, preset, scopes, expiry, **Create** | `POST /auth/keys`. The preset only fills the scope boxes, and only presets within the person's role are offered. The boxes never offer a session-only scope. A scope that caps a key at 90 days takes "a year" and "never" off the expiry list; any other admin-only scope takes "never" off it. A key holding an admin-only scope asks for the password first |
+| The new key | Shown once, with **Copy**, and never again: not after a reload, not to an admin |
+| **Revoke** | `DELETE /auth/keys/{id}`. The key is refused from its next request, and anything it had open is closed |
+
+**Admin** (`/ui/admin/<section>`) is an admin's:
+
+| Section | What it does |
+|---|---|
+| **Users** | Create a user (a username and a role; the temporary password is shown once, and they choose their own at first sign-in), change a role, disable or enable, reset a password ("Also revoke this user's API keys" is ticked by default), delete. Nobody can delete, demote or disable themselves, and the last admin cannot be either |
+| **Keys** | Everyone's keys, by user, with when each was last used and from where; revoke. An admin never sees a key |
+| **Roles** | The roles and presets against every scope, read-only, with the session-only scopes marked. They are code, not settings |
+| **Secrets** | The secret store ([ADR 0023](../../docs/adr/0023-one-secret-store.md)): each secret's name, kind, description, consumers, allowed hosts, who changed it and who last read it. Set or replace a value (a password box, never filled in), clear it, edit its consumers and hosts, **Confirm** an imported one. **Rotate master key** for a generated keyring. Read-only rows for the TLS certificate's expiry, the GPU runner's key file and the firmware signing key |
+| **Audit** | What people and services did, newest first, with filters for who, what and the outcome, and a switch for the per-minute counts |
+
+Banners at the top say what needs somebody: keys that expire within 14 days,
+imported secrets not yet confirmed, secrets that cannot be decrypted, a
+keyring generated on the gateway's volume (back it up separately), variables
+a service imported from its environment and that should now be removed, a
+removed variable a service is ignoring, and an audit that has reached its
+ceiling.
+
+**Every change to a user, every key with an admin-only scope and every secret
+write asks for the password again**, valid for 10 minutes, and sends the
+same request once it is given. Cancelling sends nothing.
+
+**Every row is built as DOM nodes, never as markup.** Usernames, key names,
+audit targets, a session's user agent and a device's hello are all text
+someone else chose.
+
+### When the gateway says no
+
+One wrapper handles every refusal the same way, wherever it comes from:
+
+| Answer | What the page does |
+|---|---|
+| `401` | Asks `GET /auth/me` once. If the session has ended, goes to `/login` with the way back; if not, a service behind the gateway refused, and the page says so and stays |
+| `403 step_up_required` | Asks for the password, then sends the same request again |
+| `403 insufficient_scope` | Says which scope the account lacks, and switches off the control that asked, for the rest of the visit |
+| `403 csrf`, `403 session_required` | Asks the reader to reload, or to sign in again |
+| `429` | Says how long to wait |
+| `503 locked` | Covers the page with the reason and what to fix |
+| no answer at all at load | Covers the page with "Calliope is not answering" and tries again, 2 s at first and doubling to 30 s |
 
 ---
 
@@ -1170,11 +1233,13 @@ than keeping a second copy of the rule.
 array on the second**. Nothing in the page reads either field: the counts it
 shows come from `terms`, which is an integer on both.
 
-The four routes are on `app/main.py`'s allowlist. Three of them are writes, and
-what that changes is stated in the table: anybody who can reach this service
-could already start and cancel work on the stack, and can now also write a
-glossary file. The ceiling is the service's own: 64 KB, a validated name, 500
-terms, and a 409 on a built-in.
+The page calls `/glossaries` on the gateway with the person's session.
+**Each person's profiles are their own**: a speech user lists and edits only
+theirs and reads the built-ins. An admin sees every profile grouped by owner
+(System first) and edits another person's with `?owner=<user id>`.
+`home-assistant` belongs to the system and is listed only for an account
+holding `glossaries:ha` or a glossaries `:all` scope. The ceiling is stt's own: 64 KB, a validated name, 500 terms,
+a 409 on a built-in, and 50 profiles per person.
 
 **What they still do not show**, because an expert panel is not every
 environment variable: `STT_VAD`, `STT_HOTWORDS`, `STT_THREADS`,
@@ -1192,8 +1257,8 @@ Every variable is optional and every default degrades rather than fails.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `UI_GATEWAY_URL` | `http://voice-gateway:8080` | The only speech address this service knows |
-| `UI_GATEWAY_API_KEY` | *(unset)* | The key this container presents. **Setting it moves the trust boundary to :30081** — read the section above |
+| `CALLIOPE_RUN_DIR` | `/run/calliope` | Where this service's key and the gateway's public key are: `calliope-svc-ui`, mounted read-only. `/health` says `not_ready` until both exist |
+| `UI_GATEWAY_INTERNAL_URL` | `http://voice-gateway:8081` | The gateway's internal listener, the one address `/ui/fetch` sends to. Only that address or a loopback `http://` one (for tests on one machine) is accepted; anything else falls back to the default, with an ERROR that names the variable and not its value |
 | `UI_METUBE_URL` | *(unset)* | MeTube, **by host address**. Unset hides the link box entirely |
 | `UI_METUBE_FOLDER` | `stt-ingest` | Mandatory in effect — see the table above |
 | `UI_METUBE_FORMAT` | `opus` | ~1 MB a minute. MeTube 400s on any `quality` but `best` for it |
@@ -1210,8 +1275,8 @@ Every variable is optional and every default degrades rather than fails.
 | `UI_VOICE_DIR` | `/voices` | The reference-clip store, shared with tts-long |
 | `UI_MAX_CLIP_BYTES` | 25 MiB | |
 | `UI_MAX_CLIP_SECONDS` | `30` | Trimmed client-side, enforced server-side |
-| `UI_RESOLVE_PER_MINUTE` | `12` | So `/ui/resolve` is not a free scanner |
-| `UI_VOLUMES` | `/voices` | What the entrypoint takes ownership of before dropping to uid 1000 |
+| `UI_RESOLVE_PER_MINUTE` | `12` | Per person, so `/ui/resolve` is not a free scanner |
+| `VOICE_CHOWN_DIRS` | `/voices` | What the entrypoint takes ownership of before dropping to uid 1000. Never `/run/calliope`, which is read-only |
 
 ### Why the confirm thresholds are those numbers
 
@@ -1232,10 +1297,11 @@ always confirms: not knowing is the case the dialog exists for.
 # Build, from the repository root — the context is the root for every service
 docker build -f services/ui/Containerfile -t calliope-ui .
 
-# Run, on the network the gateway shares
-docker run -p 30081:8090 \
-  -e UI_GATEWAY_URL=http://voice-gateway:8080 \
+# Run, on a network the gateway shares and no backend is on. No port: every
+# request must come through the gateway, which signs it.
+docker run --network edge \
   -e UI_METUBE_URL=http://192.0.2.10:30097 \
+  -v calliope-svc-ui:/run/calliope:ro \
   -v voices:/voices \
   calliope-ui
 ```
@@ -1255,9 +1321,21 @@ cd services/ui && pytest -q
 
 **No test starts a server, and none may.** The suite is
 `fastapi.testclient.TestClient` over an httpx `MockTransport` standing in for
-both the gateway and MeTube, so the whole resolve → confirm → fetch flow, the
-forwarding table, the upload ceiling and the clip store run in-process with no
-socket anywhere. `yt-dlp` is never spawned — `app.probe.run` is replaced.
+both the gateway's internal listener and MeTube, so the whole resolve →
+confirm → fetch flow, the upload ceiling and the clip store run in-process
+with no socket anywhere. `yt-dlp` is never spawned: the tests replace
+`app.probe.run`. Every request is signed as the gateway would sign it, with
+`voice_common.conformance`'s test keys.
+
+The identity rules have their own files: `tests/test_conformance.py` (the
+shared suite every service runs: no assertion, a wrong audience, an expired
+or forged one), `tests/test_owners.py` (a link answers only the person who
+resolved it), `tests/test_clips.py` (clip namespaces), `tests/test_delegation.py`
+(`/ui/fetch` sends the delegation and this service's key and nothing else)
+and `tests/test_probe.py` (no private destination reaches yt-dlp).
+`tests/test_account.py` runs the page's session layer in Node: the sign-in
+redirect, the step-up prompt, a missing scope, locked mode, and the key form
+against `voice_common.scopes`.
 
 `tests/test_escaping.py` and `tests/test_playback.py` are static and
 parser-based: what they assert about `ui.html` — which value reaches
@@ -1301,8 +1379,9 @@ the network.
 | File | |
 |---|---|
 | `app/static/ui.html` | The whole UI, the Satellites tab included. Inline CSS and JS, no build step, no external request of any kind — it works on a NAS with no internet |
-| `app/main.py` | The forwarding allowlist, the `/satellites` routes among it, the key check, the upload ceilings, the clip routes |
-| `app/ingest.py` | Resolve, commit, abandon, progress, fetch |
+| `app/main.py` | The page and its addresses, its CSP, `/ui/config`, the clip routes, and `identity.install` |
+| `app/ingest.py` | Resolve, commit, abandon, progress, fetch, and the delegation `/ui/fetch` sends |
+| `app/owners.py` | Who resolved each link, bounded |
 | `app/metube.py` | A narrow client, with every verified trap written down |
 | `app/probe.py` | Five scalars out of a URL, and not one byte of media |
 | `app/guard.py` | What a pasted URL has to survive. **Read this before relaxing anything in it** |
@@ -1321,10 +1400,6 @@ the network.
 - **resemble-ai/chatterbox** (MIT) **as a specification only** — the parameter
   ranges and the four-visible-plus-accordion layout. Its ranges are reconciled
   against ours, not copied.
-- **speaches-ai/speaches** (MIT, `src/speaches/ui/app.py:14-88`) — the
-  `localStorage` API-key box with show/hide, lifted as a pattern into vanilla
-  JS. The rest of that fork carries imports into `speaches.config` and two
-  dropdown wirings that are wrong for our API.
 - **PyAV**, already in the stt image — video upload already worked; nothing was
   added for it.
 - **tts-long's job queue, chunking and ETA arithmetic** — the page reads them,

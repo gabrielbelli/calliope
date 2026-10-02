@@ -11,7 +11,8 @@ sends force.
 
 What the page sent is read from browser_log (the browser's side) and from the
 fake's request log (what reached the service); what it shows is read from the
-page. "Another device" is plain httpx to the gateway, never a second browser.
+page. "Another device" is plain httpx to the gateway with an admin key of the
+same admin the page is signed in as, never a second browser.
 The flow inventory is in the spec's §6; the addresses are in
 services/ui/README.md, "Addresses".
 """
@@ -45,13 +46,21 @@ def profiles(fake):
 
 
 def another_device(stack) -> httpx.Client:
-    return httpx.Client(base_url=stack.url, timeout=10)
+    """The admin's phone: the same person, with an admin key."""
+    return stack.client()
+
+
+def listings(browser_log) -> list[dict]:
+    """The reader's own listing of the profiles. An admin's page also lists
+    everyone's (?owner=all), to group other people's under their names (§4.4),
+    and that is a second request per read, not a second read."""
+    return [r for r in browser_log.sent("GET", r"^/glossaries$") if not r["query"]]
 
 
 def served(stack) -> dict[str, dict]:
     """The listing as the service holds it, asked for by another device."""
     with another_device(stack) as http:
-        return {g["name"]: g for g in http.get("/ui/api/glossaries").json()["glossaries"]}
+        return {g["name"]: g for g in http.get("/glossaries").json()["glossaries"]}
 
 
 def until(page, condition, what: str, seconds: float = 10.0) -> None:
@@ -101,8 +110,8 @@ def test_the_vocabulary_tab_lists_the_services_profiles(page, goto, stack, brows
     expect(e["why"]).to_have_text("")
     expect(e["note"]).to_have_text("")
     assert page.locator("#tab-vocab h2").count() == 0, "the card repeats the tab's name"
-    assert len(browser_log.sent("GET", r"^/ui/api/glossaries$")) == 1
-    assert not browser_log.sent("GET", r"^/ui/api/glossaries/"), "a profile was read before one was opened"
+    assert len(listings(browser_log)) == 1
+    assert not browser_log.sent("GET", r"^/glossaries/"), "a profile was read before one was opened"
 
 
 def test_the_tab_says_it_is_asking_until_the_service_answers(page, goto, fake):
@@ -120,8 +129,8 @@ def test_no_vocabulary_service_says_so_instead_of_an_empty_heading(page, goto, f
     """A 404 is a deployment without the service, and keeps that sentence. A
     503 is a service that did not answer this time, which is not the same
     thing and no longer reads as if it were."""
-    browser_log.allow(404, r"^/ui/api/glossaries$")
-    browser_log.allow(503, r"^/ui/api/glossaries$")
+    browser_log.allow(404, r"^/glossaries$")
+    browser_log.allow(503, r"^/glossaries$")
     e = editor(page)
     fake.fail(r"^/glossaries$", status=404, json_body={"detail": "Not Found"})
     goto("/ui/vocabulary")
@@ -186,7 +195,7 @@ def test_opening_a_profile_shows_its_file_text_and_source(page, goto, stack, bro
     expect(profile_button(page, "dictation")).to_have_attribute("aria-pressed", "false")
     assert page.title() == "tech · Vocabulary · Calliope"
     assert history_length(page) == before + 1, "opening a profile is a step Back undoes"
-    assert len(browser_log.sent("GET", r"^/ui/api/glossaries/tech$")) == 1
+    assert len(browser_log.sent("GET", r"^/glossaries/tech$")) == 1
 
     # The keyboard opens one the same way.
     profile_button(page, "dictation").focus()
@@ -211,7 +220,7 @@ def test_a_profile_button_is_pressed_at_once_while_its_text_is_on_the_way(page, 
 
 
 def test_a_profile_that_cannot_be_read_says_why_and_shows_no_editor(page, goto, fake, browser_log):
-    browser_log.allow(500, r"^/ui/api/glossaries/tech$")
+    browser_log.allow(500, r"^/glossaries/tech$")
     goto("/ui/vocabulary")
     settled(page)
     e = editor(page)
@@ -280,9 +289,9 @@ def test_a_built_in_profile_can_be_copied_to_a_new_name_and_saved(page, goto, st
     wait_for_address(page, "/ui/vocabulary/mytech")
     assert history_length(page) == before, "a save rewrites the entry it is on"
     assert page.title() == "mytech · Vocabulary · Calliope"
-    put = browser_log.sent("PUT", r"^/ui/api/glossaries/")
+    put = browser_log.sent("PUT", r"^/glossaries/")
     assert [(p["path"], p["query"], p["json"]) for p in put] == [
-        ("/ui/api/glossaries/mytech", "", {"text": TECH})]
+        ("/glossaries/mytech", "", {"text": TECH})]
     assert [r["status"] for r in fake.requests(backend="stt", method="PUT")] == [201]
     expect(profile_button(page, "mytech")).to_have_attribute("title", f"Custom, {terms} terms")
     expect(profile_button(page, "mytech")).to_have_attribute("aria-pressed", "true")
@@ -338,7 +347,7 @@ def test_a_name_the_service_would_refuse_greys_save_with_the_reason(page, goto, 
     assert not browser_log.sent("PUT"), "a refused name was sent"
     e["save"].click()
     wait_for_address(page, "/ui/vocabulary/notes.v2_x")
-    assert [p["path"] for p in browser_log.sent("PUT")] == ["/ui/api/glossaries/notes.v2_x"]
+    assert [p["path"] for p in browser_log.sent("PUT")] == ["/glossaries/notes.v2_x"]
     expect(profile_button(page, "notes.v2_x")).to_be_visible()
 
 
@@ -346,7 +355,7 @@ def test_the_name_box_decides_what_save_and_delete_act_on(page, goto, stack, dia
     """One rule settles the whole panel: what the typed name resolves to in
     the listing, never which name button was pressed."""
     with another_device(stack) as http:
-        http.put("/ui/api/glossaries/team", json={"text": "kuber netes = Kubernetes\nnginx\n"}).raise_for_status()
+        http.put("/glossaries/team", json={"text": "kuber netes = Kubernetes\nnginx\n"}).raise_for_status()
     goto("/ui/vocabulary/tech")
     settled(page)
     e = editor(page)
@@ -361,7 +370,7 @@ def test_the_name_box_decides_what_save_and_delete_act_on(page, goto, stack, dia
     dialogs(answer=True)
     e["delete"].click()
     expect(e["note"]).to_have_text("Deleted team.")
-    assert [d["path"] for d in browser_log.sent("DELETE")] == ["/ui/api/glossaries/team"]
+    assert [d["path"] for d in browser_log.sent("DELETE")] == ["/glossaries/team"]
     assert "team" not in served(stack)
 
 
@@ -396,7 +405,7 @@ BROKEN = "kuber netes = Kubernetes\n= nothing heard\nnginx\nempty side =\n"
 
 def test_lines_the_service_refuses_are_listed_by_number_and_nothing_is_written(page, goto, stack, fake,
                                                                                browser_log):
-    browser_log.allow(400, r"^/ui/api/glossaries/broken$")
+    browser_log.allow(400, r"^/glossaries/broken$")
     goto("/ui/vocabulary")
     settled(page)
     e = editor(page)
@@ -425,7 +434,7 @@ def test_lines_the_service_refuses_are_listed_by_number_and_nothing_is_written(p
 
 
 def test_each_refused_line_is_drawn_on_its_own_with_its_reason(page, goto, browser_log):
-    browser_log.allow(400, r"^/ui/api/glossaries/broken$")
+    browser_log.allow(400, r"^/glossaries/broken$")
     goto("/ui/vocabulary")
     settled(page)
     e = editor(page)
@@ -445,7 +454,7 @@ def test_save_anyway_appears_only_for_forceable_refusals_and_goes_on_the_next_ed
                                                                                     browser_log):
     """`force` answers the single-word rule and nothing else, and it answers
     one refusal of one body: the moment the text changes, it is withdrawn."""
-    browser_log.allow(400, r"^/ui/api/glossaries/mine$")
+    browser_log.allow(400, r"^/glossaries/mine$")
     fake.glossaries(strict=True)
     goto("/ui/vocabulary")
     settled(page)
@@ -466,7 +475,7 @@ def test_save_anyway_appears_only_for_forceable_refusals_and_goes_on_the_next_ed
     e["force"].click()
     expect(e["note"]).to_contain_text("Saved")
     expect(e["force"]).to_be_hidden()
-    puts = browser_log.sent("PUT", r"^/ui/api/glossaries/mine$")
+    puts = browser_log.sent("PUT", r"^/glossaries/mine$")
     assert [p["query"] for p in puts] == ["", "", "force=true"]
     assert puts[-1]["json"] == {"text": forced}, "Save anyway sent a body other than the one refused"
     assert served(stack)["mine"]["terms"] == 3
@@ -476,7 +485,7 @@ def test_save_anyway_appears_only_for_forceable_refusals_and_goes_on_the_next_ed
     e["save"].click()
     expect(e["note"]).to_contain_text("2 line(s) rejected")
     expect(e["force"]).to_be_hidden()
-    assert len(browser_log.sent("PUT", r"^/ui/api/glossaries/mine$")) == 4
+    assert len(browser_log.sent("PUT", r"^/glossaries/mine$")) == 4
 
 
 def test_save_says_saving_and_is_off_while_the_write_is_in_flight(page, goto, fake):
@@ -496,7 +505,7 @@ def test_save_says_saving_and_is_off_while_the_write_is_in_flight(page, goto, fa
 
 def test_saving_an_existing_profile_updates_its_term_count(page, goto, stack, fake, browser_log):
     with another_device(stack) as http:
-        http.put("/ui/api/glossaries/notes", json={"text": "kuber netes = Kubernetes\nnginx\n"}).raise_for_status()
+        http.put("/glossaries/notes", json={"text": "kuber netes = Kubernetes\nnginx\n"}).raise_for_status()
     goto("/ui/vocabulary/notes")
     settled(page)
     e = editor(page)
@@ -522,7 +531,7 @@ def test_saving_an_existing_profile_updates_its_term_count(page, goto, stack, fa
 def test_a_write_refused_by_a_read_only_volume_says_the_servers_reason(page, goto, fake, browser_log):
     """The volume can go away after the listing said it was there. The 503
     carries the service's own sentence, and the editor keeps the text."""
-    browser_log.allow(503, r"^/ui/api/glossaries/late$")
+    browser_log.allow(503, r"^/glossaries/late$")
     goto("/ui/vocabulary")
     settled(page)
     e = editor(page)
@@ -541,7 +550,7 @@ def test_a_write_refused_by_a_read_only_volume_says_the_servers_reason(page, got
 
 def test_deleting_a_profile_asks_first_and_removes_it_from_both_tabs(page, goto, stack, dialogs, browser_log):
     with another_device(stack) as http:
-        http.put("/ui/api/glossaries/gone", json={"text": "nginx\n"}).raise_for_status()
+        http.put("/glossaries/gone", json={"text": "nginx\n"}).raise_for_status()
     goto("/ui/vocabulary/gone")
     settled(page)
     e = editor(page)
@@ -561,7 +570,7 @@ def test_deleting_a_profile_asks_first_and_removes_it_from_both_tabs(page, goto,
     until(page, lambda: len(seen) == 2, "the second question")
     expect(e["form"]).to_be_hidden()
     expect(e["note"]).to_have_text("Deleted gone.")
-    assert [d["path"] for d in browser_log.sent("DELETE")] == ["/ui/api/glossaries/gone"]
+    assert [d["path"] for d in browser_log.sent("DELETE")] == ["/glossaries/gone"]
     assert "gone" not in served(stack)
     expect(profile_button(page, "gone")).to_have_count(0)
     expect(chooser_button(page, "gone")).to_have_count(0)
@@ -574,18 +583,18 @@ def test_deleting_a_profile_asks_first_and_removes_it_from_both_tabs(page, goto,
 def test_a_failure_with_quotes_in_it_is_shown_as_the_service_wrote_it(page, goto, stack, dialogs, browser_log):
     """A profile deleted on another device and then deleted here: the
     service's 404 names it in quotes."""
-    browser_log.allow(404, r"^/ui/api/glossaries/vanished$")
+    browser_log.allow(404, r"^/glossaries/vanished$")
     with another_device(stack) as http:
-        http.put("/ui/api/glossaries/vanished", json={"text": "nginx\n"}).raise_for_status()
+        http.put("/glossaries/vanished", json={"text": "nginx\n"}).raise_for_status()
         goto("/ui/vocabulary/vanished")
         settled(page)
         e = editor(page)
         expect(e["name"]).to_have_value("vanished")
-        http.delete("/ui/api/glossaries/vanished").raise_for_status()
+        http.delete("/glossaries/vanished").raise_for_status()
     dialogs(answer=True)
     e["delete"].click()
     expect(e["note"].locator(".note.bad")).to_contain_text("vanished")
-    expect(e["note"]).to_have_text("no glossary profile called 'vanished'", timeout=1000)
+    expect(e["note"]).to_have_text("no glossary profile named 'vanished'", timeout=1000)
 
 
 # ---- a deployment that cannot write ----------------------------------------------------
@@ -594,7 +603,7 @@ def test_a_failure_with_quotes_in_it_is_shown_as_the_service_wrote_it(page, goto
 def test_a_deployment_that_cannot_write_says_why_beside_every_greyed_control(page, goto, stack, fake,
                                                                              browser_log):
     with another_device(stack) as http:
-        http.put("/ui/api/glossaries/mine", json={"text": "nginx\nRedis\n"}).raise_for_status()
+        http.put("/glossaries/mine", json={"text": "nginx\nRedis\n"}).raise_for_status()
     fake.glossaries(writable=False, reason=NO_VOLUME)
     goto("/ui/vocabulary")
     settled(page)
@@ -670,7 +679,7 @@ def test_back_never_throws_away_edits_that_were_not_saved(page, goto, stack, dia
     """A swipe back on a phone is enough. Back to another profile asks first,
     and No keeps the edits and their profile's address."""
     with another_device(stack) as http:
-        http.put("/ui/api/glossaries/mine", json={"text": "nginx\n"}).raise_for_status()
+        http.put("/glossaries/mine", json={"text": "nginx\n"}).raise_for_status()
     goto("/ui/vocabulary")
     settled(page)
     e = editor(page)
@@ -729,13 +738,13 @@ def test_a_profile_address_with_a_name_no_profile_can_have_asks_for_nothing(page
     wait_for_address(page, "/ui/vocabulary")
     expect(page.locator("#glossnote")).to_have_text("There is no profile called my notes, so none is open.")
     expect(page.locator("#glossform")).to_be_hidden()
-    assert not browser_log.sent("GET", r"^/ui/api/glossaries/"), "a name no profile can have was asked for"
+    assert not browser_log.sent("GET", r"^/glossaries/"), "a name no profile can have was asked for"
 
 
 def test_a_profile_address_is_kept_when_the_service_did_not_answer(page, goto, fake, browser_log):
     """A listing that failed decides nothing: the link is not called wrong,
     it is kept for when the service answers."""
-    browser_log.allow(503, r"^/ui/api/glossaries$")
+    browser_log.allow(503, r"^/glossaries$")
     fake.fail(r"^/glossaries$", status=503)
     goto("/ui/vocabulary/tech")
     settled(page)
@@ -749,16 +758,16 @@ def test_a_profile_address_is_kept_when_the_service_did_not_answer(page, goto, f
 
 
 def test_a_profile_deleted_elsewhere_is_said_and_saving_puts_it_back(page, goto, stack, browser_log):
-    browser_log.allow(404, r"^/ui/api/glossaries/shared$")
+    browser_log.allow(404, r"^/glossaries/shared$")
     text = "kuber netes = Kubernetes\nnginx\n"
     with another_device(stack) as http:
-        http.put("/ui/api/glossaries/shared", json={"text": text}).raise_for_status()
+        http.put("/glossaries/shared", json={"text": text}).raise_for_status()
         page.clock.install()
         goto("/ui/vocabulary/shared")
         settled(page)
         e = editor(page)
         expect(e["text"]).to_have_value(text)
-        http.delete("/ui/api/glossaries/shared").raise_for_status()
+        http.delete("/glossaries/shared").raise_for_status()
         page.clock.fast_forward(6_000)
         open_tab(page, "transcribe")
         open_tab(page, "vocab")
@@ -771,7 +780,7 @@ def test_a_profile_deleted_elsewhere_is_said_and_saving_puts_it_back(page, goto,
 
         e["save"].click()
         expect(e["note"]).to_contain_text("Saved")
-        assert http.get("/ui/api/glossaries/shared").json()["text"] == text
+        assert http.get("/glossaries/shared").json()["text"] == text
     expect(profile_button(page, "shared")).to_be_visible()
 
 
@@ -780,7 +789,7 @@ def test_a_profile_saved_elsewhere_reaches_the_transcribe_chooser_on_the_way_in(
         page.clock.install()
         goto("/ui/vocabulary")
         settled(page)
-        http.put("/ui/api/glossaries/fromphone", json={"text": "nginx\n"}).raise_for_status()
+        http.put("/glossaries/fromphone", json={"text": "nginx\n"}).raise_for_status()
         page.clock.fast_forward(6_000)
         open_tab(page, "transcribe")
         expect(chooser_button(page, "fromphone")).to_be_visible()
@@ -794,7 +803,7 @@ def test_the_profiles_are_read_again_on_the_way_in_after_five_seconds_and_on_ret
     settled(page)
 
     def reads() -> int:
-        return len(browser_log.sent("GET", r"^/ui/api/glossaries$"))
+        return len(listings(browser_log))
 
     def loaded() -> int:
         return page.evaluate("() => LOADED.glossaries")

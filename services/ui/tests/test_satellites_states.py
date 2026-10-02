@@ -265,28 +265,29 @@ def test_a_row_says_what_it_listens_for_from_the_saved_words(tmp_path):
 
 
 def test_a_button_mapping_is_one_the_hub_accepts(tmp_path):
-    """The hub replaces the whole mapping, refuses a webhook with a user in it
-    or no scheme, and refuses a mapping with no mute left in it, since only a
-    button undoes the mute. A mute on Side alone does not count: a stock board
-    does not wire it, and the firmware made Rec the mute while the grid showed
-    Rec as Talk. Any button may do anything else, Rec included, and Side may
-    mute beside another. "none" is the default and is left out."""
+    """The hub replaces the whole mapping, takes a webhook only as the name of
+    a secret (webhook:secret:<NAME>, D62) and refuses a raw address, and
+    refuses a mapping with no mute left in it, since only a button undoes the
+    mute. A mute on Side alone does not count: a stock board does not wire
+    it, and the firmware made Rec the mute while the grid showed Rec as Talk.
+    Any button may do anything else, Rec included, and Side may mute beside
+    another. "none" is the default and is left out."""
     got = run(tmp_path, SAT + """
-      const e = (button, edge, action, url) => ({ button, edge, action, url: url || "" });
+      const e = (button, edge, action, secret) => ({ button, edge, action, secret: secret || "" });
       const mute = e("rec", "press", "mute");
       console.log(JSON.stringify({
         good: satMapping([e("play", "press", "ptt"), e("play", "release", "none"),
-                          e("set", "press", "stop"), e("mode", "press", "webhook", "https://ha.local/hook"),
+                          e("set", "press", "stop"), e("mode", "press", "webhook", "SATELLITES_BUTTON_MODE"),
                           e("key1", "press", "lights"), e("rec", "press", "lights"),
                           e("vol_up", "release", "brighter"), e("vol_down", "release", "mute")]),
         no_mute: satMapping([e("play", "press", "ptt"), e("rec", "press", "none")]),
         side_only: satMapping([e("key1", "press", "mute"), e("rec", "press", "ptt")]),
         side_too: satMapping([e("key1", "release", "mute"), e("mode", "press", "mute")]),
-        userinfo: satMapping([mute, e("mode", "press", "webhook", "https://me:pw@ha.local/hook")]),
-        scheme: satMapping([mute, e("mode", "press", "webhook", "ha.local/hook")]),
+        address: satMapping([mute, e("mode", "press", "webhook", "https://ha.example/api/webhook/x")]),
+        lower: satMapping([mute, e("mode", "press", "webhook", "satellites_button_mode")]),
         empty: satMapping([mute, e("mode", "press", "webhook", "")]),
         note: satButtonsNote({ play: { press: "ptt" }, set: { press: "stop" },
-                               mode: { press: "webhook:https://x.local" } }, ["play", "set", "mode"]),
+                               mode: { press: "webhook:secret:SATELLITES_BUTTON_MODE" } }, ["play", "set", "mode"]),
         note_device: satButtonsNote({ rec: { press: "mute" }, vol_up: { press: "volume_up" },
                                       key1: { press: "lights" }, mode: { press: "dimmer" } },
                                     ["rec", "mode", "vol_up", "key1"]),
@@ -301,10 +302,10 @@ def test_a_button_mapping_is_one_the_hub_accepts(tmp_path):
         keys_offline: satButtonKeys(sat({ caps: {}, config: { buttons: { custom: { press: "ptt" } } } })) }));
     """)
     assert got["good"] == {"mapping": {
-        "play": {"press": "ptt"}, "set": {"press": "stop"}, "mode": {"press": "webhook:https://ha.local/hook"},
+        "play": {"press": "ptt"}, "set": {"press": "stop"}, "mode": {"press": "webhook:secret:SATELLITES_BUTTON_MODE"},
         "key1": {"press": "lights"}, "rec": {"press": "lights"}, "vol_up": {"release": "brighter"},
         "vol_down": {"release": "mute"}}}, got
-    for refused in ("no_mute", "side_only", "userinfo", "scheme", "empty"):
+    for refused in ("no_mute", "side_only", "address", "lower", "empty"):
         assert "error" in got[refused], (refused, got[refused])
     assert "muted" in got["no_mute"]["error"]
     assert "other than Side" in got["side_only"]["error"], got["side_only"]

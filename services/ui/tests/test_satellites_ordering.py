@@ -117,7 +117,7 @@ def test_activity_opens_its_stream_again_after_the_hub_restarts(tmp_path):
     assert got["retrying"] == {"held": True, "said": lost}, got
     assert got["opened_while_retrying"] == 1, "a second stream was opened beside one still retrying"
     assert got["lost"] == {"said": lost, "sum": "not connected", "none": True}, got
-    assert got["count"] == 2 and got["url"] == "/ui/api/satellites/events" and got["current"], got
+    assert got["count"] == 2 and got["url"] == "/satellites/events" and got["current"], got
     assert got["cleared"] == "" and got["sum"] == "", got
 
 

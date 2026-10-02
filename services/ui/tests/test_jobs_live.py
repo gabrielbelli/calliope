@@ -45,8 +45,13 @@ async function land(i, listed) {
 const job = (id, status) => ({ id, status: status || "done", created_at: 1 });
 let renders = 0;
 const renderJobs = () => { renders++; };
-const remembered = () => [];
+// The jobs this browser started, which a scenario may fill.
+let seen = [];
+const remembered = () => seen;
 const store = { set() {} };
+const jobsKey = () => "jobs.u_aaaaaaaaaaaaaaaa";
+let owner = "me";
+const jobOwner = () => owner;
 const jobs = new Map();
 const TTL = 86400;
 const OFFSETS_SEEN = new Map();
@@ -108,6 +113,54 @@ def test_a_listing_asked_for_under_another_filter_is_dropped(tmp_path):
     assert got["dropped"] == {"jobs": [], "renders": 0}, got
     assert got["kind"] == [], got
     assert got["path"] == "/jobs?audio=present", got
+
+
+def test_an_admin_listing_asks_for_whose_runs_it_shows_and_drops_another_owners_answer(tmp_path):
+    """Everyone's runs are asked for by name (?owner=all, D32), and an answer
+    asked for under one owner is not drawn under another: Mine left, then the
+    reader chose Everyone's, and Mine's answer must not fill that list."""
+    got = run(tmp_path, """
+      owner = "all";
+      const first = refreshJobsInner();
+      await land(0, [job("everyone's")]);
+      await first;
+      const listed = [...jobs.keys()];
+      const second = refreshJobsInner();
+      owner = "system";
+      await land(1, [job("all of them")]);
+      await second;
+      console.log(JSON.stringify({ path: out[0].path, listed, dropped: [...jobs.keys()] }));
+    """)
+    assert got["path"] == "/jobs?audio=present&owner=all", got
+    assert got["listed"] == ["everyone's"], got
+    assert got["dropped"] == ["everyone's"], got
+
+
+def test_an_admins_own_live_job_is_not_called_lost_by_a_listing_of_someone_elses(tmp_path):
+    """tts-long applies `owner` before its rule that a live job comes back
+    from every filter, so the system's runs never hold the admin's own clone.
+    Taken as lost, it became "lost when the service restarted" with a live
+    Retry, and Retry queued the same GPU job again."""
+    got = run(tmp_path, """
+      seen = [{ id: "mine", at: Date.now() / 1000 }];
+      owner = "system";
+      jobs.set("mine", job("mine", "running"));
+      const asked = refreshJobsInner();
+      await land(0, [job("the system's")]);
+      await asked;
+      const theirs = [...jobs.values()];
+      // Under the reader's own runs the same absence still means lost.
+      owner = "me";
+      jobs.set("mine", job("mine", "running"));
+      const again = refreshJobsInner();
+      await land(1, [job("the system's")]);
+      await again;
+      console.log(JSON.stringify({ path: out[0].path, theirs, lost: jobs.get("mine") }));
+    """)
+    assert got["path"] == "/jobs?audio=present&owner=system", got
+    assert got["theirs"] == [{"id": "the system's", "status": "done", "created_at": 1}], got
+    assert got["lost"]["status"] == "failed", got
+    assert got["lost"]["error"] == "lost when the service restarted", got
 
 
 def test_a_job_deleted_while_a_poll_is_in_flight_does_not_come_back(tmp_path):

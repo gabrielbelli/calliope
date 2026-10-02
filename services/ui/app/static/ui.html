@@ -411,7 +411,7 @@ code,.num{font-family:var(--mono)}
      and the cards above it read as cut from the same stock. --at is the
      selected tab's index, written by the script. */
   --dock-r:var(--radius-l);--dock-in:6px;--at:0;
-  width:min(410px,calc(100% - 36px));height:76px;border-radius:var(--dock-r);
+  width:min(calc(82px * var(--tabs,5)),calc(100% - 36px));height:76px;border-radius:var(--dock-r);
   /* THE EDGE IS THE BORDER, painted with a gradient of its own (--dock-rim):
      on a dark page a rim light, bright along the top edge where the light
      falls and almost gone at the foot; on the creme page a dark edge. */
@@ -445,7 +445,15 @@ code,.num{font-family:var(--mono)}
      carries no momentum, so nothing here may bounce. Everything else that
      changes with the selection -- the colour, the icons, the names, the
      badge -- runs on this same clock, so a tab change is one event. */
-  transition:transform .5s var(--spring),--glow-rgb .5s var(--spring);pointer-events:none}
+  transition:transform .5s var(--spring),--glow-rgb .5s var(--spring),opacity .2s ease-out;
+  pointer-events:none}
+/* NO PILL WHEN THE SELECTED TAB IS NOT ON THE BAR: on a phone Account and
+   Admin are opened from the name's menu, and a pill under a column that is
+   not there would mark whichever tab sat next to it. */
+.dock[data-away] .tabs .highlight{opacity:0}
+/* FIVE ON A PHONE. Account and Admin leave the bar for the name's menu below
+   600px; the script reads the same query (PHONE) to count the columns. */
+@media (max-width:600px){.tabs button[data-menu]{display:none}}
 /* PLACED, NOT MOVED: the first paint, before there is anything on screen
    for the pill or the colour to travel from. The script holds this class
    for exactly one style pass. Every transition in the bar, not only the
@@ -1712,6 +1720,77 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
   .sat-btns .bn{grid-column:1/-1;margin-top:var(--s2)}
   .sat-btns .url,.sat-btns .bnote{grid-column:1/-1}
 }
+
+/* ------------------------------------------------------- the account -- */
+/* WHO IS SIGNED IN, ON THE BRAND'S LINE. The masthead's top line held the
+   wordmark and nothing else; the person's name and the way out sit at its
+   other end, small and quiet, because they are looked for rarely and must
+   always be in the same place when they are. A <details>, so it opens with
+   the keyboard and closes with Escape for free. */
+.who{position:absolute;top:clamp(1.25rem,3vh,2.25rem);right:var(--s4);
+  font-size:var(--t-label);color:var(--dim)}
+.who>summary{cursor:pointer;list-style:none;padding:var(--s1) var(--s2);
+  border-radius:var(--radius-s)}
+.who>summary::-webkit-details-marker{display:none}
+.who>summary b{color:var(--ink);font-weight:600}
+.who[open]>summary{background:var(--bg)}
+.who .menu{position:absolute;right:0;top:calc(100% + var(--s1));z-index:25;min-width:12rem;
+  display:flex;flex-direction:column;gap:var(--s2);padding:var(--s3);
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-s);
+  box-shadow:var(--lift)}
+/* ONE LINE ABOVE THE DOCK, NEVER OVER A CONTROL. A refusal the page cannot
+   pin to a field -- a scope the account lacks, a stale page, a wait -- is said
+   here and goes by itself; the control that was refused stays greyed. */
+.toast{position:fixed;left:50%;transform:translateX(-50%);z-index:30;
+  bottom:calc(22px + 76px + var(--s3) + env(safe-area-inset-bottom));
+  max-width:min(34rem,calc(100% - 2rem));padding:var(--s2) var(--s3);
+  border-radius:var(--radius-s);background:var(--accent);color:var(--accent-ink);
+  font-size:var(--t-label);line-height:1.45;box-shadow:var(--lift)}
+/* LOCKED MODE COVERS THE PAGE: every route behind it answers 503, so
+   nothing under it would work, and a page that looked usable would be
+   pressed. It says what to fix and offers the reload that checks again. */
+.lockout{position:fixed;inset:0;z-index:50;display:grid;place-items:center;
+  padding:var(--s5);background:var(--panel)}
+.lockout>div{max-width:34rem}
+.lockout p{margin:var(--s3) 0}
+/* THE ADMIN VIEW'S SECTIONS, a segmented control rather than five cards in a
+   column: each section is a table, and five tables at once is a page
+   nobody scrolls to the bottom of. */
+.adminnav{margin-bottom:var(--s3);flex-wrap:wrap}
+/* THE BANNERS ABOVE IT START WHERE EVERY PANEL'S FIRST THING DOES. A note's
+   own top margin fell through the unpadded box around them and opened
+   the Admin tab 8px lower than the others, with the last banner flush on the
+   switcher; the gap goes below each one instead. */
+#adminbanners .note{margin:0 0 var(--s3)}
+/* A TABLE THAT FITS A PHONE BY SCROLLING ITSELF, NOT THE PAGE. The page
+   never scrolls sideways; a wide table scrolls inside its own box. */
+.tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.admintable{width:100%;border-collapse:collapse;font-size:var(--t-label)}
+.admintable th,.admintable td{text-align:left;vertical-align:top;
+  padding:var(--s1) var(--s2);border-bottom:1px solid var(--line)}
+.admintable th{color:var(--dim);font-weight:600;white-space:nowrap}
+.admintable td{overflow-wrap:anywhere}
+/* A CONTROL IN A CELL KEEPS ITS WORD. With every cell free to break anywhere,
+   the role picker was squeezed to "spee" and "admi" beside a long row of
+   buttons; its own longest option is the narrowest it may get. */
+.admintable select{width:auto;min-width:max-content}
+.admintable tr.gone td{color:var(--dim)}
+.admintable .acts{display:flex;gap:var(--s1);flex-wrap:wrap}
+.admintable td.yes{text-align:center}
+.tag{display:inline-block;font-size:var(--t-micro);line-height:1.3;
+  padding:0 .4em;border:1px solid var(--line);border-radius:999px;color:var(--dim);
+  white-space:nowrap}
+.tag.warn{border-color:var(--warn);color:var(--warn)}
+.tag.bad{border-color:var(--bad);color:var(--bad)}
+/* A KEY OR A TEMPORARY PASSWORD, SHOWN ONCE. Monospace, selectable whole,
+   and nowhere else on the page: it is gone the moment it is dismissed. */
+.secretonce{font-family:var(--mono);overflow-wrap:anywhere;user-select:all;
+  background:var(--sunk);border-radius:var(--radius-s);padding:var(--s2) var(--s3)}
+.scopeboxes{display:grid;grid-template-columns:repeat(auto-fill,minmax(14rem,1fr));
+  gap:var(--s1) var(--s3);margin:0;padding:0;border:0}
+.scopeboxes label{display:flex;gap:var(--s2);align-items:baseline;color:var(--ink);margin:0}
+.scopeboxes label span{color:var(--dim)}
+.stack>*+*{margin-top:var(--s3)}
 </style>
 </head>
 <body>
@@ -1782,12 +1861,36 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
          pushed toward plum. -->
     <button role="tab" id="tab-btn-satellites" data-tab="satellites"
             aria-controls="tab-satellites" aria-selected="false" tabindex="-1" type="button"
-            style="--acc:#D4507F">
+            style="--acc:#D4507F" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
         <circle cx="12" cy="12" r="2.6"/>
         <path d="M7.6 7.6a6.2 6.2 0 0 0 0 8.8"/><path d="M16.4 7.6a6.2 6.2 0 0 1 0 8.8"/>
         <path d="M4.8 4.8a10.2 10.2 0 0 0 0 14.4"/><path d="M19.2 4.8a10.2 10.2 0 0 1 0 14.4"/>
       </svg><span class="label">Satellites</span><span class="count" id="satellitecount"></span></button>
+
+    <!-- ACCOUNT AND ADMIN: the person's own password, sessions and keys, and
+         the household's. The ramp carries on past the rose into plum and
+         violet, so the two that are about people rather than sound read as
+         the end of the strip. Every role has an account; Admin and
+         Satellites stay hidden until GET /auth/me says the session may open
+         them. The gateway refuses the address either way, so hiding a tab is
+         wayfinding and never the check. On a phone both live in the name's
+         menu instead (data-menu): seven named tabs do not fit 390px, and a
+         tab bar past five is the point where iOS moves the rest to More. -->
+    <button role="tab" id="tab-btn-account" data-tab="account" data-menu
+            aria-controls="tab-account" aria-selected="false" tabindex="-1" type="button"
+            style="--acc:#B0569A">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="8.2" r="3.7"/><path d="M4.6 19.8a7.4 7.4 0 0 1 14.8 0"/>
+      </svg><span class="label">Account</span></button>
+
+    <button role="tab" id="tab-btn-admin" data-tab="admin" data-menu
+            aria-controls="tab-admin" aria-selected="false" tabindex="-1" type="button"
+            style="--acc:#8E62B8" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M12 3.2 5.2 6v5.4c0 4.3 2.9 7.8 6.8 9.4 3.9-1.6 6.8-5.1 6.8-9.4V6z"/>
+        <path d="m9.1 12.1 2 2 3.8-4.1"/>
+      </svg><span class="label">Admin</span></button>
   </div>
 </div>
 </div>
@@ -1805,6 +1908,17 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
      explained is a mark that was invented; this one is already on screen. -->
 <div class="masthead">
   <p class="brand" id="brand"><span class="lamp" aria-hidden="true"></span>Calliope</p>
+  <!-- WHO IS SIGNED IN, and the two things a person does about it: their
+       own account, and leaving. Filled from GET /auth/me; hidden until then,
+       so it never shows a name it has not been told. -->
+  <details class="who" id="who" hidden>
+    <summary><b id="who-name"></b> · <span id="who-role"></span></summary>
+    <div class="menu">
+      <button class="small" type="button" id="who-account">Account</button>
+      <button class="small" type="button" id="who-admin" hidden>Admin</button>
+      <button class="small" type="button" id="who-signout">Sign out</button>
+    </div>
+  </details>
   <!-- ONE <h1>, AND IT NAMES THE SECTION YOU ARE ON. The page used to have no
        first-level heading at all, then had one that said the product name --
        a string nobody navigates by. The four panels write this between them
@@ -2422,6 +2536,17 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
         </div>
       </details>
     </div>
+    <!-- EVERYONE'S CLIPS, for a session holding voices:write:all (D35): a
+         list with Delete and nothing else. The picker above offers only the
+         reader's own voices, because nobody synthesises with somebody
+         else's. -->
+    <div class="card" id="allclips" hidden>
+      <details id="allclipsbox">
+        <summary>Manage everyone's voice clips</summary>
+        <div id="allclipslist"></div>
+        <div id="allclipsnote" aria-live="polite"></div>
+      </details>
+    </div>
   </section>
 
   <!-- ======================================================== JOBS == -->
@@ -2429,7 +2554,7 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
     <div class="card">
       <!-- THE GPU RUNNER, when there is one. Hidden entirely when no runner
            is configured, because a panel that always says "none" is furniture.
-           Everything in it comes from /ui/health, which this page already
+           Everything in it comes from /health, which this page already
            polls, so there is no second request and no second thing to fail.
            ABOVE THE FILTERS, NOT BETWEEN THEM AND THE ROWS. A control sits on
            what it changes: with the panel under the selects, the filters read
@@ -2476,6 +2601,14 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
              disappears at the moment you are watching it reads as data loss; a
              second pass on this side would throw away exactly the rows those
              two rules exist to keep. -->
+        <!-- WHOSE RUNS, for a session that may read everyone's (D32). Absent
+             for everybody else: their list is their own and nothing else. -->
+        <select class="tight jobsel" id="jobowner"
+                aria-label="Whose runs to list" hidden>
+          <option value="me">Mine</option>
+          <option value="all">Everyone's</option>
+          <option value="system">The system's</option>
+        </select>
         <select class="tight jobsel" id="jobkind"
                 aria-label="Which kind of run to list">
           <option value="all">All kinds</option>
@@ -2562,11 +2695,14 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
            left to be inferred. -->
       <div class="hint" id="glossnone">Asking the transcription service for its vocabulary profiles…</div>
       <div id="glossman" hidden>
+          <span class="label-like" id="glosssystem" hidden>Built-in and the system's</span>
           <div class="row" style="align-items:center">
             <div class="seg tight" id="glossnames" role="group" aria-label="Vocabulary profiles"></div>
             <span class="spacer"></span>
             <button class="small tight" id="glossnew" type="button">New profile</button>
           </div>
+          <!-- Each person's own profiles, under their name: for an admin only. -->
+          <div id="glossothers" class="stack" hidden></div>
           <!-- WHAT THE BUTTONS ARE, IN WORDS, while none is open. Without the
                heading the card at rest was two unpressed buttons and "New
                profile", with nothing saying what they hold. Not a heading
@@ -2590,6 +2726,7 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
                   <span class="pill" id="glossbytes"></span></div>
               </div>
             </div>
+            <div class="hint" id="glosswhose"></div>
             <!-- The file text, not the parsed halves. GET /glossaries/{name}
                  returns both, and the text is the one that carries the
                  comments: a glossary's comments are where it says why a rule
@@ -2626,9 +2763,9 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
 
   <!-- ================================================== SATELLITES == -->
   <!-- Thin audio devices: a mic array, a speaker and a ring of lights each,
-       adopted here and told what to do. Every call goes through
-       /ui/api/satellites, the same allowlist as the rest of the page. Nothing
-       on this tab runs while another tab is open. -->
+       adopted here and told what to do. Every call goes to the gateway's
+       /satellites paths, each behind the scope its route table names (§3.5).
+       Nothing on this tab runs while another tab is open. -->
   <section id="tab-satellites" role="tabpanel" aria-labelledby="tab-btn-satellites" hidden>
     <!-- ONE CARD. The list is the tab; what belongs to one satellite folds
          under its row (satelliteRow), and the hub's own settings are the three
@@ -2786,7 +2923,7 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
               </div>
               <div class="hint" id="tmsize" aria-live="polite"></div>
               <div class="row">
-                <a class="button small tight" id="tmdownload" href="/ui/api/satellites/telemetry/records?limit=20000"
+                <a class="button small tight" id="tmdownload" href="/satellites/telemetry/records?limit=20000"
                    download="telemetry.json" hidden>Download</a>
                 <button class="small tight" id="tmdelete" type="button">Delete all</button>
               </div>
@@ -2847,7 +2984,194 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
     </div>
   </section>
 
+  <!-- ===================================================== ACCOUNT == -->
+  <!-- THE PERSON'S OWN: password, sessions and API keys (§4.5). No field
+       here has a `name`: the forms are taken by script, and a form whose
+       script failed to load must not be able to send a password in a URL. -->
+  <section id="tab-account" role="tabpanel" aria-labelledby="tab-btn-account" hidden>
+    <div class="card">
+      <h2>Password</h2>
+      <form id="pwform" class="stack">
+        <div class="row">
+          <div><label for="pw-current">Current password</label>
+            <input type="password" id="pw-current" autocomplete="current-password"></div>
+        </div>
+        <div class="row">
+          <div><label for="pw-new">New password</label>
+            <input type="password" id="pw-new" autocomplete="new-password" maxlength="128"></div>
+          <div><label for="pw-again">The new password again</label>
+            <input type="password" id="pw-again" autocomplete="new-password" maxlength="128"></div>
+        </div>
+        <div class="hint">15 to 128 characters, not a common password and not your username.</div>
+        <div class="row"><button class="primary tight" type="submit" id="pw-go">Change the password</button></div>
+        <div id="pwnote" aria-live="polite"></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Where you are signed in</h2>
+      <div id="sessions"></div>
+      <div class="row"><button class="small tight" type="button" id="sessions-others" disabled>Sign out every other session</button></div>
+      <div id="sessionsnote" aria-live="polite"></div>
+    </div>
+
+    <div class="card">
+      <h2>API keys</h2>
+      <div class="hint">For programs such as Home Assistant or a script. A key is shown once.</div>
+      <div id="keyshown" hidden></div>
+      <div id="keys"></div>
+      <details id="keynew">
+        <summary>New key</summary>
+        <div class="stack">
+          <div class="row">
+            <div><label for="key-name">Name</label>
+              <input type="text" id="key-name" maxlength="64" autocomplete="off" placeholder="Home Assistant"></div>
+            <div><label for="key-preset">Preset</label><select id="key-preset"></select></div>
+            <div><label for="key-expiry">Expires</label>
+              <select id="key-expiry">
+                <option value="30">in 30 days</option>
+                <option value="90" selected>in 90 days</option>
+                <option value="365">in a year</option>
+                <option value="never">never</option>
+              </select>
+              <div class="hint" id="key-expiryhint"></div></div>
+          </div>
+          <fieldset class="scopeboxes" id="key-scopes"></fieldset>
+          <div class="row"><button class="primary tight" type="button" id="key-create">Create the key</button></div>
+        </div>
+      </details>
+      <div id="keysnote" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <!-- ======================================================= ADMIN == -->
+  <!-- THE HOUSEHOLD'S (§4.6). One section at a time: each is a table, and
+       five tables at once is a page nobody reads to the end. -->
+  <section id="tab-admin" role="tabpanel" aria-labelledby="tab-btn-admin" hidden>
+    <div id="adminbanners" aria-live="polite"></div>
+    <div class="seg adminnav" id="adminnav" role="group" aria-label="Admin sections">
+      <button type="button" data-admin="users" aria-pressed="true">Users</button>
+      <button type="button" data-admin="keys" aria-pressed="false">Keys</button>
+      <button type="button" data-admin="roles" aria-pressed="false">Roles</button>
+      <button type="button" data-admin="secrets" aria-pressed="false">Secrets</button>
+      <button type="button" data-admin="audit" aria-pressed="false">Audit</button>
+    </div>
+
+    <div class="card" id="admin-users">
+      <div class="row">
+        <div><label for="user-name">Username</label>
+          <input type="text" id="user-name" maxlength="64" autocomplete="off" spellcheck="false"></div>
+        <div><label for="user-display">Name (optional)</label>
+          <input type="text" id="user-display" maxlength="128" autocomplete="off"></div>
+        <div class="tight"><label for="user-role">Role</label>
+          <select id="user-role"><option value="speech" selected>speech</option><option value="admin">admin</option></select></div>
+        <button class="primary small tight" type="button" id="user-create">Add the user</button>
+      </div>
+      <div id="userreset" class="stack" hidden></div>
+      <div id="users"></div>
+      <div id="usersnote" aria-live="polite"></div>
+    </div>
+
+    <div class="card" id="admin-keys" hidden>
+      <div class="row">
+        <div class="tight"><label for="allkeys-user">Whose keys</label><select id="allkeys-user"></select></div>
+      </div>
+      <div id="allkeys"></div>
+      <div id="allkeysnote" aria-live="polite"></div>
+    </div>
+
+    <div class="card" id="admin-roles" hidden>
+      <div class="hint">Roles and presets are set by the code, and change only with a release.</div>
+      <div id="roles"></div>
+      <div id="rolesnote" aria-live="polite"></div>
+    </div>
+
+    <div class="card" id="admin-secrets" hidden>
+      <div class="hint">A value is stored encrypted and is never shown again.</div>
+      <div id="secretedit" class="stack" hidden></div>
+      <div id="secrets"></div>
+      <details id="secretnew">
+        <summary>Store a new secret</summary>
+        <div class="stack">
+          <div class="row">
+            <div><label for="secret-name">Name</label>
+              <input type="text" id="secret-name" maxlength="64" autocomplete="off" spellcheck="false" placeholder="SATELLITES_HA_TOKEN"></div>
+            <div class="tight"><label for="secret-kind">Kind</label>
+              <select id="secret-kind"><option value="bearer">bearer token</option>
+                <option value="password">password</option><option value="secret_url">address that is itself secret</option></select></div>
+          </div>
+          <div><label for="secret-description">Description (optional)</label>
+            <input type="text" id="secret-description" maxlength="200" autocomplete="off"></div>
+          <fieldset class="scopeboxes" id="secret-consumers"><legend class="label-like">Services that may read it</legend>
+            <label><input type="checkbox" value="satellites" checked> satellites</label>
+            <label><input type="checkbox" value="tts-long"> tts-long</label></fieldset>
+          <div><label for="secret-hosts">Hosts it may be sent to, one per line</label>
+            <textarea id="secret-hosts" rows="2" spellcheck="false" placeholder="https://ha.example:8123"></textarea></div>
+          <div><label for="secret-value">Value</label>
+            <input type="password" id="secret-value" autocomplete="off"></div>
+          <div class="row"><button class="primary tight" type="button" id="secret-new">Store it</button></div>
+        </div>
+      </details>
+      <div id="secretstatus"></div>
+      <div class="row"><button class="small tight" type="button" id="secret-rotate" hidden>Rotate the master key</button></div>
+      <div id="secretsnote" aria-live="polite"></div>
+    </div>
+
+    <div class="card" id="admin-audit" hidden>
+      <div class="row">
+        <div class="tight"><label for="audit-actor">Who</label><select id="audit-actor"></select></div>
+        <div><label for="audit-action">Action</label>
+          <input type="text" id="audit-action" maxlength="64" autocomplete="off" spellcheck="false" placeholder="login_failed"></div>
+        <div class="tight"><label for="audit-outcome">Outcome</label>
+          <select id="audit-outcome"><option value="">any</option><option value="ok">ok</option>
+            <option value="denied">denied</option><option value="failed">failed</option></select></div>
+        <button class="small tight" type="button" id="audit-apply">Show</button>
+      </div>
+      <label><input type="checkbox" id="audit-aggregated"> Include the per-minute counts of refusals</label>
+      <div id="audit"></div>
+      <div class="row"><button class="small tight" type="button" id="audit-older" hidden>Older</button></div>
+      <div id="auditnote" aria-live="polite"></div>
+    </div>
+  </section>
+
 </main>
+
+<!-- ================================================ THE SESSION ===== -->
+<!-- A refusal the page cannot pin to a field: a scope, a stale page, a wait. -->
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<!-- LOCKED MODE (D63). Every route behind the gateway answers 503 until the
+     setting named here is fixed, so the page is covered rather than left to
+     fail one press at a time. The same cover stands while nothing answers who
+     is signed in at start (whoAmI), so the page is never an empty shell. -->
+<div class="lockout" id="lockout" role="alert" hidden>
+  <div>
+    <h2 id="lockout-title">Calliope is locked</h2>
+    <p id="lockout-why"></p>
+    <p class="hint" id="lockout-variable"></p>
+    <button class="primary" type="button" id="lockout-reload">Reload</button>
+  </div>
+</div>
+
+<!-- THE PASSWORD AGAIN (D13), for the changes that need it: users, roles,
+     secrets and admin keys. Ten minutes, then it is asked for again. No
+     `name` on the field: if the script ever failed to take the submit, a
+     form without named fields sends nothing anywhere. -->
+<dialog id="stepup" aria-labelledby="stepup-title">
+  <form id="stepupform">
+    <div class="head"><h2 id="stepup-title">Enter your password again</h2>
+      <div class="hint">This change needs it. You will not be asked again for ten minutes.</div></div>
+    <div class="body">
+      <label for="stepup-password">Password</label>
+      <input type="password" id="stepup-password" autocomplete="current-password">
+      <div id="stepupnote" aria-live="polite"></div>
+    </div>
+    <div class="foot">
+      <button type="button" id="stepup-cancel">Cancel</button>
+      <button class="primary" type="submit" id="stepup-ok">Continue</button>
+    </div>
+  </form>
+</dialog>
 
 <!-- ============================================ CONFIRM BEFORE FETCH == -->
 <dialog id="confirm">
@@ -2892,6 +3216,7 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem("aiv." + k);
                     return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem("aiv." + k, JSON.stringify(v)); } catch {} },
+  drop(k) { try { localStorage.removeItem("aiv." + k); } catch {} },
 };
 
 /* THE ONE ESCAPER. Every value that did not come from this file goes through
@@ -2900,11 +3225,12 @@ const store = {
 
    It exists because there was a real hole rather than a theoretical one: the
    title of a pasted link went straight into innerHTML, and a link to media
-   titled `<img src=x onerror="...">` executed. The CSP this page sets is
-   script-src 'self' 'unsafe-inline' -- the 'unsafe-inline' is there for this
-   file's own inline block -- so an injected event handler RUNS, and the API
-   key is in localStorage next to it. That title is remote, attacker-chosen
-   data arriving through the most ordinary use of the page.
+   titled `<img src=x onerror="...">` executed. The page's policy now lets
+   only this file's own script run, by its hash (§4.7), so an injected handler
+   is blocked there too -- but a policy is the second line, not a reason to
+   drop the first: this origin carries the reader's session. That title is
+   remote, attacker-chosen data arriving through the most ordinary use of the
+   page.
 
    All five characters, not the two the old hand-rolled version at the
    glossary line covered: quotes matter because some of these land in
@@ -2959,10 +3285,10 @@ function roughly(seconds) {
    words: ingest.py copies yt-dlp's failure text -- which quotes the far site's
    own error string -- into `state.error`, and the download handler pasted it
    here. A link to a host whose failure text carries `<img src=x onerror=...>`
-   ran that handler on this origin, and this origin is the authenticator: the
-   UI server signs every outgoing request with UI_GATEWAY_API_KEY, so injected
-   script could start jobs, delete clips and read transcripts with the
-   container's credential. The CSP allows 'unsafe-inline', so nothing stopped it.
+   ran that handler on this origin, and this origin is the authenticator:
+   every request from it carries the reader's session, so injected script
+   could start jobs, delete clips and read transcripts as them. The policy of
+   the day allowed inline script, so nothing stopped it.
    This page closed exactly this hole once before -- see the comment above esc()
    about a media title that executed -- and left the error path open.
    Callers that genuinely build markup use noteHtml and escape their own
@@ -3014,7 +3340,8 @@ function busy(button, label) {
   button.disabled = true;
   button.setAttribute("aria-busy", "true");
   return () => {
-    button.disabled = wasDisabled;
+    /* A control the gateway refused for want of a scope stays off (api()). */
+    button.disabled = wasDisabled || DENIED.has(button);
     button.removeAttribute("aria-busy");
     if (label) button.textContent = was;
     if (BUSY_FOCUS === button) {
@@ -3092,45 +3419,273 @@ function failure(status) {
   return "The server refused that.";
 }
 
-/* NO Authorization HEADER IS SET HERE, and that is the change rather than an
-   omission. The browser used to hold the key and sign every request with it;
-   the key now lives on the voice-ui container as UI_GATEWAY_API_KEY and
-   app/main.py adds the header on the way past. Kept as a wrapper rather than
-   collapsed into fetch() because every call site already goes through it, and
-   a single seam is what made removing the header a three-line change instead
-   of thirty. */
-/* THE PROXIED ROUTES MOVE UNDER A PREFIX WHEN THE GATEWAY IS THE ONLY DOOR.
-   The page is served from the gateway's origin now, so a bare relative call to
-   /v1/audio/transcriptions would land on the GATEWAY directly and never reach
-   this service -- skipping UI_GATEWAY_API_KEY, which is the only key a browser
-   has since the key box was removed. /ui/api/... comes back here first.
+/* ======================================================== the session === */
+/* THE PAGE HOLDS NO CREDENTIAL. The session is an HttpOnly cookie the
+   gateway set at /login, so script on this page -- this file's or anything
+   injected into it -- cannot read it, and every request below carries it
+   because it goes to the page's own origin. There is no prefix and no proxy
+   in voice-ui any more: the page calls the gateway's own paths (§4.2), and the
+   gateway decides, on every request, whether this session may.
 
-   The service's own routes -- /ui/config, /ui/clips, /ui/resolve and the rest
-   -- are NOT prefixed: they are already under /ui and the gateway forwards
-   them as they are. Only the proxied paths move.
+   WHO IS SIGNED IN, AND WHAT THE SESSION MAY DO, from GET /auth/me once at
+   boot. The scopes decide which tabs and controls are drawn and nothing more:
+   hiding a control is wayfinding, never the check. */
+const ME = { user: null, role: "", scopes: new Set(), presets: [] };
+function holds(scope) { return ME.scopes.has(scope); }
+/* WHICH TABS THIS SESSION MAY OPEN: the scope each needs, the same as the
+   gateway's PAGE_TABS (§3.4). A tab whose scope is missing is not drawn, and
+   the gateway answers its address with /ui either way. */
+const TAB_SCOPE = { transcribe: "speech:transcribe", speak: "speech:speak", jobs: "jobs:read:own",
+                    vocab: "glossaries:read:own", satellites: "satellites:read",
+                    account: "keys:manage:own", admin: "users:manage" };
+/* A user's ID, the shape the gateway gives one (scopes.USER_ID). Checked
+   before an ID from any answer is put in a query. */
+const USER_ID = /^u_[a-z2-7]{16}$/;
+/* Usernames by ID, for an owner or an actor named by ID; filled by the
+   users list, which only an admin reads. */
+const USERS = new Map();
+/* `leaving` once the page is on its way to /login, so a dozen polls that all
+   find the session gone send the reader once; `stepping` is the password
+   prompt while it is open, shared by every request that needs it; `asking`
+   is the question to /auth/me that a 401 raises (sessionEnded), shared the
+   same way; `cover` is what #lockout is showing, "locked" or "unanswered". */
+const AUTH = { leaving: false, stepping: null, asking: null, cover: "", toastTimer: null };
 
-   Both mounts are live on the UI service, so this also works unchanged when
-   the page is opened on that service's own port directly. */
-/* The end of the first segment may also be a query: "/jobs?status=failed"
-   is the filtered listing, and without the "?" alternative below it matched
-   nothing, went to the gateway's own GET /jobs with no key, and was answered
-   401 wherever GATEWAY_API_KEYS is set. */
-const GATEWAY_ROUTES = /^\/(v1|transcribe|speak|voices|jobs|glossaries|satellites)(\/|\?|$)/;
+/* A REFUSAL BELONGS TO THE CONTROL THAT ASKED (§4.3). A 403 insufficient_scope
+   greys the control that was pressed for the rest of the session, so it is
+   not pressed again for the same answer. The press is noted on the way down,
+   before any handler runs, and a request is that press's only when it starts
+   while the press is still being handled (api()). A second on the clock was
+   the rule, and a poll, a timer or a reload that happened to start in that
+   second greyed whatever had last been clicked, for good.
+
+   A tab is never the control: opening one reads what it shows, and a read the
+   session may not make says nothing about whether it may open the tab. A
+   change and a submit are presses too, since a select's and a form's
+   handlers run on those and not on the click. A control the page redraws
+   comes back enabled; the gateway refuses it again, which is the check that
+   matters. */
+let PRESSED = null;
+const DENIED = new WeakSet();
+function notePress(ev) {
+  const control = ev.submitter
+    || (ev.target instanceof Element ? ev.target.closest("button, select, input") : null);
+  PRESSED = control && !control.matches("[role=tab]") ? { control, event: ev } : null;
+}
+for (const type of ["click", "change", "submit"]) document.addEventListener(type, notePress, true);
+
+/* ONE LINE, BRIEFLY, ABOVE THE DOCK. textContent: a refusal can quote a
+   server's words. */
+function toast(text) {
+  const box = $("toast");
+  if (!box) return;
+  clearTimeout(AUTH.toastTimer);
+  box.textContent = text;
+  box.hidden = !text;
+  if (text) AUTH.toastTimer = setTimeout(() => { box.hidden = true; }, 8000);
+}
+
+/* SIGNED OUT, OR NEVER SIGNED IN: to /login, which comes back here. The
+   address is this one, so a reload after signing in lands where the reader
+   was. /login takes `next` only as a path on this host (D55). A session that
+   must choose a new password is sent there too: /login asks /auth/me and
+   shows the forced change instead of the form (D21). */
+function signIn() {
+  if (AUTH.leaving) return;
+  AUTH.leaving = true;
+  location.assign("/login?next=" + encodeURIComponent(location.pathname + location.search));
+}
+
+/* WHAT /login SAYS FOR EACH REASON, said here when the gateway locks while the
+   page is open. Names of variables, never values (recheck L7). */
+const LOCKED_SAID = {
+  bootstrap_required: "Set CALLIOPE_ADMIN_PASSWORD and restart the gateway.",
+  bootstrap_data_lost: "The user database was lost. Run app.admin reset-password admin in the gateway's container.",
+  admin_password_weak: "CALLIOPE_ADMIN_PASSWORD is too weak. Use 15 or more characters that are not a common password, then restart.",
+  argon2_selftest: "This image's OpenSSL cannot hash passwords with Argon2id. Use an image with OpenSSL 3.2 or later.",
+  removed_variable: "A setting this release removed is still set. Remove it from the gateway's configuration and restart.",
+  public_origin_required: "Set CALLIOPE_PUBLIC_ORIGIN to Calliope's own https address and restart.",
+  dev_insecure_cookie: "CALLIOPE_DEV_INSECURE_COOKIE works only on a loopback address. Remove it and restart.",
+  keyring_unreadable: "The secret keyring cannot be read. Fix CALLIOPE_MASTER_KEY_FILE and restart.",
+};
+function lockedOut(body) {
+  if (AUTH.cover === "locked") return;
+  const why = body && typeof body.reason === "string" ? body.reason : "";
+  cover("locked", "Calliope is locked", LOCKED_SAID[why] || "See the gateway's log for the reason.",
+        body && typeof body.variable === "string" ? "Setting: " + body.variable : "");
+}
+/* THE WHOLE PAGE, COVERED, with a heading, why, one more line and Reload.
+   The focus moves to Reload only when the cover first appears, so a cover
+   that is rewritten while it stands does not keep taking it. */
+function cover(kind, title, why, more) {
+  const box = $("lockout");
+  if (!box) return;
+  const shown = !box.hidden;
+  AUTH.cover = kind;
+  $("lockout-title").textContent = title;
+  $("lockout-why").textContent = why;
+  $("lockout-variable").textContent = more;
+  box.hidden = false;
+  if (!shown) $("lockout-reload").focus();
+}
+
+/* THE PASSWORD, ONCE MORE, FOR TEN MINUTES (D13). Creating a user, changing a
+   role, setting a secret and minting an admin key each answer 403
+   step_up_required until the password has been entered again in this
+   session. The request that met the refusal waits here and is sent again
+   when the password is taken; Cancel sends nothing. One prompt for however
+   many requests are waiting on it. */
+function stepUp() {
+  if (AUTH.stepping) return AUTH.stepping;
+  const dialog = $("stepup"), field = $("stepup-password"), said = $("stepupnote");
+  AUTH.stepping = new Promise(resolve => {
+    const done = ok => {
+      $("stepupform").removeEventListener("submit", submit);
+      $("stepup-cancel").removeEventListener("click", cancel);
+      dialog.removeEventListener("cancel", cancel);
+      field.value = "";
+      if (dialog.open) dialog.close();
+      AUTH.stepping = null;
+      resolve(ok);
+    };
+    const cancel = ev => { if (ev) ev.preventDefault(); done(false); };
+    const submit = async ev => {
+      ev.preventDefault();
+      const password = field.value;
+      field.value = "";
+      if (!password) { field.focus(); return; }
+      const undo = busy($("stepup-ok"), "Checking…");
+      try {
+        let response;
+        try {
+          response = await fetch("/auth/step-up", { method: "POST", headers: JSON_BODY,
+            credentials: "same-origin", body: JSON.stringify({ password }) });
+        } catch { throw unreached(); }
+        if (response.ok) { done(true); return; }
+        const body = await bodyOf(response);
+        if (response.status === 401) { done(false); signIn(); return; }
+        if (response.status === 429) {
+          note(said, "bad", "Too many attempts. Try again in " + waitFor(response) + ".");
+        } else {
+          note(said, "bad", reason(body, "That password is not correct."));
+        }
+        field.focus();
+      } catch (err) {
+        note(said, "bad", err.message);
+      } finally { undo(); }
+    };
+    $("stepupform").addEventListener("submit", submit);
+    $("stepup-cancel").addEventListener("click", cancel);
+    dialog.addEventListener("cancel", cancel);
+    note(said, "", "");
+    dialog.showModal();
+    field.focus();
+  });
+  return AUTH.stepping;
+}
+
+/* A WAIT, IN WORDS, from Retry-After. */
+function waitFor(response) {
+  const seconds = Number(response.headers.get("Retry-After")) || 0;
+  return seconds >= 90 ? roughly(seconds) : seconds > 1 ? seconds + " seconds" : "a moment";
+}
+
+async function bodyOf(response) {
+  try { return await response.clone().json(); } catch { return null; }
+}
+function codeOf(body) { return (body && body.error && body.error.code) || ""; }
 
 /* A REQUEST THAT NEVER ARRIVED IS SAID IN WORDS TOO. fetch() rejects with
    the browser's own text, "Failed to fetch" in Chrome and "Load failed" in
    Safari, and every caller pasted that after its own sentence. A stopped
    request is still an AbortError, because the callers that offered Stop read
    that name to say "Stopped." rather than call it a failure. */
+function unreached() {
+  const lost = new Error("This page could not reach the server. Check the connection and try again.");
+  lost.status = 0;
+  return lost;
+}
+
+/* EVERY REQUEST THE PAGE MAKES GOES THROUGH HERE, and the refusals every
+   caller would otherwise handle alike are handled once (§4.3):
+
+     401                     the session ended (sessionEnded says whether):
+                             to /login, and back here after
+     403 step_up_required    the password again, then the same request again
+     403 insufficient_scope  said, and the control that asked is greyed
+     403 csrf                said: the page is stale
+     403 session_required    said: cannot normally happen from a session
+     429                     said, with the wait
+     503 locked              the whole page, with what to fix
+
+   Everything else -- a 404, a 409 for a link somebody else is fetching, a
+   422 that names a field -- is the caller's, because only the caller knows
+   where to say it. The response is handed back either way, so a caller that
+   reads the body still can. */
 async function api(path, options) {
-  const target = GATEWAY_ROUTES.test(path) ? "/ui/api" + path : path;
-  try { return await fetch(target, options || {}); }
-  catch (err) {
-    if (err && err.name === "AbortError") throw err;
-    const lost = new Error("This page could not reach the server. Check the connection and try again.");
-    lost.status = 0;
-    throw lost;
+  /* The press's own request starts while the press is being handled, before
+     the handler's first await; once the dispatch is over the event's phase
+     is NONE, and anything started after that is nobody's press. */
+  const control = PRESSED && PRESSED.event.eventPhase !== Event.NONE ? PRESSED.control : null;
+  const send = async () => {
+    try { return await fetch(path, { credentials: "same-origin", ...(options || {}) }); }
+    catch (err) {
+      if (err && err.name === "AbortError") throw err;
+      throw unreached();
+    }
+  };
+  let response = await send();
+  if (response.ok || ![401, 403, 429, 503].includes(response.status)) return response;
+  let body = await bodyOf(response), code = codeOf(body);
+  /* Sent again only with a body that can be sent twice: a string, a form or
+     a blob, which is every body that reaches a step-up route. */
+  const again = !options || !options.body || typeof options.body === "string"
+    || options.body instanceof FormData || options.body instanceof Blob;
+  if (response.status === 403 && code === "step_up_required" && again) {
+    if (!(await stepUp())) return response;
+    response = await send();
+    if (response.ok) return response;
+    body = await bodyOf(response); code = codeOf(body);
   }
+  if (response.status === 401) {
+    if (AUTH.leaving || /^\/auth\//.test(path) || await sessionEnded()) signIn();
+    else toast("A service behind the gateway did not accept who you are signed in as. "
+               + "You are still signed in; that service's log says why.");
+  } else if (response.status === 503 && code === "locked") lockedOut(body);
+  else if (response.status === 429) toast("Too many requests. Try again in " + waitFor(response) + ".");
+  else if (code === "csrf") toast("This page is out of date. Reload it and try again.");
+  else if (code === "session_required") toast("Sign in again to do this.");
+  else if (code === "insufficient_scope") {
+    const wanted = /scope="([^"]*)"/.exec(response.headers.get("WWW-Authenticate") || "");
+    toast("Your account cannot do this" + (wanted ? " (needs " + wanted[1] + ")." : "."));
+    if (control && control.isConnected) {
+      DENIED.add(control);
+      control.disabled = true;
+      if (wanted) control.title = "Needs " + wanted[1];
+    }
+  }
+  return response;
+}
+
+/* WHOSE 401 IT WAS. The gateway answers 401 when the session has ended, and
+   so does a backend that refuses the gateway's word for who is asking -- an
+   identity key it has not read again since a rotation, an unreadable
+   identity.pub, a wrong audience (voice_common.identity) -- which the
+   gateway passes on unchanged, code and all. Taken as an ended session, the
+   second one looped: /login asked /auth/me, found the session alive and sent
+   the reader straight back, where the same backend refused again, a full
+   page load each time and in every open tab. So the gateway is asked, once
+   for however many refusals land together, and only its own 401 ends the
+   page, or a session that must choose a new password, which /login shows.
+   An /auth/me that does not answer is not an ended session either. */
+function sessionEnded() {
+  if (!AUTH.asking) {
+    AUTH.asking = api("/auth/me")
+      .then(async response => response.status === 401
+        || (response.ok && Boolean(((await bodyOf(response)) || {}).must_change)), () => false)
+      .finally(() => { AUTH.asking = null; });
+  }
+  return AUTH.asking;
 }
 
 async function json(path, options) {
@@ -3146,15 +3701,27 @@ async function json(path, options) {
        only ever return one string; a caller that wants the list has nowhere
        else to read it from. Every other caller ignores this field. */
     err.payload = payload;
+    err.code = codeOf(payload);
     throw err;
   }
   return payload;
 }
 
+/* A STREAM, A PLAYER OR A PICTURE THAT FAILED CANNOT SAY WHY: EventSource,
+   <audio> and <img> are given no status. So one of them failing asks the
+   gateway who is signed in, and a 401 there is the session having ended,
+   which sends the reader to sign in like any other 401 (§4.3). At most once
+   every ten seconds, so a stream that keeps failing is not a poll. */
+let SESSION_CHECKED = 0;
+function sessionCheck() {
+  if (Date.now() - SESSION_CHECKED < 10000 || AUTH.leaving) return;
+  SESSION_CHECKED = Date.now();
+  api("/auth/me").catch(() => {});
+}
+
 /* ============================================================= state === */
-let CONFIG = { ingestion:false, probe:false, cloning:false, stt_rtf_seed:8.5,
-               stt_budget_seconds:900, max_clip_seconds:30, confirm_seconds:600,
-               confirm_bytes:52428800, max_upload_bytes:2147483648 };
+let CONFIG = { ingestion:false, cloning:false, stt_rtf_seed:8.5,
+               stt_budget_seconds:900, max_clip_seconds:30, max_upload_bytes:2147483648 };
 let VOICES = { kokoro:{}, clones:[] };
 let HEALTH = null;
 /* WHEN EACH ON-DEMAND LIST WAS LAST ASKED FOR, for the live layer's max-age
@@ -3189,18 +3756,17 @@ function speakNoteClear() { note($("speak-note"), VOICES_FAILED ? "bad" : "", VO
    at 297 s, because the upload and the model warm are fixed costs. That is
    not corrected for, because roughly() buckets everything under 45 s as "a
    few seconds" and the two answers are the same sentence. */
-/* WHERE tts-long's HEALTH ACTUALLY LIVES, in one place.
-   /ui/health is the UI's own document and it WRAPS the gateway's:
-   gateway.health.backends.tts_long.health. The runner panel was written
-   against the gateway's /health instead, read HEALTH.backends.tts_long, found
-   undefined, and hid itself on a machine with a runner sitting right there
-   answering. Two readers, two spellings, one of them wrong. */
-/* ONE READER FOR ALL THREE BACKENDS, for the reason in the paragraph above.
-   The path is written out once here and nowhere else, so a second spelling of
-   it cannot exist to be wrong. */
+/* WHERE A BACKEND'S HEALTH LIVES, in one place: GET /health, which the
+   gateway answers to this session with each backend's filtered body under
+   backends.<name>.health (D50). Anonymous, the same path says only "ok" or
+   "degraded", so everything read from here is {} until the session's scopes
+   reach it -- and {} is what every reader below already treats as "not
+   said". The path is written out once here and nowhere else, so a second
+   spelling of it cannot exist to be wrong; the runner panel once read a
+   different one, found undefined, and hid itself beside a runner that was
+   answering. */
 function backendHealth(name) {
-  const g = HEALTH && HEALTH.gateway && HEALTH.gateway.health;
-  const b = g && g.backends && g.backends[name];
+  const b = HEALTH && HEALTH.backends && HEALTH.backends[name];
   return (b && b.health) || {};
 }
 function ttsLongHealth() { return backendHealth("tts_long"); }
@@ -3268,7 +3834,7 @@ function presetVoices(id) {
 }
 
 /* THE OPTION A CLIP VOICE IS DRAWN AS. A clip is not one engine's voice, so
-   its value carries the engine that will read it: "c:" until /ui/health has
+   its value carries the engine that will read it: "c:" until /health has
    named the engines, the first engine that reads clips after. Everything that
    selects a clip by name goes through here, because "c:" + name written by
    hand matched no option once health had answered, and saving a clip left the
@@ -3518,11 +4084,10 @@ function speechPlan(engine, text) {
    belong to the chosen voice. That is about which model runs, not about how
    much the reader wants to see. */
 
-/* NO KEY BOX EITHER. The key is the CONTAINER'S now: app/config.py reads
-   UI_GATEWAY_API_KEY and app/main.py signs requests with it, so this file has
-   no credential to hold, no localStorage entry to leak into a screenshot or a
-   heap dump, and no header to attach. api() above is a plain fetch for exactly
-   that reason. */
+/* NO KEY BOX EITHER. The page holds no credential: the session is an
+   HttpOnly cookie (see "the session" above api()), so there is no
+   localStorage entry to leak into a screenshot or a heap dump and no header
+   to attach. */
 
 /* ========================================================== the dock ===== */
 /*
@@ -3554,13 +4119,27 @@ const DOCKACC = DOCKTABS.map(t => dhex(getComputedStyle(t).getPropertyValue("--a
    with the pill sliding across from Transcribe. .dock-still turns every
    transition in the bar and the wash off for the one style pass the read
    below forces, so the jump is committed before they come back. */
+const PHONE = matchMedia("(max-width:600px)");
+const docked = b => !b.hidden && !(PHONE.matches && "menu" in b.dataset);
 function dockPlace(animate) {
   if (!DOCK) return;
-  const at = Math.max(0, DOCKTABS.findIndex(b => b.getAttribute("aria-selected") === "true"));
+  /* THE COLUMNS ARE THE TABS THIS SESSION MAY OPEN. A hidden tab takes no
+     column, so the pill counts only the shown ones, and the bar is as wide as
+     they need: five for a speech account, seven for an admin. */
+  const shown = DOCKTABS.filter(docked);
+  const selected = DOCKTABS.find(b => b.getAttribute("aria-selected") === "true");
+  const found = shown.indexOf(selected);
+  const at = Math.max(0, found);
+  const lit = Math.max(0, DOCKTABS.indexOf(found < 0 ? selected : shown[at]));
+  DOCK.toggleAttribute("data-away", !!selected && found < 0);
+  /* THE ROVING TABSTOP STAYS ON THE BAR: with the selected tab in the menu,
+     the first tab on the bar takes it, or Tab would skip the strip. */
+  if (found < 0 && shown[0]) for (const b of DOCKTABS) b.tabIndex = b === shown[0] ? 0 : -1;
   const root = document.documentElement;
   if (!animate) root.classList.add("dock-still");
   DOCK.style.setProperty("--at", String(at));
-  for (const el of DOCKGLOW) el.style.setProperty("--glow-rgb", DOCKACC[at]);
+  DOCK.style.setProperty("--tabs", String(shown.length || 1));
+  for (const el of DOCKGLOW) el.style.setProperty("--glow-rgb", DOCKACC[lit]);
   if (animate) return;
   void getComputedStyle($("highlight")).transform;
   root.classList.remove("dock-still");
@@ -3575,7 +4154,9 @@ const MASTHEAD = {
   speak:      ["Speak", "Text in, a voice out."],
   jobs:       ["Jobs", "Everything this stack has run, where it ran, and how long it took."],
   vocab:      ["Vocabulary", "The words this box keeps getting wrong, and what they should be."],
-  satellites: ["Satellites", "The microphones and speakers around the house, and what they are told."]
+  satellites: ["Satellites", "The microphones and speakers around the house, and what they are told."],
+  account:    ["Account", "Your password, where you are signed in, and your API keys."],
+  admin:      ["Admin", "The people who use this box, their keys, its secrets and what happened."]
 };
 function dockMasthead(button) {
   const said = MASTHEAD[button && button.dataset ? button.dataset.tab : ""];
@@ -3609,8 +4190,18 @@ function lampBusy(source, on) {
 }
 
 /* ---------------------------------------------------------------- boot --- */
+/* THE TABS THIS SESSION MAY OPEN, BEFORE THE FIRST PAINT. voice-ui writes the
+   session's scopes on <html> from the gateway's assertion, so an admin's dock
+   is drawn with seven tabs from the first frame and a speech account's with
+   five. Drawn from the markup's default and corrected when /auth/me answered,
+   the bar grew under the reader and every icon moved. /auth/me still decides
+   (sessionShow); this only draws its answer early. */
+const FIRST_SCOPES = new Set((document.documentElement.dataset.scopes || "").split(" ")
+  .filter(scope => /^[a-z]+:[a-z]+(:own|:all)?$/.test(scope)));
+if (FIRST_SCOPES.size) for (const b of DOCKTABS) b.hidden = !FIRST_SCOPES.has(TAB_SCOPE[b.dataset.tab]);
 if (DOCK) {
   dockPlace(false);
+  PHONE.addEventListener("change", () => dockPlace(false));
   /* THE MASTHEAD IS WRITTEN BY THE TAB HANDLER (navTabSelected), so a key
      and a click cannot disagree about it. This line is the first paint's,
      before any tab has been chosen. */
@@ -3703,22 +4294,26 @@ TABS.forEach(button => {
        already does exactly this line; the tab did not. */
     if (changed && button.dataset.tab === "jobs") schedule(0);
     if (changed && button.dataset.tab === "satellites") satellitesRefresh();
+    if (changed && button.dataset.tab === "account") accountEnter();
+    if (changed && button.dataset.tab === "admin") adminEnter();
     navTabSelected(button, changed);
   });
   /* Arrow, Home and End over the strip. It calls next.click() rather than
      repeating what a tab does, so the listener above stays the only thing that
      knows, and keyboard and mouse cannot drift apart. */
   button.addEventListener("keydown", ev => {
-    const at = TABS.indexOf(button);
+    /* Over the tabs this session may open: a hidden one is not a stop. */
+    const shown = TABS.filter(docked);
+    const at = shown.indexOf(button);
     let to = -1;
-    if (ev.key === "ArrowRight" || ev.key === "ArrowDown") to = (at + 1) % TABS.length;
-    else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") to = (at + TABS.length - 1) % TABS.length;
+    if (ev.key === "ArrowRight" || ev.key === "ArrowDown") to = (at + 1) % shown.length;
+    else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") to = (at + shown.length - 1) % shown.length;
     else if (ev.key === "Home") to = 0;
-    else if (ev.key === "End") to = TABS.length - 1;
+    else if (ev.key === "End") to = shown.length - 1;
     if (to < 0) return;
     ev.preventDefault();
-    TABS[to].focus();
-    TABS[to].click();
+    shown[to].focus();
+    shown[to].click();
   });
 });
 
@@ -3739,10 +4334,9 @@ TABS.forEach(button => {
    request that needed it -- rather than as a badge someone has to notice. */
 async function poll() {
   try {
-    /* /health is unauthenticated everywhere in this stack and always answers
-       200 even when a backend is down, so the code is not the signal — the
-       body is. */
-    HEALTH = await (await fetch("/ui/health")).json();
+    /* The gateway's /health answers 200 even when a backend is down or the
+       gateway is locked, so the code is not the signal -- the body is. */
+    HEALTH = await json("/health");
   } catch { HEALTH = null; }
   paintRunner();
   /* THE ENGINE PICKER IS DRAWN FROM THIS DOCUMENT AND FROM NOTHING ELSE, so it
@@ -3869,7 +4463,10 @@ function runnerTrouble(error) {
 
 /* ------------------------------------------------- router: addresses -- */
 const NAV_SLUG = { transcribe: "transcribe", speak: "speak", jobs: "jobs",
-                   vocab: "vocabulary", satellites: "satellites" };
+                   vocab: "vocabulary", satellites: "satellites", account: "account", admin: "admin" };
+/* Admin's sections, each a place of its own: /ui/admin/secrets is a link an
+   operator can be sent to from a refusal that names a secret. */
+const NAV_ADMIN = { users: "Users", keys: "Keys", roles: "Roles", secrets: "Secrets", audit: "Audit" };
 const NAV_TAB = Object.fromEntries(Object.entries(NAV_SLUG).map(([tab, slug]) => [slug, tab]));
 const NAV_HUB = { "wake-words": "sat-wakewords", "try-a-word": "ww-try", "custom-models": "ww-models",
                   activity: "sat-activity", telemetry: "sat-telemetry", firmware: "sat-firmware" };
@@ -3911,6 +4508,8 @@ function navShape(route) {
     case "transcribe": return keep(p[0] === "expert" ? 1 : 0);
     case "speak": return keep(p[0] === "expert" || p[0] === "clone" ? 1 : 0);
     case "jobs": case "vocab": return keep(Math.min(p.length, 1));
+    case "account": return keep(0);
+    case "admin": return keep(Object.hasOwn(NAV_ADMIN, p[0] || "") ? 1 : 0);
   }
   if (p[0] === "wake-words") return keep(p.length >= 3 && p[2] === "more" ? 3 : Math.min(p.length, 2));
   if (Object.hasOwn(NAV_HUB, p[0] || "")) return keep(1);
@@ -4233,6 +4832,7 @@ function navNames(route) {
   else if (route.view === "speak" && p[0] === "clone") item = "Use my own voice";
   else if (route.view === "jobs" && p[0]) item = `Job ${p[0].slice(0, 8)}`;
   else if (route.view === "vocab" && p[0]) item = p[0];
+  else if (route.view === "admin" && p[0]) section = NAV_ADMIN[p[0]] || "";
   else if (route.view === "satellites" && p[0] === "wake-words" && p[1]) {
     item = p[1] === "ptt" ? "Push-to-talk" : wwLabel(p[1]);
     section = NAV_HUB_LABEL["wake-words"];
@@ -4301,6 +4901,8 @@ async function navApply(route, how, state) {
     : route.view === "speak" ? navAtSpeak(route, ready)
     : route.view === "jobs" ? await navAtJobs(route, ready)
     : route.view === "vocab" ? await navAtVocab(route, ready)
+    : route.view === "account" ? navAtAccount(route)
+    : route.view === "admin" ? navAtAdmin(route)
     : navAtSatellites(route, state);
   if (!found || NAV.route !== route) return;
   if (how === "pop") {
@@ -4476,6 +5078,9 @@ async function navAtVocab(route, ready) {
     if (glossDirty()) {
       return navNothing({ ...route, parts: GLOSS_OPEN ? [GLOSS_OPEN.name] : [] });
     }
+    /* A profile still being read for the address just left would open the
+       editor again under this one, so its answer is dropped. */
+    GLOSS_ASKED++;
     if (!$("glossform").hidden) {
       $("glossform").hidden = true;
       GLOSS_OPEN = null;
@@ -4496,6 +5101,7 @@ async function navAtVocab(route, ready) {
   }
   const button = () => $("glossnames").querySelector(`[data-open="${CSS.escape(name)}"]`);
   if (ready && GLOSS_NAME.test(name) && GLOSSARIES.some(g => g.name === name)) {
+    GLOSS_OWNER = "";
     await glossOpen(name, button());
     if (NAV.route !== route) return null;
     /* glossRender drew the buttons again, so the one to focus is the new one. */
@@ -4995,6 +5601,11 @@ let GLOSSARIES = [];
    editor as it was when opened or last saved, the base a change made on
    another device is measured against (glossLive). */
 let GLOSS_FAILED = null, GLOSS_SIG = "", GLOSS_OPEN = null;
+/* EVERYONE'S PROFILES, for a session holding glossaries:read:all, from
+   GET /glossaries?owner=all (null for anybody else), and the namespace the
+   editor is in: "" is the reader's own default -- a person's own profiles, or
+   for an admin the system's -- and a user ID is that person's (D33). */
+let GLOSS_ALL = null, GLOSS_OWNER = "";
 /* Which glossOpen is the latest: two quick Backs sent two reads, and the one
    that answered last filled the editor under the other's address. */
 let GLOSS_ASKED = 0;
@@ -5094,7 +5705,13 @@ const SAT_COPY = {
   ringMutedWhy: "Unmute it with its button to set up the ring; muted, the ring shows red.",
   /* The scheme without its colon and slashes: test_ui.py keeps every plain
      http address out of this file, so a fetch to one cannot hide in copy. */
-  btnBadUrl: "Write the webhook as a full web address, starting with https or http.",
+  btnBadUrl: "Write the webhook's address in full, starting with https or http, to store it.",
+  btnBadSecret: "Name the webhook's secret in capitals, digits and _, such as SATELLITES_BUTTON_PLAY.",
+  btnHookStored: "{var} is in the secret store.",
+  btnHookMissing: "{var} is not in the secret store yet; store the webhook's address under it.",
+  btnHookUnknown: "Store the webhook's address under {var}.",
+  btnHookSaved: "Stored as {var}. The address is not shown again.",
+  btnUseSecret: "The hub keeps a webhook's address only in the secret store: name its secret here.",
   moveBadUrl: "Write the address as ws://host:port or wss://host:port.",
   moving: "Moving. Forget it here once the other hub has adopted it.",
   updAvail: "{v} is available for this model.",
@@ -5315,11 +5932,10 @@ const SAT_COPY = {
   modelsList: "List models",
   modelsNotListed: "{model} is not one {name} lists; clear Model to see its list.",
   /* The key box. The page never holds a key to show: these are said from
-     WAKE.server.secrets, a name and where its value lives. */
-  keyHub: "A key is stored on the hub as {var}.",
-  keyEnv: "{var} is set in the hub's environment, which a stored key cannot replace.",
+     WAKE.server.env, a name and whether the secret store holds it. */
+  keyHub: "A key is in the secret store as {var}.",
   keyNone: "No key is stored as {var}; a server of your own may need none.",
-  keyUnknown: "Store a key as {var}, or save to learn whether the environment sets it.",
+  keyUnknown: "Store a key as {var}, or save to learn whether the secret store has one.",
   keyNoName: "Name the key to send one; with no name, no key is sent.",
   keyShared: "Also used by {words}.",
   keyStored: "Stored. It is not shown again.",
@@ -5345,7 +5961,6 @@ const SAT_COPY = {
   fixEnvNeeded: "Name the variable that holds Home Assistant's token.",
   fixEnv: "Write the name of the variable that holds the token, never the token itself.",
   fixEnvKey: "Write the key's name in capitals, digits and underscores, never the key itself.",
-  fixEnvHub: "That name is one of the hub's own settings: name a variable with TOKEN or KEY in it.",
   fixFallback: "{word} is not a conversation word, so it cannot take over.",
   fixFollow: "Keep listening for 1 to 60 seconds.",
   fixPause: "Pause for 0.2 to 3 seconds before the command ends.",
@@ -6389,9 +7004,11 @@ function satAirPlay(li, n, cfg) {
   if (!sha) art.hidden = true;
   else if (art.dataset.sha !== sha) {
     art.dataset.sha = sha;
-    art.onerror = () => { art.hidden = true; delete art.dataset.sha; };
+    /* A picture cannot say why it failed: an ended session is asked about
+       (sessionCheck), the hub's 404 for a cover not there yet is not. */
+    art.onerror = () => { art.hidden = true; delete art.dataset.sha; sessionCheck(); };
     art.onload = () => { art.hidden = false; };
-    art.src = `/ui/api/satellites/${encodeURIComponent(n.id)}/airplay/artwork?v=${sha}`;
+    art.src = `/satellites/${encodeURIComponent(n.id)}/airplay/artwork?v=${sha}`;
   } else art.hidden = !art.complete || !art.naturalWidth;
   const facts = on ? satAirPlayFacts(ap, audio.playing_at) : [];
   const dl = q(".sat-apfacts");
@@ -6548,8 +7165,18 @@ const SAT_BUTTONS = { rec: "Rec", mode: "Mode", play: "Play", set: "Set", vol_do
                       vol_up: "Vol +", key1: "Side" };
 const SAT_VERBS = { ptt: "talks", stop: "stops", mute: "mutes", volume_up: "louder",
                     volume_down: "quieter", lights: "switches", dimmer: "dims", brighter: "brightens" };
-/* The hub's ButtonAction pattern, so nothing is sent that it would refuse. */
+/* A BUTTON'S WEBHOOK NAMES A SECRET (D62): webhook:secret:<NAME>, a
+   secret_url secret whose value is the address. A Home Assistant webhook ID
+   is a bearer secret, so the mapping, which every satellites:read holder
+   and MQTT used to see, never carries one. The name is the store's pattern,
+   as the hub's SECRET_WEBHOOK takes it. */
+const SAT_HOOK_SECRET = /^[A-Z][A-Z0-9_]{0,63}$/;
+/* An address worth storing as one: absolute http or https, with no
+   user:password part, which the store would refuse. */
 const SAT_WEBHOOK = /^https?:\/\/[^\s/?#@]+(\/\S*)?$/;
+/* The secret_url secrets the store holds, for the name box's suggestions;
+   read when a satellite's buttons are drawn, by a session that may. */
+const SAT_HOOKS = { names: [], at: 0 };
 /* The hub's MUTE_DOES_NOT_COUNT: a mute there is no way out of one. */
 const SAT_MUTE_DOES_NOT_COUNT = ["key1"];
 
@@ -6578,8 +7205,8 @@ function satMapping(entries) {
     if (e.action === "none") continue;
     let act = e.action;
     if (act === "webhook") {
-      if (!SAT_WEBHOOK.test(e.url) || e.url.length > 480) return { error: SAT_COPY.btnBadUrl };
-      act = "webhook:" + e.url;
+      if (!SAT_HOOK_SECRET.test(e.secret)) return { error: SAT_COPY.btnBadSecret };
+      act = "webhook:secret:" + e.secret;
     }
     (mapping[e.button] = mapping[e.button] || {})[e.edge] = act;
   }
@@ -6633,6 +7260,10 @@ function satButtons(li, n) {
   if (grid.dataset.keys !== keys.join(" ") && !grid.contains(document.activeElement)) {
     grid.dataset.keys = keys.join(" ");
     while (grid.children.length > 3) grid.lastChild.remove();
+    /* The names a webhook may pick from, suggested under every name box. */
+    const hooks = document.createElement("datalist");
+    hooks.id = `${u}-hooks`;
+    grid.append(hooks);
     keys.forEach((key, i) => {
       const label = satButtonName(key);
       const cell = document.createElement("span");
@@ -6653,17 +7284,38 @@ function satButtons(li, n) {
         box.hidden = true;
         const name = document.createElement("label");
         name.htmlFor = pick.dataset.url;
-        name.textContent = `${label}, ${when}: webhook URL`;
+        name.textContent = `${label}, ${when}: webhook secret`;
         const field = document.createElement("input");
         field.type = "text";
-        field.inputMode = "url";
         field.id = pick.dataset.url;
-        field.maxLength = 480;
-        field.placeholder = "https://…";
+        field.maxLength = 64;
+        field.placeholder = "SATELLITES_BUTTON_…";
         field.spellcheck = false;
         field.autocomplete = "off";
+        field.setAttribute("autocapitalize", "characters");
+        field.setAttribute("list", hooks.id);
         field.dataset.hook = key;
-        box.append(name, field);
+        const said = document.createElement("div");
+        said.className = "hint";
+        /* THE ADDRESS, TO STORE IT, never to send it. It goes into the
+           secret store under the name above and is emptied before the
+           request leaves; the mapping only ever carries the name. */
+        const address = document.createElement("input");
+        address.type = "password";
+        address.maxLength = 2048;
+        address.autocomplete = "off";
+        address.spellcheck = false;
+        address.placeholder = "Its address, to store it: https://…";
+        address.setAttribute("aria-label", `${label}, ${when}: the webhook's address, to store as its secret`);
+        const keep = document.createElement("button");
+        keep.type = "button";
+        keep.className = "small";
+        keep.textContent = "Store the address";
+        keep.addEventListener("click", () => satHookStore(li, pick, field, address, keep));
+        const storing = document.createElement("div");
+        storing.className = "actions";
+        storing.append(address, keep);
+        box.append(name, field, said, storing);
         boxes.push(box);
       }
       grid.append(...boxes);
@@ -6683,37 +7335,106 @@ function satButtons(li, n) {
       }
     });
   }
+  const hooks = grid.querySelector("datalist");
+  if (hooks) satFillList(hooks, SAT_HOOKS.names);
+  satHooksRead();
   /* A select somebody changed is theirs until the hub has taken it: a
-     Webhook with no address yet is not in the stored mapping, and the poll
-     would otherwise put it back to Nothing under the address being typed. */
+     Webhook with no secret yet is not in the stored mapping, and the poll
+     would otherwise put it back to Nothing under the name being typed. */
   for (const pick of grid.querySelectorAll("select[data-btn]")) {
     const field = grid.querySelector(`#${pick.dataset.url}`);
     const act = (mapping[pick.dataset.btn] || {})[pick.dataset.edge] || "none";
     const hook = act.startsWith("webhook:");
     if (!pick.dataset.pending && pick !== document.activeElement) {
       pick.value = hook ? "webhook" : SAT_ACTIONS.some(([v]) => v === act) ? act : "none";
-      if (hook && field !== document.activeElement) field.value = act.slice(8);
+      const named = /^webhook:secret:(.*)$/.exec(act);
+      if (named && field !== document.activeElement) field.value = named[1];
     }
     field.parentElement.hidden = pick.value !== "webhook";
+    satHookSay(field);
   }
   satSet(li.querySelector(".sat-buttons .sum-note"), satButtonsNote(mapping, keys));
+}
+
+/* WHAT THE STORE HOLDS UNDER A WEBHOOK'S NAME, said under the name box. */
+function satHookSay(field) {
+  const name = field.value.trim();
+  const said = field.nextElementSibling;
+  if (!said) return;
+  satSet(said, !SAT_HOOK_SECRET.test(name) ? ""
+    : SAT_HOOKS.names.includes(name) ? satText("btnHookStored", { var: name })
+    : SAT_HOOKS.at ? satText("btnHookMissing", { var: name })
+    : satText("btnHookUnknown", { var: name }));
+}
+
+/* The store's secret_url names, read at most once a minute and only by a
+   session that may read the store. */
+async function satHooksRead() {
+  if (!holds("secrets:manage") || Date.now() - SAT_HOOKS.at < 60000) return;
+  SAT_HOOKS.at = Date.now();
+  try {
+    const rows = (await json("/admin/secrets")).secrets || [];
+    SAT_HOOKS.names = rows.filter(r => r.kind === "secret_url" && r.set).map(r => r.name).sort();
+  } catch { SAT_HOOKS.at = 0; return; }
+  for (const list of document.querySelectorAll(".sat-btns datalist")) satFillList(list, SAT_HOOKS.names);
+  for (const field of document.querySelectorAll(".sat-btns input[data-hook]")) satHookSay(field);
+}
+
+/* THE NAME A WEBHOOK IS OFFERED, the one the hub imports a button's old
+   address as (secret_import.button_secret), when it fits the 64 characters a
+   name may have. */
+function satHookDefault(li, pick) {
+  const name = `SATELLITES_BUTTON_${li.dataset.id}_${pick.dataset.btn}_${pick.dataset.edge}`
+    .toUpperCase().replace(/[^A-Z0-9]/g, "_");
+  return SAT_HOOK_SECRET.test(name) ? name : "";
 }
 
 function satButtonPicked(li, pick) {
   const field = li.querySelector(`#${pick.dataset.url}`);
   field.parentElement.hidden = pick.value !== "webhook";
   pick.dataset.pending = "1";
-  /* Webhook with no address yet: the address is the next thing to write. */
-  if (pick.value === "webhook" && !field.value.trim()) { field.focus(); return; }
+  /* Webhook with no secret yet: its name is the next thing to write, and the
+     one the hub would give it is offered. */
+  if (pick.value === "webhook" && !field.value.trim()) {
+    field.value = satHookDefault(li, pick);
+    satHookSay(field);
+    field.focus();
+    if (!SAT_HOOKS.names.includes(field.value)) return;
+  }
+  satButtonsSave(li);
+}
+
+/* STORE THE ADDRESS, THEN SAVE THE MAPPING THAT NAMES IT. The address goes
+   to PUT /admin/secrets/{name} as a secret_url, bound to its own host and
+   read by the hub (D41, D62), and is emptied from the box first. */
+async function satHookStore(li, pick, field, address, button) {
+  const host = li.querySelector(".sat-buttons .sat-note");
+  const name = field.value.trim();
+  const url = address.value.trim();
+  address.value = "";
+  if (!SAT_HOOK_SECRET.test(name)) { note(host, "bad", SAT_COPY.btnBadSecret); field.focus(); return; }
+  if (!SAT_WEBHOOK.test(url) || url.length > 2048) { note(host, "bad", SAT_COPY.btnBadUrl); address.focus(); return; }
+  const done = busy(button, "Storing…");
+  try {
+    await secretPut(name, url, { kind: "secret_url", host: url,
+      description: `${satButtonName(pick.dataset.btn)} ${pick.dataset.edge === "press" ? "pressed" : "released"} on ${satName(li._n || {})}` });
+  } catch (e) {
+    if (!secretLink(host, e)) note(host, "bad", e.message);
+    return;
+  } finally { done(); }
+  SAT_HOOKS.names = [...new Set([...SAT_HOOKS.names, name])].sort();
+  satHookSay(field);
+  satSaid(host, satText("btnHookSaved", { var: name }));
   satButtonsSave(li);
 }
 
 async function satButtonsSave(li) {
   const picks = [...li.querySelectorAll("select[data-btn]")];
   const made = satMapping(picks.map(pick => ({ button: pick.dataset.btn, edge: pick.dataset.edge,
-    action: pick.value, url: li.querySelector(`#${pick.dataset.url}`).value.trim() })));
+    action: pick.value, secret: li.querySelector(`#${pick.dataset.url}`).value.trim() })));
   const host = li.querySelector(".sat-buttons .sat-note");
   if (made.error) { note(host, "bad", made.error); return; }
+  for (const field of li.querySelectorAll(".sat-btns input[data-hook]")) satHookSay(field);
   if (await satellitePatch(li, { buttons: made.mapping }, host)) {
     for (const pick of picks) delete pick.dataset.pending;
   }
@@ -6883,6 +7604,14 @@ async function satellitePatch(li, change, host, from) {
     return true;
   } catch (e) {
     if (from) delete from.dataset.held;
+    /* A RAW ADDRESS THE HUB REFUSED (D62): the name box of the first
+       webhook is where a secret is picked, so the focus goes there. */
+    if (e.code === "use_secret") {
+      note(host, "bad", SAT_COPY.btnUseSecret);
+      const field = li.querySelector(".sat-btns .url:not([hidden]) input[data-hook]");
+      if (field) field.focus();
+      return false;
+    }
     note(host, "bad", e.message);
     return false;
   }
@@ -6971,7 +7700,9 @@ async function satelliteAct(li, act, button) {
       await json(`/satellites/${id}/flush`, { method: "POST" });
     } else if (act === "listen") {
       satSaid(host, SAT_COPY.recording);
-      const r = await api(`/satellites/${id}/listen?seconds=5`);
+      /* A POST: opening a microphone is a side effect, which no link or
+         picture on another site may cause (D15). */
+      const r = await api(`/satellites/${id}/listen?seconds=5`, { method: "POST" });
       if (!r.ok) {
         let p = null;
         try { p = await r.json(); } catch {}
@@ -7218,14 +7949,13 @@ const WAKE_PHRASES = { most: 64, longest: 64 };
    each may be (router.VerifySettings and its Spelling). */
 const WAKE_SPELLINGS = { most: 12, longest: 40 };
 const WAKE_LANG = /^([a-z]{2,3}(-[A-Za-z0-9]{2,8})*|auto)$/;
+/* A secret's name, as the store keeps it (scopes.SECRET_NAME): what an
+   action names its key, token or webhook address by. */
 const WAKE_ENV = /^[A-Z][A-Z0-9_]{0,63}$/;
-/* The hub's own settings (destinations.hub_setting): under its prefix, with
-   no word of the name a credential's. No destination may send one. */
-const WAKE_HUB_SETTING = /^(SATELLITES|NODES)_(?!(.*_)?(TOKEN|KEY|SECRET|PASSWORD)(_|$))/;
 const WAKE_URL = /^https?:\/\/[^/\s?#]+(\/[^\s]*)?$/;
 const WAKE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-/* What the hub takes as a key (secret_store.SECRET_VALUE): printable, with no
-   space and no line break, which is what an Authorization header can carry. */
+/* What is worth storing as a key: printable, with no space and no line break,
+   which is what an Authorization header can carry. */
 const WAKE_SECRET = /^[\x21-\x7e]{1,4096}$/;
 /* WELL-KNOWN PROVIDERS, BY THE ADDRESS THEIR OPENAI-COMPATIBLE API LIVES AT.
    Choosing one writes the Base URL and nothing else: the key's name stays as
@@ -7591,7 +8321,6 @@ function wakeProblem(w, words) {
   const env = d.type === "llm" ? d.api_key_env : d.token_env;
   if (WAKE_HA.includes(d.type) && !env) return SAT_COPY.fixEnvNeeded;
   if (env && !WAKE_ENV.test(env)) return d.type === "llm" ? SAT_COPY.fixEnvKey : SAT_COPY.fixEnv;
-  if (env && WAKE_HUB_SETTING.test(env)) return SAT_COPY.fixEnvHub;
   if (w.mode === "command" && a.fallback) {
     const to = words.find(x => x.name === a.fallback);
     if (!to || to.mode !== "conversation") return satText("fixFallback", { word: wwLabel(a.fallback) });
@@ -7629,7 +8358,6 @@ function wakeProblemAt(w, problem) {
     [SAT_COPY.fixEnvNeeded]: ["d.env", true],
     [SAT_COPY.fixEnv]: ["d.env"],
     [SAT_COPY.fixEnvKey]: ["d.env"],
-    [SAT_COPY.fixEnvHub]: ["d.env"],
     [SAT_COPY.fixFollow]: ["c.follow_up_s"],
     [SAT_COPY.fixPause]: ["silence_ms"],
     [SAT_COPY.fixColour]: ["colour"],
@@ -7821,6 +8549,7 @@ async function wakePipesFetch(url, token_env) {
                            pipelines: (r && Array.isArray(r.pipelines)) ? r.pipelines : [] });
   } catch (e) {
     Object.assign(entry, { state: "failed", error: e.message });
+    secretLink($("wwnote"), e);
   }
   wakeRender();
 }
@@ -7973,6 +8702,7 @@ async function wakeModelsFetch(base_url, api_key_env) {
     Object.assign(entry, { state: "ready", models });
   } catch (e) {
     Object.assign(entry, { state: "failed", error: e.message });
+    secretLink($("wwnote"), e);
   }
   wakeRender();
 }
@@ -8002,16 +8732,15 @@ function wakeModelsHint(d, entry, waiting) {
   return satText("modelsReady", { n: satCount(entry.models.length, "model", "models") });
 }
 
-/* THE KEY BOX IS WRITE-ONLY BY CONSTRUCTION. The hub has no route that
-   answers a key, so the page is never given one to show: what it knows is
-   WAKE.server.secrets, a name and where its value lives ("environment" or
-   "hub"). {hint, canStore, canClear} for the name an action sends. */
+/* THE KEY BOX IS WRITE-ONLY BY CONSTRUCTION. Nothing answers a key, so the
+   page is never given one to show: what it knows is WAKE.server.env, a name
+   and whether the secret store holds a value under it. The box stores into
+   the gateway's secret store (D47), the one place every secret lives.
+   {hint, canStore, canClear} for the name an action sends. */
 function wakeKeyState(name, self) {
   if (!name || !WAKE_ENV.test(name)) return { hint: SAT_COPY.keyNoName, canStore: false, canClear: false };
-  const where = ((WAKE.server && WAKE.server.secrets) || {})[name];
   const env = (WAKE.server && WAKE.server.env) || {};
-  const state = where === "environment" ? { hint: satText("keyEnv", { var: name }), canStore: false, canClear: false }
-    : where === "hub" ? { hint: satText("keyHub", { var: name }), canStore: true, canClear: true }
+  const state = env[name] === true ? { hint: satText("keyHub", { var: name }), canStore: true, canClear: true }
     : name in env ? { hint: satText("keyNone", { var: name }), canStore: true, canClear: false }
     : { hint: satText("keyUnknown", { var: name }), canStore: true, canClear: false };
   /* A key is shared by every saved action that names it, and clearing it
@@ -8030,15 +8759,94 @@ function wakeKeyUsers(name, self) {
     && [w.action.destination.api_key_env, w.action.destination.token_env].includes(name)).map(([n]) => wakeName(n));
 }
 
-/* A key for the hub to hold under `name`, or null to clear it: in turn with
-   the other wake word writes, because the answer is the whole view. The
-   value is in this call and its request body, and nowhere else. */
-function wakeKeyPut(name, value) {
+/* THE SECRET STORE'S WRITE PATH, for the boxes on this tab: PUT and DELETE
+   /admin/secrets/{name}, which need the password again (D13; api() asks).
+   The value is in the request body and nowhere else.
+
+   A KEY STORED FROM AN ACTION GOES WHERE THAT ACTION SENDS IT (D41), and
+   only a new secret takes its bindings from the action: read by the hub, sent
+   only to `host`, of the action's kind. One that exists is given its new
+   value and nothing else, and is refused here when the action could not use
+   it. Widening its bindings on the way past sent a key to whatever host a
+   word's Base URL named, typo included, for every word that shares it, and
+   handed the hub a secret that was only tts-long's. Which hosts a secret
+   may reach is changed on its row in Admin › Secrets, on purpose (secretLink
+   leads there). */
+async function secretPut(name, value, { kind, host, description } = {}) {
+  const body = { value };
+  if (host) {
+    const row = await secretRow(name);
+    if (row) secretFits(row, kind, host);
+    else {
+      body.kind = kind || "bearer";
+      body.consumers = ["satellites"];
+      const origin = secretHost(host, false);
+      body.allowed_hosts = origin ? [origin] : [];
+      if (description) body.description = description;
+    }
+  }
+  return json(`/admin/secrets/${encodeURIComponent(name)}`, { method: "PUT", headers: JSON_BODY,
+                                                              body: JSON.stringify(body) });
+}
+/* The store's row for `name`, or null when there is none, read fresh: a
+   name stored since the list was drawn is still taken. */
+async function secretRow(name) {
+  try { return ((await json("/admin/secrets")).secrets || []).find(r => r.name === name) || null; }
+  catch (err) { if (err.status === 404) return null; throw err; }
+}
+/* WHETHER AN EXISTING SECRET CAN BE WHAT AN ACTION SENDS, said in the hub's
+   own words when not, since the hub would refuse it the same way later. The
+   refusals that a change of bindings would fix carry the secret's name, so
+   secretLink can offer its row. */
+function secretFits(row, kind, host) {
+  const refuse = (message, code) => {
+    const err = new Error(message);
+    err.code = code || "";
+    err.payload = { secret: row.name };
+    throw err;
+  };
+  if (kind === "secret_url" && row.kind !== "secret_url") {
+    refuse(`${row.name} is ${row.kind ? "a " + row.kind : "a secret of no stated kind"}, `
+           + "not a secret_url: a webhook's address is kept as one. Choose another name.");
+  }
+  if (!(row.consumers || []).includes("satellites")) {
+    refuse(`${row.name} is not one the satellites hub may read. Store this under another name, `
+           + "or add the hub to its services in Admin › Secrets.", "not_a_consumer");
+  }
+  const origin = secretHost(host, false);
+  if (!(row.allowed_hosts || []).some(entry => secretHost(entry, true) === origin)) {
+    refuse(`${row.name} may not be sent to ${origin || "that address"}: that host is not one of `
+           + "the secret's allowed hosts (Admin › Secrets)", "host_not_allowed");
+  }
+}
+/* AN ADDRESS AS THE STORE AND THE HUB COMPARE ONE, scheme://host:port with
+   the default port written out (secret_store.normalise_host); "" when it is
+   not an http(s) address. An allowed_hosts entry (`entry`) may leave out its
+   scheme, which then means https. */
+function secretHost(text, entry) {
+  let raw = String(text || "").trim();
+  if (entry && !raw.includes("://")) raw = "https://" + raw;
+  let url;
+  try { url = new URL(raw); } catch { return ""; }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return "";
+  const name = url.hostname.replace(/\.$/, "");
+  if (!name) return "";
+  return `${url.protocol}//${name}:${url.port || (url.protocol === "https:" ? "443" : "80")}`;
+}
+function secretRemove(name) {
+  return json(`/admin/secrets/${encodeURIComponent(name)}`, { method: "DELETE" });
+}
+
+/* A key for the store to hold under `name`, or null to clear it: in turn with
+   the other wake word writes. The hub learns of it from the store within its
+   cache's minute; the row says so at once. */
+function wakeKeyPut(name, value, base_url) {
   return wakeTurn(async () => {
-    const r = await json("/satellites/secrets", { method: "PUT", headers: JSON_BODY,
-                                                  body: JSON.stringify({ name, value }) });
+    if (value === null) await secretRemove(name);
+    else await secretPut(name, value, { kind: "bearer", host: base_url,
+                                        description: "A language model's key, stored from a wake word" });
     wakeModelsForget(name);
-    wakeTake(r);
+    if (WAKE.server) WAKE.server.env = { ...(WAKE.server.env || {}), [name]: value !== null };
   });
 }
 function wakeKeyClear(name) { return wakeKeyPut(name, null); }
@@ -8074,18 +8882,18 @@ async function wakeKeyStore(name, row, button, base_url, self) {
   const out = row.querySelector(".ww-keynote");
   const others = wakeKeyUsers(name, self);
   if (value && WAKE_SECRET.test(value) && others.length
-      && ((WAKE.server && WAKE.server.secrets) || {})[name] === "hub"
+      && ((WAKE.server && WAKE.server.env) || {})[name] === true
       && !confirm(satText("askKeyReplace", { var: name, words: satList(others) }))) return;
   box.value = "";
   if (!value) { satSaid(out, SAT_COPY.keyEmpty); return; }
   if (!WAKE_SECRET.test(value)) { note(out, "bad", SAT_COPY.keyBad); return; }
   const done = busy(button, "Storing…");
   try {
-    await wakeKeyPut(name, value);
+    await wakeKeyPut(name, value, base_url);
     if (base_url) WAKE_MODELS_ASKED.add(wakeModelsKey(base_url, name));
     satSaid(out, SAT_COPY.keyStored);
   } catch (e) {
-    note(out, "bad", e.message);
+    if (!secretLink(out, e)) note(out, "bad", e.message);
   } finally {
     done();
     wakeRender();
@@ -8122,7 +8930,7 @@ async function wakeLlmTest(destination) {
     return { ok: true, text: satText("testOk", { s, first: (Number(r.first_token_ms) / 1000).toFixed(1),
                                                  reply: r.reply }) };
   } catch (e) {
-    return { ok: false, text: satText("testFailed", { message: e.message }) };
+    return { ok: false, text: satText("testFailed", { message: e.message }), err: e };
   }
 }
 
@@ -8142,7 +8950,8 @@ async function wakeLlmTry(name, row, button) {
   try {
     const r = await wakeLlmTest(wakeClone(d));
     if (row._tested !== sent) return;
-    if (r.ok) satSaid(out, r.text); else note(out, "bad", r.text);
+    if (r.ok) satSaid(out, r.text);
+    else if (!secretLink(out, r.err)) note(out, "bad", r.text);
   } finally {
     done();
   }
@@ -8337,7 +9146,7 @@ function wakeRowMarkup(u) {
       <div class="grid2 ww-dest" data-when="command conversation">
         <div data-dest="ha_assist ha_conversation webhook"><label for="${u}-url">Address</label>
           <input type="text" inputmode="url" id="${u}-url" data-f="d.url" maxlength="500"
-                 placeholder="https://homeassistant.local:8123" spellcheck="false" autocomplete="off"></div>
+                 placeholder="https://ha.example:8123" spellcheck="false" autocomplete="off"></div>
         <div data-dest="llm"><label for="${u}-preset">Provider</label>
           <select id="${u}-preset" data-f="preset"></select></div>
         <div data-dest="llm"><label for="${u}-base">Base URL</label>
@@ -8365,7 +9174,7 @@ function wakeRowMarkup(u) {
             <div class="grow"><label for="${u}-key">API key</label>
               <input type="password" id="${u}-key" maxlength="4096" autocomplete="off" data-1p-ignore
                      data-lpignore="true" data-bwignore data-form-type="other" spellcheck="false"
-                     autocapitalize="off" placeholder="Paste it to store it on the hub"></div>
+                     autocapitalize="off" placeholder="Paste it to store it in the secret store"></div>
             <button class="small tight" type="button" data-ww="key">Store key</button>
             <button class="small tight danger" type="button" data-ww="keyclear" hidden>Clear key</button>
           </div>
@@ -8921,8 +9730,10 @@ function wakeLlmUpdate(row, w, words) {
   const go = q('[data-ww="models"]');
   go.hidden = !waiting && !failed;
   satSet(go, failed ? SAT_COPY.pipeAgain : SAT_COPY.modelsList);
-  /* A hub from before keys could be stored reports no `secrets`: no box. */
-  q(".ww-keybox").hidden = !WAKE.server || !WAKE.server.secrets;
+  /* The box stores into the secret store, which only a session holding
+     secrets:manage may write; a hub that reports no `env` has no names to
+     say anything about. */
+  q(".ww-keybox").hidden = !WAKE.server || !WAKE.server.env || !holds("secrets:manage");
   /* Push-to-talk's behaviour has no name of its own. */
   const keys = wakeKeyState(d.api_key_env, w.name || WAKE_PTT);
   satSet(q(".ww-keyhint"), keys.hint);
@@ -9370,7 +10181,7 @@ $("tmdelete").addEventListener("click", () => {
    connected until one opens. */
 function satellitesListen() {
   if (SATELLITES.events || !window.EventSource) return;
-  const source = new EventSource("/ui/api/satellites/events");
+  const source = new EventSource("/satellites/events");
   SATELLITES.events = source;
   /* A GAP IS SAID WHERE IT IS. The hub's stream has no replay, so what
      happened while it was down (a hub restart, the Wi-Fi) never arrives, and
@@ -9389,6 +10200,9 @@ function satellitesListen() {
   };
   source.onerror = () => {
     SATELLITES.evGap = true;
+    /* A stream is not told why it closed, and the gateway closes every one
+       a session held when it ends (D54): ask whether this one has. */
+    sessionCheck();
     /* 2 is EventSource.CLOSED: it will not try again by itself. The live
        layer is told, because with the tab shut no poll comes along to open
        another, and it retries on a ladder of its own. */
@@ -9760,12 +10574,16 @@ async function loadGlossaries() {
      why not when it has not, so both halves come from one request. */
   LOADED.glossaries = Date.now();
   const asked = ++GLOSS_SEQ.asked, writes = GLOSS_SEQ.writes;
-  let listing = null, failed = null;
-  try { listing = await json("/glossaries"); }
+  let listing = null, failed = null, everyone = null;
+  try {
+    [listing, everyone] = await Promise.all([json("/glossaries"),
+      holds("glossaries:read:all") ? json("/glossaries?owner=all").catch(() => null) : null]);
+  }
   catch (e) { failed = e.status || 0; }
   if (asked < GLOSS_SEQ.applied || writes !== GLOSS_SEQ.writes) return;
   GLOSS_SEQ.applied = asked;
   GLOSS_FAILED = failed;
+  GLOSS_ALL = everyone && Array.isArray(everyone.glossaries) ? everyone.glossaries : null;
   GLOSSARIES = (listing && listing.glossaries) || [];
   GLOSS_SERVED = !!listing;
   GLOSS_WRITABLE = !!(listing && listing.writable);
@@ -9775,7 +10593,7 @@ async function loadGlossaries() {
      and closed nothing but cost a redraw each time. The open profile is still
      checked against the server, which is the one thing a same listing
      cannot say. */
-  const sig = JSON.stringify([GLOSS_SERVED, GLOSS_WRITABLE, GLOSS_REASON, GLOSS_FAILED, GLOSSARIES]);
+  const sig = JSON.stringify([GLOSS_SERVED, GLOSS_WRITABLE, GLOSS_REASON, GLOSS_FAILED, GLOSSARIES, GLOSS_ALL]);
   if (sig === GLOSS_SIG) { glossLive(); navSettle("glossaries"); return; }
   GLOSS_SIG = sig;
 
@@ -9860,7 +10678,21 @@ const GLOSS_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const GLOSS_MAX_BYTES = 65536;
 
 function glossProfile(name) {
+  /* In another person's namespace: theirs by that name, or a built-in, which
+     every namespace can name. */
+  if (USER_ID.test(GLOSS_OWNER))
+    return (GLOSS_ALL || []).filter(g => g.owner === GLOSS_OWNER && g.name === name)[0]
+      || GLOSSARIES.filter(g => g.name === name && g.source === "builtin")[0] || null;
   return GLOSSARIES.filter(g => g.name === name)[0] || null;
+}
+/* The query a request about one profile carries: whose it is, when it is not
+   the reader's own default, and `force` for a save that asks for it. */
+function glossQuery(force) {
+  const params = new URLSearchParams();
+  if (USER_ID.test(GLOSS_OWNER)) params.set("owner", GLOSS_OWNER);
+  if (force) params.set("force", "true");
+  const query = params.toString();
+  return query ? "?" + query : "";
 }
 
 /* UTF-8 BYTES, which is what the ceiling counts. text.length counts UTF-16
@@ -9896,11 +10728,38 @@ function glossRender() {
   const here = open ? glossTarget().name : "";
   $("glossnames").innerHTML = GLOSSARIES.map(g =>
     `<button type="button" data-open="${esc(g.name)}"
-       aria-pressed="${g.name === here ? "true" : "false"}"
+       aria-pressed="${g.name === here && !GLOSS_OWNER ? "true" : "false"}"
        title="${esc(glossSource(g.source) + ", " + termCount(g.terms))}">${esc(g.name)}</button>`
   ).join("");
   $("glossnames").querySelectorAll("button").forEach(b =>
-    b.addEventListener("click", () => { navProfile(b.dataset.open); glossOpen(b.dataset.open, b); }));
+    b.addEventListener("click", () => {
+      GLOSS_OWNER = "";
+      navProfile(b.dataset.open);
+      glossOpen(b.dataset.open, b);
+    }));
+  /* EVERYONE ELSE'S, GROUPED BY PERSON, for an admin (§4.4): the row above is
+     the built-ins and the system's, and each person's follow under their
+     name. Another person's profile has no address of its own: the address
+     names a profile by name, and the name is only unique within one person. */
+  const people = new Map();
+  for (const g of GLOSS_ALL || []) {
+    if (USER_ID.test(g.owner || "")) people.set(g.owner, [...(people.get(g.owner) || []), g]);
+  }
+  $("glosssystem").hidden = !people.size;
+  $("glossothers").hidden = !people.size;
+  $("glossothers").innerHTML = [...people].map(([owner, list]) =>
+    `<span class="label-like">${esc(userSaid(owner))}</span>
+     <div class="seg" role="group" aria-label="${esc(userSaid(owner))}: vocabulary profiles">${list.map(g =>
+      `<button type="button" data-open="${esc(g.name)}" data-owner="${esc(owner)}"
+         aria-pressed="${g.name === here && owner === GLOSS_OWNER ? "true" : "false"}"
+         title="${esc(termCount(g.terms))}">${esc(g.name)}</button>`).join("")}</div>`).join("");
+  $("glossothers").querySelectorAll("button").forEach(b =>
+    b.addEventListener("click", () => {
+      GLOSS_OWNER = b.dataset.owner;
+      navProfile(null);
+      glossOpen(b.dataset.open, b);
+    }));
+  $("glosswhose").textContent = open && USER_ID.test(GLOSS_OWNER) ? `In ${userSaid(GLOSS_OWNER)}'s profiles.` : "";
   glossGuards();
 }
 
@@ -9934,10 +10793,12 @@ function glossGuards() {
   /* READ-ONLY AND NOT DISABLED. A disabled textarea cannot be selected, and
      the whole point of opening a built-in is to read it and copy from it. */
   $("glosstext").readOnly = builtin || !GLOSS_WRITABLE;
-  $("glosssave").disabled = !!why || !target.name;
+  /* A control the gateway refused for a missing scope stays off for the
+     session (DENIED, §4.3): settling the panel again must not switch it on. */
+  $("glosssave").disabled = !!why || !target.name || DENIED.has($("glosssave"));
   /* Delete removes what the name box points at, so it is off unless that is a
      profile the server holds and may remove. */
-  $("glossdelete").disabled = !!why || !profile;
+  $("glossdelete").disabled = !!why || !profile || DENIED.has($("glossdelete"));
   $("glossnew").disabled = !GLOSS_WRITABLE;
   /* The standing reason belongs beside the greyed control, and only while
      something is greyed by it. */
@@ -9955,13 +10816,13 @@ async function glossOpen(name, button) {
      rewrites every one of these buttons from the name box, so this is the
      pressed state until the answer lands rather than a second opinion. */
   if (button) {
-    for (const other of $("glossnames").querySelectorAll("[data-open]")) {
+    for (const other of document.querySelectorAll("#glossnames [data-open], #glossothers [data-open]")) {
       other.setAttribute("aria-pressed", String(other === button));
     }
   }
   const asked = ++GLOSS_ASKED;
   try {
-    const profile = await json("/glossaries/" + encodeURIComponent(name));
+    const profile = await json("/glossaries/" + encodeURIComponent(name) + glossQuery());
     if (asked !== GLOSS_ASKED) return;
     $("glossname").value = profile.name;
     /* THE FILE TEXT, not the parsed replacements and hotwords. The comments in
@@ -9987,6 +10848,7 @@ function glossDirty() {
 }
 
 function glossNew() {
+  GLOSS_OWNER = "";
   note($("glossnote"), "", "");
   $("glossforce").hidden = true;
   $("glossname").value = "";
@@ -10031,7 +10893,7 @@ async function glossSave(force) {
      a No changes nothing. */
   if (GLOSS_OPEN && target.name === GLOSS_OPEN.name) {
     let now = null;
-    try { now = await json("/glossaries/" + encodeURIComponent(target.name)); } catch {}
+    try { now = await json("/glossaries/" + encodeURIComponent(target.name) + glossQuery()); } catch {}
     const theirs = now ? now.text || "" : null;
     if (theirs !== null && theirs !== GLOSS_OPEN.text && theirs !== $("glosstext").value
         && !confirm(`"${target.name}" was changed on another device since you opened it. Save yours over it?`)) {
@@ -10042,7 +10904,7 @@ async function glossSave(force) {
   note($("glossnote"), "flat", "Saving…");
   try {
     const written = await json(
-      "/glossaries/" + encodeURIComponent(target.name) + (force ? "?force=true" : ""),
+      "/glossaries/" + encodeURIComponent(target.name) + glossQuery(force),
       { method: "PUT", headers: { "content-type": "application/json" },
         body: JSON.stringify({ text: $("glosstext").value }) });
     GLOSS_SEQ.writes++;
@@ -10052,7 +10914,7 @@ async function glossSave(force) {
        request rather than patched in place. */
     GLOSS_OPEN = { name: written.name, text: $("glosstext").value };
     await loadGlossaries();
-    navProfile(written.name, "replace");
+    navProfile(GLOSS_OWNER ? null : written.name, "replace");
     note($("glossnote"), "ok", `Saved ${written.name}, ${termCount(written.terms)}.`);
   } catch (err) {
     const detail = err.payload && err.payload.detail;
@@ -10070,7 +10932,7 @@ async function glossDelete() {
   if (!confirm(`Delete the vocabulary profile "${target.name}"?
 The file is deleted from disk.`)) return;
   try {
-    await json("/glossaries/" + encodeURIComponent(target.name), { method: "DELETE" });
+    await json("/glossaries/" + encodeURIComponent(target.name) + glossQuery(), { method: "DELETE" });
     GLOSS_SEQ.writes++;
     $("glossform").hidden = true;
     GLOSS_OPEN = null;
@@ -10092,7 +10954,7 @@ async function glossLive() {
   const open = GLOSS_OPEN;
   if (!open || $("glossform").hidden) return;
   let now = null;
-  try { now = await json("/glossaries/" + encodeURIComponent(open.name)); }
+  try { now = await json("/glossaries/" + encodeURIComponent(open.name) + glossQuery()); }
   catch (e) { if (e.status !== 404) return; }
   if (GLOSS_OPEN !== open || (now && (now.text || "") === open.text)) return;
   const clean = $("glosstext").value === open.text && $("glossname").value === open.name;
@@ -11342,6 +12204,9 @@ $("sttplayer").addEventListener("error", () => {
   $("sttwhy").textContent = sttStreaming
     ? "No playback: the server did not return the media. The transcript is unaffected."
     : "This browser cannot play that file. The transcript is unaffected.";
+  /* /ui/media is fetched by the element, which is told no status: a session
+     that has ended is found out by asking. */
+  if (sttStreaming) sessionCheck();
 });
 
 /* A CONTAINER THE BROWSER WILL NOT RENDER COSTS THE PICTURE, NOT THE FEATURE.
@@ -13097,11 +13962,11 @@ let speakSink = null;
   AudioBufferSourceNode on an absolute timeline, and not MSE: the byte stream
   format registry admits only WebM, ISO BMFF, MPEG-2 TS and MPEG audio, so raw
   pcm cannot be appended to a SourceBuffer at all, and the one containerless
-  option is refused by Firefox. Not AudioWorklet either: this page's CSP is
-  script-src 'self' 'unsafe-inline' with no blob:, and a worklet module load
-  falls back through worker-src to child-src to script-src, so addModule of an
-  object URL is blocked. Two tests pin that header. createBuffer and
-  createBufferSource need no CSP change and no library.
+  option is refused by Firefox. Not AudioWorklet either: this page's CSP
+  names only its own inline script, by hash, with no blob:, and a worklet
+  module load falls back through worker-src to child-src to script-src, so
+  addModule of an object URL is blocked. Tests pin that header. createBuffer
+  and createBufferSource need no CSP change and no library.
 
   pcm AND ONLY pcm. Streamed wav writes a RIFF size of 8 and a data size of 0;
   mp3, opus, aac and flac carry encoder priming and padding, so a delta
@@ -13954,13 +14819,45 @@ let jobTimer = null, poller = 0;
 const OFFSETS_SEEN = new Map();
 let growing = false;
 
-function remembered() { return store.get("jobs", []); }
+/* THE JOBS THIS BROWSER REMEMBERS ARE ONE PERSON'S: aiv.jobs.<user id>, so
+   whoever signs in next at this browser does not inherit them, and sign-out
+   drops them. */
+function jobsKey() { return "jobs." + (ME.user ? ME.user.id : "nobody"); }
+function remembered() { return store.get(jobsKey(), []); }
 function adopt(id, params) {
   const seen = remembered();
   if (!seen.some(j => j.id === id)) {
     seen.unshift({ id, at: Date.now() / 1000, params: params || null });
-    store.set("jobs", seen.slice(0, 50));
+    store.set(jobsKey(), seen.slice(0, 50));
   }
+}
+
+/* WHOSE RUNS THE LIST SHOWS: "me" for everybody, and for a session holding
+   jobs:read:all also everyone's, the system's or one person's (D32).
+   Validated on the way out like the other two filters. */
+function jobOwner() {
+  if (!holds("jobs:read:all")) return "me";
+  const value = store.get("jobowner", "me");
+  return value === "all" || value === "system" || USER_ID.test(value) ? value : "me";
+}
+/* THE ?owner= A REQUEST ABOUT ONE JOB CARRIES. Nothing for the reader's own
+   job; for anybody else's, its owner, or "system" for a run with none or a
+   service's -- tts-long answers another person's job only to an :all holder
+   who names whose it is, which is also how the gateway audits it (D32). A
+   job not in the list (a link to one) is looked for among everyone's while
+   the list shows more than the reader's own. */
+function jobAs(id) {
+  const job = jobs.get(id);
+  if (job) {
+    if (job.mine || !ME.user || job.owner === ME.user.id) return "";
+    return "?owner=" + encodeURIComponent(USER_ID.test(job.owner || "") ? job.owner : "system");
+  }
+  return jobOwner() !== "me" ? "?owner=all" : "";
+}
+/* Whose a listed run is, in words, for the owner line an admin sees. */
+function jobOwnerSaid(job) {
+  if (job.mine || (ME.user && job.owner === ME.user.id)) return "yours";
+  return userSaid(USER_ID.test(job.owner || "") ? job.owner : job.owner || null);
 }
 
 async function queueJob(voice, text) {
@@ -14333,6 +15230,7 @@ const FILTER_COUNT = { playable: null, all: ["", "all"],
 function syncJobFilters() {
   const filter = $("jobfilter"), kind = $("jobkind");
   if (!filter || !kind) return;
+  jobOwnerDraw();
   filter.value = jobFilter();
   kind.value = jobKind();
   for (const option of filter.options) {
@@ -14361,6 +15259,25 @@ function syncJobFilters() {
             : jobCount("kind", option.value);
     option.textContent = JOB_KINDS[option.value] + (n === null ? "" : ` (${n})`);
   }
+}
+
+/* THE OWNER SELECT, for an :all holder only, with a line for each person the
+   users list names. */
+function jobOwnerDraw() {
+  const select = $("jobowner");
+  if (!select) return;
+  select.hidden = !holds("jobs:read:all");
+  if (select.hidden) return;
+  const people = [...USERS.entries()].filter(([id]) => !ME.user || id !== ME.user.id);
+  const drawn = people.map(([id]) => id).join(" ");
+  if (select.dataset.drawn !== drawn) {
+    select.dataset.drawn = drawn;
+    while (select.options.length > 3) select.lastChild.remove();
+    for (const [id, name] of people) select.append(new Option(name + "'s", id));
+  }
+  const owner = jobOwner();
+  if (![...select.options].some(option => option.value === owner)) select.append(new Option(owner, owner));
+  select.value = owner;
 }
 
 function renderJobs() {
@@ -14523,6 +15440,10 @@ function renderJobs() {
        this string is innerHTML, and a comment inside it ships into the DOM
        once per row. */
     const audio = hasAudio(job);
+    /* SOMEBODY ELSE'S RUN, on a list that shows more than the reader's own:
+       its owner is said on the row, and Retry is off on a clone, because a
+       voice is its owner's and nobody else synthesises with it (D35). */
+    const theirs = !!jobAs(job.id);
     /* THE PIECES A RUN WAS MADE OF, IN THE WORD THE ENGINE THAT MADE THEM
        USES, AND PLURALISED. This was `job.chunks + " chunks"`, written when
        every row was a clone: the TEXT is cut into segments to be spoken, there
@@ -14595,11 +15516,12 @@ function renderJobs() {
     }
     return `<div class="job ${expired ? "expired" : ""}" data-job="${esc(job.id)}" tabindex="-1">
       <div class="top">
-        <span class="status ${statusClass(job.status)}">${stopping ? "stopping…" : job.status}</span>
+        <span class="status ${statusClass(job.status)}">${stopping ? "stopping…" : esc(job.status)}</span>
         <strong>${esc(kind === "transcribe"
           ? (job.language ? "Transcript · " + job.language : "Transcript")
           : (job.voice || (job.recovered ? "voice unknown" : "default")))}</strong>
         <span class="id" title="${esc(job.id)}">${esc(job.id.slice(0, 8))}</span>
+        ${jobOwner() !== "me" ? `<span class="hint tight">${esc(jobOwnerSaid(job))}</span>` : ""}
         <span class="spacer"></span>
         <span class="hint">${pieceHint}</span>
       </div>
@@ -14629,7 +15551,9 @@ function renderJobs() {
         ${live && !stopping ? `<button class="small" data-stop="${esc(job.id)}" type="button">Stop and keep what's done</button>` : ""}
         ${kind === "transcribe" ? `<button class="small" data-copy="${esc(job.id)}" type="button">Copy the transcript</button>` : ""}
         ${kind === "speech" && !queued ? `<button class="small" data-again="${esc(job.id)}" type="button">Speak again</button>` : ""}
-        ${queued && job.status === "failed" ? `<button class="small" data-retry="${esc(job.id)}" type="button">Retry</button>` : ""}
+        ${queued && job.status === "failed" && !theirs ? `<button class="small" data-retry="${esc(job.id)}" type="button">Retry</button>` : ""}
+        ${queued && job.status === "failed" && theirs ? `<button class="small" type="button" disabled
+          title="Only its owner can run this again: the voice is theirs.">Retry</button>` : ""}
         ${audio ? `<button class="small" data-delaudio="${esc(job.id)}" type="button">Delete the audio</button>` : ""}
         ${live ? "" : `<button class="small" data-forget="${esc(job.id)}" type="button">${
           audio ? "Delete the record too"
@@ -14677,7 +15601,7 @@ function renderJobs() {
       if (!body || body.dataset.loaded) return;
       body.dataset.loaded = "1";
       try {
-        const full = await json(`/jobs/${encodeURIComponent(body.dataset.text)}`);
+        const full = await json(`/jobs/${encodeURIComponent(body.dataset.text)}${jobAs(body.dataset.text)}`);
         const said = full.text
           || (full.segments || []).map(x => segmentOf(x).text).filter(Boolean).join("\n\n");
         /* textContent, not innerHTML: this is the text somebody typed, and it
@@ -14720,12 +15644,12 @@ function jobsFocusKey(el) {
 
 let jobUrl = null;
 
-/* FETCHED WITH api(), NOT PUT IN THE src ATTRIBUTE. /jobs/{id}/audio needs the
-   Authorization header and an <audio src> carries none, so pointing the
-   element at the route directly answers 401 on any deployment with
-   GATEWAY_API_KEYS set -- which is the deployment this is for. The blob is the
-   whole file; there is no range support to give up, because the route serves
-   the file from disk in one piece anyway. */
+/* FETCHED WITH api(), NOT PUT IN THE src ATTRIBUTE. An <audio src> is never
+   told why it failed, and here the why matters: 409 is "not ready yet", 404
+   is "swept", and 401 is a session that has ended and must sign in again,
+   which only a request that can read its status can tell apart. The blob is
+   the whole file; there is no range support to give up, because the route
+   serves the file from disk in one piece anyway. */
 /* ONE PLAYER, TWO SOURCES. A stored job's audio is fetched from the server; a
    re-spoken instant run arrives as the body of the POST that made it, because
    nothing on the instant path keeps a file. Both end here so that the revoke
@@ -14777,7 +15701,7 @@ async function playJob(id) {
   sayLoudness((jobs.get(id) || {}).engine);
   $("jobplaying").textContent = "Loading " + id.slice(0, 8) + "…";
   let response;
-  try { response = await api(`/jobs/${encodeURIComponent(id)}/audio`); }
+  try { response = await api(`/jobs/${encodeURIComponent(id)}/audio${jobAs(id)}`); }
   catch (err) { $("jobplaying").textContent = "Could not load it: " + (err.message || err); return; }
   if (!response.ok) {
     $("jobplaying").textContent = audioMissing(response.status);
@@ -14808,7 +15732,7 @@ async function downloadJob(id, button) {
      nothing to show for it: measured at NEVER with the route delayed 300 ms. */
   const release = busy(button, "Fetching…");
   try {
-    const response = await api(`/jobs/${encodeURIComponent(id)}/audio`);
+    const response = await api(`/jobs/${encodeURIComponent(id)}/audio${jobAs(id)}`);
     if (!response.ok) { alert(audioMissing(response.status)); return; }
     const url = URL.createObjectURL(await response.blob());
     const a = document.createElement("a");
@@ -14832,7 +15756,7 @@ async function deleteAudio(id) {
       + `stays: what was said, which voice, how long it took and where it ran. `
       + `The audio cannot be recovered.`)) return;
   try {
-    await json(`/jobs/${encodeURIComponent(id)}/audio`, { method: "DELETE" });
+    await json(`/jobs/${encodeURIComponent(id)}/audio${jobAs(id)}`, { method: "DELETE" });
     JOBS_SEQ.writes++;
   } catch (err) {
     /* A 404 means the service does not have it either, which is the same
@@ -14895,7 +15819,7 @@ async function forgetJob(id) {
         + `goes from every device.`)) return;
   }
   try {
-    await json(`/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
+    await json(`/jobs/${encodeURIComponent(id)}${jobAs(id)}`, { method: "DELETE" });
     JOBS_SEQ.writes++;
   } catch (err) {
     if (err.status !== 404) {
@@ -14904,7 +15828,7 @@ async function forgetJob(id) {
     }
   }
   jobs.delete(id);
-  store.set("jobs", remembered().filter(j => j.id !== id));
+  store.set(jobsKey(), remembered().filter(j => j.id !== id));
   renderJobs();
 }
 
@@ -14923,7 +15847,7 @@ async function stopJob(id, button) {
   busy(button, "Stopping…");
   STOPPING.add(id);
   renderJobs();
-  try { await json(`/jobs/${encodeURIComponent(id)}`, { method: "DELETE" }); JOBS_SEQ.writes++; }
+  try { await json(`/jobs/${encodeURIComponent(id)}${jobAs(id)}`, { method: "DELETE" }); JOBS_SEQ.writes++; }
   catch (err) { STOPPING.delete(id); renderJobs();
                 alert("Could not stop it: " + err.message); }
   refreshJobs();
@@ -14952,7 +15876,7 @@ function segmentOf(x) {
 }
 
 async function recordFor(id) {
-  try { return await json(`/jobs/${encodeURIComponent(id)}`); }
+  try { return await json(`/jobs/${encodeURIComponent(id)}${jobAs(id)}`); }
   catch (err) {
     /* The record is gone -- swept, or forgotten from another device. What this
        browser remembers is then the only copy, and it is better than a dead
@@ -15126,7 +16050,7 @@ async function refreshJobs() {
    the job's own record does. Only a 404 means gone, and anything else (the
    service restarting, the gateway down) is not known. */
 async function jobLookup(id) {
-  try { await json(`/jobs/${encodeURIComponent(id)}`); return "there"; }
+  try { await json(`/jobs/${encodeURIComponent(id)}${jobAs(id)}`); return "there"; }
   catch (err) { return err.status === 404 ? "gone" : "unknown"; }
 }
 
@@ -15167,10 +16091,18 @@ async function refreshJobsInner() {
   for (const [key, value] of Object.entries(JOB_FILTERS[jobFilter()].query)) {
     params.set(key, value);
   }
+  /* WHETHER THE LISTING COULD HOLD THE JOBS THIS BROWSER REMEMBERS, which are
+     all the reader's own. Everyone's runs include them; the system's or one
+     other person's never do, live or not, because tts-long applies `owner`
+     before its rule that a live job comes back from every filter.
+
+     And whether the server was asked about EVERYTHING, which is the
+     precondition for every conclusion drawn below from an id being absent. */
+  const owner = jobOwner();
+  const ours = owner === "me" || owner === "all";
+  const unfiltered = params.toString() === "" && ours;
+  if (owner !== "me") params.set("owner", owner);
   const query = params.toString();
-  /* WHETHER THE SERVER WAS ASKED ABOUT EVERYTHING, which is the precondition
-     for every conclusion drawn below from an id being absent. */
-  const unfiltered = query === "";
   const asked = ++JOBS_SEQ.asked, writes = JOBS_SEQ.writes, filter = jobFilter();
   LOADED.jobs = Date.now();
   let payload;
@@ -15189,7 +16121,7 @@ async function refreshJobsInner() {
      follows it), or when it answers a filter that is no longer the one on
      screen. The newer answer is on its way in every case. */
   if (asked < JOBS_SEQ.applied || writes !== JOBS_SEQ.writes
-      || filter !== jobFilter() || kind !== jobKind()) return false;
+      || filter !== jobFilter() || kind !== jobKind() || owner !== jobOwner()) return false;
   JOBS_SEQ.applied = asked;
   JOBS_STALE = false;
   jobsFailed = null;
@@ -15217,7 +16149,11 @@ async function refreshJobsInner() {
        listed yet the moment somebody touches a select. */
     if (unfiltered && now - seen.at > TTL) continue;
     keep.push(seen);
-    if (!before.has(seen.id)) continue;
+    /* NOT IN THIS LISTING BY ASKING: the system's runs, or one other
+       person's. Left out of the list for now, not restored and not failed:
+       taken as lost, an admin's own clone still running became a failure
+       with a live Retry, and Retry queued the same GPU job twice. */
+    if (!before.has(seen.id) || !ours) continue;
     /* THE SERVER ANSWERED AND DOES NOT KNOW THIS JOB. The catch above already
        handled "unreachable", so reaching here means tts-long listed its jobs
        and this was not among them.
@@ -15230,9 +16166,10 @@ async function refreshJobsInner() {
        exactly what a restart looked like from here. */
     const was = before.get(seen.id);
     const unfinished = was.status === "queued" || was.status === "running";
-    /* A LIVE JOB COMES BACK FROM EVERY FILTER, by the service's own rule, so a
-       live one that is missing is missing for the reason this branch has
-       always meant: the process holding it went away.
+    /* A LIVE JOB COMES BACK FROM EVERY FILTER of a listing that holds its
+       owner's runs, by the service's own rule, so a live one that is missing
+       is missing for the reason this branch has always meant: the process
+       holding it went away.
 
        A FINISHED one is a different question now. The filter is the ordinary
        explanation for its absence, so restoring it is only right when the
@@ -15246,7 +16183,7 @@ async function refreshJobsInner() {
       jobs.set(seen.id, was);
     }
   }
-  store.set("jobs", keep);
+  store.set(jobsKey(), keep);
   /* GREW SINCE THE LAST POLL, measured here because this is the only place
      that sees both the old counts and the new ones. Read by interval(). */
   growing = false;
@@ -15349,7 +16286,7 @@ $("refresh").addEventListener("click", async () => {
    the acknowledgement -- leaving the previous answer on screen under a
    contradicting label is worse than a blank moment, because it reads as a
    filter that did nothing. */
-for (const control of ["jobfilter", "jobkind"]) {
+for (const control of ["jobfilter", "jobkind", "jobowner"]) {
   $(control).addEventListener("change", () => {
     store.set(control, $(control).value);
     /* A filter is a setting of the list, so it rewrites the list's address
@@ -15746,6 +16683,1007 @@ $("saveclip").addEventListener("click", async () => {
   }
 });
 
+/* ========================================================== who === */
+
+/* WHO IS SIGNED IN, ASKED BEFORE ANYTHING ELSE IS. false when the page
+   cannot go on: the session has ended (api() is on its way to /login) or the
+   gateway is locked (api() has covered the page). A session that must choose
+   a new password is sent to /login, which shows that form and nothing else
+   (D21).
+
+   NOTHING ANSWERING IS NEITHER, AND IT PASSES: the proxy's 502 while the
+   gateway restarts, a 500, a dropped connection. Giving up there left a shell
+   with its tabs drawn, nothing read and nothing polled, explained by a toast
+   that went after eight seconds. So the page is covered, says so, and asks
+   again on a back-off up to half a minute, for as long as it is open. */
+async function whoAmI() {
+  let me;
+  for (let wait = 2000; ; wait = Math.min(wait * 2, 30000)) {
+    let why = "The gateway's answer was not one this page can read.";
+    try {
+      me = await json("/auth/me");
+      if (me && typeof me === "object") break;
+    } catch (err) {
+      if (err.status === 401 || err.code === "locked") return false;
+      why = err.message;
+    }
+    cover("unanswered", "Calliope is not answering", why,
+          `Trying again in ${Math.round(wait / 1000)} seconds.`);
+    await new Promise(resolve => setTimeout(resolve, wait));
+  }
+  if (AUTH.cover === "unanswered") { $("lockout").hidden = true; AUTH.cover = ""; }
+  if (me.must_change) { signIn(); return false; }
+  ME.user = me.user || null;
+  ME.role = String(me.role || "");
+  ME.scopes = new Set(Array.isArray(me.scopes) ? me.scopes : []);
+  ME.presets = Array.isArray(me.presets) ? me.presets : [];
+  sessionShow();
+  return true;
+}
+
+/* THE PAGE, CUT TO THE SESSION. The name in the masthead, the tabs it may
+   open, and the jobs this browser remembers, which are now this person's.
+   If the address named a tab the session may not open (the gateway sends a
+   navigation to /ui, so only a stale history entry can), the first tab it
+   may open is shown instead. */
+function sessionShow() {
+  $("who-name").textContent = ME.user ? (ME.user.display_name || ME.user.username || "") : "";
+  $("who-role").textContent = ME.role;
+  $("who").hidden = !ME.user;
+  for (const b of TABS) b.hidden = !holds(TAB_SCOPE[b.dataset.tab]);
+  $("who-admin").hidden = !holds(TAB_SCOPE.admin);
+  const selected = TABS.find(b => b.getAttribute("aria-selected") === "true");
+  const first = TABS.find(b => !b.hidden);
+  if ((!selected || selected.hidden) && first) {
+    for (const b of TABS) {
+      b.setAttribute("aria-selected", String(b === first));
+      b.tabIndex = b === first ? 0 : -1;
+      const panel = $("tab-" + b.dataset.tab);
+      if (panel) panel.hidden = b !== first;
+    }
+    NAV.route = { view: first.dataset.tab, parts: [], query: {} };
+    dockMasthead(first);
+    navTitle();
+  }
+  dockPlace(false);
+  $("allclips").hidden = !holds("voices:write:all");
+  /* aiv.jobs WAS ONE LIST FOR WHOEVER USED THIS BROWSER. Two people on one
+     laptop saw each other's Retry parameters; the list is per person now
+     (aiv.jobs.<id>), and the shared one is dropped the first time anyone
+     signs in here. */
+  store.drop("jobs");
+}
+
+/* THE MENU OPENS A TAB THROUGH ITS BUTTON, so the menu and the bar cannot
+   drift apart. On a phone the button is off the bar and cannot take the
+   focus, so it goes to the masthead's heading, where the panel begins. */
+for (const [item, name] of [["who-account", "account"], ["who-admin", "admin"]]) {
+  $(item).addEventListener("click", () => {
+    $("who").open = false;
+    const tab = TABS.find(b => b.dataset.tab === name);
+    if (!tab || tab.hidden) return;
+    tab.click();
+    if (docked(tab)) tab.focus(); else $("word").focus();
+  });
+}
+$("who-signout").addEventListener("click", ev => signOut(ev.currentTarget));
+/* A MENU CLOSES WHEN THE READER IS DONE WITH IT: a press anywhere else, or
+   Escape, which hands the focus back to the name it opened from. */
+document.addEventListener("click", ev => {
+  if ($("who").open && !$("who").contains(ev.target)) $("who").open = false;
+});
+$("who").addEventListener("keydown", ev => {
+  if (ev.key !== "Escape" || !$("who").open) return;
+  $("who").open = false;
+  $("who").querySelector("summary").focus();
+});
+$("lockout-reload").addEventListener("click", () => location.reload());
+
+/* SIGNING OUT ENDS THE SESSION ON THE SERVER, and the jobs this browser kept
+   for the person go with it, so the next person at this browser does not
+   inherit their Retry list. A 401 here means it had already ended, which is
+   the same outcome. */
+async function signOut(button) {
+  const undo = busy(button, "Signing out…");
+  try { await json("/auth/logout", { method: "POST" }); }
+  catch (err) {
+    if (err.status !== 401) { undo(); toast(err.message); return; }
+  }
+  store.drop(jobsKey());
+  AUTH.leaving = true;
+  location.assign("/login");
+}
+
+/* ------------------------------------------------- building rows safely -- */
+/* EVERY ROW ON THESE TWO TABS IS BUILT AS NODES, NEVER AS MARKUP. Usernames,
+   key names, session browsers, audit targets and paths are typed by somebody
+   -- an audit path or an attempted username by anybody on the internet --
+   and a string that only ever becomes a text node cannot become an element
+   (recheck L9). `props` sets properties and attributes, never a handler:
+   handlers are attached with addEventListener, which the policy allows. */
+function make(tag, props, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (value === null || value === undefined || value === false) continue;
+    if (key.startsWith("on")) throw new Error("make() attaches no handlers: " + key);
+    if (key === "class") node.className = value;
+    else if (key === "text") node.textContent = String(value);
+    else if (key === "for" || key.startsWith("data-") || key.startsWith("aria-"))
+      node.setAttribute(key, value === true ? "" : String(value));
+    else node[key] = value;
+  }
+  for (const child of children.flat()) {
+    if (child === null || child === undefined || child === false) continue;
+    node.append(child instanceof Node ? child : String(child));
+  }
+  return node;
+}
+/* A table in a box that scrolls sideways on its own, so the page never does. */
+function tableOf(heads, rows, rowClass) {
+  return make("div", { class: "tablewrap" },
+    make("table", { class: "admintable" },
+      make("thead", {}, make("tr", {}, heads.map(text => make("th", { scope: "col", text })))),
+      make("tbody", {}, rows.map((cells, i) => make("tr", { class: rowClass ? rowClass(i) : null },
+        cells.map(cell => make("td", {}, cell)))))));
+}
+/* A time the gateway wrote (UTC, ISO 8601), in the reader's own clock. */
+function dateSaid(iso) {
+  if (!iso) return "never";
+  const at = Date.parse(iso);
+  if (!isFinite(at)) return "unknown";
+  return new Date(at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+/* How many whole days until a time, or null for none. */
+function daysUntil(iso) {
+  const at = iso ? Date.parse(iso) : NaN;
+  return isFinite(at) ? Math.floor((at - Date.now()) / 86400000) : null;
+}
+/* A browser as a person would name it. The string is whatever the browser
+   sent, so it is read, never shown whole. */
+function agentSaid(agent) {
+  const text = String(agent || "");
+  const browser = /Edg\//.test(text) ? "Edge" : /Firefox\//.test(text) ? "Firefox"
+    : /Chrome\//.test(text) ? "Chrome" : /Safari\//.test(text) ? "Safari" : "";
+  const system = /iPhone|iPad/.test(text) ? "iOS" : /Android/.test(text) ? "Android"
+    : /Mac OS X/.test(text) ? "macOS" : /Windows/.test(text) ? "Windows" : /Linux/.test(text) ? "Linux" : "";
+  return [browser, system].filter(Boolean).join(" on ") || (text ? "another program" : "unknown");
+}
+/* A button for a row, with its handler. */
+function rowButton(text, act, danger) {
+  const button = make("button", { class: "small" + (danger ? " danger" : ""), type: "button", text });
+  button.addEventListener("click", () => act(button));
+  return button;
+}
+/* SHOWN ONCE: a key or a temporary password, with Copy and a way to put it
+   away. Nothing else on the page holds it, and Done takes it out of the DOM. */
+function showOnce(host, intro, value, after) {
+  const said = make("div", { class: "secretonce", text: value });
+  const copy = rowButton("Copy", async button => {
+    try { await navigator.clipboard.writeText(value); button.textContent = "Copied"; }
+    catch { button.textContent = "Select it and copy"; }
+  });
+  const done = rowButton("Done", () => { host.replaceChildren(); host.hidden = true; if (after) after(); });
+  host.replaceChildren(make("div", { class: "note warn", text: intro }), said,
+                       make("div", { class: "actions" }, copy, done));
+  host.hidden = false;
+  copy.focus();
+}
+
+/* ========================================================== account === */
+/* THE ACCOUNT TAB (§4.5): the person's password, the places they are signed
+   in, and their API keys. Read when the tab is opened, not at load: most
+   visits to the page never open it. */
+const ACCOUNT = { at: 0, keys: [] };
+
+function accountEnter() {
+  if (Date.now() - ACCOUNT.at < 3000) return;
+  ACCOUNT.at = Date.now();
+  sessionsLoad();
+  keysLoad();
+  keyFormDraw();
+}
+function navAtAccount(route) {
+  accountEnter();
+  return navNothing(route);
+}
+
+/* ---- the password ---- */
+$("pwform").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const current = $("pw-current").value, chosen = $("pw-new").value, again = $("pw-again").value;
+  const out = $("pwnote");
+  if (!current) { note(out, "bad", "Enter your current password."); $("pw-current").focus(); return; }
+  if (chosen !== again) { note(out, "bad", "The two new passwords are not the same."); $("pw-again").focus(); return; }
+  if (chosen.length < 15) { note(out, "bad", "Use at least 15 characters."); $("pw-new").focus(); return; }
+  const undo = busy($("pw-go"), "Changing…");
+  try {
+    await json("/auth/password", { method: "POST", headers: JSON_BODY,
+      body: JSON.stringify({ current_password: current, new_password: chosen }) });
+    for (const id of ["pw-current", "pw-new", "pw-again"]) $(id).value = "";
+    note(out, "ok", "Changed. Every other session of yours has been signed out.");
+    sessionsLoad();
+  } catch (err) {
+    if (err.code === "wrong_password") { $("pw-current").value = ""; $("pw-current").focus(); }
+    note(out, "bad", err.message);
+  } finally { undo(); }
+});
+
+/* ---- sessions ---- */
+async function sessionsLoad() {
+  const out = $("sessionsnote");
+  let listed;
+  try { listed = (await json("/auth/sessions")).sessions || []; }
+  catch (err) { note(out, "bad", err.message); return; }
+  note(out, "", "");
+  $("sessions").replaceChildren(tableOf(["Signed in", "Last seen", "From", "Browser", ""],
+    listed.map(row => [dateSaid(row.created_at), dateSaid(row.last_seen_at), row.ip || "unknown",
+      agentSaid(row.user_agent),
+      row.current ? make("span", { class: "tag", text: "this browser" })
+        : rowButton("Sign out", button => sessionEnd(row.id, button))])));
+  $("sessions-others").disabled = !listed.some(row => !row.current);
+}
+async function sessionEnd(ref, button) {
+  const undo = busy(button, "Signing out…");
+  try { await json(`/auth/sessions/${encodeURIComponent(ref)}`, { method: "DELETE" }); }
+  catch (err) { note($("sessionsnote"), "bad", err.message); }
+  finally { undo(); }
+  sessionsLoad();
+}
+$("sessions-others").addEventListener("click", async ev => {
+  const undo = busy(ev.currentTarget, "Signing out…");
+  try {
+    await json("/auth/sessions", { method: "DELETE" });
+    note($("sessionsnote"), "ok", "Every other session has been signed out.");
+  } catch (err) { note($("sessionsnote"), "bad", err.message); }
+  finally { undo(); }
+  sessionsLoad();
+});
+
+/* ---- API keys ---- */
+/* WHAT A KEY MAY HOLD, AND THE PRESETS, AS voice_common/scopes.py HAS THEM.
+   A speech account cannot read /admin/roles, so the page carries its own
+   copy; test_account.py reads both and fails when they part. Service scopes
+   are not here: no person's key may hold one. */
+const KEY_SCOPES = {
+  "models:read": "GET /v1/models",
+  "health:read": "/health with per-service status, engines and models",
+  "health:detail": "/health in full: runner, MQTT, satellite topology",
+  "speech:transcribe": "transcription, translation and chat completions",
+  "speech:speak": "the CPU speech lane, /speak and GET /voices",
+  "speech:long": "the GPU lane: POST /jobs and long-model speech",
+  "ingest:links": "link downloads: resolve, commit, progress, media",
+  "jobs:read:own": "your own jobs and run records",
+  "jobs:read:all": "everyone's jobs and run records, and system ones",
+  "jobs:delete:own": "delete your own jobs",
+  "jobs:delete:all": "delete anyone's jobs",
+  "glossaries:read:own": "your own glossaries and the built-ins",
+  "glossaries:read:all": "every glossary, system ones included",
+  "glossaries:write:own": "write your own glossaries",
+  "glossaries:write:all": "write any glossary, home-assistant included",
+  "glossaries:ha": "read, write and select the home-assistant glossary",
+  "voices:read": "list voice clips",
+  "voices:write:own": "add and delete your own voice clips",
+  "voices:write:all": "list and delete anyone's voice clips",
+  "satellites:read": "list satellites, their events, firmware and artwork",
+  "satellites:control": "lights, tones, speech, media and identify",
+  "satellites:listen": "open a satellite's microphone",
+  "satellites:update": "push an over-the-air update",
+  "satellites:firmware": "upload and delete firmware images",
+  "satellites:admin": "adopt, routing, wake words, telemetry, config",
+  "secrets:manage": "Admin › Secrets (session only)",
+  "keys:manage:own": "your own API keys (session only)",
+  "keys:manage:all": "list and revoke anyone's API keys (session only)",
+  "users:manage": "Admin › Users and Roles (session only)",
+  "audit:read": "Admin › Audit",
+};
+/* Never offered: these need a signed-in session, and a key that held one
+   would be a way round the password prompt (D60). */
+const SESSION_ONLY_SCOPES = ["keys:manage:all", "keys:manage:own", "secrets:manage", "users:manage"];
+/* A key holding any of these lives at most 90 days (recheck M-5). */
+const EXPIRY_CAPPED_SCOPES = ["audit:read", "glossaries:read:all", "glossaries:write:all",
+  "health:detail", "jobs:delete:all", "jobs:read:all", "keys:manage:all", "satellites:admin",
+  "satellites:firmware", "satellites:listen", "voices:write:all"];
+/* A key holding any of these lives at most a year and never forever: a leaked
+   key that can push firmware must still die (scopes.ADMIN_ONLY). */
+const ADMIN_ONLY_SCOPES = ["audit:read", "glossaries:ha", "glossaries:read:all",
+  "glossaries:write:all", "health:detail", "jobs:delete:all", "jobs:read:all", "keys:manage:all",
+  "satellites:admin", "satellites:control", "satellites:firmware", "satellites:listen",
+  "satellites:read", "satellites:update", "secrets:manage", "users:manage", "voices:write:all"];
+const KEY_PRESETS = {
+  "admin": Object.keys(KEY_SCOPES).filter(s => !SESSION_ONLY_SCOPES.includes(s)),
+  "speech": ["glossaries:read:own", "glossaries:write:own", "health:read", "jobs:delete:own",
+             "jobs:read:own", "models:read", "speech:long", "speech:speak", "speech:transcribe",
+             "voices:read", "voices:write:own"],
+  "transcribe-only": ["models:read", "speech:transcribe"],
+  "speak-only": ["jobs:read:own", "models:read", "speech:long", "speech:speak"],
+  "read-only": ["glossaries:read:own", "health:read", "jobs:read:own", "models:read", "voices:read"],
+  "monitor": ["audit:read", "glossaries:read:all", "health:detail", "health:read", "jobs:read:all",
+              "models:read", "satellites:read"],
+  "home-assistant": ["glossaries:ha", "health:read", "models:read", "satellites:control",
+                     "satellites:read", "satellites:update", "speech:speak", "speech:transcribe"],
+  "firmware-release": ["satellites:firmware", "satellites:read", "satellites:update"],
+};
+const KEY_EXPIRY_WARNING_DAYS = 14;
+
+/* What a key is now, from its own row. */
+function keyState(key) {
+  if (key.revoked_at) return "revoked";
+  const left = daysUntil(key.expires_at);
+  if (left !== null && Date.parse(key.expires_at) <= Date.now()) return "expired";
+  if (left !== null && left < KEY_EXPIRY_WARNING_DAYS) return "expiring";
+  return "active";
+}
+function keyStateTag(key) {
+  const state = keyState(key);
+  if (state === "revoked") return make("span", { class: "tag", text: "revoked" });
+  if (state === "expired") return make("span", { class: "tag bad", text: "expired" });
+  if (state === "expiring") {
+    const left = daysUntil(key.expires_at);
+    return make("span", { class: "tag warn", text: left < 1 ? "expires today" : `expires in ${left} day${left === 1 ? "" : "s"}` });
+  }
+  return null;
+}
+function keyScopesSaid(key) {
+  const scopes = Array.isArray(key.scopes) ? key.scopes : [];
+  return make("span", { title: scopes.join(", "), text: `${scopes.length} scope${scopes.length === 1 ? "" : "s"}` });
+}
+function lastUsedSaid(key) {
+  return key.last_used_at ? dateSaid(key.last_used_at) + (key.last_used_ip ? " from " + key.last_used_ip : "") : "never";
+}
+
+async function keysLoad() {
+  try { ACCOUNT.keys = (await json("/auth/keys")).keys || []; }
+  catch (err) { note($("keysnote"), "bad", err.message); return; }
+  keysDraw();
+}
+function keysDraw() {
+  const keys = ACCOUNT.keys;
+  $("keys").replaceChildren(keys.length ? tableOf(
+    ["Name", "Key", "Preset", "Scopes", "Created", "Expires", "Last used", ""],
+    keys.map(key => [key.name, make("code", { text: key.display }), key.preset || "custom",
+      keyScopesSaid(key), dateSaid(key.created_at), key.expires_at ? dateSaid(key.expires_at) : "never",
+      lastUsedSaid(key),
+      keyState(key) === "revoked" || keyState(key) === "expired" ? keyStateTag(key)
+        : make("span", { class: "acts" }, keyStateTag(key),
+            rowButton("Revoke", button => keyRevoke(key, button), true))]),
+    i => keyState(keys[i]) === "revoked" || keyState(keys[i]) === "expired" ? "gone" : null)
+    : make("div", { class: "hint", text: "No keys yet." }));
+}
+async function keyRevoke(key, button) {
+  if (!confirm(`Revoke the key "${key.name}"?\n\nAnything using it is refused from its next request. This cannot be undone.`)) return;
+  const undo = busy(button, "Revoking…");
+  try {
+    await json(`/auth/keys/${encodeURIComponent(key.id)}`, { method: "DELETE" });
+    note($("keysnote"), "ok", `"${key.name}" is revoked.`);
+  } catch (err) { note($("keysnote"), "bad", err.message); }
+  finally { undo(); }
+  keysLoad();
+}
+
+/* THE NEW KEY FORM. The boxes are the scopes this account may give a key:
+   its own, less the session-only ones (D60). A preset only ticks boxes; what
+   is sent is what is ticked. The expiry follows the boxes: a scope that caps
+   a key at 90 days takes a year and "never" off the list while it is ticked. */
+function keyFormDraw() {
+  const preset = $("key-preset");
+  const offered = ME.presets.filter(name => Object.hasOwn(KEY_PRESETS, name));
+  if (preset.dataset.drawn !== offered.join(" ")) {
+    preset.dataset.drawn = offered.join(" ");
+    preset.replaceChildren(new Option("Choose the scopes yourself", ""),
+                           ...offered.map(name => new Option(name, name)));
+  }
+  const grantable = Object.keys(KEY_SCOPES).filter(s => holds(s) && !SESSION_ONLY_SCOPES.includes(s));
+  const box = $("key-scopes");
+  if (box.dataset.drawn !== grantable.join(" ")) {
+    box.dataset.drawn = grantable.join(" ");
+    box.replaceChildren(make("legend", { class: "label-like", text: "Scopes" }),
+      ...grantable.map(scope => {
+        const tick = make("input", { type: "checkbox", value: scope });
+        tick.addEventListener("change", () => { keyPresetFollow(); keyExpiryFollow(); });
+        return make("label", {}, tick, make("code", { text: scope }), make("span", { text: KEY_SCOPES[scope] }));
+      }));
+  }
+  keyExpiryFollow();
+}
+function keyTicked() {
+  return [...$("key-scopes").querySelectorAll("input[type=checkbox]:checked")].map(tick => tick.value);
+}
+$("key-preset").addEventListener("change", () => {
+  const chosen = KEY_PRESETS[$("key-preset").value];
+  if (!chosen) return;
+  for (const tick of $("key-scopes").querySelectorAll("input[type=checkbox]")) tick.checked = chosen.includes(tick.value);
+  keyExpiryFollow();
+});
+/* A box changed by hand makes the key no longer the preset it started from,
+   unless the boxes still say exactly that preset. */
+function keyPresetFollow() {
+  const ticked = keyTicked().sort().join(" ");
+  const same = Object.entries(KEY_PRESETS).find(([name, scopes]) =>
+    ME.presets.includes(name) && [...scopes].sort().join(" ") === ticked);
+  $("key-preset").value = same ? same[0] : "";
+}
+function keyExpiryFollow() {
+  const ticked = keyTicked();
+  const capped = ticked.some(scope => EXPIRY_CAPPED_SCOPES.includes(scope));
+  const yearly = !capped && ticked.some(scope => ADMIN_ONLY_SCOPES.includes(scope));
+  const refused = option => (capped && (option === "365" || option === "never"))
+    || (yearly && option === "never");
+  const select = $("key-expiry");
+  for (const option of select.options) option.disabled = refused(option.value);
+  const moved = refused(select.value);
+  if (moved) select.value = capped ? "90" : "365";
+  const limit = capped ? "90 days" : "a year";
+  $("key-expiryhint").textContent = capped || yearly
+    ? `One of these scopes limits a key to ${limit}.`
+      + (moved ? ` The expiry was moved to ${capped ? "90" : "365"} days.` : "") : "";
+}
+$("key-create").addEventListener("click", async ev => {
+  const out = $("keysnote");
+  const name = $("key-name").value.trim();
+  const scopes = keyTicked();
+  if (!name) { note(out, "bad", "Give the key a name, such as the program that will use it."); $("key-name").focus(); return; }
+  if (!scopes.length) { note(out, "bad", "Tick at least one scope, or choose a preset."); return; }
+  const expiry = $("key-expiry").value;
+  const undo = busy(ev.currentTarget, "Creating…");
+  try {
+    const made = await json("/auth/keys", { method: "POST", headers: JSON_BODY, body: JSON.stringify({
+      name, scopes, preset: $("key-preset").value || null,
+      expires_days: expiry === "never" ? null : Number(expiry) }) });
+    note(out, "", "");
+    $("key-name").value = "";
+    $("keynew").open = false;
+    showOnce($("keyshown"), `This is the key "${made.key.name}". Copy it now: it is not shown again and cannot be recovered.`,
+             made.plaintext, () => $("keys").scrollIntoView({ block: "nearest" }));
+  } catch (err) { note(out, "bad", err.message); }
+  finally { undo(); }
+  keysLoad();
+});
+
+/* ============================================================ admin === */
+/* THE ADMIN TAB (§4.6): the people who use this box, every key, the roles
+   as the code defines them, the secret store and the audit trail. Each
+   section is a place (/ui/admin/<section>) and reads its list when it is
+   shown. The banners above them are read once per visit: keys about to
+   expire, secrets waiting for review, and an audit that has reached its
+   ceiling, which each need somebody to act before anything breaks. */
+const ADMIN = { part: "users", at: 0, users: [], keys: [], secrets: null, overflow: false,
+                ignored: [], focusSecret: "", audit: { rows: [], last: null, asked: 0 } };
+
+function adminEnter() {
+  adminShow(ADMIN.part, false);
+}
+function navAtAdmin(route) {
+  adminShow(route.parts[0] || ADMIN.part, false);
+  return navNothing(route);
+}
+function adminShow(part, push) {
+  if (!Object.hasOwn(NAV_ADMIN, part)) part = "users";
+  ADMIN.part = part;
+  for (const b of document.querySelectorAll("#adminnav [data-admin]"))
+    b.setAttribute("aria-pressed", String(b.dataset.admin === part));
+  for (const id of Object.keys(NAV_ADMIN)) $("admin-" + id).hidden = id !== part;
+  if (Date.now() - ADMIN.at > 3000) {
+    ADMIN.at = Date.now();
+    adminBannersLoad();
+  }
+  ({ users: usersLoad, keys: allKeysLoad, roles: rolesLoad, secrets: secretsLoad, audit: () => auditLoad(false) })[part]();
+  if (push) {
+    NAV.route = { view: "admin", parts: [part], query: {} };
+    navNames(NAV.route);
+    navTitle();
+    navGo(navPath(NAV.route), "push");
+  }
+}
+for (const b of document.querySelectorAll("#adminnav [data-admin]"))
+  b.addEventListener("click", () => adminShow(b.dataset.admin, true));
+
+/* THE THINGS AN ADMIN MUST DO SOMETHING ABOUT, read together. */
+async function adminBannersLoad() {
+  const [keys, secrets, audit] = await Promise.allSettled([json("/admin/keys"), json("/admin/secrets"),
+    holds("audit:read") ? json("/admin/audit?limit=1") : Promise.resolve(null)]);
+  if (keys.status === "fulfilled") ADMIN.keys = keys.value.keys || [];
+  if (secrets.status === "fulfilled") ADMIN.secrets = secrets.value;
+  if (audit.status === "fulfilled" && audit.value) ADMIN.overflow = !!audit.value.overflow;
+  /* Variables a backend ignores and names in its health (D63): read from the
+     full health a session of this role is answered with. */
+  const backends = (HEALTH && HEALTH.backends) || {};
+  ADMIN.ignored = Object.entries(backends).flatMap(([name, b]) =>
+    ((b && b.health && b.health.ignored_variables) || []).filter(v => typeof v === "string")
+      .map(variable => ({ name, variable })));
+  adminBanners();
+}
+function adminBanners() {
+  const said = [];
+  const expiring = ADMIN.keys.filter(key => keyState(key) === "expiring");
+  if (expiring.length) said.push(["warn", `${expiring.length} API key${expiring.length === 1 ? " expires" : "s expire"} within ${KEY_EXPIRY_WARNING_DAYS} days: `
+    + expiring.map(key => `"${key.name}" (${userSaid(key.user_id, key.username)}, ${dateSaid(key.expires_at)})`).join(", ")
+    + ". Make a new key and give it to whatever uses the old one before it expires."]);
+  const secrets = ADMIN.secrets;
+  if (secrets) {
+    const counts = secrets.counts || {};
+    if (counts.unreviewed) said.push(["warn", `${counts.unreviewed} imported secret${counts.unreviewed === 1 ? " is" : "s are"} unreviewed. Check where each may be sent, then confirm it in Secrets.`]);
+    if (counts.undecryptable) said.push(["bad", `${counts.undecryptable} secret${counts.undecryptable === 1 ? "" : "s"} could not be decrypted. Store ${counts.undecryptable === 1 ? "it" : "them"} again in Secrets.`]);
+    if (secrets.keyring && secrets.keyring.source === "generated")
+      said.push(["warn", "The secret keyring was generated on the calliope-keys volume. Back that volume up separately from the database: one without the other cannot be decrypted."]);
+    for (const row of secrets.secrets || []) {
+      const env = /^env ([A-Z][A-Z0-9_]*) @ ([a-z][a-z0-9-]*)$/.exec(row.imported_from || "");
+      if (env) said.push(["warn", `${row.name} was imported from the environment of ${env[2]}. Remove ${env[1]} from that service's configuration.`]);
+    }
+  }
+  for (const { name, variable } of ADMIN.ignored)
+    said.push(["bad", `The ${name.replace(/_/g, "-")} service ignores the removed variable ${variable}. Remove it from that service's configuration.`]);
+  if (ADMIN.overflow) said.push(["bad", "The audit has reached its ceiling of security events. New events go to the gateway's log only until the yearly sweep makes room."]);
+  $("adminbanners").replaceChildren(...said.map(([kind, text]) => make("div", { class: "note " + kind, text })));
+}
+
+/* A user ID as a name: the username when the list has it. */
+function userSaid(id, fallback) {
+  if (!id) return "System";
+  if (ME.user && id === ME.user.id) return "you";
+  const user = ADMIN.users.find(u => u.id === id) || (USERS.get(id) ? { username: USERS.get(id) } : null);
+  if (user) return user.deleted ? user.username + " (deleted user)" : user.username;
+  return fallback || (String(id).startsWith("svc:") ? "System (" + String(id).slice(4) + ")" : String(id));
+}
+
+/* ---- users ---- */
+async function usersLoad() {
+  try { ADMIN.users = (await json("/admin/users")).users || []; }
+  catch (err) { note($("usersnote"), "bad", err.message); return; }
+  for (const u of ADMIN.users) USERS.set(u.id, u.username);
+  usersDraw();
+}
+function userStateSaid(u) {
+  if (u.deleted) return make("span", { class: "tag", text: "deleted" });
+  if (u.disabled) return make("span", { class: "tag bad", text: "disabled" });
+  if (u.must_change) return make("span", { class: "tag warn", text: "must choose a password" });
+  return make("span", { class: "tag", text: "active" });
+}
+function usersDraw() {
+  const users = ADMIN.users;
+  $("users").replaceChildren(tableOf(["Username", "Name", "Role", "State", "Last sign-in", ""],
+    users.map(u => {
+      const self = ME.user && u.id === ME.user.id;
+      const role = make("select", { class: "tight", "aria-label": `Role of ${u.username}`, disabled: self || u.deleted },
+        new Option("admin", "admin"), new Option("speech", "speech"));
+      role.value = u.role;
+      role.addEventListener("change", () => userRole(u, role));
+      const acts = u.deleted ? "" : make("span", { class: "acts" },
+        /* One's own password is changed on Account, with the current one;
+           a reset here would sign the admin out of this very page. */
+        self ? null : rowButton(u.disabled ? "Enable" : "Disable", button => userDisable(u, button)),
+        self ? null : rowButton("Reset password", () => userResetAsk(u)),
+        self ? null : rowButton("Delete", button => userDelete(u, button), true));
+      return [u.username, u.display_name || "", role, userStateSaid(u), dateSaid(u.last_login_at), acts];
+    }), i => users[i].deleted ? "gone" : null));
+}
+/* EVERY CHANGE TO A USER IS ANSWERED BY THE SERVER'S OWN RULES: the last
+   admin cannot be demoted, disabled or deleted, and nobody can do either to
+   themselves. Its 409 says which, and is shown as it is. */
+async function userChange(u, change, button, label) {
+  const undo = button ? busy(button, label) : () => {};
+  try {
+    await json(`/admin/users/${encodeURIComponent(u.id)}`, { method: "PATCH", headers: JSON_BODY,
+      body: JSON.stringify(change) });
+    note($("usersnote"), "", "");
+  } catch (err) { note($("usersnote"), "bad", err.message); }
+  finally { undo(); }
+  usersLoad();
+}
+function userRole(u, select) {
+  const to = select.value;
+  if (to === "speech" && !confirm(`Make ${u.username} a speech user?\n\nTheir sessions and keys lose every admin scope at once.`)) {
+    select.value = u.role; return;
+  }
+  userChange(u, { role: to }, null);
+}
+function userDisable(u, button) {
+  if (!u.disabled && !confirm(`Disable ${u.username}?\n\nThey are signed out and every API key of theirs is revoked. Enabling them again does not bring these back.`)) return;
+  userChange(u, { disabled: !u.disabled }, button, u.disabled ? "Enabling…" : "Disabling…");
+}
+async function userDelete(u, button) {
+  if (!confirm(`Delete ${u.username}?\n\nThey are signed out and every key of theirs is revoked. Their jobs, vocabulary and voices stay, visible to admins only, and the username stays taken.`)) return;
+  const undo = busy(button, "Deleting…");
+  try {
+    await json(`/admin/users/${encodeURIComponent(u.id)}`, { method: "DELETE" });
+    note($("usersnote"), "ok", `${u.username} is deleted.`);
+  } catch (err) { note($("usersnote"), "bad", err.message); }
+  finally { undo(); }
+  usersLoad();
+}
+/* RESET ASKS ONE QUESTION: whether the user's keys go too. Ticked by default
+   (D20): a reset is what somebody does when an account is suspected. */
+function userResetAsk(u) {
+  const box = $("userreset");
+  const revoke = make("input", { type: "checkbox", checked: true });
+  const go = rowButton("Reset the password", button => userReset(u, revoke.checked, button), true);
+  box.replaceChildren(make("div", { class: "hint", text: `Reset ${u.username}'s password. Every session of theirs ends, and they choose a new password when they next sign in with the temporary one.` }),
+    make("label", {}, revoke, " Also revoke this user's API keys"),
+    make("div", { class: "actions" }, go, rowButton("Cancel", () => { box.replaceChildren(); box.hidden = true; })));
+  box.hidden = false;
+  go.focus();
+}
+async function userReset(u, revokeKeys, button) {
+  const undo = busy(button, "Resetting…");
+  try {
+    const done = await json(`/admin/users/${encodeURIComponent(u.id)}/reset-password`, { method: "POST",
+      headers: JSON_BODY, body: JSON.stringify({ revoke_keys: revokeKeys }) });
+    const keys = Array.isArray(done.keys_revoked) ? done.keys_revoked.length : 0;
+    showOnce($("userreset"), `${u.username}'s temporary password` + (keys ? ` (${keys} key${keys === 1 ? "" : "s"} revoked)` : "")
+      + ". Give it to them yourself; it is not shown again.", done.temporary_password);
+  } catch (err) { undo(); note($("usersnote"), "bad", err.message); return; }
+  usersLoad();
+}
+$("user-create").addEventListener("click", async ev => {
+  const username = $("user-name").value.trim();
+  if (!username) { note($("usersnote"), "bad", "Choose a username."); $("user-name").focus(); return; }
+  const undo = busy(ev.currentTarget, "Creating…");
+  try {
+    const made = await json("/admin/users", { method: "POST", headers: JSON_BODY, body: JSON.stringify({
+      username, role: $("user-role").value, display_name: $("user-display").value.trim() || null }) });
+    $("user-name").value = ""; $("user-display").value = "";
+    note($("usersnote"), "", "");
+    showOnce($("userreset"), `${made.user.username}'s temporary password. Give it to them yourself: it is not shown again, and they choose their own when they first sign in.`,
+             made.temporary_password);
+  } catch (err) { note($("usersnote"), "bad", err.message); }
+  finally { undo(); }
+  usersLoad();
+});
+
+/* ---- everyone's keys ---- */
+async function allKeysLoad() {
+  if (!ADMIN.users.length) await usersLoad();
+  const filter = $("allkeys-user");
+  const wanted = USER_ID.test(filter.value) ? filter.value : "";
+  if (filter.dataset.drawn !== ADMIN.users.map(u => u.id).join(" ")) {
+    filter.dataset.drawn = ADMIN.users.map(u => u.id).join(" ");
+    filter.replaceChildren(new Option("Everyone", ""), ...ADMIN.users.map(u => new Option(u.username, u.id)));
+    filter.value = wanted;
+  }
+  let keys;
+  try { keys = (await json("/admin/keys" + (wanted ? "?user=" + encodeURIComponent(wanted) : ""))).keys || []; }
+  catch (err) { note($("allkeysnote"), "bad", err.message); return; }
+  if (!wanted) { ADMIN.keys = keys; adminBanners(); }
+  $("allkeys").replaceChildren(keys.length ? tableOf(
+    ["User", "Name", "Key", "Preset", "Scopes", "Created", "Expires", "Last used", ""],
+    keys.map(key => [userSaid(key.user_id, key.username), key.name, make("code", { text: key.display }),
+      key.preset || "custom", keyScopesSaid(key), dateSaid(key.created_at),
+      key.expires_at ? dateSaid(key.expires_at) : "never", lastUsedSaid(key),
+      keyState(key) === "revoked" || keyState(key) === "expired" ? keyStateTag(key)
+        : make("span", { class: "acts" }, keyStateTag(key), rowButton("Revoke", button => anyKeyRevoke(key, button), true))]),
+    i => ["revoked", "expired"].includes(keyState(keys[i])) ? "gone" : null)
+    : make("div", { class: "hint", text: "No keys." }));
+}
+$("allkeys-user").addEventListener("change", () => allKeysLoad());
+async function anyKeyRevoke(key, button) {
+  if (!confirm(`Revoke "${key.name}", ${userSaid(key.user_id, key.username)}'s key?\n\nAnything using it is refused from its next request.`)) return;
+  const undo = busy(button, "Revoking…");
+  try {
+    await json(`/admin/keys/${encodeURIComponent(key.id)}`, { method: "DELETE" });
+    note($("allkeysnote"), "ok", `"${key.name}" is revoked.`);
+  } catch (err) { note($("allkeysnote"), "bad", err.message); }
+  finally { undo(); }
+  allKeysLoad();
+}
+
+/* ---- roles ---- */
+/* READ-ONLY: roles and presets are code (D2). One row per scope, one column
+   per role and preset, and the session-only scopes marked, since no key can
+   hold them whatever a preset says. */
+async function rolesLoad() {
+  let roles;
+  try { roles = await json("/admin/roles"); }
+  catch (err) { note($("rolesnote"), "bad", err.message); return; }
+  const sessionOnly = new Set(roles.session_only || []), serviceOnly = new Set(roles.service_only || []);
+  const columns = [...Object.keys(roles.roles || {}).map(name => ["role", name]),
+                   ...Object.keys(roles.presets || {}).map(name => ["preset", name])];
+  const scopesOf = (kind, name) => new Set(kind === "role" ? roles.roles[name] : roles.presets[name].scopes);
+  const held = columns.map(([kind, name]) => scopesOf(kind, name));
+  const scopes = Object.keys(roles.scopes || {}).filter(scope => !serviceOnly.has(scope));
+  $("roles").replaceChildren(tableOf(["Scope", ...columns.map(([kind, name]) => (kind === "role" ? "Role " : "Key ") + name)],
+    scopes.map(scope => [make("span", {}, make("code", { text: scope }), " ",
+        sessionOnly.has(scope) ? make("span", { class: "tag warn", text: "session only" }) : null,
+        make("div", { class: "hint", text: roles.scopes[scope] })),
+      ...held.map(set => set.has(scope) ? make("span", { "aria-label": "yes", text: "✓" }) : "")])));
+}
+
+/* ---- secrets ---- */
+/* WRITE-ONLY (D40). The list never carries a value, and the boxes that take
+   one are never filled: a value goes into the request that stores it and
+   nowhere else on the page. */
+const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
+const SECRET_CONSUMERS = ["satellites", "tts-long"];
+async function secretsLoad() {
+  let answer;
+  try { answer = await json("/admin/secrets"); }
+  catch (err) { note($("secretsnote"), "bad", err.message); return; }
+  ADMIN.secrets = answer;
+  adminBanners();
+  const users = await secretUsers();
+  secretsDraw(answer, users);
+}
+/* WHICH ACTIONS NAME EACH SECRET: wake words (their key, token or webhook
+   address) and button webhooks. Read from the hub, so a secret nothing uses
+   any more can be seen to be unused. An unreachable hub leaves the column
+   empty rather than the table. */
+async function secretUsers() {
+  const used = new Map();
+  const add = (name, label) => { if (name) used.set(name, [...(used.get(name) || []), label]); };
+  if (!holds("satellites:admin")) return used;
+  const [words, list] = await Promise.allSettled([json("/satellites/wake-words"), json("/satellites")]);
+  if (words.status === "fulfilled" && words.value) {
+    const all = [...(words.value.words || []).map(w => [w.name, w]),
+                 ...(words.value.ptt ? [["push-to-talk", words.value.ptt]] : [])];
+    for (const [name, w] of all) {
+      const d = w && w.action && w.action.destination;
+      if (!d) continue;
+      for (const field of ["token_env", "api_key_env", "url_secret"]) add(d[field], `wake word ${name}`);
+    }
+  }
+  if (list.status === "fulfilled" && list.value) {
+    for (const n of list.value.satellites || []) {
+      for (const [button, edges] of Object.entries((n.config && n.config.buttons) || {})) {
+        for (const [edge, act] of Object.entries(edges || {})) {
+          const named = /^webhook:secret:([A-Z][A-Z0-9_]{0,63})$/.exec(String(act));
+          if (named) add(named[1], `${satButtonName(button)} ${edge === "press" ? "pressed" : "released"} on ${n.name || n.id}`);
+        }
+      }
+    }
+  }
+  return used;
+}
+function secretsDraw(answer, users) {
+  const rows = answer.secrets || [];
+  const keyring = answer.keyring || {};
+  $("secret-rotate").hidden = !keyring.rotatable;
+  $("secrets").replaceChildren(rows.length ? tableOf(
+    ["Name", "Kind", "Used by", "Readers", "May be sent to", "Updated", "Last read", ""],
+    rows.map(row => [
+      make("span", {}, make("code", { text: row.name }), " ",
+        row.set ? null : make("span", { class: "tag", text: "not set" }),
+        row.unreviewed ? make("span", { class: "tag warn", text: "unreviewed" }) : null,
+        row.undecryptable ? make("span", { class: "tag bad", text: "could not be decrypted" }) : null,
+        row.description ? make("div", { class: "hint", text: row.description }) : null,
+        row.imported_from ? make("div", { class: "hint", text: "Imported from " + row.imported_from }) : null),
+      row.kind,
+      (users.get(row.name) || []).join("; ") || (holds("satellites:admin") ? "nothing" : ""),
+      (row.consumers || []).join(", ") || "nobody",
+      (row.allowed_hosts || []).join(", ") || "nowhere",
+      row.updated_at ? dateSaid(row.updated_at) + (row.updated_by ? " by " + userSaid(row.updated_by) : "") : "",
+      row.last_read_at ? dateSaid(row.last_read_at) + (row.last_read_by ? " by " + userSaid(row.last_read_by) : "") : "never",
+      make("span", { class: "acts" },
+        rowButton(row.set ? "Replace" : "Set", () => secretEditor(row, "value")),
+        rowButton("Bindings", () => secretEditor(row, "bindings")),
+        row.unreviewed ? rowButton("Confirm", button => secretConfirm(row, button)) : null,
+        row.set ? rowButton("Clear", button => secretClear(row, button), true) : null)]),
+    i => rows[i].set ? null : "gone")
+    : make("div", { class: "hint", text: "No secrets yet." }));
+  for (const [i, tr] of [...$("secrets").querySelectorAll("tbody tr")].entries())
+    tr.dataset.secret = rows[i].name;
+  $("secretstatus").replaceChildren(...(answer.status || []).map(item => make("div", { class: "hint",
+    text: `${item.label}: ${{ ok: "valid", expiring: "expiring soon", expired: "expired", unreadable: "cannot be read",
+      not_configured: "not configured", present: "present", absent: "absent", configured: "configured",
+      unknown: "unknown" }[item.state] || item.state}`
+      + (item.expires_at ? `, until ${dateSaid(item.expires_at)}` : "")
+      + (item.key_id ? `, key ${item.key_id}` : "") })));
+  if (ADMIN.focusSecret) {
+    const tr = $("secrets").querySelector(`tr[data-secret="${CSS.escape(ADMIN.focusSecret)}"]`);
+    ADMIN.focusSecret = "";
+    if (tr) { tr.scrollIntoView({ block: "center" }); const b = tr.querySelector("button"); if (b) b.focus({ preventScroll: true }); }
+  }
+}
+/* ONE SECRET'S EDITOR, under the table: a value box or its bindings. A value
+   box is never filled, and is emptied before its request goes. */
+function secretEditor(row, what) {
+  const box = $("secretedit");
+  const out = make("div", { "aria-live": "polite" });
+  const close = rowButton("Cancel", () => { box.replaceChildren(); box.hidden = true; });
+  if (what === "value") {
+    const value = make("input", { type: "password", autocomplete: "off", id: "secretedit-value", spellcheck: false });
+    const store = rowButton(row.set ? "Replace" : "Store", async button => {
+      const text = value.value;
+      value.value = "";
+      if (!text) { note(out, "bad", "Enter the value."); value.focus(); return; }
+      const undo = busy(button, "Storing…");
+      try {
+        await secretPut(row.name, text, {});
+        box.replaceChildren(); box.hidden = true;
+        note($("secretsnote"), "ok", `${row.name} is stored.`);
+        secretsLoad();
+      } catch (err) { note(out, "bad", err.message); }
+      finally { undo(); }
+    });
+    box.replaceChildren(make("label", { for: "secretedit-value", text: `New value for ${row.name}` }), value,
+      make("div", { class: "actions" }, store, close), out);
+    value.focus();
+  } else {
+    const description = make("input", { type: "text", id: "secretedit-description", maxLength: 200, value: row.description || "" });
+    const readers = SECRET_CONSUMERS.map(name => make("input", { type: "checkbox", value: name,
+      checked: (row.consumers || []).includes(name) }));
+    const hosts = make("textarea", { id: "secretedit-hosts", rows: 3, spellcheck: false,
+      value: (row.allowed_hosts || []).join("\n") });
+    const save = rowButton("Save", async button => {
+      const undo = busy(button, "Saving…");
+      try {
+        await json(`/admin/secrets/${encodeURIComponent(row.name)}`, { method: "PATCH", headers: JSON_BODY,
+          body: JSON.stringify({ description: description.value.trim(),
+            consumers: readers.filter(tick => tick.checked).map(tick => tick.value),
+            allowed_hosts: hosts.value.split(/\s+/).filter(Boolean) }) });
+        box.replaceChildren(); box.hidden = true;
+        note($("secretsnote"), "ok", `${row.name}'s bindings are saved.`);
+        secretsLoad();
+      } catch (err) { note(out, "bad", err.message); }
+      finally { undo(); }
+    });
+    box.replaceChildren(make("div", { class: "hint", text: `Where ${row.name} may go.` }),
+      make("label", { for: "secretedit-description", text: "Description" }), description,
+      make("fieldset", { class: "scopeboxes" }, make("legend", { class: "label-like", text: "Services that may read it" }),
+        readers.map(tick => make("label", {}, tick, tick.value))),
+      make("label", { for: "secretedit-hosts", text: "Hosts it may be sent to, one per line (https://host:port; a host alone means https)" }), hosts,
+      make("div", { class: "actions" }, save, close), out);
+    description.focus();
+  }
+  box.hidden = false;
+}
+async function secretConfirm(row, button) {
+  if (!confirm(`Confirm ${row.name}?\n\nIt may be read by ${(row.consumers || []).join(", ") || "nobody"} and sent to ${(row.allowed_hosts || []).join(", ") || "nowhere"}.`)) return;
+  const undo = busy(button, "Confirming…");
+  try {
+    await json(`/admin/secrets/${encodeURIComponent(row.name)}`, { method: "PATCH", headers: JSON_BODY,
+      body: JSON.stringify({ reviewed: true }) });
+  } catch (err) { note($("secretsnote"), "bad", err.message); }
+  finally { undo(); }
+  secretsLoad();
+}
+async function secretClear(row, button) {
+  if (!confirm(`Clear ${row.name}?\n\nEverything that sends it stops at once. The name and its bindings are kept.`)) return;
+  const undo = busy(button, "Clearing…");
+  try { await secretRemove(row.name); note($("secretsnote"), "ok", `${row.name} is cleared.`); }
+  catch (err) { note($("secretsnote"), "bad", err.message); }
+  finally { undo(); }
+  secretsLoad();
+}
+$("secret-new").addEventListener("click", async ev => {
+  const out = $("secretsnote");
+  const name = $("secret-name").value.trim();
+  const value = $("secret-value").value;
+  $("secret-value").value = "";
+  if (!SECRET_NAME.test(name)) { note(out, "bad", "A name is upper case letters, digits and _, starting with a letter, such as SATELLITES_HA_TOKEN."); $("secret-name").focus(); return; }
+  if (!value) { note(out, "bad", "Enter the value."); $("secret-value").focus(); return; }
+  const undo = busy(ev.currentTarget, "Storing…");
+  try {
+    /* NEW MEANS NEW. A PUT keeps the fields it is not sent and overwrites
+       the ones it is, so this form on a name already stored replaced its
+       hosts with whatever the box held, an empty box being "nowhere", and its
+       services with the ticks, without a word that the name was taken. A
+       stored secret is changed on its own row, which is brought into view. */
+    if (await secretRow(name)) {
+      note(out, "bad", `${name} is already stored: use Replace or Bindings on its row.`);
+      ADMIN.focusSecret = name;
+    } else {
+      await json(`/admin/secrets/${encodeURIComponent(name)}`, { method: "PUT", headers: JSON_BODY, body: JSON.stringify({
+        value, kind: $("secret-kind").value, description: $("secret-description").value.trim() || null,
+        consumers: [...document.querySelectorAll("#secret-consumers input:checked")].map(tick => tick.value),
+        allowed_hosts: $("secret-hosts").value.split(/\s+/).filter(Boolean) }) });
+      for (const id of ["secret-name", "secret-description", "secret-hosts"]) $(id).value = "";
+      $("secretnew").open = false;
+      note(out, "ok", `${name} is stored.`);
+    }
+  } catch (err) { note(out, "bad", err.message); }
+  finally { undo(); }
+  secretsLoad();
+});
+$("secret-rotate").addEventListener("click", async ev => {
+  if (!confirm("Rotate the master key?\n\nEvery secret is encrypted again under a new key, and the old key is removed. Nobody is signed out.")) return;
+  const undo = busy(ev.currentTarget, "Rotating…");
+  try {
+    const done = await json("/admin/secrets/rotate-master", { method: "POST" });
+    const lost = (done.undecryptable || []).length;
+    note($("secretsnote"), lost ? "warn" : "ok", `${done.rotated} secret${done.rotated === 1 ? "" : "s"} encrypted under the new key.`
+      + (lost ? ` ${lost} could not be decrypted and must be stored again.` : ""));
+  } catch (err) { note($("secretsnote"), "bad", err.message); }
+  finally { undo(); }
+  secretsLoad();
+});
+/* A REFUSAL THAT NAMES A SECRET LEADS TO IT. A picker or a Test answering
+   host_not_allowed (D41) says which secret would have gone where, and a key
+   box refused by secretFits says which secret the hub may not read or send
+   there; the link opens that secret's row, where its bindings are changed. */
+function secretLink(host, err) {
+  const body = err && err.payload;
+  const name = body && typeof body.secret === "string" && SECRET_NAME.test(body.secret) ? body.secret : "";
+  if (!name || !["host_not_allowed", "not_a_consumer"].includes(err.code) || !holds("secrets:manage")) return false;
+  const go = make("button", { class: "link", type: "button", text: `Open ${name} in Admin › Secrets` });
+  go.addEventListener("click", () => {
+    const tab = TABS.find(b => b.dataset.tab === "admin");
+    if (!tab || tab.hidden) return;
+    ADMIN.focusSecret = name;
+    if (tab.getAttribute("aria-selected") === "true") { adminShow("secrets", true); return; }
+    /* Opening the tab writes /ui/admin; the section is this entry's. */
+    ADMIN.part = "secrets";
+    tab.click();
+    NAV.route = { view: "admin", parts: ["secrets"], query: {} };
+    navNames(NAV.route);
+    navTitle();
+    navGo(navPath(NAV.route), "replace");
+  });
+  host.replaceChildren(make("div", { class: "note bad" }, err.message, " ", go));
+  return true;
+}
+
+/* ---- everyone's clips ---- */
+/* THE SPEAK TAB'S CLIP MANAGER, for a voices:write:all holder: every
+   namespace's clips with Delete. Read when it is opened. */
+$("allclipsbox").addEventListener("toggle", () => { if ($("allclipsbox").open) allClipsLoad(); });
+async function allClipsLoad() {
+  let clips;
+  try { clips = (await json("/ui/clips?owner=all")).voices || []; }
+  catch (err) { note($("allclipsnote"), "bad", err.message); return; }
+  note($("allclipsnote"), "", "");
+  $("allclipslist").replaceChildren(clips.length ? tableOf(["Voice", "Whose", "Length", "Saved", ""],
+    clips.map(clip => [clip.name, userSaid(clip.owner),
+      typeof clip.seconds === "number" ? Math.round(clip.seconds) + " s" : "",
+      typeof clip.modified === "number" ? dateSaid(new Date(clip.modified * 1000).toISOString()) : "",
+      rowButton("Delete", button => clipDeleteAny(clip, button), true)]))
+    : make("div", { class: "hint", text: "Nobody has saved a voice clip." }));
+}
+async function clipDeleteAny(clip, button) {
+  if (!confirm(`Delete the voice "${clip.name}" (${userSaid(clip.owner)})?\n\nThe clip is deleted from the server and cannot be recovered.`)) return;
+  const owner = USER_ID.test(clip.owner || "") ? clip.owner : "system";
+  const undo = busy(button, "Deleting…");
+  try {
+    await json(`/ui/clips/${encodeURIComponent(clip.name)}?owner=${encodeURIComponent(owner)}`, { method: "DELETE" });
+    note($("allclipsnote"), "ok", `Deleted ${clip.name}.`);
+  } catch (err) { note($("allclipsnote"), "bad", err.message); }
+  finally { undo(); }
+  allClipsLoad();
+  /* The reader's own clip is in the picker above too. */
+  if (ME.user && clip.owner === ME.user.id) loadVoices();
+}
+
+/* ---- audit ---- */
+async function auditLoad(older) {
+  if (!ADMIN.users.length) await usersLoad();
+  const actor = $("audit-actor");
+  if (actor.dataset.drawn !== ADMIN.users.map(u => u.id).join(" ")) {
+    const kept = actor.value;
+    actor.dataset.drawn = ADMIN.users.map(u => u.id).join(" ");
+    actor.replaceChildren(new Option("Anyone", ""), ...ADMIN.users.map(u => new Option(u.username, u.id)));
+    actor.value = kept;
+  }
+  const params = new URLSearchParams();
+  if (actor.value) params.set("actor", actor.value);
+  if ($("audit-action").value.trim()) params.set("action", $("audit-action").value.trim());
+  if ($("audit-outcome").value) params.set("outcome", $("audit-outcome").value);
+  if ($("audit-aggregated").checked) params.set("aggregated", "1");
+  if (older && ADMIN.audit.last) params.set("before", String(ADMIN.audit.last));
+  const query = params.toString();
+  /* THE LATEST QUESTION WINS. Opening the section reads the whole trail, and
+     a filter pressed before that answer lands was drawn over by it. */
+  const asked = ++ADMIN.audit.asked;
+  let answer;
+  try { answer = await json("/admin/audit" + (query ? "?" + query : "")); }
+  catch (err) { if (asked === ADMIN.audit.asked) note($("auditnote"), "bad", err.message); return; }
+  if (asked !== ADMIN.audit.asked) return;
+  note($("auditnote"), "", "");
+  ADMIN.overflow = !!answer.overflow;
+  adminBanners();
+  const rows = older ? [...ADMIN.audit.rows, ...(answer.rows || [])] : (answer.rows || []);
+  ADMIN.audit.rows = rows;
+  ADMIN.audit.last = rows.length ? rows[rows.length - 1].id : null;
+  $("audit-older").hidden = (answer.rows || []).length < 100;
+  $("audit").replaceChildren(rows.length ? tableOf(
+    ["Time", "Who", "How", "From", "Action", "Target", "Outcome", "Detail"],
+    rows.map(row => [dateSaid(row.ts),
+      row.actor_kind === "user" || row.actor_kind === "api_key" ? userSaid(row.actor_id) : row.actor_id || row.actor_kind,
+      row.auth_method || "", row.ip || "", row.action + (row.aggregated ? " (counted)" : ""),
+      row.target && USER_ID.test(row.target) ? userSaid(row.target) : row.target || "",
+      row.outcome === "ok" ? "ok" : make("span", { class: "tag " + (row.outcome === "denied" ? "warn" : "bad"), text: row.outcome }),
+      row.detail ? JSON.stringify(row.detail).slice(0, 300) : ""]))
+    : make("div", { class: "hint", text: "Nothing matches." }));
+}
+$("audit-apply").addEventListener("click", () => auditLoad(false));
+$("audit-older").addEventListener("click", () => auditLoad(true));
+
 /* ============================================================== live === */
 /* WHAT KEEPS THE PAGE TRUE WITHOUT A RELOAD, AND WHAT KEEPS IT QUIET. Before
    this, each tab looked after itself: health on a bare 30 s interval that ran
@@ -15826,9 +17764,10 @@ function liveHealth() {
    null: health has not answered. Three answers, because "not yet known" must
    not stop the first attempts the way "there is none" stops them for good. */
 function liveHub() {
-  const g = HEALTH && HEALTH.gateway && HEALTH.gateway.health;
-  if (!g || !g.backends) return null;
-  const hub = g.backends.satellites;
+  /* A session that may not read the satellites has no hub to reach. */
+  if (!holds("satellites:read")) return false;
+  if (!HEALTH || !HEALTH.backends) return null;
+  const hub = HEALTH.backends.satellites;
   return hub ? !!hub.reachable : false;
 }
 
@@ -15841,7 +17780,8 @@ function liveHub() {
    the stream, so this leaves it to that. */
 async function liveStream() {
   clearTimeout(LIVE.streamTimer);
-  if (SATELLITES.events || document.hidden || !window.EventSource || satellitesOpen()) return;
+  if (SATELLITES.events || document.hidden || !window.EventSource || satellitesOpen()
+      || !holds("satellites:read")) return;
   const answered = await satellitesCount();
   if (!answered) { liveStreamLater(); return; }
   LIVE.streamTries = 0;
@@ -15925,7 +17865,12 @@ function liveFresh(what, maxAge) {
 
 /* ============================================================== boot === */
 (async function boot() {
-  try { CONFIG = Object.assign(CONFIG, await (await fetch("/ui/config")).json()); } catch {}
+  /* WHO, BEFORE ANYTHING ELSE. Every read below is one this session may or
+     may not make, and a page that asked first and found out after would
+     greet a speech account with a row of refusals. Nothing is read at all
+     when the session has ended or the gateway is locked. */
+  if (!(await whoAmI())) return;
+  try { CONFIG = Object.assign(CONFIG, await json("/ui/config")); } catch {}
 
   /* Ingestion is hidden entirely when it is not configured, and disabled with
      a reason when it is configured but down. Neither is ever a broken button,
@@ -15938,10 +17883,10 @@ function liveFresh(what, maxAge) {
      size" under an empty box, before anybody had pasted anything. The confirm
      card says the same thing at the moment it costs something: Length and
      Transcribe both read "unknown" there, and the note beside them names the
-     probe. CONFIG.probe is still served and is no longer read here. */
+     probe. Whether a link was probed comes back with each link now. */
 
   /* STARTED AND NOT AWAITED, and this is the whole of the cold first paint.
-     /ui/health is proxied to the gateway with a 5 s timeout, the gateway fans
+     /health is the gateway's, at a 5 s timeout per backend; the gateway fans
      out to three backends at GATEWAY_HEALTH_TIMEOUT 5, and one of those
      reaches over the network to a GPU runner that is somebody's desktop.
      Measured 2,517 ms on the first read of a session and 50 to 165 ms after.
@@ -15975,7 +17920,10 @@ function liveFresh(what, maxAge) {
      It is six requests either way and the same load on the NAS; they now
      overlap instead of queueing. */
   for (const seen of remembered()) if (!jobs.has(seen.id)) jobs.set(seen.id,
-    { id: seen.id, status: "queued", created_at: seen.at });
+    { id: seen.id, status: "queued", created_at: seen.at, mine: true });
+  /* WHOSE IS WHOSE, for an admin: the owner column in Jobs and Vocabulary
+     and the clips list name people, not IDs. Nobody else is shown an owner. */
+  if (holds("users:manage")) usersLoad();
   await Promise.all([loadGlossaries(), loadVoices(),
                      refreshJobs().catch(() => {})]);
   /* THE ONE THING THAT NEEDED HEALTH: renderVoices labels the clone group with

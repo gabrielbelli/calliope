@@ -55,34 +55,93 @@ ps -axo pid=,ppid=,command= | awk '$3 ~ /chrome-headless-shell|launch\.py|playwr
 ## The stack
 
 ```text
-browser -> gateway (real) -> page server (real) -> gateway -> stt, tts, tts-long (fakes.py)
-                                                           -> hub (real) <- scripted satellites (fakes.py)
-                             page server -> MeTube (fakes.py)
+browser -> gateway :8080 (real) -> page server, hub (real); stt, tts, tts-long (fakes.py)
+           hub, page server -> gateway :8081 (internal, real) -> stt, tts (fakes.py)
+           page server -> MeTube (fakes.py)
+           scripted satellites (fakes.py) -> gateway device socket -> hub
 ```
 
 The browser loads the page from the real gateway, because that is how the page
-is deployed. Every call the page makes goes through both allowlists: the
-gateway's `/ui` routes and the page server's `PROXIED` table. A path the page
-needs and either table lacks is a 404 here, as it would be in production.
+is deployed. Every call the page makes crosses the gateway's route table, and
+a path the page needs and the table lacks is a 404 here, as it would be at
+home.
+
+### Signed in, as the deployment is
+
+The gateway runs as a developer's machine may run it: bound to loopback, with
+`CALLIOPE_DEV_INSECURE_COOKIE=1` (so the session cookie is `calliope_session`
+and works over plain http), `CALLIOPE_PUBLIC_ORIGIN` set to its own address,
+and its database, keys and service volumes in the run's directory, new every
+session. Its internal listener, `:8081`, is on another free loopback port.
+
+The session's first act is the deployment's first sign-in, through `/login`:
+`admin` with the `CALLIOPE_ADMIN_PASSWORD` the stack made up, then a password
+of the session's own on the forced change. What that sign-in showed and sent is
+kept for `test_auth.py`, because it can happen only once per gateway. Then the
+harness, with the admin's session, mints an admin key for itself (the password
+again first, as any admin key needs), and the admin creates the speech user
+`sam`, who signs in for the first time through `/login` too. Every page a test
+opens starts from the cookie of one of those sign-ins and nothing else.
+
+Every password and key is made up per session, and the gateway's data, keys
+and service volumes are deleted when the session ends.
+
+> The gateway allows twenty sign-in attempts per address per ten minutes, and
+> every test comes from 127.0.0.1. A test signs in itself only when it has
+> to: to sign out, to meet the step-up prompt, or as a person nobody else is
+> using. It never signs out or changes the password of a shared session.
+
+The harness counts every attempt the gateway counts: each sign-in and step-up
+from a page or from `stack`, a wrong password included, and not a request
+refused before the password is read (CSRF, wrong host). Its budget is 16 in
+any ten minutes, four under the gateway's limit
+(`stack.SIGN_IN_BUDGET`). The test that spends the seventeenth fails and says
+so, and so does a test that meets a 429. A full run spends about a dozen in
+its first ten minutes: the first sign-ins of `admin`, `sam` and `robin`, the
+harness's step-up, and the tests in `test_admin.py` and `test_auth.py` that
+sign in or are asked for the password again.
+
+### Nothing believes anything but the gateway
+
+The fake stt, tts and tts-long install `voice_common.identity` for their
+audience, with the public key the gateway wrote to their service volume, so a
+request that did not come through the gateway is a 401 there as it is at home.
+What each one keeps is partitioned as the real service partitions it:
+tts-long's jobs by owner, stt's profiles by namespace.
+
+So a test never calls a backend or the hub directly. What another device does
+goes through the gateway with a key (`stack.api`, `stack.client`), and what a
+test needs to know or change behind the page's back goes through the fakes'
+control port (`fake.jobs()`, `fake.job(id)`, `fake.backend_health(...)`).
+
+The hub and the page server reach the gateway's internal listener at
+`http://voice-gateway:8081`, a constant in `voice_common.identity` and not a
+setting. `launch.py --route voice-gateway:8081=<port>` answers that name for
+them with this session's port, so they run with the deployment's own address.
+
+### The services
 
 The hub (`services/satellites`) is real too. It runs with a temporary
 `SATELLITES_DATA_DIR`, no MQTT, and the pinned wake word models for
 `hey_jarvis` and `alexa`. The models are copied from
 `<venv>/share/calliope-e2e/wakewords`, or from `SATELLITES_TEST_WAKEWORD_DIR`
 when that is set. If they are missing, the hub starts with no wake words
-instead of downloading them.
+instead of downloading them. Its secrets are in the gateway's store, which
+outlives a hub restart and every test: `stack.store_secret` puts one there,
+and `conftest.py` clears the store after any test that stored one, that way or
+through the page.
 
 The page server runs with `UI_METUBE_FORMAT=wav`, a clip store that holds one
-voice, `narrator`, and a resolve limit of 600 a minute instead of 12, because
-every request reaches it from the one gateway. Its metadata probe is on, and
-the only `yt-dlp` on its `PATH` is `bin/yt-dlp`, a shell script that prints an
-info-dict and touches nothing. The venv's real `yt-dlp` is left off that
-`PATH`, because it would reach for the network from a process `launch.py` does
-not wall in.
+voice, `narrator`, which is the admin's own, and a resolve limit of 600 a
+minute instead of 12, because a file of link tests runs as the one admin. Its
+metadata probe is on, and the only `yt-dlp` on its `PATH` is `bin/yt-dlp`, a
+shell script that prints an info-dict and touches nothing. The venv's real
+`yt-dlp` is left off that `PATH`, because it would reach for the network from
+a process `launch.py` does not wall in.
 
-A stack starts in about 2 seconds, once per session. The fake backends and the
-scripted satellites are in one process. Everything is in `stack.py` and
-`fakes.py`.
+A stack starts and signs in in about 10 seconds, once per session. The fake
+backends and the scripted satellites are in one process. Everything is in
+`stack.py`, `fakes.py` and `conftest.py`.
 
 ## Writing a test
 
@@ -100,15 +159,19 @@ def test_a_new_glossary_is_saved_and_listed(page, goto, fake, browser_log, scree
 
 | Fixture | What it is |
 |---|---|
-| `page` | A Playwright `Page`, 1440 x 900, light, in a new context. |
-| `new_page(viewport="desktop", scheme="light", mobile=None, reduced_motion="no-preference", notifications="denied")` | Another page in its own context. `viewport` is `"desktop"`, `"mobile"` (390 x 844, touch, 2x pixels) or `(w, h)`. `notifications="granted"` makes `Notification.permission` read `"granted"` (the headless shell itself answers `"denied"` whatever the context grants); the default makes it `"denied"` and `requestPermission()` answer `"denied"`, so queueing a job never waits on a prompt nobody can see. All of them are closed when the test ends. |
+| `page`, `admin_page` | A Playwright `Page`, 1440 x 900, light, in a new context, signed in as the admin. |
+| `speech_page` | The same, signed in as `sam`, a person with the speech role (`conftest.SPEECH`). |
+| `new_page(viewport="desktop", scheme="light", mobile=None, reduced_motion="no-preference", notifications="denied", user="admin")` | Another page in its own context. `viewport` is `"desktop"`, `"mobile"` (390 x 844, touch, 2x pixels) or `(w, h)`. `user` is `"admin"`, `SPEECH`, `OTHER` (a second speech user, `robin`), any other username (created and signed in on first use), or `None` for nobody. `notifications="granted"` makes `Notification.permission` read `"granted"` (the headless shell itself answers `"denied"` whatever the context grants); the default makes it `"denied"` and `requestPermission()` answer `"denied"`, so queueing a job never waits on a prompt nobody can see. All of them are closed when the test ends. |
+| `people(username)` | That person's `stack.Account`: username, role, ID, the password they chose and their signed-in cookie. |
+| `api_key(preset, user="admin")` | A key of that preset, made by that person with their own session, as the Account tab makes one; once per session. |
+| `first_sign_in` | What the session's first sign-in showed and sent: every answer's text, the markup and every field's value at the forced change and once signed in, and the bootstrap value to search them for. |
 | `goto(path="/ui", target=None)` | Loads a path from the page's origin (the gateway) and waits for `load`, not `networkidle`: the Satellites event stream never goes idle. |
 | `screenshot(name, viewport=None, scheme=None, full_page=False, target=None)` | Writes `WEBUI/shots/<name>.png` and returns its path. `viewport` resizes the page. `scheme` switches `prefers-color-scheme`. CSS animations are stopped for the shot. |
 | `browser_log` | What the test's pages did. `.sent(method, path)` lists the requests that left the page (with the JSON body), and `.responses`, `.failed`, `.console` and `.errors` (uncaught exceptions) hold the rest. `.bad_responses()` returns the 404s, 405s and 5xx responses. `.allow(status, path)` marks one the test caused on purpose (a link to a job that is gone asks for it and gets a 404); `.unexpected()` is the rest. |
 | `dialogs(target=None, answer=True)` | Answers every `confirm()` and `alert()` on `target` (the default page) with Yes, No, or `answer(dialog) -> bool`, and records each one's type and message in `dialogs.seen`. Without it Playwright dismisses them, which is a No the test never chose. |
 | `fresh_hub` | Restarts the hub before the test with an empty data directory, so Kitchen and Lounge are adopted again and Hallway waits. The scripted satellites start over too, as they were when the stack started (a volume, a mute, a forget and a skipped track are gone). For every test that changes what the hub holds: an adopt, a forget, a rename, a wake word, firmware, telemetry, a setting. |
 | `fake` | The fakes' control API (`stack.FakeControl`, below). Failures a test injects are cleared after it. |
-| `stack` | The running stack: `.url` (the gateway), `.ui_direct`, `.hub`, `.restart_hub()`, `.stop_hub()` and `.start_hub()` (the hub down and back, on the same port and with its data), `.inject(key, wav_bytes, **params)` (a clip through a satellite's listening path, `POST /satellites/{id}/inject` with `play=0`), `.describe()`. |
+| `stack` | The running stack: `.url` (the gateway), `.admin`, `.api` (the gateway with the harness's admin key), `.client(key=None)` (a new client of the gateway with a key, the admin's by default), `.person(account)` (the gateway as that person's page calls it), `.mint_key(account, preset)`, `.store_secret(name, value, hosts=[...])`, `.clear_secrets()`, `.restart_hub()`, `.stop_hub()` and `.start_hub()` (the hub down and back, on the same port and with its data), `.inject(key, wav_bytes, **params)` (a clip through a satellite's listening path, `POST /satellites/{id}/inject` with `play=0`), `.describe()`. |
 
 Each context grants the microphone (a synthetic device, never the real one)
 and the clipboard. It uses `en-GB`, `Europe/London`, and blocks service workers.
@@ -116,6 +179,17 @@ and the clipboard. It uses `en-GB`, `Europe/London`, and blocks service workers.
 Every test that passes is then checked for three things it does not have to
 say: no uncaught exception on the page, no 404, 405 or 5xx it did not `allow`,
 and no request that failed outright other than one cut short (`ERR_ABORTED`).
+
+Two helpers in `conftest.py` are for what signing in changed:
+
+| Helper | What it is for |
+|---|---|
+| `password_if_asked(page, password, done)` | Waits for `done`, entering the password first if the page asks for it again. The shared admin session entered it at the start of the session, and a step-up lasts ten minutes, so whether the prompt comes depends on when the test runs. |
+| `fetch_as_page(route)` | `route.fetch()` with the Fetch Metadata the page's own `fetch()` carries. Playwright sends it from outside the page, and the gateway refuses a cookie request without it. |
+
+A route pattern for one of the gateway's paths is anchored to the host
+(`re.compile(r"//[^/]+/satellites$")`): `/satellites$` alone also matches the
+page's own address, `/ui/satellites`, and holds the page itself.
 
 `page.wait_for_function` takes a FUNCTION, `"() => ..."`, never a bare
 expression. The page's policy forbids `eval`, and Playwright evaluates a bare
@@ -127,19 +201,25 @@ inside it.
 
 | Call | What it does |
 |---|---|
-| `fake.requests(backend=, method=, path=, since=)` | What reached the fake backends, oldest first: method, path, query, the `x-` headers, status, and the JSON body or form fields (a file as its name, type and size). `backend` is `stt`, `tts`, `tts_long`, `metube`, or `ha`, `llm` and `hook` for what the hub sent a wake word's action or a button's webhook. `path` is a regular expression. |
-| `fake.last_seq()`, `fake.clear_requests()` | For "only what happened after this point". |
+| `fake.requests(backend=, method=, path=, since=)` | What reached the fake backends, oldest first: method, path, query, the `x-` headers, status, and the JSON body or form fields (a file as its name, type and size). `identity` is who the gateway said asked (`sub`, `kind`, `cred`, `scopes`), or None. An `X-Calliope-*` header is recorded by name only, under `calliope_headers`, and a cookie or an `Authorization` header only as `cookie: true` and `authorization: true`; only `ha`, `llm` and `hook`, which are handed tokens a test made up, keep the `Authorization` value. `began` and `seq` are when the request arrived and when it was answered, on one clock. `backend` is `stt`, `tts`, `tts_long`, `metube`, or `ha`, `llm` and `hook` for what the hub sent a wake word's action or a button's webhook. `path` is a regular expression. |
+| `fake.last_seq()`, `fake.clear_requests()` | For "only what happened after this point": the request log's clock now, and a log emptied. |
 | `fake.fail(path, status=500, method=, backend=, json_body=, times=, delay=, headers=, cut_after=)` | Answers matching requests with an error instead. With `status=None`, it only delays them, which is useful for loading states; with `status=None` and `cut_after=n`, a streamed `/v1/audio/speech` sends n deltas and then tts-stack's in-band error frame, with `headers` on its response (tts-long's `X-Job-Id`, say). |
-| `fake.health(backend, **fields)` | Merges fields over a backend's `/health` (`None` removes one). For example, `fake.health("tts_long", runner=None)` hides the GPU runner panel. |
+| `fake.health(backend, **fields)` | Merges fields over a backend's `/health` (`None` removes one), and returns once the gateway has probed the backends again: it keeps a probe for 5 s. For example, `fake.health("tts_long", runner=None)` hides the GPU runner panel. A field the gateway's allowlist does not name never reaches the page. |
+| `fake.fresh_health()` | Until the gateway's `/health` comes from a probe that arrived after now, for a change a backend's health shows (a job queued elsewhere). A probe already under way carries the old health, even when it is logged after. |
+| `fake.backend_health(backend)` | What a backend's `/health` answers now, overrides included. |
 | `fake.transcript(text)` | What every transcription returns from now on. |
 | `fake.glossaries(writable=True, reason=None, strict=False)` | How profile writes are treated until `reset()`. `writable=False` lists `writable: false` (with the server's `reason` when one is given) and answers a `PUT` or `DELETE` with 503, as a deployment with no volume does. `strict=True` refuses a one-word left-hand side (`belly = Belli`) unless the `PUT` sends `force`, with a reason that says "send force", as the real service does. |
-| `fake.add_job(**fields)` | A tts-long job. Scripted by default: it is queued for 1 s, then finishes one segment every 1.2 s. Use `scripted=False, status="failed"` for a fixed state. |
+| `fake.add_job(**fields)` | A tts-long job, the admin's unless `owner` says whose (`None` is a system record). Scripted by default: it is queued for 1 s, then finishes one segment every 1.2 s. Use `scripted=False, status="failed"` for a fixed state. |
+| `fake.jobs(**params)`, `fake.job(id)` | tts-long's listing over every job whoever owns it (the same filters and counts), and one job's whole record (`None` once it is gone). |
+| `fake.elsewhere(to, username, password, host="127.0.0.1")` | The address of another site's page that submits a sign-in form to `to` by itself: on `127.0.0.1` it is the gateway's site with another origin, on `localhost` another site. |
 | `fake.metube()` | The fake MeTube's downloads. |
 | `fake.reset()` | Restores the request log, failures, health, transcript, jobs, glossaries and MeTube to their start state. The hub is not reset. `stack.restart_hub()` gives a fresh one in about a second. |
 
 ### The scripted satellites
 
-Three devices connect to the real hub's WebSocket when the stack starts.
+Three devices connect to the gateway's device socket, which relays them to the
+real hub, once the session has signed in; the two adopted ones are adopted
+through the gateway with the harness's admin key.
 
 | Key | Id | Device | State |
 |---|---|---|---|
@@ -177,13 +257,15 @@ Their wire shapes are copied from the real services.
 
 | Backend | Routes |
 |---|---|
-| stt-stack | `GET /health`; `POST /v1/audio/transcriptions` (`json`, `text`, `srt`, `vtt`, `verbose_json` with `words` and `segments` spread over the upload's length); `POST /v1/audio/translations` (Parakeet's 400); `POST /transcribe`. Both transcription routes apply the profiles named in a `glossary` field to the transcript, and report the terms that changed it: `/transcribe` as `repaired`, `/v1` as the `x-glossary-repaired` header; `GET /glossaries`; `GET`, `PUT` and `DELETE /glossaries/{name}` (`dictation` and `tech` are built in and answer 409; a line without both sides of `=` is refused with its number) |
+| stt-stack | `GET /health`; `POST /v1/audio/transcriptions` (`json`, `text`, `srt`, `vtt`, `verbose_json` with `words` and `segments` spread over the upload's length); `POST /v1/audio/translations` (Parakeet's 400); `POST /transcribe`. Both transcription routes apply the profiles named in a `glossary` field, as the caller may name them, to the transcript, and report the terms that changed it: `/transcribe` as `repaired`, `/v1` as the `x-glossary-repaired` header. A name the caller cannot see, another person's or `home-assistant` without its scope, is refused with 400 as an unknown profile, listing the names they can, as the service refuses it; `GET /glossaries` (with `?owner=`); `GET`, `PUT` and `DELETE /glossaries/{name}` (`dictation` and `tech` are built in and answer 409; a line without both sides of `=` is refused with its number). A person's profiles are theirs; the admin, who holds `glossaries:read:all`, reads and writes the system's unless `?owner=` names someone, and `home-assistant` is reserved. |
 | tts-stack | `GET /health`; `GET /voices` (Kokoro's names and the OpenAI aliases); `POST /v1/audio/speech` (`pcm` and `wav` are real; `mp3`, `opus`, `aac` and `flac` are WAV bytes under their own content type; `stream_format=sse` sends half-second deltas); `POST /speak` (with `X-Segment-Offsets`) |
-| tts-long | `GET /health` (the engines from `voice_common.engines`, both lanes, an idle GPU runner); `POST /jobs`; `GET /jobs` (with `kind`, `audio`, `status` and `limit`, and the counts); `GET` and `DELETE /jobs/{id}`; `GET` and `DELETE /jobs/{id}/audio`; `POST /v1/audio/speech` |
+| tts-long | `GET /health` (the engines from `voice_common.engines`, both lanes, an idle GPU runner); `POST /jobs` (owned by whoever the gateway says asked); `GET /jobs` (the caller's own, or `?owner=all`, `system` or a user ID with `jobs:read:all`, filtered before the counts and the limit; with `kind`, `audio`, `status` and `limit`); `GET` and `DELETE /jobs/{id}`; `GET` and `DELETE /jobs/{id}/audio` (somebody else's job answers 404 unless `?owner=` covers it); `POST /v1/audio/speech` |
 | MeTube | `POST /add` (a URL containing `unsupported` is refused), `/start`, `/delete`; `GET /history` (a download finishes 3 s after it starts, and one whose URL contains `broken` fails then, with MeTube's error); `GET /audio_download/…` and `/download/…` (one exact path per finished file, with ranges) |
 
-At the start, the Jobs tab has five jobs: a finished clone with audio, one
-whose audio was deleted, a failed clone, a Kokoro run and a transcription.
+At the start, the admin's Jobs tab has five jobs: a finished clone with audio,
+one whose audio was deleted, a failed clone, a Kokoro run and a transcription.
+A sixth, a satellite's transcription, is the hub's (`svc:satellites`), so it
+is on nobody's own list and under The system's for the admin.
 
 Links are resolved without the network. `launch.py` answers
 `example.com`, `example.org` and `example.net` with a public address, so use
@@ -207,8 +289,10 @@ cd services/ui/e2e
 <venv>/bin/python stack.py
 ```
 
-This takes the same lock, prints the URLs, and stops on Ctrl-C or after 20
-minutes. Use it to explore the stack with `curl` while you write a test.
+This takes the same lock, signs the admin in through the API, prints the URLs,
+and stops on Ctrl-C or after 20 minutes. The admin's password and an admin key
+are in a file only you can read, `runs/<pid>/tmp/access.json`, deleted when the
+stack stops. Use them to explore the stack with `curl` while you write a test.
 
 ## The environment
 

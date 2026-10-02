@@ -31,9 +31,17 @@ blunt it:
   * It runs THIRD, only on a URL that our own guard and then MeTube's
     url_guard have both already accepted. It is never the thing that decides
     whether a URL is fetchable.
+  * It resolves the host AGAIN, itself, immediately before it spawns, and
+    refuses any loopback, private, link-local, CGNAT or unspecified answer
+    (D36). The first check ran a MeTube round trip earlier, and a name that
+    has started answering 10.0.0.5 since then is the rebinding the first check
+    cannot see. yt-dlp resolves a third time and follows redirects, which no
+    check here covers (§7 of the design, and guard.py's docstring).
   * It runs in a subprocess with a hard kill, cwd on a directory it cannot
     write, `--no-config` and `--no-cache-dir` so nothing on disk influences it
-    and nothing is left behind.
+    and nothing is left behind, and an environment of three fixed variables,
+    so nothing this service was started with -- a proxy setting, a path to its
+    credential volume -- reaches a process that runs on a user's URL.
   * Its failure mode is a title-only confirm card, never a blocked or broken
     fetch. A stale extractor here costs an estimate, not a download.
 
@@ -48,14 +56,24 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 from typing import Any
 
-from . import config
+from . import config, guard
 
 log = logging.getLogger("voice-ui.probe")
 
-__all__ = ["Probe", "available", "run"]
+__all__ = ["DestinationNotAllowed", "Probe", "available", "run"]
+
+# The whole environment yt-dlp is given. PATH is the platform default, enough
+# for an interpreter's own lookups; the binary itself is passed by absolute
+# path. UTF-8 so a title in any script survives the JSON on stdout.
+ENVIRONMENT = {"PATH": os.defpath, "LANG": "C.UTF-8", "PYTHONIOENCODING": "utf-8"}
+
+
+class DestinationNotAllowed(ValueError):
+    """The URL's host resolves somewhere a probe must not go. Shown to the user."""
 
 # argv, fixed. Nothing from the user reaches it except the URL, in the last
 # position, passed as a list element so no shell ever sees it.
@@ -128,23 +146,34 @@ def _real_subtitles(info: dict[str, Any]) -> bool:
 
 
 async def run(url: str) -> Probe | None:
-    """Probe `url`, or return None if we could not, for any reason.
+    """Probe `url`, or return None if we could not, for any reason but one.
 
     None is a first-class answer, not an error path: every caller degrades to
-    a title-only card, so there is nothing here worth raising over.
+    a title-only card. The exception is a destination this service must not
+    reach, which raises DestinationNotAllowed before anything is spawned: that
+    is a refusal of the link, not a probe that happened to fail.
     """
-    if not available():
+    binary = shutil.which("yt-dlp") if config.PROBE else None
+    if binary is None:
         return None
 
     try:
+        # Resolved off the event loop: getaddrinfo blocks, and this route is
+        # one a person waits on while every other request still needs serving.
+        await asyncio.to_thread(guard.check, url)
+    except guard.GuardError as exc:
+        raise DestinationNotAllowed(str(exc)) from None
+
+    try:
         proc = await asyncio.create_subprocess_exec(
-            "yt-dlp", *ARGV, "--", url,
+            binary, *ARGV, "--", url,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             # A directory this process cannot write. yt-dlp writes nothing with
             # the flags above; cwd is the second lock on that, so a future flag
             # change cannot silently start dropping files next to the app.
             cwd="/",
+            env=ENVIRONMENT,
         )
     except (OSError, ValueError) as exc:
         log.warning("probe could not start: %s", exc)

@@ -36,8 +36,10 @@ def hub_class(name: str, tree: ast.Module = HUB_MAIN) -> ast.ClassDef:
     return found[0]
 
 
-def method(cls: ast.ClassDef, name: str) -> ast.FunctionDef:
-    found = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name]
+def method(cls: ast.ClassDef, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    # Either kind: a method that became a coroutine has not gone anywhere.
+    found = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.name == name]
     assert found, f"{cls.name}.{name} is gone from voice-satellites"
     return found[0]
 
@@ -131,6 +133,7 @@ def test_every_satellite_is_spelt_the_same_on_both_sides():
 HUB_ROUTER = ast.parse((HUB / "router.py").read_text())
 HUB_DESTINATIONS = ast.parse((HUB / "destinations.py").read_text())
 HUB_WAKEWORD = ast.parse((HUB / "wakeword.py").read_text())
+COMMON_SCOPES = ast.parse((REPO / "packages" / "common" / "voice_common" / "scopes.py").read_text())
 MARKUP = re.sub(r"<!--.*?-->", "", PAGE, flags=re.S)
 WORD_MARKUP = page_function("wakeRowMarkup")
 
@@ -143,15 +146,6 @@ def module_string(tree: ast.Module, name: str) -> str:
             value = node.value.args[0] if isinstance(node.value, ast.Call) else node.value
             assert isinstance(value, ast.Constant), f"{name} is not a literal any more"
             return value.value
-    raise AssertionError(f"voice-satellites has no {name}; the contract moved")
-
-
-def hub_tuple(tree: ast.Module, name: str) -> tuple[str, ...]:
-    """The strings a module-level NAME = ("...", ...) holds."""
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name
-                                                for t in node.targets):
-            return tuple(e.value for e in node.value.elts)
     raise AssertionError(f"voice-satellites has no {name}; the contract moved")
 
 
@@ -246,14 +240,16 @@ def test_every_destination_field_the_page_writes_is_one_that_type_has():
 
 def test_the_page_checks_what_the_hub_checks_with_the_hubs_own_patterns():
     assert page_regex("WAKE_LANG") == module_string(HUB_ROUTER, "LANGUAGE")
-    assert page_regex("WAKE_ENV") == module_string(HUB_DESTINATIONS, "ENV_NAME")
+    # A secret's name is the store's pattern (D38), which the hub takes from
+    # voice_common rather than keeping its own.
+    assert "Field(pattern=SECRET_NAME.pattern)" in (HUB / "destinations.py").read_text()
+    assert page_regex("WAKE_ENV") == module_string(COMMON_SCOPES, "SECRET_NAME")
     assert page_regex("WAKE_URL") == module_string(HUB_DESTINATIONS, "HTTP_URL")
     assert page_regex("WAKE_NAME") == module_string(HUB_WAKEWORD, "NAME")
     assert page_regex("WAKE_COLOUR") == module_string(HUB_ROUTER, "COLOUR")
-    # The hub's own settings, which no destination may send, from its tuples.
-    prefixes, words = (hub_tuple(HUB_DESTINATIONS, n) for n in ("HUB_PREFIXES", "CREDENTIAL_WORDS"))
-    assert page_regex("WAKE_HUB_SETTING") == ("^(" + "|".join(p.rstrip("_") for p in prefixes)
-                                              + ")_(?!(.*_)?(" + "|".join(words) + ")(_|$))")
+    # The hub's own settings are no longer refused by name: names resolve in
+    # the secret store, never in the hub's environment (D47).
+    assert "WAKE_HUB_SETTING" not in CODE
     # The secret goes in as a name, and the hub's defaults are the page's.
     types = destination_types()
     for kind in ("ha_assist", "ha_conversation"):
@@ -414,9 +410,6 @@ def test_a_rows_conversation_and_latency_are_read_by_the_names_the_hub_uses():
 
 # ---- a language model word: its key, its model list, its Test -----------------------
 
-HUB_SECRETS = ast.parse((HUB / "secret_store.py").read_text())
-
-
 def hub_function(tree: ast.Module, name: str) -> ast.AsyncFunctionDef | ast.FunctionDef:
     found = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
              and n.name == name]
@@ -444,16 +437,6 @@ def field_call(cls: ast.ClassDef, name: str) -> dict:
             return {k.arg: ast.literal_eval(k.value) for c in calls for k in c.keywords
                     if isinstance(k.value, ast.Constant)}
     raise AssertionError(f"{cls.name}.{name} is gone")
-
-
-def test_the_key_the_page_stores_is_shaped_as_the_hub_takes_it():
-    """PUT /satellites/secrets refuses a field it does not know and a value
-    it would not send; the page checks a pasted key with the hub's own
-    pattern before it goes, and sends exactly the two fields."""
-    assert sent_keys("wakeKeyPut", 'json("/satellites/secrets"') == fields(hub_class("SecretBody"))
-    assert page_regex("WAKE_SECRET") == module_string(HUB_SECRETS, "SECRET_VALUE")
-    assert '@app.put("/satellites/secrets")' in (HUB / "main.py").read_text()
-    assert "WAKE_SECRET.test(value)" in page_function("wakeKeyStore")
 
 
 def test_the_model_list_request_is_what_the_hub_takes():
@@ -503,15 +486,18 @@ def test_the_reply_limit_bounds_are_the_hubs():
     assert f'wakeWithin(d.max_tokens, {hub["ge"]}, {hub["le"]})' in page_function("wakeProblem")
 
 
-def test_the_key_sources_the_page_names_are_the_ones_the_hub_reports():
-    """GET /satellites/wake-words says where each key lives. A word spelt
-    differently on the two sides would read as "no key stored", and offer
-    Store for a key the environment holds."""
-    assert "secrets" in ANSWER_FIELDS and "WAKE.server.secrets" in CODE
-    reported = {c.value for c in ast.walk(hub_function(HUB_ROUTER, "secret_sources"))
-                if isinstance(c, ast.Constant) and isinstance(c.value, str)}
-    named = set(re.findall(r'where === "(\w+)"', page_function("wakeKeyState")))
-    assert named == {"environment", "hub"} and named <= reported
+def test_the_key_state_the_page_reads_is_the_one_the_hub_reports():
+    """GET /satellites/wake-words says, for each name an action sends,
+    whether the secret store holds a value: `env`, names and booleans only.
+    The `secrets` map of where a key lived ("environment" or "hub") went with
+    the hub's own key store (D47); a page still reading it would say "no key
+    stored" for every key the store holds."""
+    assert "env" in ANSWER_FIELDS and "secrets" not in ANSWER_FIELDS
+    assert "WAKE.server.secrets" not in CODE
+    reported = hub_function(HUB_ROUTER, "env_status")
+    assert reported.returns is not None and ast.unparse(reported.returns) == "dict[str, bool]"
+    state = page_function("wakeKeyState")
+    assert "env[name] === true" in state and "name in env" in state
 
 
 def test_the_colour_the_page_shows_for_an_unset_word_is_the_hubs_listening_blue():

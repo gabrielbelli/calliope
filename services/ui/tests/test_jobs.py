@@ -164,7 +164,7 @@ def test_changing_a_filter_asks_the_server_again():
     page, not a question for the server", and that was true of a checkbox over
     an unfiltered fifty. It is false of a filter whose whole purpose is
     reaching rows the fifty do not contain."""
-    wiring = code(HTML[HTML.index('for (const control of ["jobfilter", "jobkind"])'):])
+    wiring = code(HTML[HTML.index('for (const control of ["jobfilter", "jobkind", "jobowner"])'):])
     wiring = wiring[:wiring.index("\n}")]
     assert "schedule(0)" in wiring, "the new filter is never sent"
     assert "renderJobs()" not in wiring, "it redraws the old answer instead of asking"
@@ -221,8 +221,13 @@ def test_a_filtered_listing_never_declares_a_remembered_job_lost():
     guard the first press of a select marks half this browser's history
     "lost when the service restarted".
     """
-    assert 'const unfiltered = query === "";' in REFRESH
+    # Everyone's runs include the reader's own; the system's or one other
+    # person's do not, so those are a filter like any other, and one that
+    # cannot hold a remembered job at all (test_jobs_live runs that case).
+    assert 'const ours = owner === "me" || owner === "all";' in REFRESH
+    assert 'const unfiltered = params.toString() === "" && ours;' in REFRESH
     assert "if (unfiltered && now - seen.at > TTL) continue;" in REFRESH
+    assert "if (!before.has(seen.id) || !ours) continue;" in REFRESH
     assert "} else if (unfiltered) {" in REFRESH, \
         "a finished job hidden by the filter is restored anyway"
 
@@ -392,14 +397,14 @@ def test_the_parameters_for_a_repeat_come_from_the_record():
     # adopt() survives only as the seed for a job the server has not listed yet.
     assert "adopt(payload.id, params)" in body
     fetcher = code(body_of("async function recordFor(id)", "\nasync function retryJob"))
-    assert "json(`/jobs/${encodeURIComponent(id)}`)" in fetcher
+    assert "json(`/jobs/${encodeURIComponent(id)}${jobAs(id)}`)" in fetcher
     assert "remembered().find" in fetcher, "there is no fallback when the record is gone"
 
 
 def test_retry_belongs_to_the_kind_that_can_be_retried():
     """A transcription cannot be run again from here -- the clip is not kept --
     and offering the button anyway is the phone-Retry defect in a new place."""
-    assert 'queued && job.status === "failed" ?' in ROW
+    assert 'queued && job.status === "failed" && !theirs ?' in ROW
     # AND ON THE SERVICE THAT CAN TAKE IT BACK. Retry resubmits to POST /jobs,
     # so what it needs is a run tts-long made -- which is every clone AND every
     # run of an engine whose voices are presets, filed under kind "speech". On

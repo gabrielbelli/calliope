@@ -15,10 +15,14 @@ available.
 
 from __future__ import annotations
 
+import ipaddress
 import os
+from urllib.parse import urlsplit
+
+from voice_common.identity import GATEWAY_INTERNAL
 
 __all__ = [
-    "GATEWAY_URL", "GATEWAY_VERIFY", "GATEWAY_API_KEY", "gateway_authorization",
+    "GATEWAY_INTERNAL_URL", "IGNORED_INTERNAL_URL",
     "METUBE_URL", "METUBE_FOLDER", "METUBE_FORMAT", "METUBE_VIDEO_FORMAT",
     "PROBE", "PROBE_TIMEOUT", "MAX_UPLOAD_BYTES", "MAX_CAPTION_BYTES",
     "MAX_MEDIA_BYTES",
@@ -35,71 +39,39 @@ def flag(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-# The ONLY address this service speaks HTTP to for speech work. Not
-# stt-stack:8000, not tts-stack:8001, not tts-long:8002 -- those three have no
-# `ports` entry in compose.yaml, so a UI that addressed them would work on a
-# laptop with all five containers and fail on the NAS, which is the exact bug
-# the port deletion was made to prevent.
-GATEWAY_URL = os.getenv("UI_GATEWAY_URL", "http://voice-gateway:8080").rstrip("/")
+def _internal_url(raw: str | None) -> tuple[str, bool]:
+    """Where /ui/fetch sends a download to be transcribed, and whether `raw` was refused.
 
-# WHETHER TO VERIFY THE GATEWAY'S CERTIFICATE ON THE INTERNAL HOP.
-#
-# Default true, and it must stay true for anything crossing a network. It is
-# set to 0 in compose for one specific reason: once the gateway serves HTTPS it
-# serves ONLY HTTPS, including to this container, and this container reaches it
-# as `https://voice-gateway:8080` -- a compose service name, on the app's own
-# bridge network. No certificate for a public hostname can match that name, and
-# no certificate authority will issue one that does.
-#
-# The alternatives were considered and are worse: a second listener on plain
-# HTTP would be the second door this whole change removed, and a private CA
-# with `voice-gateway` in its SAN is a certificate authority to maintain,
-# renew and distribute for one hop between two processes on one host.
-#
-# What this does NOT do is weaken anything a client sees. The published port
-# still presents the real wildcard certificate and still validates. This is the
-# hop that never leaves the box.
-GATEWAY_VERIFY = flag("UI_GATEWAY_VERIFY", True)
+    That request carries this service's own key (D6, D64), so the address is
+    the gateway's internal listener and nothing a setting can point anywhere
+    else. The one exception is an address on THIS machine's loopback, which is
+    how the browser harness runs the whole stack on 127.0.0.1 without a
+    `voice-gateway` name to resolve: the key still never leaves the box.
 
-# THE KEY THIS SERVICE PRESENTS TO THE GATEWAY, and the reason the page no
-# longer has a box for one.
-#
-# It used to be the browser's: the page kept a key in localStorage, put it on
-# every XHR, and this service forwarded it untouched. That made :30080 the
-# trust boundary and this container a pipe. The user's decision is that this is
-# not a bring-your-own-key tool, so the credential moved here.
-#
-# WHAT THAT COSTS, AND IT IS NOT SMALL: the trust boundary moves from :30080 to
-# :30081. Anyone who can open the page is authenticated by it, because this
-# process signs their requests for them. That is a defensible trade for a tool
-# on a LAN behind a firewall and it is not defensible for anything reachable
-# from outside one. Publishing 30081 more widely than 30080 now means MORE
-# access, not less.
-#
-# UNSET BY DEFAULT, deliberately, exactly like GATEWAY_API_KEYS in
-# compose.yaml: a key invented in a file that gets deployed is how a
-# placeholder becomes production credentials. Unset means no header is added
-# and any inbound one is forwarded as before, so a deployment with
-# GATEWAY_API_KEYS also unset behaves precisely as it did.
-GATEWAY_API_KEY = (os.getenv("UI_GATEWAY_API_KEY") or "").strip()
-
-
-def gateway_authorization(inbound: str | None) -> str | None:
-    """The Authorization to put on a request to the gateway, or None.
-
-    One function rather than the same conditional at each of the four call
-    sites -- the proxy, the key probe, the ingest hand-off and the page's own
-    calls -- because "which credential goes on this hop" is exactly the kind of
-    question that gets answered three ways and then disagrees in production.
-
-    Ours WINS over an inbound header when it is configured. A caller who sends
-    their own must not be able to make this service present a different key
-    than the one it was given, and there is no case where a browser on this
-    page sends one at all.
+    Anything else falls back to the constant rather than switching link
+    transcription off, because the constant is the only place the key may go
+    and production works with it. The lifespan logs the refusal by name.
     """
-    if GATEWAY_API_KEY:
-        return f"Bearer {GATEWAY_API_KEY}"
-    return inbound
+    value = (raw or "").strip().rstrip("/")
+    if not value or value == GATEWAY_INTERNAL:
+        return GATEWAY_INTERNAL, False
+    parts = urlsplit(value)
+    try:
+        loopback = ipaddress.ip_address(parts.hostname or "").is_loopback
+    except ValueError:
+        loopback = False
+    if (parts.scheme == "http" and loopback and not parts.username
+            and not parts.password and not parts.path and not parts.query):
+        return value, False
+    return GATEWAY_INTERNAL, True
+
+
+# THE ONLY ADDRESS THIS SERVICE SENDS A CREDENTIAL TO: the gateway's internal
+# listener, plain HTTP inside the compose network and never published. The page
+# calls the gateway itself with its session cookie; this process calls it once,
+# from /ui/fetch, with its service key and the user's delegation token.
+GATEWAY_INTERNAL_URL, IGNORED_INTERNAL_URL = _internal_url(
+    os.getenv("UI_GATEWAY_INTERNAL_URL"))
 
 # MeTube. Unset means the URL box is not rendered at all and the page says
 # "link ingestion not configured" -- not a broken button, not a spinner.
@@ -144,11 +116,11 @@ PROBE_TIMEOUT = float(os.getenv("UI_PROBE_TIMEOUT", "20"))
 
 # 2 GiB. services/stt/app/main.py:138 is a bare `file.file.read()` on an
 # UploadFile -- no Content-Length check, no cap, no streaming -- so a 4 GB MKV
-# is buffered whole into the stt container's 6 GB memory limit. Rejecting on
-# Content-Length here costs one comparison and happens before a byte is
-# forwarded. The page also extracts audio in the browser above ~50 MB, which
-# is the real fix; this is the boundary behind it, because a client-side check
-# is a courtesy and not a boundary.
+# is buffered whole into the stt container's 6 GB memory limit. The page's own
+# uploads go to the gateway, which counts them against its own ceiling; this
+# one bounds what /ui/fetch pulls out of MeTube and hands on, and it is the
+# figure the page reads from /ui/config to decide when to extract the audio in
+# the browser first.
 MAX_UPLOAD_BYTES = int(os.getenv("UI_MAX_UPLOAD_BYTES", str(2 * 1024**3)))
 
 # 8 MiB, and it is a sanity bound rather than a real limit. A captions download
@@ -207,7 +179,7 @@ CONFIRM_BYTES = int(os.getenv("UI_CONFIRM_BYTES", str(50 * 1024**2)))
 # labels it an estimate, the page keeps its own EMA from the realtime_factor
 # the native /transcribe route returns on every real transcription, and the
 # page warns when duration/rtf crosses the budget below. Someone must
-# re-measure on orko and correct main.py:121's help text in the same change,
+# re-measure on the deployment host and correct main.py:121's help text in the same change,
 # or the UI and the gateway's own 504 will disagree in front of one user.
 STT_RTF_SEED = float(os.getenv("UI_STT_RTF", "8.5"))
 STT_BUDGET_SECONDS = float(os.getenv("UI_STT_BUDGET", "900"))
@@ -224,5 +196,7 @@ MAX_CLIP_BYTES = int(os.getenv("UI_MAX_CLIP_BYTES", str(25 * 1024**2)))
 MAX_CLIP_SECONDS = float(os.getenv("UI_MAX_CLIP_SECONDS", "30"))
 
 # /ui/resolve spawns a process that makes an outbound request on a URL a user
-# chose. That is a scanning primitive if it is free, so it is not free.
+# chose. That is a scanning primitive if it is free, so it is not free. Counted
+# per signed-in person (D36): a household behind one address is several
+# allowances, and one person on two devices is one.
 RESOLVE_PER_MINUTE = int(os.getenv("UI_RESOLVE_PER_MINUTE", "12"))

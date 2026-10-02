@@ -22,7 +22,8 @@ What they prevent:
   * one missed poll (the hub restarting): what the hub answered stays on
     screen with the reason beside it, and the reason goes with the next poll;
   * an AirPlay control offered for a command the phone does not take now,
-    or one that sends another command than the one it says.
+    or one that sends another command than the one it says;
+  * a webhook's address stored over a secret the hub keeps as something else.
 
 The same harness drives test_satellites_ordering.py and
 test_satellites_states.py, which import `run` from here.
@@ -94,7 +95,8 @@ const elements = new Map();
 const $ = id => { if (!elements.has(id)) elements.set(id, stand()); return elements.get(id); };
 // The tab is not open, so satellitesRefresh schedules no next poll.
 $("tab-satellites").hidden = true;
-const document = { activeElement: null, createElement: () => stand(), getElementById: $ };
+const document = { activeElement: null, createElement: () => stand(), getElementById: $,
+                   querySelectorAll: () => [] };
 const window = {};
 class Option {}
 // note() is recorded, so a scenario can read what the reader was told.
@@ -108,6 +110,11 @@ const confirm = question => { asked.push(String(question)); return confirming; }
 const note = (host, kind, text) => { if (text) notes.push([kind, String(text)]); };
 const busy = () => () => {};
 const focusWithin = box => box.contains(document.activeElement);
+// The session: every scope, so every control is drawn. A failed stream or
+// picture asks nobody here, and no refusal names a secret.
+const holds = () => true;
+const sessionCheck = () => {};
+const secretLink = () => false;
 const reason = (p, fallback) => fallback;
 const saved = new Map();
 const store = { get: (k, d) => saved.has(k) ? saved.get(k) : d, set: (k, v) => saved.set(k, v) };
@@ -152,19 +159,19 @@ const hub = {
   modelsFail: "",
   testCalls: [],
   testFail: "",
-  // Keys: PUT /satellites/secrets. `secrets` is the hub's name -> "hub" or
-  // "environment" map, undefined for a hub from before keys could be
-  // stored; `environment` is the names the hub's environment sets.
+  // Keys: the gateway's secret store (PUT and DELETE /admin/secrets/{name}).
+  // `store` is name -> its row as GET /admin/secrets lists it; every write is
+  // recorded in secretCalls with its name, the value (null for a clear) and
+  // the bindings it sent. A stored name the hub's env reports turns true.
   secretCalls: [],
-  secrets: undefined,
-  environment: [],
+  store: {},
   // Which tools the hub can run (GET /satellites/wake-words' `tools`),
   // undefined for a hub from before it said.
   tools: undefined,
 };
 const answer = () => JSON.parse(JSON.stringify({ available: hub.available, words: hub.words,
                                                  ptt: hub.ptt, custom: hub.custom, env: hub.env,
-                                                 secrets: hub.secrets, tools: hub.tools,
+                                                 tools: hub.tools,
                                                  warnings: hub.warnings, load_error: null }));
 let held = [];
 function release() { for (const r of held) r(); held = []; }
@@ -252,18 +259,22 @@ async function json(path, options) {
     return { model: JSON.parse(options.body).model, reply: "Hello there.", first_token_ms: 420,
              total_ms: 1260, token_limit: "max_tokens" };
   }
-  if (method === "PUT" && path === "/satellites/secrets") {
-    const body = JSON.parse(options.body);
-    hub.secretCalls.push(body);
+  if (method === "GET" && path === "/admin/secrets") {
     await later();
-    if (body.value !== null && hub.environment.includes(body.name)) {
-      const e = new Error("409 " + body.name + " is set in the hub's environment"); e.status = 409; throw e;
-    }
-    hub.secrets = { ...(hub.secrets || {}) };
-    hub.env = { ...(hub.env || {}) };
-    if (body.value === null) { delete hub.secrets[body.name]; if (body.name in hub.env) hub.env[body.name] = false; }
-    else { hub.secrets[body.name] = "hub"; if (body.name in hub.env) hub.env[body.name] = true; }
-    return answer();
+    return { secrets: Object.values(JSON.parse(JSON.stringify(hub.store))) };
+  }
+  if ((method === "PUT" || method === "DELETE") && path.startsWith("/admin/secrets/")) {
+    const name = decodeURIComponent(path.slice("/admin/secrets/".length));
+    const body = method === "PUT" ? JSON.parse(options.body) : { value: null };
+    hub.secretCalls.push({ name, ...body });
+    await later();
+    const row = hub.store[name] || { name, kind: body.kind || "bearer", consumers: [], allowed_hosts: [] };
+    if (method === "PUT") {
+      hub.store[name] = { ...row, set: true, consumers: body.consumers || row.consumers,
+                          allowed_hosts: body.allowed_hosts || row.allowed_hosts };
+    } else if (hub.store[name]) hub.store[name] = { ...row, set: false };
+    if (hub.env && name in hub.env) hub.env = { ...hub.env, [name]: method === "PUT" };
+    return method === "PUT" ? { secret: hub.store[name] } : null;
   }
   throw new Error("the fake hub has no " + method + " " + path);
 }
@@ -880,7 +891,7 @@ def test_the_airplay_section_shows_the_cover_the_hub_keeps(tmp_path):
       satAirPlay(li, { ...n, status: { airplay: { running: true, session: false } } }, {});
       console.log(JSON.stringify({ first, shown, gone: art.hidden }));
     """)
-    assert got["first"] == "/ui/api/satellites/b827eb121359/airplay/artwork?v=ab12"
+    assert got["first"] == "/satellites/b827eb121359/airplay/artwork?v=ab12"
     assert got["shown"] is False and got["gone"] is True
 
 
@@ -905,7 +916,7 @@ def test_a_cover_that_was_not_there_yet_is_asked_for_again(tmp_path):
     """)
     assert got["once"] == 1, "a cover still loading was asked for again on every poll"
     assert got["hidden"] is True, got
-    assert got["asked"] == ["/ui/api/satellites/b827eb121359/airplay/artwork?v=ab12"] * 2, got
+    assert got["asked"] == ["/satellites/b827eb121359/airplay/artwork?v=ab12"] * 2, got
     assert got["shown"] is True, got
 
 
@@ -1048,3 +1059,20 @@ def test_disconnect_asks_first_and_names_the_phone(tmp_path):
     ], "Next asked a question, or Disconnect did not"
     assert got["refused"] == 0, "Disconnect was sent after No"
     assert got["posts"] == ["disconnect", "next"], got
+
+
+def test_a_webhook_address_is_never_stored_under_a_secret_kept_as_something_else(tmp_path):
+    """Recheck L5: the hub sends a button's webhook only to a secret_url. An
+    address stored over a bearer of the same name kept the bearer's kind, so
+    the hub refused the mapping later, and the key that was there was gone."""
+    got = run(tmp_path, """
+      hub.store.SATELLITES_BUTTON_MODE = { name: "SATELLITES_BUTTON_MODE", kind: "bearer", set: true,
+                                           consumers: ["satellites"], allowed_hosts: ["https://ha.example:443"] };
+      const address = { value: "https://ha.example/api/webhook/mode" };
+      await satHookStore(stand(), { dataset: { btn: "mode", edge: "press" } },
+                         { value: "SATELLITES_BUTTON_MODE" }, address, stand());
+      console.log(JSON.stringify({ sent: hub.secretCalls, said: notes[notes.length - 1], emptied: address.value }));
+    """)
+    assert got["sent"] == [] and got["emptied"] == "", got
+    assert got["said"] == ["bad", "SATELLITES_BUTTON_MODE is a bearer, not a secret_url: a webhook's "
+                                  "address is kept as one. Choose another name."], got

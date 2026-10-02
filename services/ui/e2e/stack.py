@@ -1,23 +1,38 @@
 """The local stack the browser tests run against, and the process hygiene that
 keeps it from outliving them.
 
-    browser -> gateway (real) -> page server (real) -> gateway -> backends (fakes.py)
-                                                              -> hub (real) <- scripted satellites
+    browser -> gateway :8080 (real) -> page server, hub (real), stt, tts, tts-long (fakes.py)
+    hub, page server -> gateway :8081 (internal) -> stt, tts (fakes.py)
+    scripted satellites -> gateway device socket -> hub
 
 Everything listens on 127.0.0.1, on ports the kernel picked, and nothing in it
 can reach anything else (launch.py). The browser is pointed at the GATEWAY,
 not at the page server, because that is how the page is deployed: it is served
-from the gateway's origin and every call it makes crosses the gateway's /ui
-allowlist twice. A route the page needs and the gateway does not carry is a
-404 here, as it would be at home -- which is the class of bug a deep link to a
-tab or a satellite is most likely to introduce.
+from the gateway's origin, signed in there, and every call it makes crosses
+the gateway's route table. A route the page needs and the gateway does not
+carry is a 404 here, as it would be at home -- which is the class of bug a deep
+link to a tab or a satellite is most likely to introduce.
+
+THE GATEWAY IS THE DEPLOYMENT'S, CONFIGURED AS A DEVELOPER'S MACHINE MAY BE
+(D16): bound to loopback, so CALLIOPE_DEV_INSECURE_COOKIE drops `__Host-` and
+`Secure` and the session cookie works over plain http; its public origin this
+session's own address; its database, keys and service volumes in this run's
+directory, new every session. So the first sign-in is the deployment's first
+sign-in: admin, with the CALLIOPE_ADMIN_PASSWORD this session made up, and a
+password of the session's choosing straight after (D21). Nothing here is a
+test-only door: every backend believes the gateway's signature and nothing
+else, and the harness reaches them through the gateway with a key or a
+session like anyone else, or through the fakes' control port.
 
 MANUAL USE, for poking at the stack with curl while writing a test:
 
     <venv>/bin/python stack.py
 
-takes the same machine-wide lock the tests take, prints the URLs, and stops
-everything on Ctrl-C or after 20 minutes. It starts no browser.
+takes the same machine-wide lock the tests take, signs the admin in, prints
+the URLs and the path of a file only you can read that holds the admin's
+password and an admin key (never the values themselves; the file goes with
+the run), and stops everything on Ctrl-C or after 20 minutes. It starts no
+browser.
 """
 
 from __future__ import annotations
@@ -28,6 +43,7 @@ import errno
 import fcntl
 import json
 import os
+import secrets
 import shutil
 import signal
 import socket
@@ -36,9 +52,10 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -83,6 +100,25 @@ WAKEWORD_CACHE = Path(os.environ.get("SATELLITES_TEST_WAKEWORD_DIR")
 # POST /satellites/firmware?model=...&version=...&signature=UNCHECKED_SIGNATURE,
 # with a body whose first byte is 0xE9 (an ESP32 application image).
 UNCHECKED_SIGNATURE = "MAYCAQECAQE"
+
+# The session cookie's name on a loopback bind with CALLIOPE_DEV_INSECURE_COOKIE
+# (D16); at home it is __Host-calliope_session.
+COOKIE = "calliope_session"
+# What a page's own fetch() says about itself (D14, D15). The harness sends
+# these when it acts with a person's session, as the page would; a cookie
+# request without them is refused.
+SAME_ORIGIN = {"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}
+
+# THE SIGN-IN BUDGET. The gateway lets one address make twenty sign-in
+# attempts in ten minutes (D19; IP_ATTEMPTS in services/gateway/app/throttle.py),
+# successes and step-ups included, and every attempt here comes from
+# 127.0.0.1. Past that it answers 429, and the tests that meet it fail for a
+# reason that has nothing to do with them. So the harness counts its own and
+# holds four back: the test that spends the seventeenth fails, naming the
+# budget, while the gateway would still have let it through.
+SIGN_IN_LIMIT = 20
+SIGN_IN_BUDGET = SIGN_IN_LIMIT - 4
+SIGN_IN_WINDOW = 10 * 60
 
 
 def free_port() -> int:
@@ -262,6 +298,10 @@ class FakeControl:
     def __init__(self, base: str) -> None:
         self.base = base
         self.http = httpx.Client(base_url=base, timeout=30)
+        # The gateway, with a key that may read /health in full: set once the
+        # stack has one, so a change to a backend's health can wait until the
+        # gateway has looked again (fresh_health).
+        self.gateway: httpx.Client | None = None
 
     def _ok(self, response: httpx.Response) -> Any:
         response.raise_for_status()
@@ -276,8 +316,9 @@ class FakeControl:
         return self._ok(self.http.get("/__fake/requests", params=params))
 
     def last_seq(self) -> int:
-        entries = self.requests()
-        return entries[-1]["seq"] if entries else 0
+        """The request log's clock now: a request logged after this has a
+        greater `seq`, and one that arrived after it a greater `began`."""
+        return self._ok(self.http.get("/__fake/seq"))["seq"]
 
     def clear_requests(self) -> None:
         self._ok(self.http.delete("/__fake/requests"))
@@ -286,7 +327,8 @@ class FakeControl:
         """Requests, failures, health overrides, transcript, jobs, glossaries and
         MeTube back to how the session started. The hub is real and is not
         reset here; see Stack.restart_hub."""
-        self._ok(self.http.post("/__fake/reset"))
+        if self._ok(self.http.post("/__fake/reset"))["health_changed"]:
+            self.fresh_health()
 
     def fail(self, path: str, *, status: int | None = 500, method: str | None = None,
              backend: str | None = None, json_body: Any = None, body: str | None = None,
@@ -309,8 +351,33 @@ class FakeControl:
         self._ok(self.http.delete("/__fake/fail"))
 
     def health(self, backend: str, **fields: Any) -> None:
-        """Merge fields over a backend's /health (stt, tts, tts_long); None removes one."""
+        """Merge fields over a backend's /health (stt, tts, tts_long); None
+        removes one. Returns once the gateway has read the backends again, so
+        the next page load is told."""
         self._ok(self.http.post(f"/__fake/health/{backend}", json=fields))
+        self.fresh_health()
+
+    def fresh_health(self, seconds: float = 15.0) -> None:
+        """Until the gateway's /health comes from a probe made after now. The
+        gateway keeps each probe for 5 s (D50), so a page loaded straight
+        after a change to a backend's health would otherwise be told the old
+        one. Its own GET /health of the backends is in the request log.
+
+        A probe counts only if it ARRIVED after now (`began`): one that was
+        already being answered when the change was made carries the old
+        health, even when it is logged after."""
+        if self.gateway is None:
+            return
+        since = self.last_seq()
+        ends = time.monotonic() + seconds
+        while True:
+            self.gateway.get("/health").raise_for_status()
+            if any(probe["began"] > since
+                   for probe in self.requests(method="GET", path=r"^/health$", since=since)):
+                return
+            if time.monotonic() > ends:
+                raise TimeoutError("the gateway did not probe the backends again")
+            time.sleep(0.5)
 
     def transcript(self, text: str) -> None:
         self._ok(self.http.put("/__fake/transcript", json={"text": text}))
@@ -325,9 +392,36 @@ class FakeControl:
                                 json={"writable": writable, "reason": reason, "strict": strict}))
 
     def add_job(self, **fields: Any) -> dict[str, Any]:
-        """A tts-long job. Scripted by default: queued for 1 s, then one segment
+        """A tts-long job, the session admin's unless `owner` says whose (None
+        is system). Scripted by default: queued for 1 s, then one segment
         every 1.2 s. scripted=False keeps whatever status is given."""
         return self._ok(self.http.post("/__fake/jobs", json=fields))
+
+    def jobs(self, **params: Any) -> dict[str, Any]:
+        """tts-long's GET /jobs answer over every job, whoever owns it: the
+        same filters (kind, status, audio, limit) and the same counts."""
+        return self._ok(self.http.get("/__fake/jobs", params=params))
+
+    def job(self, job_id: str) -> dict[str, Any] | None:
+        """One job's whole record as tts-long keeps it, or None once it is gone."""
+        response = self.http.get(f"/__fake/jobs/{job_id}")
+        return None if response.status_code == 404 else self._ok(response)
+
+    def backend_health(self, backend: str) -> dict[str, Any]:
+        """What a backend's /health answers now (stt, tts, tts_long), overrides included."""
+        return self._ok(self.http.get(f"/__fake/health/{backend}"))
+
+    def owners(self, admin: str) -> None:
+        """Whose the seeded history is. The fakes start over with it."""
+        self._ok(self.http.post("/__fake/owners", json={"admin": admin}))
+
+    def elsewhere(self, to: str, username: str, password: str, *, host: str = "127.0.0.1") -> str:
+        """The address of another site's page that signs its visitor in to `to`
+        as `username` by a form it submits itself. 127.0.0.1 is the gateway's
+        site with another origin; localhost is another site."""
+        port = self.base.rsplit(":", 1)[1]
+        query = urlencode({"to": to, "username": username, "password": password})
+        return f"http://{host}:{port}/__fake/elsewhere/sign-in?{query}"
 
     def metube(self) -> dict[str, Any]:
         return self._ok(self.http.get("/__fake/metube"))
@@ -398,11 +492,83 @@ class FakeControl:
         self.http.close()
 
 
+# ---- the people ---------------------------------------------------------------------
+
+
+@dataclass
+class Account:
+    """A person of this session's gateway: who, the password they chose, and
+    the browser session they signed in with, which tests reuse.
+
+    `password` is the temporary one an admin was shown until the person has
+    chosen their own at first sign-in, which is the only way out of a
+    must-change session (D21, D25). Every password is made up per session.
+    """
+
+    username: str
+    role: str
+    password: str
+    id: str = ""
+    # Playwright's storage state of the browser that signed in: its cookie.
+    state: dict[str, Any] | None = None
+    keys: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def cookie(self) -> str:
+        return next(c["value"] for c in (self.state or {}).get("cookies", []) if c["name"] == COOKIE)
+
+
+def new_password() -> str:
+    """Past every rule in D18 by construction, and never the same twice."""
+    return "e2e-" + secrets.token_urlsafe(18)
+
+
+class Attempts:
+    """Every password this session has asked the gateway to check, by when:
+    a sign-in or a step-up, from a page or from the harness (SIGN_IN_BUDGET).
+
+    note() is told of each answer. An answer the gateway gives before its
+    throttle is reached (a CSRF or wrong-host refusal, a body that is not
+    JSON) is no attempt; a wrong password and a 429 are. A password change
+    from Account would count as well, but nothing here makes one: the forced
+    change after a first sign-in asks for no current password, and the
+    gateway does not count it. What went over the budget, or was throttled,
+    is kept in `over` until conftest.sign_ins_within_budget fails the test
+    with it."""
+
+    # Besides a success: the wrong password (401 at sign-in, 403 at step-up)
+    # and the throttle's own refusal.
+    COUNTED = {"/auth/login": (401, 429), "/auth/step-up": (403, 429)}
+
+    def __init__(self) -> None:
+        self.times: list[float] = []
+        self.over: list[str] = []
+
+    def note(self, path: str, status: int, by: str) -> None:
+        refusals = self.COUNTED.get(path)
+        if refusals is None or not (status < 300 or status in refusals):
+            return
+        now = time.monotonic()
+        self.times = [t for t in self.times if t > now - SIGN_IN_WINDOW] + [now]
+        if status == 429:
+            self.over.append(f"the gateway throttled {path} ({by}) after {len(self.times)} attempts "
+                             f"in ten minutes: it allows {SIGN_IN_LIMIT} from one address (D19)")
+        elif len(self.times) > SIGN_IN_BUDGET:
+            self.over.append(f"{len(self.times)} sign-in attempts in ten minutes, the latest {path} "
+                             f"({by}): the harness's budget is {SIGN_IN_BUDGET} of the gateway's "
+                             f"{SIGN_IN_LIMIT} per address (D19). Reuse a signed-in person "
+                             "rather than signing in again")
+
+    def take(self) -> list[str]:
+        over, self.over = self.over, []
+        return over
+
+
 # ---- the stack ---------------------------------------------------------------------
 
 
 class Stack:
-    """Start and stop the fakes, the hub, the gateway and the page server.
+    """Start and stop the fakes, the gateway, the page server and the hub.
 
     `stop()` is idempotent and safe from a signal handler or atexit, which is
     how it is also installed: every child is in a process group of its own, and
@@ -415,43 +581,76 @@ class Stack:
         self.run = RUNS / str(self.owner)
         self.children: dict[str, subprocess.Popen] = {}
         self.ports = {name: free_port() for name in
-                      ("stt", "tts", "long", "metube", "control", "hub", "gateway", "ui")}
+                      ("stt", "tts", "long", "metube", "control", "hub", "gateway", "internal", "ui")}
         self.url = f"http://127.0.0.1:{self.ports['gateway']}"
         self.ui_direct = f"http://127.0.0.1:{self.ports['ui']}"
         self.hub = f"http://127.0.0.1:{self.ports['hub']}"
         self.fake = FakeControl(f"http://127.0.0.1:{self.ports['control']}")
         self.wake_words: str = ""
+        # The gateway's volumes (D7): gateway-data, calliope-keys and every
+        # calliope-svc-<name>, which each service reads as its /run/calliope.
+        self.svc = self.run / "svc"
+        # CALLIOPE_ADMIN_PASSWORD, the first-access value: made up here, used
+        # once by the first sign-in, and never a password anyone keeps.
+        self.bootstrap = new_password()
+        self.admin = Account("admin", "admin", self.bootstrap)
+        self.people: dict[str, Account] = {"admin": self.admin}
+        # The harness's own admin key, minted once the admin has signed in:
+        # what adopts the scripted satellites and what `api` sends.
+        self.key: str | None = None
+        self.attempts = Attempts()
+        # The names store_secret has put in the gateway's store since the
+        # store was last cleared (clear_secrets).
+        self.stored: set[str] = set()
+        self._api: httpx.Client | None = None
         self._stopped = False
 
     # -- lifecycle --
 
     def start(self) -> Stack:
+        """Everything up, nobody signed in, no satellite connected yet: those
+        need the admin, whose first sign-in is the caller's (conftest signs in
+        through the page; main() through the API). Then provision()."""
         self._prune_runs()
         if self.run.exists():
             shutil.rmtree(self.run)
         (self.run / "tmp").mkdir(parents=True)
-        self._seed_voices()
+        (self.run / "voices").mkdir()
         atexit.register(self.stop)
         try:
-            self._spawn("fakes", ["--fakes", "--repo", str(REPO),
+            self._spawn("fakes", ["--fakes", "--repo", str(REPO), "--svc-dir", str(self.svc),
                                   *(f"--{n}-port={self.ports[n]}" for n in ("stt", "tts", "long",
                                                                           "metube", "control"))],
                         cwd=HERE, env={})
             self._wait("fakes", f"http://127.0.0.1:{self.ports['control']}/__fake/health")
-            self._start_hub()
             self._spawn("gateway", ["--app", "app.main:app", "--app-dir", str(SERVICES / "gateway"),
                                     "--port", str(self.ports["gateway"])],
                         cwd=SERVICES / "gateway", env={
+                            "CALLIOPE_DATA_DIR": str(self.run / "gateway-data"),
+                            "CALLIOPE_KEYS_DIR": str(self.run / "gateway-keys"),
+                            "CALLIOPE_SVC_DIR": str(self.svc),
+                            "CALLIOPE_ADMIN_PASSWORD": self.bootstrap,
+                            "CALLIOPE_PUBLIC_ORIGIN": self.url,
+                            # Honoured only because the bind is loopback (D16);
+                            # GATEWAY_BIND says what uvicorn was given.
+                            "CALLIOPE_DEV_INSECURE_COOKIE": "1",
+                            "GATEWAY_BIND": "127.0.0.1",
+                            "GATEWAY_INTERNAL_BIND": "127.0.0.1",
+                            "GATEWAY_INTERNAL_PORT": str(self.ports["internal"]),
                             "GATEWAY_STT_URL": f"http://127.0.0.1:{self.ports['stt']}",
                             "GATEWAY_TTS_URL": f"http://127.0.0.1:{self.ports['tts']}",
                             "GATEWAY_TTS_LONG_URL": f"http://127.0.0.1:{self.ports['long']}",
                             "GATEWAY_UI_URL": self.ui_direct,
                             "GATEWAY_SATELLITES_URL": self.hub,
                             "GATEWAY_LOG_LEVEL": "WARNING"})
+            # The gateway mints every service's key and identity.pub before it
+            # answers, so the services after it start with their credentials.
+            self._wait("gateway", f"{self.url}/health")
+            self._start_hub()
             self._spawn("ui", ["--app", "app.main:app", "--app-dir", str(SERVICES / "ui"),
                                "--port", str(self.ports["ui"])],
-                        cwd=SERVICES / "ui", env={
-                            "UI_GATEWAY_URL": self.url,
+                        cwd=SERVICES / "ui", routed=True, env={
+                            "CALLIOPE_RUN_DIR": str(self.svc / "ui"),
                             "UI_METUBE_URL": f"http://127.0.0.1:{self.ports['metube']}",
                             # WAV, not the production opus: the fake MeTube
                             # serves a WAV, and a name that says so keeps the
@@ -470,19 +669,144 @@ class Stack:
                             "UI_PROBE": "1",
                             "PATH": f"{HERE / 'bin'}:/usr/bin:/bin",
                             # Twelve a minute is the deployment's rate limit for
-                            # one client, and every request here comes from the
-                            # one gateway: a file of link tests passes it in
-                            # under a minute and would read 429s it did not cause.
+                            # one person, and a file of link tests passes it in
+                            # under a minute as the one admin, so it would read
+                            # 429s it did not cause.
                             "UI_RESOLVE_PER_MINUTE": "600",
                             "UI_VOICE_DIR": str(self.run / "voices"),
                             "UI_LOG_LEVEL": "WARNING"})
-            self._wait("gateway", f"{self.url}/health")
             self._wait("ui", f"{self.ui_direct}/health")
-            self._wait("page", f"{self.url}/ui")
         except BaseException:
             self.stop()
             raise
         return self
+
+    def first_sign_in(self) -> None:
+        """The admin's first sign-in over the API, for main(): the bootstrap
+        value, then a password of the session's own. The tests sign in
+        through the page instead (conftest)."""
+        with self.person(None) as http:
+            self._ok(http.post("/auth/login", json={"username": "admin", "password": self.bootstrap}))
+            self.admin.password = new_password()
+            self._ok(http.post("/auth/password", json={"new_password": self.admin.password}))
+            self.admin.state = {"cookies": [{"name": COOKIE, "value": http.cookies[COOKIE]}]}
+
+    def provision(self) -> None:
+        """Once the admin has signed in (self.admin.state holds the session):
+        their ID, which the fakes seed the history under; an admin key for the
+        harness, minted as any admin mints one, with the password again (D13);
+        and the satellites, adopted with it."""
+        with self.person(self.admin) as http:
+            self.admin.id = self._ok(http.get("/auth/me"))["user"]["id"]
+            self._ok(http.post("/auth/step-up", json={"password": self.admin.password}))
+            self.key = self._ok(http.post("/auth/keys", json={
+                "name": "e2e harness", "preset": "admin", "expires_days": 30}))["plaintext"]
+        self.fake.owners(self.admin.id)
+        self.fake.gateway = self.api
+        self._seed_voices(self.admin.id)
+        self._connect_satellites()
+
+    def create_person(self, username: str, role: str = "speech") -> Account:
+        """A person an admin created, with the temporary password they were
+        shown (D25). The first sign-in is the caller's, through the page."""
+        with self.person(self.admin) as http:
+            created = self._ok(self._stepped_up(http, self.admin, lambda: http.post(
+                "/admin/users", json={"username": username, "role": role})))
+        person = Account(username, role, created["temporary_password"], id=created["user"]["id"])
+        self.people[username] = person
+        return person
+
+    def mint_key(self, person: Account, preset: str, *, name: str | None = None,
+                 expires_days: int = 30) -> str:
+        """A key of `preset`, made with the person's own session as the Account
+        tab makes one. A preset that needs the password again gets it."""
+        body = {"name": name or f"e2e {preset}", "preset": preset, "expires_days": expires_days}
+        with self.person(person) as http:
+            return self._ok(self._stepped_up(http, person, lambda: http.post("/auth/keys", json=body)))[
+                "plaintext"]
+
+    def store_secret(self, name: str, value: str | None, *, hosts: list[str],
+                     kind: str = "bearer", consumers: tuple[str, ...] = ("satellites",)) -> None:
+        """A secret in the gateway's store, as Admin › Secrets stores one: the
+        admin's session, the password again when it is asked for (D13), the
+        services that may read it and the hosts it may go to (D41). None
+        clears it."""
+        path = f"/admin/secrets/{name}"
+        with self.person(self.admin) as http:
+            def send() -> httpx.Response:
+                if value is None:
+                    return http.delete(path)
+                return http.put(path, json={"value": value, "kind": kind, "consumers": list(consumers),
+                                            "allowed_hosts": hosts})
+            answer = self._stepped_up(http, self.admin, send)
+            if value is None and answer.status_code == 404:
+                return  # nothing was stored, which is what clearing asks for
+            if answer.is_error:
+                self._ok(answer)
+            if value is not None:
+                self.stored.add(name)
+
+    def clear_secrets(self) -> None:
+        """Every value in the gateway's store cleared. The store outlives the
+        hub, which restart_hub starts afresh, and every test, so a key one
+        test stored would otherwise be what the next test's hub, or its
+        Admin › Secrets, finds (conftest.no_secret_left)."""
+        # Forgotten even when clearing fails: the test it failed after says
+        # so, and every test after it would otherwise fail the same way.
+        self.stored.clear()
+        with self.person(self.admin) as http:
+            for row in self._ok(http.get("/admin/secrets"))["secrets"]:
+                if row["set"]:
+                    self.store_secret(row["name"], None, hosts=[])
+
+    def person(self, who: Account | None) -> httpx.Client:
+        """The gateway as `who`'s page calls it: their session cookie and the
+        fetch metadata a same-origin fetch() carries. None is nobody. Every
+        sign-in and step-up it sends is counted against SIGN_IN_BUDGET."""
+        cookies = {COOKIE: who.cookie} if who is not None and who.state else None
+        return httpx.Client(base_url=self.url, timeout=30, cookies=cookies,
+                            headers=SAME_ORIGIN | {"Origin": self.url},
+                            event_hooks={"response": [self._attempted]})
+
+    def _attempted(self, response: httpx.Response) -> None:
+        if response.request.method == "POST":
+            self.attempts.note(response.request.url.path, response.status_code, "by the harness")
+
+    @property
+    def api(self) -> httpx.Client:
+        """The gateway with the harness's admin key, for what a test does
+        behind the page's back: what another device sends, a direct read of
+        the hub. A Bearer request, so no CSRF check applies to it."""
+        if self._api is None:
+            if self.key is None:
+                raise RuntimeError("the stack has no admin key until provision() has run")
+            self._api = httpx.Client(base_url=self.url, timeout=60,
+                                     headers={"Authorization": f"Bearer {self.key}"})
+        return self._api
+
+    def client(self, key: str | None = None, **options: Any) -> httpx.Client:
+        """A new client of the gateway with `key` (the harness's by default),
+        for a test that closes it itself."""
+        return httpx.Client(base_url=self.url, timeout=options.pop("timeout", 10),
+                            headers={"Authorization": f"Bearer {key or self.key}"}, **options)
+
+    def _stepped_up(self, http: httpx.Client, person: Account,
+                    send: Callable[[], httpx.Response]) -> httpx.Response:
+        """send(), and once more after the password again if the gateway asks
+        for it (D13). Each step-up is a sign-in attempt to the throttle (D19),
+        and one lasts ten minutes, so the harness asks only when told to."""
+        answer = send()
+        if answer.status_code == 403 and answer.json()["error"]["code"] == "step_up_required":
+            self._ok(http.post("/auth/step-up", json={"password": person.password}))
+            answer = send()
+        return answer
+
+    @staticmethod
+    def _ok(response: httpx.Response) -> Any:
+        if response.is_error:
+            raise RuntimeError(f"{response.request.method} {response.request.url.path} answered "
+                               f"{response.status_code}: {response.text[:300]}")
+        return response.json()
 
     def _start_hub(self, fresh: bool = False) -> None:
         data = self.run / "hub-data"
@@ -495,20 +819,28 @@ class Stack:
         words = [w for w, f in (("hey_jarvis:0.5", "hey_jarvis_v0.1.onnx"), ("alexa:0.6", "alexa_v0.1.onnx"))
                  if f in present and {"melspectrogram.onnx", "embedding_model.onnx"} <= set(present)]
         self.wake_words = ",".join(words)
+        # Speech through the gateway's internal listener with the hub's own
+        # key, as compose sets it (D6); launch.py answers the name.
+        internal = "http://voice-gateway:8081"
         self._spawn("hub", ["--app", "app.main:app", "--app-dir", str(SERVICES / "satellites"),
                             "--port", str(self.ports["hub"])],
-                    cwd=SERVICES / "satellites", env={
+                    cwd=SERVICES / "satellites", routed=True, env={
+                        "CALLIOPE_RUN_DIR": str(self.svc / "satellites"),
                         "SATELLITES_DATA_DIR": str(data),
                         "SATELLITES_MODEL_DIR": str(models),
                         "SATELLITES_WAKE_WORDS": self.wake_words,
-                        "SATELLITES_STT_URL": f"http://127.0.0.1:{self.ports['stt']}",
-                        "SATELLITES_TTS_URL": f"http://127.0.0.1:{self.ports['tts']}",
+                        "SATELLITES_STT_URL": internal,
+                        "SATELLITES_TTS_URL": internal,
                         "SATELLITES_TIMEZONE": "Europe/London",
                         "SATELLITES_LOG_LEVEL": "WARNING",
                         "ORT_DISABLE_TELEMETRY": "1"})
         self._wait("hub", f"{self.hub}/health")
-        self.fake._ok(self.fake.http.post("/__fake/satellites/connect",
-                                          json={"hub": self.hub, "fresh": fresh}))
+        if self.key is not None:
+            self._connect_satellites(fresh)
+
+    def _connect_satellites(self, fresh: bool = False) -> None:
+        self.fake._ok(self.fake.http.post("/__fake/satellites/connect", json={
+            "gateway": self.url, "key": self.key, "fresh": fresh}))
 
     def restart_hub(self, wipe: bool = True) -> None:
         """A fresh hub (and a fresh adoption of the satellites) for a test that
@@ -526,10 +858,11 @@ class Stack:
         """A recorded clip through a satellite's listening path, as POST
         /satellites/{id}/inject runs it, with play=0: nothing is sent to any
         satellite. `params` are the route's own (wake_word=...). The hub
-        marks what it publishes as injected."""
+        marks what it publishes as injected. Sent through the gateway with
+        the harness's key, which holds satellites:listen."""
         nid = next(s["id"] for s in self.fake.satellites() if s["key"] == key)
-        r = httpx.post(f"{self.hub}/satellites/{nid}/inject", params={"play": 0} | params,
-                       content=wav_bytes, headers={"Content-Type": "audio/wav"}, timeout=60)
+        r = self.api.post(f"/satellites/{nid}/inject", params={"play": 0} | params,
+                          content=wav_bytes, headers={"Content-Type": "audio/wav"}, timeout=60)
         r.raise_for_status()
         return r.json()
 
@@ -551,13 +884,17 @@ class Stack:
         self._stopped = True
         with contextlib.suppress(Exception):
             self.fake.close()
+        if self._api is not None:
+            with contextlib.suppress(Exception):
+                self._api.close()
         for name in reversed(list(self.children)):
             self._kill(name)
         # Anything that escaped its group -- it should be nothing -- by marker.
         stray = self.survivors()
         if stray:
             kill_all(stray)
-        for sub in ("tmp", "hub-data", "voices"):
+        # The logs stay; the data and every key the gateway minted do not.
+        for sub in ("tmp", "hub-data", "voices", "gateway-data", "gateway-keys", "svc"):
             shutil.rmtree(self.run / sub, ignore_errors=True)
 
     def survivors(self) -> list[Proc]:
@@ -574,13 +911,17 @@ class Stack:
                 "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
                 "TMPDIR": str(self.run / "tmp")} | extra
 
-    def _spawn(self, name: str, argv: list[str], *, cwd: Path, env: dict[str, str]) -> None:
+    def _spawn(self, name: str, argv: list[str], *, cwd: Path, env: dict[str, str],
+               routed: bool = False) -> None:
+        # routed: the service reaches the gateway's internal listener by its
+        # compose name, which launch.py answers with this session's port.
+        route = ["--route", f"voice-gateway:8081={self.ports['internal']}"] if routed else []
         # The child has its own copy of the descriptor, so ours closes at once.
         with open(self.run / f"{name}.log", "ab") as log:
             self.children[name] = subprocess.Popen(
                 [sys.executable, str(HERE / "launch.py"), "--marker", self.marker,
                  "--parent", str(self.owner), "--deadline", str(self.deadline + 60),
-                 "--violations", str(self.run / "network-violations.log"), *argv],
+                 "--violations", str(self.run / "network-violations.log"), *route, *argv],
                 cwd=cwd, env=self._env(env), stdin=subprocess.DEVNULL, stdout=log,
                 stderr=subprocess.STDOUT, start_new_session=True)
 
@@ -593,7 +934,7 @@ class Stack:
             child.wait(5)
 
     def _wait(self, name: str, url: str, timeout: float = 90.0) -> None:
-        child = self.children.get(name if name != "page" else "ui")
+        child = self.children.get(name)
         ends = time.monotonic() + timeout
         while time.monotonic() < ends:
             if child is not None and child.poll() is not None:
@@ -602,16 +943,17 @@ class Stack:
                 if httpx.get(url, timeout=2).status_code == 200:
                     return
             time.sleep(0.2)
-        log = self.run / f"{name if name != 'page' else 'ui'}.log"
+        log = self.run / f"{name}.log"
         tail = log.read_text(errors="replace")[-3000:] if log.exists() else ""
         raise RuntimeError(f"{name} did not come up at {url}:\n{tail}")
 
-    def _seed_voices(self) -> None:
-        """One cloned voice, so the Speak tab's clone group is not empty."""
+    def _seed_voices(self, owner: str) -> None:
+        """One cloned voice, so the Speak tab's clone group is not empty: the
+        admin's own, as the tab lists the reader's own voices (D35)."""
         import wave
 
-        voices = self.run / "voices"
-        voices.mkdir()
+        voices = self.run / "voices" / "users" / owner
+        voices.mkdir(parents=True)
         with wave.open(str(voices / "narrator.wav"), "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
@@ -632,7 +974,8 @@ class Stack:
     def describe(self) -> dict[str, Any]:
         return {"page": f"{self.url}/ui", "gateway": self.url, "ui_direct": self.ui_direct,
                 "hub": self.hub, "fakes": self.fake.base, "run": str(self.run),
-                "wake_words": self.wake_words, "ports": self.ports}
+                "wake_words": self.wake_words, "ports": self.ports,
+                "people": {name: {"id": p.id, "role": p.role} for name, p in self.people.items()}}
 
 
 # ---- emergency exits ---------------------------------------------------------------
@@ -696,7 +1039,15 @@ def main() -> None:
         if swept:
             print(f"swept {len(swept)} orphaned processes from an earlier run")
         stack.start()
+        stack.first_sign_in()
+        stack.provision()
         print(json.dumps(stack.describe(), indent=2))
+        # Made up for this session and gone with it, but still a password and
+        # a key: written to a file only this user can read, never printed.
+        access = stack.run / "tmp" / "access.json"
+        with os.fdopen(os.open(access, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as out:
+            json.dump({"username": "admin", "password": stack.admin.password, "key": stack.key}, out)
+        print(f"the admin's password and an admin key are in {access}")
         print("Ctrl-C stops it; it stops by itself after 20 minutes.")
         ends = time.monotonic() + SESSION_SECONDS
         while time.monotonic() < ends:

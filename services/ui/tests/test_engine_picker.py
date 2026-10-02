@@ -493,7 +493,7 @@ def test_retry_and_speak_again_ask_which_service_made_the_run():
         in row, "the row does not read which service made the run"
     assert 'kind === "speech" && !queued ?' in row, \
         "Speak again is offered for a run the instant route cannot make"
-    assert 'queued && job.status === "failed" ?' in row, \
+    assert 'queued && job.status === "failed" && !theirs ?' in row, \
         "Retry is not offered for every failed run tts-long made"
 
 

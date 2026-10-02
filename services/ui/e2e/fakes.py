@@ -26,14 +26,24 @@ assert what the page actually sent after the gateway and the page server had
 their say. The browser-side log (conftest.py) records what left the page; this
 one records what arrived.
 
+THE BACKENDS BELIEVE ONLY THE GATEWAY, as the real ones do. stt, tts and
+tts-long each install voice_common.identity for their audience, with the
+public key the session's gateway wrote to its service volume, so a request
+that did not come through the gateway is a 401 here too. Whose request it was
+is recorded beside it (`identity`: sub, kind, cred, scopes), and the raw
+assertion never is. What each one keeps is partitioned the way the real
+service partitions it: tts-long's jobs by owner (D31, D32), stt's profiles by
+namespace (D33, D34). The harness itself reads and changes them through the
+control port, never by speaking to a backend.
+
 THE SATELLITES ARE SCRIPTED, NOT MOCKED. A Korvo, a Raspberry Pi and a second
-Korvo that nobody has adopted connect to the real hub's WebSocket, say hello
-with the caps their firmware sends, are adopted through the hub's own route,
-and then behave: they send status on a clock, answer airplay_command, store
-earcons, take an OTA image chunk by chunk, reboot and come back. So a control on
-the Satellites tab goes all the way to a device and its answer comes all the
-way back, which is what "the page updates without a refresh" has to be tested
-against.
+Korvo that nobody has adopted connect to the gateway's device socket, which
+relays them to the real hub, say hello with the caps their firmware sends, are
+adopted through the gateway with the harness's admin key, and then behave:
+they send status on a clock, answer airplay_command, store earcons, take an
+OTA image chunk by chunk, reboot and come back. So a control on the Satellites
+tab goes all the way to a device and its answer comes all the way back, which
+is what "the page updates without a refresh" has to be tested against.
 """
 
 from __future__ import annotations
@@ -44,6 +54,7 @@ import base64
 import contextlib
 import functools
 import hashlib
+import html
 import io
 import json
 import math
@@ -63,7 +74,10 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.datastructures import UploadFile
+from voice_common import identity
 from voice_common.engines import CATALOGUE
+from voice_common.errors import insufficient_scope, render
+from voice_common.scopes import check_owner_filter, is_system_owner
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
@@ -148,21 +162,31 @@ DEFAULT_TRANSCRIPT = ("Calliope is listening. The quick brown fox jumps over the
 class World:
     """Every piece of state the fakes share, and what the control API changes."""
 
-    def __init__(self, repo: Path) -> None:
+    def __init__(self, repo: Path, svc: Path) -> None:
         self.repo = repo
+        # Where the gateway writes each service's identity.pub (CALLIOPE_SVC_DIR).
+        self.svc = svc
         self.seq = 0
         self.log: list[dict[str, Any]] = []
         self.rules: list[dict[str, Any]] = []
         self.health_overrides: dict[str, dict[str, Any]] = {}
         self.transcript = DEFAULT_TRANSCRIPT
         self.jobs: dict[str, dict[str, Any]] = {}
-        self.glossaries: dict[str, dict[str, Any]] = {}
+        # (owner, name) -> a profile: the built-ins and the system's under
+        # "system", a person's under their user ID (D33).
+        self.glossaries: dict[tuple[str, str], dict[str, Any]] = {}
         self.gloss_writable = True
         self.gloss_reason: str | None = None
         self.gloss_strict = False
         self.metube: dict[str, dict[str, Any]] = {}
         self.satellites: dict[str, Satellite] = {}
-        self.hub: str | None = None
+        # Where the satellites connect (the gateway's device socket) and the
+        # admin key they are adopted with, both told by the stack.
+        self.gateway: str | None = None
+        self.adopt_key: str | None = None
+        # Whose the seeded history is: the admin the session signed in as, so
+        # the Jobs tab, which lists the reader's own runs, opens on it.
+        self.admin: str | None = None
         self.reset()
 
     def reset(self) -> None:
@@ -172,16 +196,23 @@ class World:
         self.transcript = DEFAULT_TRANSCRIPT
         self.jobs.clear()
         self.metube.clear()
-        self.glossaries = {name: g for name, g in self.glossaries.items() if g["source"] == "builtin"}
+        self.glossaries = {key: g for key, g in self.glossaries.items() if g["source"] == "builtin"}
         self.gloss_writable, self.gloss_reason, self.gloss_strict = True, None, False
         if not self.glossaries:
             for path in sorted((self.repo / "services/stt/glossaries").glob("*.txt")):
-                self.glossaries[path.stem] = glossary(path.stem, path.read_text("utf-8"), "builtin")
+                self.glossaries[(SYSTEM, path.stem)] = glossary(path.stem, path.read_text("utf-8"),
+                                                                "builtin", owner=SYSTEM)
         seed_jobs(self)
 
-    def record(self, entry: dict[str, Any]) -> None:
+    def tick(self) -> int:
+        """The log's clock, moved on when a request arrives and again when it
+        is logged, so a test can tell a request that began after a moment
+        from one that only finished after it (FakeControl.fresh_health)."""
         self.seq += 1
-        entry["seq"] = self.seq
+        return self.seq
+
+    def record(self, entry: dict[str, Any]) -> None:
+        entry["seq"] = self.tick()
         self.log.append(entry)
         del self.log[:-5000]
 
@@ -237,13 +268,30 @@ async def parsed_body(headers: dict[str, str], body: bytes) -> dict[str, Any]:
     return out
 
 
+# The services a wake word's action or a button reaches, outside the stack:
+# Home Assistant, a language model server, a webhook receiver.
+OUTSIDE = frozenset({"ha", "llm", "hook"})
+
+
 class Observed:
     """ASGI middleware: log the request, and answer with an injected failure
     (or after an injected delay) before the fake itself is reached.
 
     The body is captured on its way to the app rather than read ahead of it,
     so a streamed upload still streams, and the app sees exactly the bytes it
-    would have seen without this."""
+    would have seen without this.
+
+    WHO ASKED is logged as the claims the app verified, under `identity`, and
+    None when it verified none. The assertion itself is not logged: an
+    X-Calliope-* header is recorded only by name, under `calliope_headers`,
+    and a cookie or an Authorization header only as the fact of one, so
+    test_ownership.py can say that no person's credential reached a backend
+    and that the gateway's assertion did (D51, D65). The services outside
+    (OUTSIDE) are the exception for Authorization: what reaches them is a
+    token the test made up for them, and the test reads it back.
+
+    WHEN is logged twice on the World's clock: `began` as the request
+    arrives, `seq` once it has been answered."""
 
     def __init__(self, app: Any, backend: str, world: World) -> None:
         self.app = app
@@ -255,12 +303,19 @@ class Observed:
             return await self.app(scope, receive, send)
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
         method, path = scope["method"], scope["path"]
+        kept = ("content-type", "accept", "range") + (("authorization",) if self.backend in OUTSIDE else ())
         entry: dict[str, Any] = {
-            "t": time.time(), "backend": self.backend, "method": method, "path": path,
-            "query": scope.get("query_string", b"").decode("latin-1"),
+            "t": time.time(), "began": self.world.tick(), "backend": self.backend, "method": method,
+            "path": path, "query": scope.get("query_string", b"").decode("latin-1"),
             "headers": {k: v for k, v in headers.items()
-                        if k in ("content-type", "authorization", "accept", "range")
-                        or k.startswith("x-")}}
+                        if k in kept or (k.startswith("x-") and not k.startswith("x-calliope-"))},
+            "calliope_headers": sorted(k for k in headers if k.startswith("x-calliope-")),
+            "cookie": "cookie" in headers,
+            "authorization": "authorization" in headers,
+            "identity": None}
+        # The guard copies the scope but keeps this dict, so what it verified
+        # is readable here once the app has answered.
+        state = scope.setdefault("state", {})
         chunks: list[bytes] = []
 
         async def tapped() -> dict[str, Any]:
@@ -304,6 +359,10 @@ class Observed:
         finally:
             body = b"".join(chunks)
             entry["status"] = status.get("code")
+            claims = state.get(identity.STATE_CLAIMS)
+            if isinstance(claims, identity.Claims):
+                entry["identity"] = {"sub": claims.sub, "kind": claims.kind, "cred": claims.cred,
+                                     "scopes": sorted(claims.scopes)}
             entry.update(await parsed_body(headers, body))
             self.world.record(entry)
 
@@ -325,7 +384,16 @@ PARAKEET_LANGUAGES = ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr"
                       "lt", "lv", "mt", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk"]
 
 
-def glossary(name: str, text: str, source: str, strict: bool = False) -> dict[str, Any]:
+# The namespaces, as services/stt/app/profiles.py names them (D33, D34): the
+# built-ins and the deployment's own profiles are the system's, a person's are
+# under their user ID, and `home-assistant` is the system's and reserved.
+SYSTEM = "system"
+RESERVED = "home-assistant"
+RESERVED_SCOPES = ("glossaries:ha", "glossaries:read:all", "glossaries:write:all")
+
+
+def glossary(name: str, text: str, source: str, strict: bool = False,
+             owner: str = SYSTEM) -> dict[str, Any]:
     """services/stt/app/profiles.py's reading of a file, at the depth the page
     sees: `heard = intended` is a replacement, a bare term a hotword, and a
     replacement missing either side is refused with its line number.
@@ -358,18 +426,95 @@ def glossary(name: str, text: str, source: str, strict: bool = False) -> dict[st
             replacements[heard] = intended
         else:
             hotwords.append(line)
-    return {"name": name, "source": source, "text": text, "replacements": replacements,
-            "hotwords": hotwords, "rejected": rejected, "writable": source != "builtin"}
+    return {"name": name, "owner": owner, "source": source, "text": text,
+            "replacements": replacements, "hotwords": hotwords, "rejected": rejected,
+            "writable": source != "builtin"}
 
 
 def glossary_summary(g: dict[str, Any]) -> dict[str, Any]:
-    return {"name": g["name"], "source": g["source"],
+    # No path, as the service gives none: it would name the volume's layout
+    # and the directory a person's ID is in.
+    return {"name": g["name"], "owner": g["owner"], "source": g["source"],
             "terms": len(g["replacements"]) + len(g["hotwords"]),
             "replacements": len(g["replacements"]), "hotwords": len(g["hotwords"]),
             "writable": g["writable"]}
 
 
 GLOSS_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def claims(request: Request) -> identity.Claims:
+    return identity.claims_of(request)
+
+
+def own_namespace(who: identity.Claims) -> str:
+    """profiles.view_of: a service and a holder of glossaries:read:all name the
+    system's profiles; anyone else names their own."""
+    if who.kind == "service" or identity.has(who, "glossaries:read:all"):
+        return SYSTEM
+    return who.sub
+
+
+def sees_reserved(who: identity.Claims) -> bool:
+    return any(identity.has(who, scope) for scope in RESERVED_SCOPES)
+
+
+def visible(world: World, namespace: str, reserved: bool) -> dict[str, dict[str, Any]]:
+    """Registry.visible: the namespace, the built-ins, and `home-assistant`
+    from the system's only when the view may see it."""
+    found = {name: g for (owner, name), g in world.glossaries.items()
+             if owner == namespace and g["source"] != "builtin"}
+    system = world.glossaries.get((SYSTEM, RESERVED))
+    if reserved and system is not None:
+        found[RESERVED] = system
+    found.update({name: g for (_, name), g in world.glossaries.items() if g["source"] == "builtin"})
+    if not reserved:
+        found.pop(RESERVED, None)
+    return found
+
+
+def owner_param(request: Request) -> str | None | Response:
+    """?owner=, checked before it is used anywhere (D32); a Response is the 400."""
+    raw = request.query_params.get("owner")
+    if raw is None:
+        return None
+    try:
+        return check_owner_filter(raw)
+    except ValueError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=400)
+
+
+def gloss_view(request: Request, name: str | None, *, write: bool) -> tuple[str, bool] | Response:
+    """main._view in services/stt: which namespace one route acts on for this
+    caller, and whether `home-assistant` is in it; or the refusal."""
+    who = claims(request)
+    owner = owner_param(request)
+    if isinstance(owner, Response):
+        return owner
+    wide = "glossaries:write:all" if write else "glossaries:read:all"
+    if name is not None and name.strip().lower() == RESERVED:
+        if not (identity.has(who, "glossaries:ha") or identity.has(who, wide)):
+            return render(insufficient_scope(["glossaries:ha", wide]))
+        if owner not in (None, SYSTEM):
+            return JSONResponse({"detail": f"{RESERVED!r} is reserved and always the system's "
+                                           "profile; send no owner"}, status_code=400)
+        return SYSTEM, True
+    own = who.sub if who.kind == "user" else None
+    if owner is None:
+        namespace = own_namespace(who)
+    elif owner == "me":
+        if own is None:
+            return JSONResponse({"detail": "owner=me names a user's profiles, and this caller is "
+                                           "a service"}, status_code=400)
+        namespace = own
+    elif owner == "all":
+        return JSONResponse({"detail": "owner=all lists every profile; it names no single one"},
+                            status_code=400)
+    else:
+        namespace = owner
+    if namespace != own and not identity.has(who, wide):
+        return render(insufficient_scope([wide]))
+    return namespace, sees_reserved(who) and namespace in (SYSTEM, own)
 
 
 def timed(text: str, seconds: float) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -404,17 +549,36 @@ def subtitles(segments: list[dict[str, Any]], vtt: bool) -> str:
     return "\n".join(lines)
 
 
-def repair(world: World, chosen: Any, text: str) -> tuple[str, list[str]]:
+class UnknownProfile(LookupError):
+    """services/stt/app/profiles.UnknownProfile: a name the caller's view does
+    not hold, with the names it does."""
+
+    def __init__(self, name: str, known: list[str]) -> None:
+        super().__init__(name)
+        self.name, self.known = name, known
+
+
+def repair(world: World, who: identity.Claims, chosen: Any, text: str) -> tuple[str, list[str]]:
     """services/stt/app/glossary.apply over the profiles a request named in its
-    `glossary` field: each `heard = intended` rewrites whole words whatever
-    their case, and a rule is listed as fired only when it changed the text.
-    Both routes run it; /transcribe returns the list as `repaired`, and /v1
-    sends it as the `x-glossary-repaired` header, percent-encoded, as the
-    service does."""
+    `glossary` field, as the caller's view resolves them: each `heard =
+    intended` rewrites whole words whatever their case, and a rule is listed
+    as fired only when it changed the text. Both routes run it; /transcribe
+    returns the list as `repaired`, and /v1 sends it as the
+    `x-glossary-repaired` header, percent-encoded, as the service does.
+
+    A NAME OUTSIDE THE VIEW IS REFUSED, as the service refuses it, before
+    anything is applied (UnknownProfile): another person's profile, or
+    `home-assistant` without its scope, is the same "unknown profile" as one
+    that does not exist (D33). Ignoring it here would let a page that sends
+    one pass a test and fail at home."""
+    view = visible(world, own_namespace(who), sees_reserved(who))
+    wanted = [name.strip().lower() for name in str(chosen or "").split(",") if name.strip()]
+    for name in wanted:
+        if name not in view:
+            raise UnknownProfile(name, sorted(view))
     fired: list[str] = []
-    for name in str(chosen or "").split(","):
-        profile = world.glossaries.get(name.strip())
-        for heard, intended in (profile["replacements"] if profile else {}).items():
+    for name in wanted:
+        for heard, intended in view[name]["replacements"].items():
             changed = re.sub(rf"\b{re.escape(heard)}\b", lambda _: intended, text,
                              flags=re.IGNORECASE)
             if changed != text:
@@ -423,20 +587,27 @@ def repair(world: World, chosen: Any, text: str) -> tuple[str, list[str]]:
     return text, fired
 
 
+def stt_health(world: World) -> dict[str, Any]:
+    # The system's names and the built-ins, never a person's (D50).
+    shared = sorted({name for (owner, name) in world.glossaries if owner == SYSTEM})
+    return health_body(world, "stt", {
+        "status": "ok", "model": "parakeet",
+        "models": [{"id": "parakeet", "family": "parakeet", "default": True,
+                    "languages": PARAKEET_LANGUAGES, "accepts_language": False,
+                    "accepts_boost": True, "can_translate": False, "can_stream": False}],
+        "model_id": "nvidia/parakeet-tdt-0.6b-v3", "accepts_vocabulary": True,
+        "translations": False, "streaming": False, "hotwords": True,
+        "glossaries": shared, "vad": True, "threads": 4,
+        "max_concurrent": 1, "host_label": "e2e-fake"})
+
+
 def stt_app(world: World) -> FastAPI:
     app = FastAPI(openapi_url=None)
+    identity.install(app, "stt", credentials=identity.Credentials(world.svc / "stt"))
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return health_body(world, "stt", {
-            "status": "ok", "model": "parakeet",
-            "models": [{"id": "parakeet", "family": "parakeet", "default": True,
-                        "languages": PARAKEET_LANGUAGES, "accepts_language": False,
-                        "accepts_boost": True, "can_translate": False, "can_stream": False}],
-            "model_id": "nvidia/parakeet-tdt-0.6b-v3", "accepts_vocabulary": True,
-            "translations": False, "streaming": False, "hotwords": True,
-            "glossaries": sorted(world.glossaries), "vad": True, "threads": 4,
-            "max_concurrent": 1, "host_label": "e2e-fake"})
+        return stt_health(world)
 
     async def heard(request: Request) -> tuple[dict[str, Any], float]:
         form = await request.form()
@@ -453,7 +624,12 @@ def stt_app(world: World) -> FastAPI:
     async def transcriptions(request: Request) -> Response:
         fields, seconds = await heard(request)
         fmt = fields.get("response_format", "json")
-        text, fired = repair(world, fields.get("glossary"), world.transcript)
+        try:
+            text, fired = repair(world, claims(request), fields.get("glossary"), world.transcript)
+        except UnknownProfile as unknown:
+            return error(400, f"Unknown glossary profile {unknown.name!r}. You can use: "
+                              f"{', '.join(unknown.known) or 'none'}. See GET /glossaries.",
+                         code="invalid_value", param="glossary")
         segments, words = timed(text, seconds)
         headers = {"x-stt-engine": "parakeet-tdt-0.6b-v3", "x-realtime-factor": "8.8",
                    "x-audio-seconds": f"{seconds:.2f}"}
@@ -484,24 +660,45 @@ def stt_app(world: World) -> FastAPI:
                           "with STT_MODEL=whisper to translate.", code="unsupported_task", param="model")
 
     @app.post("/transcribe")
-    async def transcribe(request: Request) -> dict[str, Any]:
+    async def transcribe(request: Request) -> Any:
         fields, seconds = await heard(request)
-        text, fired = repair(world, fields.get("glossary"), world.transcript)
+        try:
+            text, fired = repair(world, claims(request), fields.get("glossary"), world.transcript)
+        except UnknownProfile as unknown:
+            # The native route keeps its {"detail": ...} body, as the service's does.
+            return JSONResponse({"detail": f"unknown glossary profile {unknown.name!r}; you can use: "
+                                           f"{', '.join(unknown.known) or 'none'}"}, status_code=400)
         return {"text": text, "raw": world.transcript.lower(), "repaired": fired,
                 "model": "parakeet", "audio_seconds": round(seconds, 2),
                 "speech_seconds": round(seconds * 0.86, 2), "compute_seconds": round(seconds / 8.8, 2),
                 "realtime_factor": 8.8}
 
     @app.get("/glossaries")
-    async def list_glossaries() -> dict[str, Any]:
-        body = {"glossaries": [glossary_summary(g) for _, g in sorted(world.glossaries.items())],
-                "writable": world.gloss_writable, "default": [], "builtin_dir": "/app/glossaries",
-                "custom_dir": "/glossaries"}
+    async def list_glossaries(request: Request) -> Response:
+        owner = owner_param(request)
+        if isinstance(owner, Response):
+            return owner
+        if owner == "all":
+            # Every namespace at once, each entry naming its owner: the
+            # built-ins, the system's, then each person's.
+            if not identity.has(claims(request), "glossaries:read:all"):
+                return render(insufficient_scope(["glossaries:read:all"]))
+            listed = sorted(world.glossaries.values(),
+                            key=lambda g: (g["source"] != "builtin", g["owner"] != SYSTEM,
+                                           g["owner"], g["name"]))
+        else:
+            view = gloss_view(request, None, write=False)
+            if isinstance(view, Response):
+                return view
+            shown = visible(world, *view)
+            listed = [shown[name] for name in sorted(shown)]
+        body = {"glossaries": [glossary_summary(g) for g in listed],
+                "writable": world.gloss_writable, "default": []}
         # As the service: `reason` only when it cannot write, and only if it
         # has one (fake.glossaries(reason=None) is a server that gave none).
         if not world.gloss_writable and world.gloss_reason:
             body["reason"] = world.gloss_reason
-        return body
+        return JSONResponse(body)
 
     def read_only() -> Response | None:
         """The service's 503 for a write on a deployment with no volume."""
@@ -512,16 +709,22 @@ def stt_app(world: World) -> FastAPI:
                             status_code=503)
 
     @app.get("/glossaries/{name}")
-    async def get_glossary(name: str) -> Response:
-        g = world.glossaries.get(name.strip().lower())
+    async def get_glossary(name: str, request: Request) -> Response:
+        view = gloss_view(request, name, write=False)
+        if isinstance(view, Response):
+            return view
+        g = visible(world, *view).get(name.strip().lower())
         if g is None:
-            return JSONResponse({"detail": f"no glossary profile called {name!r}"}, status_code=404)
+            return JSONResponse({"detail": f"no glossary profile named {name!r}"}, status_code=404)
         return JSONResponse(glossary_summary(g) | {"replacements": g["replacements"],
-                                                   "hotwords": g["hotwords"], "text": g["text"],
-                                                   "path": f"/glossaries/{g['name']}.txt"})
+                                                   "hotwords": g["hotwords"], "text": g["text"]})
 
     @app.put("/glossaries/{name}")
     async def put_glossary(name: str, request: Request) -> Response:
+        view = gloss_view(request, name, write=True)
+        if isinstance(view, Response):
+            return view
+        namespace = view[0]
         raw = await request.body()
         force = request.query_params.get("force") in ("1", "true")
         if "json" in request.headers.get("content-type", ""):
@@ -532,7 +735,12 @@ def stt_app(world: World) -> FastAPI:
         name = name.strip().lower()
         if not GLOSS_NAME.match(name):
             return JSONResponse({"detail": f"{name!r} is not a usable profile name"}, status_code=400)
-        existing = world.glossaries.get(name)
+        # A built-in is everyone's, so nobody's own profile may hide it.
+        builtin = world.glossaries.get((SYSTEM, name))
+        if builtin is not None and builtin["source"] == "builtin":
+            existing = builtin
+        else:
+            existing = world.glossaries.get((namespace, name))
         if existing is not None and existing["source"] == "builtin":
             return JSONResponse({"detail": f"{name!r} is built in and cannot be written. Copy it to a "
                                            "new name and edit that."}, status_code=409)
@@ -540,28 +748,30 @@ def stt_app(world: World) -> FastAPI:
             return refused
         if len(text.encode()) > 65536:
             return JSONResponse({"detail": "that profile is over 64 KB"}, status_code=413)
-        g = glossary(name, text, "custom", strict=world.gloss_strict and not force)
+        g = glossary(name, text, "custom", strict=world.gloss_strict and not force, owner=namespace)
         if g["rejected"] and not force:
             accepted = len(g["replacements"]) + len(g["hotwords"])
             return JSONResponse({"detail": {
                 "message": f"{len(g['rejected'])} line(s) rejected; nothing was written. "
                            f"{accepted} term(s) would have been accepted.",
                 "accepted": accepted, "rejected": g["rejected"]}}, status_code=400)
-        world.glossaries[name] = g
-        return JSONResponse(glossary_summary(g) | {"path": f"/glossaries/{name}.txt", "forced": force,
-                                                   "created": existing is None},
+        world.glossaries[(namespace, name)] = g
+        return JSONResponse(glossary_summary(g) | {"forced": force, "created": existing is None},
                             status_code=200 if existing else 201)
 
     @app.delete("/glossaries/{name}")
-    async def delete_glossary(name: str) -> Response:
-        g = world.glossaries.get(name.strip().lower())
+    async def delete_glossary(name: str, request: Request) -> Response:
+        view = gloss_view(request, name, write=True)
+        if isinstance(view, Response):
+            return view
+        g = visible(world, *view).get(name.strip().lower())
         if g is None:
-            return JSONResponse({"detail": f"no glossary profile called {name!r}"}, status_code=404)
+            return JSONResponse({"detail": f"no glossary profile named {name!r}"}, status_code=404)
         if g["source"] == "builtin":
             return JSONResponse({"detail": f"{name!r} is built in and cannot be deleted"}, status_code=409)
         if (refused := read_only()) is not None:
             return refused
-        del world.glossaries[g["name"]]
+        del world.glossaries[(g["owner"], g["name"])]
         return JSONResponse({"name": g["name"], "deleted": True})
 
     return app
@@ -646,15 +856,20 @@ async def speech(world: World, request: Request, rtf: float) -> Response:
     return audio_answer(fmt, seconds, rtf)
 
 
+def tts_health(world: World) -> dict[str, Any]:
+    return health_body(world, "tts", {
+        "status": "ok", "voices": len(KOKORO_VOICES), "default_voice": "af_heart", "threads": 4,
+        "host_label": "e2e-fake", "runlog": {"written": 0, "dropped": 0, "last_error": None},
+        "realtime_factor": 2.79, "realtime_factor_samples": 12})
+
+
 def tts_app(world: World) -> FastAPI:
     app = FastAPI(openapi_url=None)
+    identity.install(app, "tts", credentials=identity.Credentials(world.svc / "tts"))
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return health_body(world, "tts", {
-            "status": "ok", "voices": len(KOKORO_VOICES), "default_voice": "af_heart", "threads": 4,
-            "host_label": "e2e-fake", "runlog": {"written": 0, "dropped": 0, "last_error": None},
-            "realtime_factor": 2.79, "realtime_factor_samples": 12})
+        return tts_health(world)
 
     @app.get("/voices")
     async def voices() -> dict[str, Any]:
@@ -692,27 +907,40 @@ def tts_app(world: World) -> FastAPI:
 
 SEED_TEXT = ("It was the best of times, it was the worst of times. The chapter is read aloud "
              "in a cloned voice, one segment at a time, and the Jobs tab follows it.")
+# What a satellite heard: a run of the hub's, which no person's Jobs tab lists.
+SATELLITE_TEXT = "Hey Jarvis, turn on the kitchen lights."
+
+
+# Whose a satellite's run is: the hub's, never a person's (D31).
+HUB = "svc:satellites"
 
 
 def seed_jobs(world: World) -> None:
     """A history the Jobs tab can draw at once: one of each audio state, a
-    failure, and the two kinds that keep no audio here."""
+    failure, and the two kinds that keep no audio here, all the admin's; and
+    a satellite's transcription, which is the hub's and so a system record
+    that no person's own listing shows."""
     now = time.time()
+    mine = {"owner": world.admin, "credential": "session"}
     rows = [
-        {"kind": "clone", "status": "done", "age": 7200, "audio_seconds": 42.4, "voice": "narrator"},
+        {"kind": "clone", "status": "done", "age": 7200, "audio_seconds": 42.4, "voice": "narrator"} | mine,
         {"kind": "clone", "status": "done", "age": 86400, "audio_seconds": 18.1, "voice": "narrator",
-         "audio_deleted": True},
+         "audio_deleted": True} | mine,
         {"kind": "clone", "status": "failed", "age": 10800, "voice": "narrator",
-         "error": "the runner went away in the middle of segment 3"},
+         "error": "the runner went away in the middle of segment 3"} | mine,
         {"kind": "speech", "status": "done", "age": 3600, "audio_seconds": 6.2, "voice": "af_heart",
-         "engine": "kokoro", "service": "tts-stack"},
+         "engine": "kokoro", "service": "tts-stack"} | mine,
         {"kind": "transcribe", "status": "done", "age": 1800, "audio_seconds": 312.0, "voice": None,
-         "engine": "parakeet", "service": "stt-stack"},
+         "engine": "parakeet", "service": "stt-stack"} | mine,
+        {"kind": "transcribe", "status": "done", "age": 900, "audio_seconds": 2.4, "voice": None,
+         "engine": "parakeet", "service": "stt-stack", "route": "/v1/audio/transcriptions",
+         "text": SATELLITE_TEXT, "owner": HUB, "credential": HUB},
     ]
     for row in rows:
         created = now - row.pop("age")
-        job = new_job(world, text=SEED_TEXT, voice=row.pop("voice"), engine=row.pop("engine", "chatterbox"),
-                      created=created, scripted=False)
+        job = new_job(world, text=row.pop("text", SEED_TEXT), voice=row.pop("voice"),
+                      engine=row.pop("engine", "chatterbox"), created=created, scripted=False,
+                      owner=row.pop("owner"), credential=row.pop("credential"))
         job.update(row)
         seconds = job.get("audio_seconds") or 0
         job.update(started_at=created + 1, finished_at=created + 1 + seconds / 0.7,
@@ -726,11 +954,14 @@ def seed_jobs(world: World) -> None:
 
 
 def new_job(world: World, *, text: str, voice: str | None, engine: str, created: float | None = None,
-            scripted: bool = True, language: str | None = "en") -> dict[str, Any]:
+            scripted: bool = True, language: str | None = "en", owner: str | None = None,
+            credential: str | None = None) -> dict[str, Any]:
     parts = sentences(text)
     job_id = str(uuid.uuid4())
     kind = "clone" if engine in CATALOGUE else ("transcribe" if engine == "parakeet" else "speech")
-    job = {"id": job_id, "status": "queued", "created_at": created or time.time(), "kind": kind,
+    # WHOSE IT IS, as tts-long writes it (D31): absent is system.
+    whose = {k: v for k, v in (("owner", owner), ("credential", credential)) if v is not None}
+    job = whose | {"id": job_id, "status": "queued", "created_at": created or time.time(), "kind": kind,
            "service": "tts-long", "engine": engine, "engine_reason": "default", "host": "e2e-fake",
            "route": "/jobs", "language": language, "voice": voice, "format": "wav",
            "sample_rate": 24000, "chunks": len(parts), "chars": len(text), "text": text,
@@ -818,31 +1049,103 @@ def engine_rows() -> dict[str, dict[str, Any]]:
     return rows
 
 
+def owned_by(raw: str | None, who: identity.Claims, everyone: str) -> Any:
+    """tts-long's _owned_by: which jobs `?owner=` asks for, as a test on one
+    job, or the refusal as a Response (D32). Absent means `me`, admins
+    included; anybody else's needs `everyone`, the route's `:all` scope."""
+    try:
+        value = check_owner_filter(raw or "me")
+    except ValueError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=400)
+    if value in ("me", who.sub):
+        return lambda job: job.get("owner") == who.sub
+    if not identity.has(who, everyone):
+        return render(insufficient_scope([everyone]))
+    if value == "all":
+        return lambda job: True
+    if value == "system":
+        return lambda job: is_system_owner(job.get("owner"))
+    return lambda job: job.get("owner") == value
+
+
+def listing(world: World, q: Any, covers: Any = lambda job: True) -> dict[str, Any]:
+    """GET /jobs's answer over the jobs `covers` admits: the owner filter
+    first of all, then the counts, then the other filters and the limit, as
+    tts-long orders them, so a cap never falls on somebody else's rows."""
+    def wanted(name: str) -> set[str] | None:
+        raw = q.get(name)
+        return {v.strip() for v in raw.split(",") if v.strip()} if raw else None
+
+    kinds, audio, statuses = wanted("kind"), wanted("audio"), wanted("status")
+    if statuses and "live" in statuses:
+        statuses = (statuses - {"live"}) | {"queued", "running"}
+    counts = {k: 0 for k in ("all", "clone", "speech", "transcribe", "present", "deleted", "expired",
+                             "never", "pending", "failed", "cancelled", "live")}
+    keep = []
+    for job in sorted(world.jobs.values(), key=lambda j: -j["created_at"]):
+        if not covers(job):
+            continue
+        shape = public(job)
+        live = shape["status"] in ("queued", "running")
+        counts["all"] += 1
+        counts[shape["kind"]] += 1
+        counts[shape["audio"]["state"]] += 1
+        if live:
+            counts["live"] += 1
+        elif shape["status"] in ("failed", "cancelled"):
+            counts[shape["status"]] += 1
+        if kinds and shape["kind"] not in kinds:
+            continue
+        if statuses and shape["status"] not in statuses and not live:
+            continue
+        if audio and shape["audio"]["state"] not in audio and not (live or shape["status"] == "failed"):
+            continue
+        keep.append(shape)
+    limit = max(1, min(int(q.get("limit") or 50), 200))
+    return {"jobs": keep[:limit], "counts": counts, "truncated": len(keep) > limit}
+
+
+def long_health(world: World) -> dict[str, Any]:
+    live = [j for j in world.jobs.values() if public(j)["status"] in ("queued", "running")]
+    rows = engine_rows()
+    return health_body(world, "tts_long", {
+        "status": "ok", "model_loaded": True, "threads": 4,
+        "queued": sum(1 for j in live if j["status"] == "queued"), "queue_capacity": 32,
+        "running": sum(1 for j in live if j["status"] == "running"), "realtime_factor": 0.46,
+        "realtime_factor_by_backend": {"local": 0.23, "runner": 0.7},
+        "backend_observations": {"local": 3, "runner": 17},
+        "realtime_factor_by_engine": {f"{lane}/{e}": rate for e in rows
+                                      for lane, rate in (("local", 0.23), ("runner", 0.7))},
+        "engine_observations": {f"{lane}/{e}": 5 for e in rows for lane in ("local", "runner")},
+        "engines": rows, "default_engine": "chatterbox", "backend_order": ["runner", "local"],
+        "runner": {"reachable": True, "can_run": True, "state": "idle", "machine_state": "idle",
+                   "mode": "auto", "job_running": False, "seconds_until_available": 0,
+                   "error": None,
+                   "gpu": {"name": "NVIDIA GeForce RTX 4070", "util_gpu": 3, "mem_used_mib": 2150,
+                           "mem_total_mib": 12282, "temperature_c": 41},
+                   "services": [{"id": "chatterbox-runner", "running": True}]},
+        "dispatch": {"runner": {"open": True, "why": ""}, "local": {"open": True, "why": ""}},
+        "host_label": "e2e-fake"})
+
+
 def long_app(world: World) -> FastAPI:
     app = FastAPI(openapi_url=None)
+    identity.install(app, "tts-long", credentials=identity.Credentials(world.svc / "tts-long"))
+
+    def job_for(request: Request, job_id: str, everyone: str) -> dict[str, Any] | Response:
+        """tts-long's _job_for: one job, if the listing with the same `?owner=`
+        would show it; 404 otherwise, as if it did not exist."""
+        covers = owned_by(request.query_params.get("owner"), claims(request), everyone)
+        if isinstance(covers, Response):
+            return covers
+        job = world.jobs.get(job_id)
+        if job is None or not covers(job):
+            return JSONResponse({"detail": "no such job"}, status_code=404)
+        return job
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        live = [j for j in world.jobs.values() if public(j)["status"] in ("queued", "running")]
-        rows = engine_rows()
-        return health_body(world, "tts_long", {
-            "status": "ok", "model_loaded": True, "threads": 4,
-            "queued": sum(1 for j in live if j["status"] == "queued"), "queue_capacity": 32,
-            "running": sum(1 for j in live if j["status"] == "running"), "realtime_factor": 0.46,
-            "realtime_factor_by_backend": {"local": 0.23, "runner": 0.7},
-            "backend_observations": {"local": 3, "runner": 17},
-            "realtime_factor_by_engine": {f"{lane}/{e}": rate for e in rows
-                                          for lane, rate in (("local", 0.23), ("runner", 0.7))},
-            "engine_observations": {f"{lane}/{e}": 5 for e in rows for lane in ("local", "runner")},
-            "engines": rows, "default_engine": "chatterbox", "backend_order": ["runner", "local"],
-            "runner": {"reachable": True, "can_run": True, "state": "idle", "machine_state": "idle",
-                       "mode": "auto", "job_running": False, "seconds_until_available": 0,
-                       "error": None,
-                       "gpu": {"name": "NVIDIA GeForce RTX 4070", "util_gpu": 3, "mem_used_mib": 2150,
-                               "mem_total_mib": 12282, "temperature_c": 41},
-                       "services": [{"id": "chatterbox-runner", "running": True}]},
-            "dispatch": {"runner": {"open": True, "why": ""}, "local": {"open": True, "why": ""}},
-            "host_label": "e2e-fake"})
+        return long_health(world)
 
     @app.post("/jobs", status_code=202)
     async def create_job(request: Request) -> Response:
@@ -869,51 +1172,25 @@ def long_app(world: World) -> FastAPI:
         engine = (body.get("model") or "chatterbox").strip().lower()
         if engine in ("tts-long", ""):
             engine = "chatterbox"
+        who = claims(request)
         job = new_job(world, text=text, voice=body.get("voice"), engine=engine,
-                      language=body.get("language"))
+                      language=body.get("language"), owner=who.sub, credential=who.cred)
         return JSONResponse({"id": job["id"], "status": "queued", "queued_ahead": 0,
                              "chunks": job["chunks"], "engine": engine,
                              "estimated_seconds": job["estimated_seconds"]}, status_code=202)
 
     @app.get("/jobs")
     async def list_jobs(request: Request) -> Response:
-        q = request.query_params
-
-        def wanted(name: str) -> set[str] | None:
-            raw = q.get(name)
-            return {v.strip() for v in raw.split(",") if v.strip()} if raw else None
-
-        kinds, audio, statuses = wanted("kind"), wanted("audio"), wanted("status")
-        if statuses and "live" in statuses:
-            statuses = (statuses - {"live"}) | {"queued", "running"}
-        counts = {k: 0 for k in ("all", "clone", "speech", "transcribe", "present", "deleted", "expired",
-                                 "never", "pending", "failed", "cancelled", "live")}
-        keep = []
-        for job in sorted(world.jobs.values(), key=lambda j: -j["created_at"]):
-            shape = public(job)
-            live = shape["status"] in ("queued", "running")
-            counts["all"] += 1
-            counts[shape["kind"]] += 1
-            counts[shape["audio"]["state"]] += 1
-            if live:
-                counts["live"] += 1
-            elif shape["status"] in ("failed", "cancelled"):
-                counts[shape["status"]] += 1
-            if kinds and shape["kind"] not in kinds:
-                continue
-            if statuses and shape["status"] not in statuses and not live:
-                continue
-            if audio and shape["audio"]["state"] not in audio and not (live or shape["status"] == "failed"):
-                continue
-            keep.append(shape)
-        limit = max(1, min(int(q.get("limit") or 50), 200))
-        return JSONResponse({"jobs": keep[:limit], "counts": counts, "truncated": len(keep) > limit})
+        covers = owned_by(request.query_params.get("owner"), claims(request), "jobs:read:all")
+        if isinstance(covers, Response):
+            return covers
+        return JSONResponse(listing(world, request.query_params, covers))
 
     @app.get("/jobs/{job_id}")
-    async def get_job(job_id: str) -> Response:
-        job = world.jobs.get(job_id)
-        if job is None:
-            return JSONResponse({"detail": "no such job"}, status_code=404)
+    async def get_job(job_id: str, request: Request) -> Response:
+        job = job_for(request, job_id, "jobs:read:all")
+        if isinstance(job, Response):
+            return job
         # THE SEGMENTS AS THE WORKER HOLDS THEM, (text, pause_after) pairs, which
         # is what tts-long's GET /jobs/{id} returns: main.py's _segments() builds
         # them and get_job() hands them over as they are. This answered a list of
@@ -925,10 +1202,10 @@ def long_app(world: World) -> FastAPI:
         return JSONResponse(public(job) | {"text": job.get("text"), "segments": pairs})
 
     @app.delete("/jobs/{job_id}")
-    async def delete_job(job_id: str) -> Response:
-        job = world.jobs.get(job_id)
-        if job is None:
-            return JSONResponse({"detail": "no such job"}, status_code=404)
+    async def delete_job(job_id: str, request: Request) -> Response:
+        job = job_for(request, job_id, "jobs:delete:all")
+        if isinstance(job, Response):
+            return job
         advance(job)
         if job["status"] in ("done", "failed", "cancelled"):
             del world.jobs[job_id]
@@ -939,10 +1216,10 @@ def long_app(world: World) -> FastAPI:
         return JSONResponse({"id": job_id, "status": "cancelling"})
 
     @app.get("/jobs/{job_id}/audio")
-    async def job_audio(job_id: str) -> Response:
-        job = world.jobs.get(job_id)
-        if job is None:
-            return JSONResponse({"detail": "no such job"}, status_code=404)
+    async def job_audio(job_id: str, request: Request) -> Response:
+        job = job_for(request, job_id, "jobs:read:all")
+        if isinstance(job, Response):
+            return job
         advance(job)
         if job["status"] not in ("done", "cancelled") or not job.get("path"):
             return JSONResponse({"detail": f"job is {job['status']}"}, status_code=409)
@@ -950,10 +1227,10 @@ def long_app(world: World) -> FastAPI:
                         headers={"Content-Disposition": f'attachment; filename="{job_id}.wav"'})
 
     @app.delete("/jobs/{job_id}/audio")
-    async def delete_job_audio(job_id: str) -> Response:
-        job = world.jobs.get(job_id)
-        if job is None:
-            return JSONResponse({"detail": "no such job"}, status_code=404)
+    async def delete_job_audio(job_id: str, request: Request) -> Response:
+        job = job_for(request, job_id, "jobs:delete:all")
+        if isinstance(job, Response):
+            return job
         advance(job)
         if job["status"] not in ("done", "failed", "cancelled"):
             return JSONResponse({"detail": "that job has not finished; cancel it instead"}, status_code=409)
@@ -1271,10 +1548,14 @@ class Satellite:
         self.pending.clear()
 
     async def run(self, delay: float = 0.0) -> None:
-        """Connect, and reconnect after a reboot or a dropped socket, until stopped."""
+        """Connect, and reconnect after a reboot or a dropped socket, until stopped.
+
+        Through the gateway's device socket, as a satellite at home connects:
+        the hub answers only connections the gateway relayed (D53). No Origin
+        header, as neither firmware sends a web page's."""
         await asyncio.sleep(delay)
-        while self.world.hub:
-            ws_url = self.world.hub.replace("http", "ws", 1) + "/satellites/ws"
+        while self.world.gateway:
+            ws_url = self.world.gateway.replace("http", "ws", 1) + "/satellites/ws"
             try:
                 async with connect(ws_url, max_size=None, proxy=None, open_timeout=10) as ws:
                     self.ws = ws
@@ -1310,7 +1591,10 @@ class Satellite:
                 await self.send_status()
 
     async def adopt(self) -> None:
-        async with httpx.AsyncClient(base_url=self.world.hub, timeout=10) as http:
+        """Adopted as an admin adopts one, through the gateway with a key that
+        holds satellites:admin; the hub takes no other word for it."""
+        async with httpx.AsyncClient(base_url=self.world.gateway, timeout=10, headers={
+                "Authorization": f"Bearer {self.world.adopt_key}"}) as http:
             r = await http.post(f"/satellites/{self.nid}/adopt", json={"name": self.adopt_as})
             r.raise_for_status()
 
@@ -1658,8 +1942,13 @@ def control_app(world: World) -> FastAPI:
 
     @app.post("/__fake/reset")
     async def reset() -> dict[str, Any]:
+        changed = any(world.health_overrides.values())
         world.reset()
-        return {"ok": True}
+        return {"ok": True, "health_changed": changed}
+
+    @app.get("/__fake/seq")
+    async def now() -> dict[str, Any]:
+        return {"seq": world.seq}
 
     @app.get("/__fake/requests")
     async def requests(backend: str | None = None, method: str | None = None, path: str | None = None,
@@ -1703,13 +1992,58 @@ def control_app(world: World) -> FastAPI:
         world.gloss_strict = bool(body.get("strict", False))
         return {"ok": True}
 
+    @app.post("/__fake/owners")
+    async def owners(request: Request) -> dict[str, Any]:
+        """Who the session's admin is, so the seeded history is theirs; the
+        fakes start over with it."""
+        world.admin = (await request.json())["admin"]
+        world.reset()
+        return {"ok": True}
+
     @app.post("/__fake/jobs")
     async def seed_job(request: Request) -> dict[str, Any]:
+        """A job, the admin's unless `owner` says whose (null is system)."""
         body = await request.json()
+        owner = body.pop("owner", world.admin)
         job = new_job(world, text=body.pop("text", SEED_TEXT), voice=body.pop("voice", "narrator"),
-                      engine=body.pop("engine", "chatterbox"), scripted=body.pop("scripted", True))
+                      engine=body.pop("engine", "chatterbox"), scripted=body.pop("scripted", True),
+                      owner=owner, credential=body.pop("credential", "session" if owner else None))
         job.update(body)
         return public(job)
+
+    # WHAT tts-long HOLDS, for the harness, whoever owns it: GET /jobs's
+    # answer over every job (the same filters and limit), and one job's whole
+    # record. A test reads these here rather than asking the service, which
+    # answers only what the gateway forwards.
+    @app.get("/__fake/jobs")
+    async def jobs(request: Request) -> dict[str, Any]:
+        return listing(world, request.query_params)
+
+    @app.get("/__fake/jobs/{job_id}")
+    async def job(job_id: str) -> dict[str, Any]:
+        found = world.jobs[job_id]
+        return public(found) | {"text": found.get("text")}
+
+    @app.get("/__fake/health/{backend}")
+    async def backend_health(backend: str) -> dict[str, Any]:
+        """A backend's /health as it answers now, overrides included."""
+        return {"stt": stt_health, "tts": tts_health, "tts_long": long_health}[backend](world)
+
+    @app.get("/__fake/elsewhere/sign-in")
+    async def elsewhere(to: str, username: str, password: str) -> Response:
+        """ANOTHER SITE'S PAGE that signs its visitor in to `to` as somebody
+        else, by a form it submits itself (login CSRF, D14, D61). Served on
+        this port, so it is another origin than the gateway's; reached as
+        127.0.0.1 it is the same site, as a sibling on the NAS is, and as
+        localhost it is a different site altogether. A text/plain form is
+        the closest a form can come to the JSON the login takes."""
+        field = html.escape(json.dumps({"username": username, "password": password})[:-1] + ', "x": "',
+                            quote=True)
+        page = (f'<!doctype html><title>Elsewhere</title><form id="f" method="post" '
+                f'action="{html.escape(to, quote=True)}" enctype="text/plain">'
+                f'<input type="hidden" name="{field}" value=\'"}}\'></form>'
+                '<script>document.getElementById("f").submit()</script>')
+        return Response(page, media_type="text/html")
 
     @app.get("/__fake/metube")
     async def metube() -> dict[str, Any]:
@@ -1718,7 +2052,8 @@ def control_app(world: World) -> FastAPI:
     @app.post("/__fake/satellites/connect")
     async def connect_all(request: Request) -> dict[str, Any]:
         body = await request.json()
-        world.hub = body["hub"].rstrip("/")
+        world.gateway = body["gateway"].rstrip("/")
+        world.adopt_key = body["key"]
         keys = body.get("satellites") or list(SCRIPTED)
         # AS THEY START, for a hub that starts with nothing on it
         # (stack.restart_hub). A device keeps what it was told across a
@@ -1879,9 +2214,10 @@ async def serve(world: World, ports: dict[str, int]) -> None:
 def main(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="fakes")
     parser.add_argument("--repo", required=True, type=Path)
+    parser.add_argument("--svc-dir", required=True, type=Path)
     for name in ("stt", "tts", "long", "metube", "control"):
         parser.add_argument(f"--{name}-port", type=int, required=True)
     args = parser.parse_args(argv)
-    world = World(args.repo)
+    world = World(args.repo, args.svc_dir)
     asyncio.run(serve(world, {name: getattr(args, f"{name}_port")
                               for name in ("stt", "tts", "long", "metube", "control")}))

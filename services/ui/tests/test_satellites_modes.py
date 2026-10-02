@@ -768,24 +768,25 @@ def test_conversations_and_triggers_are_logged_and_end_the_wait(tmp_path):
     assert got["none"] == ""
 
 
-def test_a_hub_setting_named_as_a_token_is_a_fix_before_save(tmp_path):
-    """The hub refuses to send its own settings (its broker URL, its API
-    keys) as a destination's token; the page names that before Save, and a
-    per-room token under the hub's prefix is still a token."""
+def test_a_token_is_any_name_the_secret_store_can_hold(tmp_path):
+    """Names resolve in the gateway's secret store now, never in the hub's
+    environment (D47), so the hub no longer refuses its own settings' names
+    and neither does the page: any name in the store's shape is a name. One
+    that is not in that shape is still a fix before Save."""
     got = run(tmp_path, MODERN + """
       await satellitesRefresh();
       const words = () => WAKE.draft || WAKE.server.words;
       const jarvis = () => words().find(w => w.name === "hey_jarvis");
       const out = {};
-      for (const name of ["SATELLITES_MQTT_URL", "SATELLITES_API_KEYS", "SATELLITES_HA_TOKEN_KITCHEN"]) {
+      for (const name of ["SATELLITES_MQTT_URL", "SATELLITES_HA_TOKEN_KITCHEN", "satellites_ha_token"]) {
         wakeEdit("hey_jarvis", w => wakeField(w, "d.env", name));
         out[name] = wakeProblem(jarvis(), words());
       }
       console.log(JSON.stringify(out));
     """)
-    fix = "That name is one of the hub's own settings: name a variable with TOKEN or KEY in it."
-    assert got["SATELLITES_MQTT_URL"] == fix and got["SATELLITES_API_KEYS"] == fix
+    assert got["SATELLITES_MQTT_URL"] in ("", None), got
     assert got["SATELLITES_HA_TOKEN_KITCHEN"] in ("", None), got
+    assert got["satellites_ha_token"], got
 
 
 def test_a_words_voice_picker_offers_its_own_language_by_name(tmp_path):

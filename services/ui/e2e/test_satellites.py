@@ -34,8 +34,11 @@ import re
 import time
 from pathlib import Path
 
+from urllib.parse import urlsplit
+
 import httpx
 import pytest
+from conftest import password_if_asked
 from playwright.sync_api import expect
 from stack import UNCHECKED_SIGNATURE, WAKEWORD_CACHE
 from test_routes import settled
@@ -54,7 +57,11 @@ WHY_OFFLINE = "It is offline, so settings you change here are sent when it recon
 TRY_OFFLINE = "Offline, so nothing here reaches it."
 DEV_OFFLINE = "Offline, so Reboot, Move and Update wait for it to reconnect."
 NO_MUTE = "Keep Mute mic on one button other than Side, or a muted satellite could never be unmuted."
-BAD_HOOK = "Write the webhook as a full web address, starting with https or http."
+BAD_HOOK = "Write the webhook's address in full, starting with https or http, to store it."
+BAD_SECRET = "Name the webhook's secret in capitals, digits and _, such as SATELLITES_BUTTON_PLAY."
+# The secret a button's webhook names (D62): the mapping carries the name, and
+# the address is the secret's value.
+HOOK = "SATELLITES_BUTTON_KITCHEN_MODE"
 WW_CLEAN, WW_DIRTY = "No changes to save.", "Unsaved changes."
 
 
@@ -86,9 +93,10 @@ def reads(stack):
 
 
 def hub(stack) -> httpx.Client:
-    """The hub itself, over loopback: how a test sets up what another device
-    or Home Assistant would have done."""
-    return httpx.Client(base_url=stack.hub, timeout=30)
+    """The hub, through the gateway with the harness's admin key: how a test
+    sets up what another device or Home Assistant would have done. The hub
+    answers nothing the gateway did not forward."""
+    return stack.client(timeout=30)
 
 
 def put_words(stack, edit=None, ptt=None) -> dict:
@@ -116,8 +124,10 @@ def llm_action(base_url: str, model: str = "fake-small", **more) -> dict:
 
 
 def store_secret(stack, name: str, value: str | None) -> None:
-    with hub(stack) as h:
-        h.put("/satellites/secrets", json={"name": name, "value": value}).raise_for_status()
+    """A key in the gateway's secret store, for the hub to read, bound to the
+    fakes' port, where Home Assistant and the language model answer (D41).
+    Cleared after the test (conftest.no_secret_left)."""
+    stack.store_secret(name, value, hosts=[stack.fake.base])
 
 
 def image(version: str, size: int = 64 * 1024) -> bytes:
@@ -221,7 +231,7 @@ def bodies(browser_log, method: str, path: str) -> list:
 
 
 def patches(browser_log, nid: str) -> list[dict]:
-    return bodies(browser_log, "PATCH", rf"^/ui/api/satellites/{nid}$")
+    return bodies(browser_log, "PATCH", rf"^/satellites/{nid}$")
 
 
 def until(page, condition, what: str, seconds: float = 10.0) -> None:
@@ -243,19 +253,24 @@ def focused(page, js: str = "e => e") -> object:
 
 def saved_words(browser_log) -> dict:
     """The last PUT /satellites/wake-words the page sent, by word."""
-    body = bodies(browser_log, "PUT", r"^/ui/api/satellites/wake-words$")[-1]
+    body = bodies(browser_log, "PUT", r"^/satellites/wake-words$")[-1]
     return {"words": {w["name"]: w for w in body["words"]}, "ptt": body.get("ptt")}
+
+
+# The hub's own paths, which the gateway forwards to it, and not the page's
+# /ui/satellites... addresses: a page that failed to load is still a fault.
+HUB_PATH = re.compile(r"^/satellites(/|$)")
 
 
 def lost_hub_is_not_a_fault(browser_log) -> None:
     """The hub going away is what such a test does: its answers while it is
     gone, and the event stream it cuts, are not faults of the page."""
     for status in (502, 503):
-        browser_log.allow(status, r"^/ui/api/satellites")
+        browser_log.allow(status, HUB_PATH.pattern)
 
 
 def forget_cut_streams(browser_log) -> None:
-    browser_log.failed[:] = [f for f in browser_log.failed if "/ui/api/satellites" not in f["url"]]
+    browser_log.failed[:] = [f for f in browser_log.failed if not HUB_PATH.match(urlsplit(f["url"]).path)]
 
 
 # ---- the list and the hub ------------------------------------------------------------
@@ -283,7 +298,7 @@ def test_the_tab_says_it_is_asking_the_hub_until_the_lists_answer(page, goto, re
     """The first read of the lists held unanswered: one sentence, and none of
     the hub's sections drawn empty under it."""
     held = []
-    page.route(re.compile(r"/ui/api/satellites$"), lambda route: held.append(route))
+    page.route(re.compile(r"//[^/]+/satellites$"), lambda route: held.append(route))
     goto("/ui/satellites")
     asking = page.locator("#satellitesnone")
     until(page, lambda: held, "the list asked for")
@@ -292,7 +307,7 @@ def test_the_tab_says_it_is_asking_the_hub_until_the_lists_answer(page, goto, re
     expect(page.locator("#satellitesman")).to_be_hidden()
     for route in held:
         route.continue_()
-    page.unroute(re.compile(r"/ui/api/satellites$"))
+    page.unroute(re.compile(r"//[^/]+/satellites$"))
     expect(asking).to_be_hidden()
     expect(page.locator("#satellitelist > li")).to_have_count(3)
 
@@ -301,6 +316,12 @@ def test_a_hub_with_no_satellites_says_how_to_add_one(page, goto, stack, fake, c
     for key in ("kitchen", "lounge", "hallway"):
         fake.satellite_drop(key)
     with hub(stack) as h:
+        # Gone from the hub's side too before they are forgotten: the close
+        # crosses the gateway's relay, so it reaches the hub a moment after
+        # the satellite has dropped, and a forget sent to a session that is
+        # still closing is another test.
+        until(page, lambda: not any(s.get("online") for s in h.get("/satellites").json()["satellites"]),
+              "the hub saw the three go")
         for nid in (KITCHEN, LOUNGE, HALLWAY):
             h.post(f"/satellites/{nid}/forget").raise_for_status()
         assert h.get("/satellites").json()["satellites"] == []
@@ -455,7 +476,7 @@ def test_adopting_a_new_satellite_names_it_opens_its_row_and_focuses_it(page, go
     expect(row).to_have_attribute("open", "")
     expect(hallway.locator(":scope > details.sat-row > .body > .sat-note")).to_have_text("Hallway adopted.")
     assert focused(page, "e => e.tagName === 'SUMMARY' && e.closest('li.sat').dataset.id") == HALLWAY
-    assert bodies(browser_log, "POST", rf"^/ui/api/satellites/{HALLWAY}/adopt$") == [{"name": "Hallway"}]
+    assert bodies(browser_log, "POST", rf"^/satellites/{HALLWAY}/adopt$") == [{"name": "Hallway"}]
     assert [m["name"] for m in fake.satellite_received("hallway", type="adopt")] == ["Hallway"]
     expect(chip(page, HALLWAY)).to_have_text("Online", timeout=15_000)
     # Adopted, it sorts by name among the others, and the address names it.
@@ -470,7 +491,7 @@ def test_enter_in_the_name_field_adopts(page, goto, browser_log, changes):
     name.fill("Porch")
     name.press("Enter")
     expect(sat(page, HALLWAY).locator(":scope > details.sat-row")).to_have_attribute("open", "")
-    assert bodies(browser_log, "POST", rf"^/ui/api/satellites/{HALLWAY}/adopt$") == [{"name": "Porch"}]
+    assert bodies(browser_log, "POST", rf"^/satellites/{HALLWAY}/adopt$") == [{"name": "Porch"}]
 
 
 def test_blink_on_a_pending_satellite_asks_it_to_identify(page, goto, fake, browser_log, reads):
@@ -481,7 +502,7 @@ def test_blink_on_a_pending_satellite_asks_it_to_identify(page, goto, fake, brow
     since = time.time()
     hallway.locator('[data-act="identify"]').click()
     expect(hallway.locator(":scope > .sat-note")).to_have_text("Blinking white for five seconds.")
-    assert len(sent(browser_log, "POST", rf"^/ui/api/satellites/{HALLWAY}/identify$")) == 1
+    assert len(sent(browser_log, "POST", rf"^/satellites/{HALLWAY}/identify$")) == 1
     until(page, lambda: fake.satellite_received("hallway", type="identify", since=since), "identify at the device")
     assert fake.satellite_received("hallway", type="identify", since=since)[-1]["seconds"] == 5
 
@@ -502,7 +523,7 @@ def test_a_pending_satellite_that_goes_away_offers_forget_without_asking(page, g
     forget.click()
     expect(hallway).to_have_count(0)
     assert dialogs.seen == [], "forgetting a satellite that was only seen asked a question"
-    assert len(sent(browser_log, "POST", rf"^/ui/api/satellites/{HALLWAY}/forget$")) == 1
+    assert len(sent(browser_log, "POST", rf"^/satellites/{HALLWAY}/forget$")) == 1
 
 
 def test_the_dock_badge_counts_satellites_waiting_to_be_adopted(page, goto, changes):
@@ -735,7 +756,7 @@ def test_airplay_shows_the_cover_and_what_is_playing(page, goto, browser_log, re
     cover = box.locator(".sat-apart")
     expect(cover).to_be_visible()
     assert cover.evaluate("img => img.naturalWidth") == 96
-    expect(cover).to_have_attribute("src", re.compile(rf"/ui/api/satellites/{LOUNGE}/airplay/artwork\?v=[0-9a-f]{{64}}$"))
+    expect(cover).to_have_attribute("src", re.compile(rf"/satellites/{LOUNGE}/airplay/artwork\?v=[0-9a-f]{{64}}$"))
     expect(box.locator("summary .sum-note")).to_have_text("playing")
     expect(box.locator(".sat-aphint")).to_have_text("Phones and Macs list it as Lounge.")
     facts = apfacts(page)
@@ -756,13 +777,13 @@ def test_pause_and_play_are_sent_to_the_phone_and_the_label_follows(page, goto, 
     at(page, goto, "/ui/satellites/lounge/airplay")
     ap(page, "toggle").click()
     expect(ap(page, "toggle")).to_have_text("Play")
-    assert len(sent(browser_log, "POST", rf"^/ui/api/satellites/{LOUNGE}/airplay/pause$")) == 1
+    assert len(sent(browser_log, "POST", rf"^/satellites/{LOUNGE}/airplay/pause$")) == 1
     assert [m["command"] for m in fake.satellite_received("lounge", type="airplay_command")] == ["pause"]
     expect(section(page, LOUNGE, "sat-ap").locator("summary .sum-note")).to_have_text("paused")
     assert apfacts(page)["Status"] == "Paused"
     ap(page, "toggle").click()
     expect(ap(page, "toggle")).to_have_text("Pause")
-    assert len(sent(browser_log, "POST", rf"^/ui/api/satellites/{LOUNGE}/airplay/play$")) == 1
+    assert len(sent(browser_log, "POST", rf"^/satellites/{LOUNGE}/airplay/play$")) == 1
 
 
 def test_next_and_previous_are_sent(page, goto, fake, browser_log, changes):
@@ -790,7 +811,7 @@ def test_disconnect_asks_first_naming_whose_music_it_ends(page, goto, browser_lo
     expect(box.locator(".sat-apctl")).to_be_hidden()
     expect(box.locator(".sat-apart")).to_be_hidden()
     expect(box.locator("summary .sum-note")).to_have_text("waiting")
-    assert len(sent(browser_log, "POST", rf"^/ui/api/satellites/{LOUNGE}/airplay/disconnect$")) == 1
+    assert len(sent(browser_log, "POST", rf"^/satellites/{LOUNGE}/airplay/disconnect$")) == 1
 
 
 def test_the_focus_goes_to_the_airplay_summary_when_disconnect_hides_the_controls(page, goto, browser_log,
@@ -894,7 +915,7 @@ def test_say_sends_the_text_to_the_satellite(page, goto, fake, browser_log, chan
     before, seq = frames_at(fake, "kitchen"), fake.last_seq()
     box.locator(".sat-sayform input").fill("Dinner is ready")
     box.locator(".sat-sayform input").press("Enter")
-    until(page, lambda: sent(browser_log, "POST", rf"^/ui/api/satellites/{KITCHEN}/say$"), "Say sent")
+    until(page, lambda: sent(browser_log, "POST", rf"^/satellites/{KITCHEN}/say$"), "Say sent")
     assert bodies(browser_log, "POST", rf"/{KITCHEN}/say$") == [{"text": "Dinner is ready"}]
     until(page, lambda: fake.requests(backend="tts", path=r"^/v1/audio/speech$", since=seq), "the speech asked for")
     assert fake.requests(backend="tts", path=r"^/v1/audio/speech$", since=seq)[-1]["json"]["input"] == "Dinner is ready"
@@ -946,15 +967,18 @@ def test_listen_records_five_seconds_into_a_player_that_does_not_start_itself(pa
     expect(player).to_be_visible(timeout=20_000)
     expect(note).to_have_text("Four channels: the speaker loopback, then the three microphones.")
     assert player.evaluate("a => a.src.startsWith('blob:') && a.paused && !a.autoplay")
-    listens = sent(browser_log, "GET", rf"^/ui/api/satellites/{KITCHEN}/listen$")
+    # A POST: recording is a side effect, and a GET is what a page elsewhere
+    # can make a browser send (D15, H3).
+    listens = sent(browser_log, "POST", rf"^/satellites/{KITCHEN}/listen$")
     assert [r["query"] for r in listens] == ["seconds=5"]
+    assert not sent(browser_log, "GET", rf"^/satellites/{KITCHEN}/listen$")
 
 
 def test_stop_asks_the_satellite_to_stop_talking(page, goto, fake, browser_log, reads):
     at(page, goto, "/ui/satellites/kitchen/try")
     since = time.time()
     try_it(page, KITCHEN).locator('[data-act="stop"]').click()
-    until(page, lambda: sent(browser_log, "POST", rf"^/ui/api/satellites/{KITCHEN}/flush$"), "Stop sent")
+    until(page, lambda: sent(browser_log, "POST", rf"^/satellites/{KITCHEN}/flush$"), "Stop sent")
     until(page, lambda: fake.satellite_received("kitchen", type="flush", since=since), "flush at the device")
     expect(try_it(page, KITCHEN).locator('[data-act="stop"]')).to_have_text("Stop")
 
@@ -1020,30 +1044,62 @@ def test_changing_a_buttons_action_sends_the_whole_mapping(page, goto, fake, bro
           "the actions the device runs itself, at the device")
 
 
-def test_choosing_webhook_asks_for_its_address_before_saving(page, goto, fake, browser_log, changes):
+def address_box(page, button: str, edge: str = "press"):
+    """The webhook's address, typed to be stored as its secret, never sent in the mapping."""
+    return hook_box(page, button, edge).locator("xpath=..").locator("input[type=password]")
+
+
+def store_hook(page, stack, button: str, url: str) -> None:
+    """The address stored under HOOK from the button's own box, with the
+    password again if the store asks for it (D13). Done when the line under
+    the name says the store holds it."""
+    hook_box(page, button).fill(HOOK)
+    address_box(page, button).fill(url)
+    hook_box(page, button).locator("xpath=..").get_by_role("button", name="Store the address").click()
+    password_if_asked(page, stack.admin.password, hook_box(page, button).locator(
+        "xpath=following-sibling::div[1]").get_by_text(f"{HOOK} is in the secret store."))
+
+
+def test_choosing_webhook_asks_for_its_secret_before_saving(page, goto, stack, fake, browser_log, changes):
+    """A webhook names a secret_url secret, and the address is stored under
+    it: the mapping, which every satellites:read holder and MQTT see, carries
+    the name and never the address (D62)."""
     at(page, goto, "/ui/satellites/kitchen/buttons")
     pick(page, "mode").select_option("webhook")
-    address = hook_box(page, "mode")
-    expect(address).to_be_visible()
-    expect(address).to_be_focused()
+    name = hook_box(page, "mode")
+    expect(name).to_be_visible()
+    expect(name).to_be_focused()
     page.wait_for_timeout(300)
-    assert patches(browser_log, KITCHEN) == [], "a webhook with no address was sent"
-    address.fill(fake.hook_url("kitchen-mode"))
-    address.press("Tab")
+    assert patches(browser_log, KITCHEN) == [], "a webhook naming no secret was sent"
+    url = fake.hook_url("kitchen-mode")
+    store_hook(page, stack, "mode", url)
     until(page, lambda: patches(browser_log, KITCHEN), "the mapping sent")
-    assert patches(browser_log, KITCHEN)[-1]["buttons"]["mode"] == {"press": f"webhook:{fake.hook_url('kitchen-mode')}"}
+    assert patches(browser_log, KITCHEN)[-1]["buttons"]["mode"] == {"press": f"webhook:secret:{HOOK}"}
+    assert url not in json.dumps(patches(browser_log, KITCHEN)), "the address went out in the mapping"
+    stored = bodies(browser_log, "PUT", rf"^/admin/secrets/{HOOK}$")
+    assert [(b["value"], b["kind"]) for b in stored] == [(url, "secret_url")]
+    # Bound to the host the address names, and to no other (D41).
+    assert [b["allowed_hosts"] for b in stored] == [[fake.base]]
+    expect(address_box(page, "mode")).to_have_value("")
     expect(section(page, KITCHEN, "sat-buttons").locator("summary .sum-note")).to_have_text(
         "Mode calls a webhook, Play talks, Set stops")
 
 
-def test_a_webhook_address_that_is_not_a_url_is_refused_before_sending(page, goto, browser_log, reads):
+def test_a_webhook_that_is_not_a_secret_or_not_an_address_is_refused_before_storing(page, goto, browser_log,
+                                                                                    reads):
+    """A name the store would refuse is said before any mapping is sent, and
+    an address that is not one before anything is stored."""
     at(page, goto, "/ui/satellites/kitchen/buttons")
     pick(page, "mode").select_option("webhook")
-    hook_box(page, "mode").fill("hooks.example.com/press")
+    hook_box(page, "mode").fill("kitchen-mode")
     hook_box(page, "mode").press("Tab")
+    expect(buttons_note(page)).to_have_text(BAD_SECRET)
+    hook_box(page, "mode").fill(HOOK)
+    address_box(page, "mode").fill("hooks.example.com/press")
+    hook_box(page, "mode").locator("xpath=..").get_by_role("button", name="Store the address").click()
     expect(buttons_note(page)).to_have_text(BAD_HOOK)
     page.wait_for_timeout(300)
-    assert patches(browser_log, KITCHEN) == []
+    assert not sent(browser_log, "PUT", r"^/admin/secrets/"), "an address that is not one was stored"
 
 
 def test_a_mapping_without_a_mute_is_refused_before_sending(page, goto, browser_log, changes):
@@ -1081,11 +1137,13 @@ def test_a_button_pressed_on_the_device_appears_in_activity(page, goto, fake, re
     expect(sat(page, KITCHEN).locator(".sat-last")).to_have_text(re.compile(r"^Last event: Mode pressed, "))
 
 
-def test_a_webhook_button_press_reaches_the_webhook(page, goto, fake, browser_log, changes):
+def test_a_webhook_button_press_reaches_the_webhook(page, goto, stack, fake, browser_log, changes):
+    """The hub reads the address from the store at the press and calls it,
+    since the page bound the secret to the host the address names (D41,
+    D62). The next test is the press whose secret names another host."""
     at(page, goto, "/ui/satellites/kitchen/buttons")
     pick(page, "mode").select_option("webhook")
-    hook_box(page, "mode").fill(fake.hook_url("kitchen-mode"))
-    hook_box(page, "mode").press("Tab")
+    store_hook(page, stack, "mode", fake.hook_url("kitchen-mode"))
     until(page, lambda: patches(browser_log, KITCHEN), "the mapping sent")
     page.wait_for_function(f"""() => {{
       const n = SATELLITES.list.find(x => x.id === "{KITCHEN}");
@@ -1097,6 +1155,31 @@ def test_a_webhook_button_press_reaches_the_webhook(page, goto, fake, browser_lo
     assert (call["method"], call["path"]) == ("POST", "/__hook/kitchen-mode")
     assert call["json"] == {"satellite": "Kitchen", "satellite_id": KITCHEN, "button": "mode",
                             "action": "press", "held_ms": None}
+
+
+def test_a_webhook_press_sends_nothing_to_a_host_its_secret_does_not_name(page, stack, fake, changes):
+    """The address stored under a secret bound to another host, as one
+    pasted under the wrong name would be: at the press the hub finds the
+    address's host is not one the secret names and sends nothing (D41). Its
+    log says so by the secret's name and the host, never the address, which
+    is the credential (recheck M-2)."""
+    log = stack.run / "hub.log"
+    start = log.stat().st_size
+
+    def logged() -> str:
+        return log.read_bytes()[start:].decode(errors="replace")
+
+    url = fake.hook_url("elsewhere")
+    stack.store_secret(HOOK, url, kind="secret_url", hosts=["https://hooks.example"])
+    with hub(stack) as h:
+        h.patch(f"/satellites/{KITCHEN}", json={"buttons": DEFAULT_BUTTONS | {
+            "mode": {"press": f"webhook:secret:{HOOK}"}}}).raise_for_status()
+    seq = fake.last_seq()
+    fake.satellite_button("kitchen", "mode", "press")
+    refused = f"button webhook {HOOK}: nothing was sent: {HOOK} may not be sent to {fake.base}:"
+    until(page, lambda: refused in logged(), "the hub refused the host")
+    assert fake.requests(backend="hook", since=seq) == [], "the press reached a host the secret does not name"
+    assert url not in logged(), "the hub logged the address"
 
 
 # ---- Device --------------------------------------------------------------------------------
@@ -1167,7 +1250,7 @@ def lit(body: dict) -> list[int]:
 
 
 def lights_sent(browser_log) -> list[dict]:
-    return bodies(browser_log, "POST", rf"^/ui/api/satellites/{KITCHEN}/lights$")
+    return bodies(browser_log, "POST", rf"^/satellites/{KITCHEN}/lights$")
 
 
 def test_setting_up_the_ring_lights_one_led_moves_it_and_saves_top_and_direction(page, goto, browser_log, changes):
@@ -1245,7 +1328,7 @@ def test_reboot_asks_first_and_the_row_reads_restarting_not_offline(page, goto, 
     expect(device(page).locator(":scope > .body > .sat-note")).to_have_text(
         "Kitchen is rebooting; it is back in about ten seconds.")
     assert dialogs.seen == [("confirm", "Reboot Kitchen? It is back in about ten seconds.")]
-    assert len(sent(browser_log, "POST", rf"^/ui/api/satellites/{KITCHEN}/reboot$")) == 1
+    assert len(sent(browser_log, "POST", rf"^/satellites/{KITCHEN}/reboot$")) == 1
     seen, health = set(), set()
 
     def back() -> bool:
@@ -1280,7 +1363,7 @@ def test_move_to_another_hub_checks_the_address_asks_and_sends_it(page, goto, fa
     expect(note).to_have_text("Moving. Forget it here once the other hub has adopted it.")
     assert dialogs.seen == [("confirm", "Move Kitchen to wss://hub.example.com:8443? "
                                         "It reboots and waits to be adopted by that hub.")]
-    assert bodies(browser_log, "POST", rf"^/ui/api/satellites/{KITCHEN}/set-hub$") == [
+    assert bodies(browser_log, "POST", rf"^/satellites/{KITCHEN}/set-hub$") == [
         {"url": "wss://hub.example.com:8443"}]
     until(page, lambda: fake.satellite_received("kitchen", type="set_hub", since=since), "the address at the device")
     expect(move_box(page)).to_be_hidden()
@@ -1302,7 +1385,7 @@ def test_forget_asks_first_removes_the_row_and_moves_the_focus(page, goto, brows
     dialogs()
     at(page, goto, "/ui/satellites/kitchen/device")
     device(page).locator('[data-act="forget"]').click()
-    until(page, lambda: sent(browser_log, "POST", rf"^/ui/api/satellites/{KITCHEN}/forget$"), "Forget sent")
+    until(page, lambda: sent(browser_log, "POST", rf"^/satellites/{KITCHEN}/forget$"), "Forget sent")
     assert dialogs.seen == [("confirm", "Forget Kitchen? It stops streaming and waits to be adopted again.")]
     # The row that took its place has the focus, not a button that is gone.
     until(page, lambda: focused(page, "e => e.closest && e.closest('li.sat') && e.closest('li.sat').dataset.id")
@@ -1389,9 +1472,9 @@ def test_a_word_whose_model_cannot_download_reads_failed_and_offers_try_again(pa
     expect(page.locator("#ww-sum")).to_have_text("hey rhasspy failed")
     retry = row.locator('[data-ww="retry"]')
     expect(retry).to_be_visible()
-    puts = len(sent(browser_log, "PUT", r"^/ui/api/satellites/wake-words$"))
+    puts = len(sent(browser_log, "PUT", r"^/satellites/wake-words$"))
     retry.click()
-    until(page, lambda: len(sent(browser_log, "PUT", r"^/ui/api/satellites/wake-words$")) == puts + 1, "Try again")
+    until(page, lambda: len(sent(browser_log, "PUT", r"^/satellites/wake-words$")) == puts + 1, "Try again")
     assert set(saved_words(browser_log)["words"]) == {"hey_jarvis", "alexa", "hey_rhasspy"}
     expect(retry).to_have_text("Try again")
 
@@ -1572,8 +1655,6 @@ FIXES = {
             "Write the name of the variable that holds the token, never the token itself.", False),
     "env-key": ([("dest", "llm"), ("d.base_url", "LLM"), ("d.model", "fake-small"), ("d.env", "my_key")],
                 "Write the key's name in capitals, digits and underscores, never the key itself.", False),
-    "env-hub": ([("dest", "ha_conversation"), ("d.url", "HA"), ("d.env", "SATELLITES_DATA_DIR")],
-                "That name is one of the hub's own settings: name a variable with TOKEN or KEY in it.", False),
     "follow": ([("mode", "conversation"), ("c.follow_up_s", "90")], "Keep listening for 1 to 60 seconds.", False),
     "pause": ([("silence_ms", "5")], "Pause for 0.2 to 3 seconds before the command ends.", False),
     "pause-follow": ([("mode", "conversation"), ("c.silence_ms", "9")],
@@ -1633,7 +1714,7 @@ def test_a_422_from_the_hub_keeps_the_draft_and_shows_the_reason(page, goto, bro
     anyway (a rule changed on the hub before the page was reloaded) comes
     back as 422 with the hub's own sentence, answered here as the hub would."""
     reason = "'hey_jarvis' is not a wake word this hub can load; it can load alexa"
-    page.route(re.compile(r"/ui/api/satellites/wake-words$"), lambda route: route.fulfill(
+    page.route(re.compile(r"//[^/]+/satellites/wake-words$"), lambda route: route.fulfill(
         status=422, json={"error": {"message": reason, "type": "invalid_request_error", "param": None,
                                     "code": "invalid_wake_words"}})
         if route.request.method == "PUT" else route.continue_())
@@ -1813,7 +1894,7 @@ def test_home_assistant_pipelines_are_listed_once_the_address_and_token_are_give
     page.wait_for_timeout(300)
     assert not sent(browser_log, "POST", r"/ha/pipelines$"), "the pipelines were asked for a half-typed address"
     address.blur()
-    until(page, lambda: sent(browser_log, "POST", r"^/ui/api/satellites/ha/pipelines$"), "the pipelines asked for")
+    until(page, lambda: sent(browser_log, "POST", r"^/satellites/ha/pipelines$"), "the pipelines asked for")
     assert bodies(browser_log, "POST", r"/ha/pipelines$") == [{"url": fake.ha_url, "token_env": "SATELLITES_HA_TOKEN"}]
     expect(hint).to_have_text("Hears with faster_whisper (en), speaks with piper as en_GB-alba-medium.")
     assert pipelines(page) == [["", "Home Assistant's preferred (Home)"], ["01home", "Home"],
@@ -1831,7 +1912,7 @@ def test_a_pipeline_list_that_failed_can_be_asked_again(page, goto, stack, fake,
     field(page, "hey_jarvis", "d.url").fill(fake.ha_url)
     field(page, "hey_jarvis", "d.url").blur()
     hint = row.locator(".ww-pipehint")
-    expect(hint).to_have_text("Could not list the pipelines: SATELLITES_HA_TOKEN is not set on the hub, "
+    expect(hint).to_have_text("Could not list the pipelines: SATELLITES_HA_TOKEN is not set in the secret store, "
                               "so Home Assistant cannot be asked")
     again = row.locator('[data-ww="pipes"]')
     expect(again).to_have_text("Ask again")
@@ -1869,7 +1950,7 @@ def test_a_language_model_provider_fills_the_base_url_and_lists_its_models(page,
     row.locator('[data-ww="models"]').click()
     expect(hint).to_have_text("3 models to pick from; type to narrow the list.")
     expect(field(page, "hey_jarvis", "d.model")).to_be_focused()
-    assert bodies(browser_log, "POST", r"^/ui/api/satellites/llm/models$") == [
+    assert bodies(browser_log, "POST", r"^/satellites/llm/models$") == [
         {"base_url": fake.llm_url, "api_key_env": LLM_KEY}]
     assert row.locator("datalist option").evaluate_all("os => os.map(o => o.value)") == [
         "fake-large", "fake-small", "fake-tiny"]
@@ -1895,19 +1976,26 @@ def test_storing_a_key_sends_it_once_empties_the_box_and_never_shows_it_again(pa
     llm_word(page, goto, fake)
     row = ww(page, "hey_jarvis")
     hint = row.locator(".ww-keyhint")
-    expect(hint).to_have_text(f"Store a key as {LLM_KEY}, or save to learn whether the environment sets it.")
+    expect(hint).to_have_text(f"Store a key as {LLM_KEY}, or save to learn whether the secret store has one.")
     key_box(page).fill(secret)
     row.locator('[data-ww="key"]').click()
-    expect(row.locator(".ww-keynote")).to_have_text("Stored. It is not shown again.")
+    password_if_asked(page, stack.admin.password, row.locator(".ww-keynote").get_by_text(
+        "Stored. It is not shown again."))
     expect(key_box(page)).to_have_value("")
-    expect(hint).to_have_text(f"A key is stored on the hub as {LLM_KEY}.")
+    expect(hint).to_have_text(f"A key is in the secret store as {LLM_KEY}.")
     expect(row.locator('[data-ww="key"]')).to_have_text("Replace key")
     expect(row.locator('[data-ww="keyclear"]')).to_be_visible()
-    assert bodies(browser_log, "PUT", r"^/ui/api/satellites/secrets$") == [{"name": LLM_KEY, "value": secret}]
+    # Into the gateway's store, bound to the model's host, readable by the hub (D41, D47).
+    stored = bodies(browser_log, "PUT", rf"^/admin/secrets/{LLM_KEY}$")
+    assert [(b["value"], b["consumers"], b["allowed_hosts"]) for b in stored] == [
+        (secret, ["satellites"], [fake.base])]
     assert secret not in page.content()
     with hub(stack) as h:
         assert secret not in h.get("/satellites/wake-words").text
-        assert h.get("/satellites/wake-words").json()["secrets"] == {LLM_KEY: "hub"}
+    with stack.person(stack.admin) as admin:
+        listed = admin.get("/admin/secrets")
+    assert secret not in listed.text
+    assert [r["set"] for r in listed.json()["secrets"] if r["name"] == LLM_KEY] == [True]
 
 
 def test_replacing_a_key_shared_by_other_words_asks_first(page, goto, stack, fake, browser_log, dialogs, changes):
@@ -1920,16 +2008,18 @@ def test_replacing_a_key_shared_by_other_words_asks_first(page, goto, stack, fak
     dialogs(answer=lambda dialog: next(answers))
     at(page, goto, "/ui/satellites/wake-words/hey_jarvis")
     row = ww(page, "hey_jarvis")
-    expect(row.locator(".ww-keyhint")).to_have_text(f"A key is stored on the hub as {LLM_KEY}. Also used by alexa.")
+    expect(row.locator(".ww-keyhint")).to_have_text(f"A key is in the secret store as {LLM_KEY}. Also used by alexa.")
     key_box(page).fill("sk-new")
     row.locator('[data-ww="key"]').click()
     until(page, lambda: len(dialogs.seen) == 1, "the question")
     assert dialogs.seen[0] == ("confirm", f"Replace the key stored as {LLM_KEY}? alexa will send the new one too.")
     expect(key_box(page)).to_have_value("sk-new")
-    assert not sent(browser_log, "PUT", r"/secrets$")
+    assert not sent(browser_log, "PUT", r"^/admin/secrets/")
     row.locator('[data-ww="key"]').click()
-    expect(row.locator(".ww-keynote")).to_have_text("Stored. It is not shown again.")
-    assert bodies(browser_log, "PUT", r"/secrets$") == [{"name": LLM_KEY, "value": "sk-new"}]
+    password_if_asked(page, stack.admin.password, row.locator(".ww-keynote").get_by_text(
+        "Stored. It is not shown again."))
+    # Only the value: the secret's bindings are already the ones it needs.
+    assert bodies(browser_log, "PUT", rf"^/admin/secrets/{LLM_KEY}$") == [{"value": "sk-new"}]
 
 
 def test_clearing_a_key_asks_first(page, goto, stack, fake, browser_log, dialogs, changes):
@@ -1943,20 +2033,23 @@ def test_clearing_a_key_asks_first(page, goto, stack, fake, browser_log, dialogs
     clear.click()
     until(page, lambda: len(dialogs.seen) == 1, "the question")
     assert dialogs.seen[0] == ("confirm", f"Clear the key stored as {LLM_KEY}? Every action that names it stops sending it.")
-    assert not sent(browser_log, "PUT", r"/secrets$")
+    assert not sent(browser_log, "DELETE", r"^/admin/secrets/")
     clear.click()
-    expect(row.locator(".ww-keynote")).to_have_text(f"The key stored as {LLM_KEY} is cleared.")
-    assert bodies(browser_log, "PUT", r"/secrets$") == [{"name": LLM_KEY, "value": None}]
+    password_if_asked(page, stack.admin.password, row.locator(".ww-keynote").get_by_text(
+        f"The key stored as {LLM_KEY} is cleared."))
+    assert [r["path"] for r in sent(browser_log, "DELETE", r"^/admin/secrets/")] == [
+        f"/admin/secrets/{LLM_KEY}"]
     expect(clear).to_be_hidden()
     expect(key_box(page)).to_be_focused()
 
 
-def test_enter_in_the_key_box_stores_the_key(page, goto, fake, browser_log, changes):
+def test_enter_in_the_key_box_stores_the_key(page, goto, stack, fake, browser_log, changes):
     llm_word(page, goto, fake)
     key_box(page).fill("sk-enter")
     key_box(page).press("Enter")
-    expect(ww(page, "hey_jarvis").locator(".ww-keynote")).to_have_text("Stored. It is not shown again.")
-    assert bodies(browser_log, "PUT", r"/secrets$") == [{"name": LLM_KEY, "value": "sk-enter"}]
+    password_if_asked(page, stack.admin.password, ww(page, "hey_jarvis").locator(".ww-keynote").get_by_text(
+        "Stored. It is not shown again."))
+    assert [b["value"] for b in bodies(browser_log, "PUT", rf"^/admin/secrets/{LLM_KEY}$")] == ["sk-enter"]
 
 
 def test_web_search_is_greyed_without_a_search_server_and_weather_is_not(page, goto, reads):
@@ -1976,7 +2069,7 @@ def test_test_asks_the_model_one_question_and_reports_the_times(page, goto, fake
     row.locator('[data-ww="llmtest"]').click()
     expect(row.locator(".ww-llmresult")).to_have_text(
         re.compile(r"^Answered in \d+\.\d s, the first words in \d+\.\d s: Hello there, friend\.$"), timeout=15_000)
-    tested = bodies(browser_log, "POST", r"^/ui/api/satellites/llm/test$")
+    tested = bodies(browser_log, "POST", r"^/satellites/llm/test$")
     assert len(tested) == 1 and (tested[0]["type"], tested[0]["base_url"], tested[0]["model"]) == (
         "llm", fake.llm_url, "fake-small")
     asked = fake.requests(backend="llm", path=r"/chat/completions$", since=seq)
@@ -2021,9 +2114,9 @@ def test_a_poll_never_undoes_an_unsaved_edit(page, goto, browser_log, reads):
     row = ww(page, "hey_jarvis")
     row.locator("input[type=range]").fill("0.8")
     row.locator('[data-mode="conversation"]').click()
-    asked = len(sent(browser_log, "GET", r"^/ui/api/satellites/wake-words$"))
+    asked = len(sent(browser_log, "GET", r"^/satellites/wake-words$"))
     refreshed(page)
-    until(page, lambda: len(sent(browser_log, "GET", r"^/ui/api/satellites/wake-words$")) > asked, "a poll")
+    until(page, lambda: len(sent(browser_log, "GET", r"^/satellites/wake-words$")) > asked, "a poll")
     page.wait_for_function("() => !SATELLITES.polling")
     expect(row.locator(".slider output")).to_have_text("0.80")
     expect(row.locator('[data-mode="conversation"]')).to_have_attribute("aria-pressed", "true")
@@ -2052,7 +2145,7 @@ def test_try_a_word_runs_the_saved_echo_action_and_plays_nothing(page, goto, fak
     expect(page.locator("#routeresult")).to_have_text(re.compile(
         r'^hey jarvis: "what time is it" \(en\) answered "what time is it", first sound after \d+ ms$'),
         timeout=15_000)
-    assert bodies(browser_log, "POST", r"^/ui/api/satellites/routing/test$") == [
+    assert bodies(browser_log, "POST", r"^/satellites/routing/test$") == [
         {"satellite": "any", "wake_word": "hey_jarvis", "text": "what time is it"}]
     assert fake.requests(backend="tts", method="POST", since=seq), "no reply was made"
     page.wait_for_timeout(500)
@@ -2129,7 +2222,7 @@ def test_uploading_a_custom_model_adds_it_to_the_list_of_words_to_add(page, goto
     page.locator("#wwmodelname").fill("lumos")
     page.locator("#wwupload").click()
     expect(page.locator("#wwmodelnote")).to_have_text("Uploaded lumos. Add it like any other wake word.")
-    upload = sent(browser_log, "POST", r"^/ui/api/satellites/wake-words/models$")
+    upload = sent(browser_log, "POST", r"^/satellites/wake-words/models$")
     assert len(upload) == 1 and upload[0]["query"] == "name=lumos"
     with hub(stack) as h:
         assert h.get("/satellites/wake-words").json()["custom"] == ["lumos"]
@@ -2185,7 +2278,7 @@ def test_deleting_an_unused_custom_model_asks_first(page, goto, stack, browser_l
     assert not sent(browser_log, "DELETE", r"/models/")
     delete.click()
     expect(page.locator("#wwmodelnote")).to_have_text("Deleted lumos.")
-    assert len(sent(browser_log, "DELETE", r"^/ui/api/satellites/wake-words/models/lumos$")) == 1
+    assert len(sent(browser_log, "DELETE", r"^/satellites/wake-words/models/lumos$")) == 1
     expect(page.locator("#wwcustom li")).to_have_count(0)
     expect(page.locator("#ww-models-sum")).to_have_text("none")
     expect(page.locator("#wwfile")).to_be_focused()
@@ -2326,7 +2419,7 @@ def test_turning_telemetry_on_and_choosing_a_level_are_saved(page, goto, stack, 
     expect(page.locator("#tm-sum")).to_have_text("recording timings only")
     page.locator("#tmdays").fill("30")
     page.locator("#tmdays").press("Tab")
-    until(page, lambda: len(sent(browser_log, "PUT", r"^/ui/api/satellites/telemetry$")) == 3, "three changes")
+    until(page, lambda: len(sent(browser_log, "PUT", r"^/satellites/telemetry$")) == 3, "three changes")
     assert bodies(browser_log, "PUT", r"/telemetry$") == [
         {"enabled": True}, {"level": "timings"}, {"retention_days": 30}]
     with hub(stack) as h:
@@ -2365,7 +2458,7 @@ def test_recorded_telemetry_can_be_downloaded_and_deleted(page, goto, stack, fak
     assert not sent(browser_log, "DELETE", r"/telemetry$")
     page.locator("#tmdelete").click()
     expect(page.locator("#tmsize")).to_have_text("Nothing recorded yet.")
-    assert len(sent(browser_log, "DELETE", r"^/ui/api/satellites/telemetry$")) == 1
+    assert len(sent(browser_log, "DELETE", r"^/satellites/telemetry$")) == 1
     expect(page.locator("#tmdownload")).to_be_hidden()
     expect(page.locator("#tmon")).to_be_checked()
 
@@ -2423,7 +2516,7 @@ def test_an_uploaded_signed_image_is_offered_to_its_satellites(page, goto, stack
     page.locator("#fwsig").fill(UNCHECKED_SIGNATURE)
     page.locator("#fwupload").click()
     expect(page.locator("#fwnote")).to_have_text("Uploaded v0.3.0.")
-    upload = sent(browser_log, "POST", r"^/ui/api/satellites/firmware$")
+    upload = sent(browser_log, "POST", r"^/satellites/firmware$")
     assert len(upload) == 1
     assert upload[0]["query"] == f"model={KORVO}&version=v0.3.0&signature={UNCHECKED_SIGNATURE}"
     with hub(stack) as h:
@@ -2454,7 +2547,7 @@ def test_update_every_satellite_updates_only_those_due_and_follows_their_progres
     go.click()
     expect(page.locator("#fwnote")).to_have_text("Updating 2 satellites.", timeout=15_000)
     assert dialogs.seen == [("confirm", "Update 2 satellites to v0.3.0? Each one reboots when its transfer ends.")]
-    asked = bodies(browser_log, "POST", r"^/ui/api/satellites/ota$")
+    asked = bodies(browser_log, "POST", r"^/satellites/ota$")
     assert sorted(a["satellite"] for a in asked) == [KITCHEN, HALLWAY]
     assert {a["sha256"] for a in asked} == {image_v3["sha256"]}
     for nid in (KITCHEN, HALLWAY):
@@ -2485,7 +2578,7 @@ def test_a_satellites_own_update_button_asks_and_starts_its_update(page, goto, s
     expect(device(page).locator(":scope > .body > .sat-note")).to_have_text(
         "Updating to v0.3.0; its row shows the progress.")
     assert dialogs.seen == [("confirm", "Update Kitchen to v0.3.0? It reboots when the transfer ends.")]
-    assert bodies(browser_log, "POST", r"^/ui/api/satellites/ota$") == [
+    assert bodies(browser_log, "POST", r"^/satellites/ota$") == [
         {"satellite": KITCHEN, "sha256": image_v3["sha256"]}]
     expect(device(page).locator("summary .sum-note")).to_have_text("v0.3.0", timeout=30_000)
     expect(device(page).locator(".sat-update")).to_be_hidden()
@@ -2545,10 +2638,12 @@ def test_deleting_an_image_asks_first_and_moves_the_focus(page, goto, stack, bro
     assert not sent(browser_log, "DELETE", r"/firmware/")
     delete.click()
     expect(fw_row(page, "v0.3.0")).to_have_count(0)
-    assert len(sent(browser_log, "DELETE", rf"^/ui/api/satellites/firmware/{first['sha256']}$")) == 1
-    # The image that took its place: its first button that is not greyed.
-    assert focused(page, "e => [e.closest('li.fw') && e.closest('li.fw').querySelector('.sat-name').textContent,"
-                         " e.textContent]") == ["v0.2.0", "Delete"]
+    assert len(sent(browser_log, "DELETE", rf"^/satellites/firmware/{first['sha256']}$")) == 1
+    # The image that took its place: its first button that is not greyed,
+    # once the list is drawn again.
+    until(page, lambda: focused(page, "e => [e.closest('li.fw') && e.closest('li.fw').querySelector('.sat-name')"
+                                      ".textContent, e.textContent]") == ["v0.2.0", "Delete"],
+          "the focus on the image that took its place")
 
 
 # ---- design ----------------------------------------------------------------------------------

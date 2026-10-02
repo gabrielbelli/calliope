@@ -19,15 +19,19 @@ from __future__ import annotations
 import json
 import re
 
-import httpx
 import pytest
+from conftest import fetch_as_page
+import stack as st
 from playwright.sync_api import expect
 
 KITCHEN, LOUNGE, HALLWAY = "020000000001", "020000000002", "020000000003"
+# The admin's tabs, which every test here is signed in as: the five sections,
+# then Account and Admin.
 TABS = {"transcribe": "Transcribe", "speak": "Speak", "jobs": "Jobs",
-        "vocab": "Vocabulary", "satellites": "Satellites"}
+        "vocab": "Vocabulary", "satellites": "Satellites", "account": "Account", "admin": "Admin"}
 SLUGS = {"transcribe": "/ui", "speak": "/ui/speak", "jobs": "/ui/jobs",
-         "vocab": "/ui/vocabulary", "satellites": "/ui/satellites"}
+         "vocab": "/ui/vocabulary", "satellites": "/ui/satellites", "account": "/ui/account",
+         "admin": "/ui/admin"}
 
 
 # ---- helpers ---------------------------------------------------------------------------
@@ -39,6 +43,18 @@ def here(page) -> str:
 
 def wait_for_address(page, address: str) -> None:
     page.wait_for_function("a => location.pathname + location.search === a", arg=address)
+
+
+def wait_for_tab(page, path: str) -> None:
+    """The bar holds a tab's address. Speak's alone may also name the voice:
+    the page writes the chosen voice into the query whenever it draws the
+    picker again, and it reads the voices again on the way into the tab once
+    they are five seconds old, which on a busy machine they are by the time a
+    test clicks. A voice in any other tab's address is a fault."""
+    page.wait_for_function(
+        """p => location.pathname === p && (!location.search
+             || (p === "/ui/speak" && /^[?]voice=[^&]+$/.test(location.search)))""",
+        arg=path)
 
 
 def settled(page) -> None:
@@ -65,10 +81,11 @@ def row(page, nid: str):
 
 
 def seeded_job(stack, kind: str, status: str, audio: str | None = None) -> str:
-    """The id of a job the fake tts-long seeded, asked of it directly."""
-    jobs = httpx.get(f"http://127.0.0.1:{stack.ports['long']}/jobs", timeout=5).json()["jobs"]
+    """The id of a job the fake tts-long seeded as the admin's, asked of the
+    fakes directly."""
+    jobs = stack.fake.jobs()["jobs"]
     for job in jobs:
-        if job["kind"] == kind and job["status"] == status and (
+        if job.get("owner") == stack.admin.id and job["kind"] == kind and job["status"] == status and (
                 audio is None or (job.get("audio") or {}).get("state") == audio):
             return job["id"]
     raise AssertionError(f"no seeded {kind} job that is {status} with audio {audio}: {jobs}")
@@ -88,20 +105,32 @@ ADDRESSES = ["/ui", "/ui/transcribe", "/ui/transcribe/expert", "/ui/speak", "/ui
              "/ui/satellites/kitchen", "/ui/satellites/lounge/airplay", "/ui/satellites/wake-words",
              "/ui/satellites/wake-words/hey_jarvis", "/ui/satellites/wake-words/hey_jarvis/more",
              "/ui/satellites/try-a-word", "/ui/satellites/custom-models", "/ui/satellites/activity",
-             "/ui/satellites/telemetry", "/ui/satellites/firmware"]
+             "/ui/satellites/telemetry", "/ui/satellites/firmware", "/ui/account", "/ui/admin",
+             "/ui/admin/users", "/ui/admin/keys", "/ui/admin/roles", "/ui/admin/secrets",
+             "/ui/admin/audit"]
+# What a browser says of a reload or a pasted link (D15): a top-level
+# navigation, from nowhere.
+NAVIGATION = {"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}
 
 
 def test_every_page_address_is_served_through_the_gateway(stack):
-    """A reload or a pasted link reaches the gateway first; each address has
-    to cross its allowlist and voice-ui's, and come back as the page."""
-    with httpx.Client(base_url=stack.url, timeout=10) as http:
+    """A reload or a pasted link reaches the gateway first, with the admin's
+    session; each address has to cross its route table and voice-ui's, and
+    come back as the page."""
+    with stack.person(stack.admin) as http:
+        http.headers.update(NAVIGATION)
         page = http.get("/ui").text
         for address in ADDRESSES:
             response = http.get(address)
             assert response.status_code == 200, address
             assert response.headers["content-type"].startswith("text/html"), address
             assert response.text == page, f"{address} is not the same page"
-        nope = http.get("/ui/nope")
+        # An address that is not a page is no navigation the gateway lets a
+        # cookie make from elsewhere (D15); asked by the page itself, it is
+        # an address nothing answers.
+        pasted = http.get("/ui/nope")
+        assert (pasted.status_code, pasted.json()["error"]["code"]) == (403, "csrf")
+        nope = http.get("/ui/nope", headers=st.SAME_ORIGIN)
         assert nope.status_code == 404
         assert nope.json()["error"]["code"] == "unknown_url"
 
@@ -123,7 +152,7 @@ DOCK_FRAMES = """target => {
     const pill = document.getElementById("highlight"), dock = document.getElementById("dock");
     const tab = document.querySelector(`[role=tab][data-tab="${target}"]`);
     const tabs = [...document.querySelectorAll("[role=tab]")];
-    if (pill && dock && tab && tabs.length === 5) {
+    if (pill && dock && tab && tabs.length === 7) {
       const b = pill.getBoundingClientRect(), t = tab.getBoundingClientRect(), d = dock.getBoundingClientRect();
       const mid = r => r.top + r.height / 2;
       seen.push({
@@ -199,7 +228,7 @@ def test_clicking_a_tab_puts_its_address_in_the_bar(page, goto):
     settled(page)
     for tab in ("speak", "jobs", "vocab", "satellites", "transcribe"):
         open_tab(page, tab)
-        wait_for_address(page, SLUGS[tab])
+        wait_for_tab(page, SLUGS[tab])
         assert page.title().endswith(f"{TABS[tab]} · Calliope"), page.title()
 
 
@@ -212,13 +241,13 @@ def test_arrow_keys_change_the_address_like_a_click(page, goto):
     page.locator("#tab-btn-transcribe").focus()
     before = history_length(page)
     page.keyboard.press("ArrowRight")
-    wait_for_address(page, "/ui/speak")
+    wait_for_tab(page, "/ui/speak")
     assert history_length(page) == before + 1
     expect(page.locator("#word")).to_have_text("Speak")
     pill_under(page, "speak")
     page.keyboard.press("End")
-    wait_for_address(page, "/ui/satellites")
-    pill_under(page, "satellites")
+    wait_for_address(page, "/ui/admin")
+    pill_under(page, "admin")
     page.keyboard.press("Home")
     wait_for_address(page, "/ui")
     expect(page.locator("#word")).to_have_text("Transcribe")
@@ -294,7 +323,7 @@ def test_back_and_forward_walk_the_tabs_visited(page, goto):
     open_tab(page, "speak")
     open_tab(page, "jobs")
     page.go_back()
-    wait_for_address(page, "/ui/speak")
+    wait_for_tab(page, "/ui/speak")
     expect(page.locator("#tab-btn-speak")).to_have_attribute("aria-selected", "true")
     expect(page.locator("#word")).to_have_text("Speak")
     # The focus goes back to the tablist's one stop, the tab now selected.
@@ -303,7 +332,7 @@ def test_back_and_forward_walk_the_tabs_visited(page, goto):
     wait_for_address(page, "/ui")
     expect(page.locator("#tab-btn-transcribe")).to_have_attribute("aria-selected", "true")
     page.go_forward()
-    wait_for_address(page, "/ui/speak")
+    wait_for_tab(page, "/ui/speak")
     expect(page.locator("#tab-btn-speak")).to_have_attribute("aria-selected", "true")
     assert not page.locator("#tab-speak").is_hidden()
 
@@ -474,7 +503,7 @@ def test_a_job_address_highlights_scrolls_to_and_opens_that_job(new_page, goto, 
     top, scrolled, height = card.evaluate("e => [e.getBoundingClientRect().top, scrollY, innerHeight]")
     assert scrolled > 0 and -1 <= top < height, f"the row is at {top} of {height} after a scroll of {scrolled}"
     assert page.locator(".job.here").count() == 1
-    assert len(browser_log.sent("GET", rf"^/ui/api/jobs/{job}$")) == 1
+    assert len(browser_log.sent("GET", rf"^/jobs/{job}$")) == 1
 
 
 def test_a_job_filtered_out_offers_to_show_everything(page, goto, stack):
@@ -494,7 +523,7 @@ def test_a_job_filtered_out_offers_to_show_everything(page, goto, stack):
 
 
 def test_a_job_that_is_gone_says_so_and_drops_the_id(page, goto, browser_log):
-    browser_log.allow(404, r"^/ui/api/jobs/0000000000000000$")
+    browser_log.allow(404, r"^/jobs/0000000000000000$")
     goto("/ui/jobs/0000000000000000")
     wait_for_address(page, "/ui/jobs")
     expect(page.locator("#jobnote")).to_have_text(
@@ -571,7 +600,7 @@ def test_the_clone_address_opens_the_sheet_only_where_cloning_is_on(page, goto, 
     other = new_page()
 
     def no_cloning(route) -> None:
-        answer = route.fetch()
+        answer = fetch_as_page(route)
         route.fulfill(response=answer, json={**answer.json(), "cloning": False})
 
     other.route("**/ui/config", no_cloning)
@@ -711,7 +740,7 @@ def test_restoring_any_address_sends_nothing_but_reads(page, goto, stack, browse
     """A URL must never cause an effect: loading every address the page
     writes asks for things and changes nothing."""
     # The one made-up job in ADDRESSES is looked up, and it is not there.
-    browser_log.allow(404, r"^/ui/api/jobs/0123456789abcdef$")
+    browser_log.allow(404, r"^/jobs/0123456789abcdef$")
     job = seeded_job(stack, "clone", "done", "present")
     for address in ADDRESSES + [f"/ui/jobs/{job}", "/ui/satellites/wake-words/ptt",
                                 f"/ui/satellites/{HALLWAY}"]:
@@ -719,6 +748,29 @@ def test_restoring_any_address_sends_nothing_but_reads(page, goto, stack, browse
         settled(page)
     writes = [r for r in browser_log.requests if r["method"] not in ("GET", "HEAD")]
     assert not writes, f"loading an address sent {writes}"
+
+
+# What a hostile link would carry: a deep link a page elsewhere can open in a
+# signed-in browser (D15 lets any site navigate to a page address), with the
+# query a reader never typed. None of these words is one the page acts on.
+HOSTILE = ["/ui/speak?voice=k:af_heart&text=Say+this+aloud&go=1&autoplay=1",
+           f"/ui/satellites/{HALLWAY}?adopt=1&name=Mallory",
+           "/ui/satellites/kitchen?listen=1&seconds=60&inject=1",
+           "/ui/vocabulary/tech?text=evil%3Devil&save=1&force=1",
+           "/ui/jobs?show=failed&delete=all&owner=all",
+           "/ui/account?preset=admin&name=stolen&create=1",
+           "/ui/admin/users?username=mallory&role=admin&create=1",
+           "/ui/admin/secrets?name=SATELLITES_HA_TOKEN&value=x&store=1"]
+
+
+def test_a_link_with_any_query_changes_nothing_until_someone_presses(page, goto, browser_log):
+    """Whatever a link's query says, loading it only reads (recheck L11): a
+    microphone, a key, a user or a secret is the reader's own press."""
+    for address in HOSTILE:
+        goto(address)
+        settled(page)
+    writes = [r for r in browser_log.requests if r["method"] not in ("GET", "HEAD")]
+    assert not writes, f"loading a link sent {writes}"
 
 
 # ---- what the page does itself (these change the hub, and run last) --------------------
@@ -772,7 +824,7 @@ RGB = "c => getComputedStyle(c)[PROP].match(/[\\d.]+/g).slice(0, 3).map(Number)"
 
 
 def test_pointing_at_a_tab_names_it(page, goto):
-    """Four of the five tabs are a glyph until chosen; resting the pointer on
+    """Every tab but the chosen one is a glyph; resting the pointer on
     one shows its name, and moving away hides it again."""
     goto("/ui")
     settled(page)
@@ -833,7 +885,8 @@ OUTSIDE_THE_BAR = """() => {
 # alone, or for the tab named, the icon and the name under it together.
 CENTRED = """name => {
   const d = document.getElementById("dock").getBoundingClientRect(), mid = d.top + d.height / 2;
-  return Object.fromEntries([...document.querySelectorAll("[role=tab]")].map(t => {
+  // The tabs on the bar: a phone's Account and Admin are in the name's menu.
+  return Object.fromEntries([...document.querySelectorAll("[role=tab]")].filter(t => t.checkVisibility()).map(t => {
     const i = t.querySelector("svg").getBoundingClientRect(), l = t.querySelector(".label").getBoundingClientRect();
     return [t.dataset.tab, (t.dataset.tab === name ? (i.top + l.bottom) / 2 : (i.top + i.bottom) / 2) - mid];
   }));
@@ -845,13 +898,27 @@ CENTRED = """name => {
 def test_the_dock_is_one_bar_with_everything_inside_it(new_page, goto, screenshot, form, scheme):
     """The selection used to be a bead that rose out of the bar through a
     notch in its outline. Nothing in the dock reaches past the bar's box now,
-    and the chosen tab's name sits inside its pill -- Vocabulary, the longest,
-    included, at phone width. Photographed with Satellites (whose badge
-    counts Hallway) and Jobs selected."""
+    and the chosen tab's name sits inside its pill -- Vocabulary and
+    Satellites, the longest, included. The admin's seven tabs are all on a
+    desktop bar; on a phone seven names do not fit 390px, so Account and Admin
+    open from the name's menu, the bar keeps five, and with one of those two
+    chosen no pill marks a tab beside it. Photographed with Satellites (whose
+    badge counts Hallway) and Jobs selected."""
     page = new_page(form, scheme=scheme)
     goto("/ui", target=page)
     settled(page)
-    for tab in ("satellites", "jobs", "vocab", "speak", "transcribe"):
+    for tab in ("satellites", "jobs", "vocab", "speak", "transcribe", "account", "admin"):
+        button = page.locator(f'[role=tab][data-tab="{tab}"]')
+        if form == "mobile" and tab in ("account", "admin"):
+            expect(button).to_be_hidden()
+            page.locator("#who > summary").click()
+            page.locator(f"#who-{tab}").click()
+            expect(button).to_have_attribute("aria-selected", "true")
+            expect(page.locator("#highlight")).to_have_css("opacity", "0")
+            assert page.locator('[role=tab]:visible').count() == 5, f"{scheme} {tab}: the phone bar is not five tabs"
+            outside = page.evaluate(OUTSIDE_THE_BAR)
+            assert not outside, f"{form} {scheme} {tab}: outside the bar: {outside}"
+            continue
         open_tab(page, tab)
         pill_under(page, tab)
         outside = page.evaluate(OUTSIDE_THE_BAR)

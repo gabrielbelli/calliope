@@ -9,8 +9,9 @@ asked for at all a minute after the page goes into the background.
 test_live_data.py, test_satellites_live.py and test_jobs_live.py drive each
 rule in Node; this is the same against the real page, gateway and hub.
 
-"Another device" is plain httpx from the test to the gateway, never a second
-browser. Long timers run on Playwright's clock (page.clock), installed before
+"Another device" is plain httpx from the test to the gateway, with an admin
+key of the same admin the page is signed in as, never a second browser. Long
+timers run on Playwright's clock (page.clock), installed before
 the page loads. Tests that change what the hub holds use `fresh_hub` and are
 the last in the file.
 """
@@ -27,13 +28,16 @@ import wave
 
 import httpx
 import pytest
+from conftest import fetch_as_page
 from playwright.sync_api import expect
+from test_routes import seeded_job
+from test_satellites import forget_cut_streams, lost_hub_is_not_a_fault
 
 KITCHEN, LOUNGE, HALLWAY = "020000000001", "020000000002", "020000000003"
 # Twelve sentences: a scripted job is queued for a second and then speaks one
 # sentence every 1.2 s, so this one stays live for about fifteen seconds.
 LONG_TEXT = " ".join(f"This is sentence number {n} of a job queued on another device." for n in range(1, 13))
-LISTS = r"^/ui/api/satellites$"
+LISTS = r"^/satellites$"
 
 
 # ---- helpers ---------------------------------------------------------------------------
@@ -90,7 +94,8 @@ def lists(browser_log) -> int:
 
 
 def another_device(stack) -> httpx.Client:
-    return httpx.Client(base_url=stack.url, timeout=10)
+    """The admin's phone: the same person, with an admin key."""
+    return stack.client()
 
 
 def wav(seconds: float = 6.0, rate: int = 24000) -> bytes:
@@ -104,15 +109,6 @@ def wav(seconds: float = 6.0, rate: int = 24000) -> bytes:
         w.setframerate(rate)
         w.writeframes(samples.tobytes())
     return out.getvalue()
-
-
-def seeded_job(stack, kind: str, status: str, audio: str | None = None) -> str:
-    jobs = httpx.get(f"http://127.0.0.1:{stack.ports['long']}/jobs", timeout=5).json()["jobs"]
-    for job in jobs:
-        if job["kind"] == kind and job["status"] == status and (
-                audio is None or (job.get("audio") or {}).get("state") == audio):
-            return job["id"]
-    raise AssertionError(f"no seeded {kind} job that is {status} with audio {audio}: {jobs}")
 
 
 # A wake word on a satellite, delivered through the page's own stream handler
@@ -135,7 +131,7 @@ def live_jobs(stack) -> list[str]:
     ids: list[str] = []
     yield ids
     for job_id in ids:
-        httpx.delete(f"http://127.0.0.1:{stack.ports['long']}/jobs/{job_id}", timeout=5)
+        stack.api.delete(f"/jobs/{job_id}")
 
 
 # ---- the dock's counts -----------------------------------------------------------------
@@ -159,9 +155,12 @@ def test_a_job_started_elsewhere_raises_the_jobs_badge_without_a_reload(page, go
     page.wait_for_function("() => LIVE.queue !== null")
     expect(page.locator("#jobcount")).to_have_text("")
     with another_device(stack) as http:
-        answer = http.post("/ui/api/jobs", json={"text": LONG_TEXT, "voice": "narrator"})
+        answer = http.post("/jobs", json={"text": LONG_TEXT, "voice": "narrator"})
     answer.raise_for_status()
     live_jobs.append(answer.json()["id"])
+    # The gateway keeps a health probe for 5 s (D50): the next read the page
+    # makes is one taken after the job was queued.
+    stack.fake.fresh_health()
     page.clock.fast_forward(30_000)
     expect(page.locator("#jobcount")).to_have_text("1")
 
@@ -173,8 +172,9 @@ def test_a_job_started_elsewhere_appears_on_the_open_jobs_tab_within_one_health_
     settled(page)
     page.wait_for_function("() => LIVE.queue !== null")
     with another_device(stack) as http:
-        job = http.post("/ui/api/jobs", json={"text": LONG_TEXT, "voice": "narrator"}).json()
+        job = http.post("/jobs", json={"text": LONG_TEXT, "voice": "narrator"}).json()
     live_jobs.append(job["id"])
+    stack.fake.fresh_health()
     page.clock.fast_forward(30_000)
     expect(page.locator(f'.job[data-job="{job["id"]}"]')).to_be_visible()
 
@@ -187,20 +187,20 @@ def test_a_profile_saved_elsewhere_appears_when_vocabulary_is_opened(page, goto,
     goto("/ui")
     page.wait_for_function("() => LOADED.glossaries > 0 && NAV.settled.has('glossaries')")
     with another_device(stack) as http:
-        http.put("/ui/api/glossaries/fromphone", json={"text": "kubernetes\n"}).raise_for_status()
+        http.put("/glossaries/fromphone", json={"text": "kubernetes\n"}).raise_for_status()
         try:
             page.clock.fast_forward(6_000)
             open_tab(page, "vocab")
             expect(page.locator('#glossnames [data-open="fromphone"]')).to_be_visible()
         finally:
-            http.delete("/ui/api/glossaries/fromphone")
+            http.delete("/glossaries/fromphone")
 
 
 def test_a_profile_changed_elsewhere_reloads_an_untouched_editor_and_warns_an_edited_one(page, goto, stack):
     """Nobody has typed in the editor: it is brought up to date in place.
     Somebody has: their text stays, and they are told."""
     with another_device(stack) as http:
-        http.put("/ui/api/glossaries/livetest", json={"text": "alpha = Alpha\n"}).raise_for_status()
+        http.put("/glossaries/livetest", json={"text": "alpha = Alpha\n"}).raise_for_status()
         try:
             page.clock.install()
             goto("/ui/vocabulary/livetest")
@@ -208,7 +208,7 @@ def test_a_profile_changed_elsewhere_reloads_an_untouched_editor_and_warns_an_ed
             text = page.locator("#glosstext")
             expect(text).to_have_value("alpha = Alpha\n")
 
-            http.put("/ui/api/glossaries/livetest", json={"text": "beta = Beta\n"}).raise_for_status()
+            http.put("/glossaries/livetest", json={"text": "beta = Beta\n"}).raise_for_status()
             page.clock.fast_forward(6_000)
             open_tab(page, "transcribe")
             open_tab(page, "vocab")
@@ -216,7 +216,7 @@ def test_a_profile_changed_elsewhere_reloads_an_untouched_editor_and_warns_an_ed
             expect(page.locator("#glossnote")).to_have_text("")
 
             text.fill("beta = Beta\nmine = Mine\n")
-            http.put("/ui/api/glossaries/livetest", json={"text": "gamma = Gamma\n"}).raise_for_status()
+            http.put("/glossaries/livetest", json={"text": "gamma = Gamma\n"}).raise_for_status()
             page.clock.fast_forward(6_000)
             open_tab(page, "transcribe")
             open_tab(page, "vocab")
@@ -224,18 +224,18 @@ def test_a_profile_changed_elsewhere_reloads_an_untouched_editor_and_warns_an_ed
                 "This profile was changed on another device since you opened it.")
             expect(text).to_have_value("beta = Beta\nmine = Mine\n")
         finally:
-            http.delete("/ui/api/glossaries/livetest")
+            http.delete("/glossaries/livetest")
 
 
 def test_saving_over_a_profile_changed_elsewhere_asks_first(page, goto, stack, dialogs, browser_log):
     with another_device(stack) as http:
-        http.put("/ui/api/glossaries/savetest", json={"text": "one = One\n"}).raise_for_status()
+        http.put("/glossaries/savetest", json={"text": "one = One\n"}).raise_for_status()
         try:
             goto("/ui/vocabulary/savetest")
             settled(page)
             expect(page.locator("#glosstext")).to_have_value("one = One\n")
             page.locator("#glosstext").fill("one = One\nmine = Mine\n")
-            http.put("/ui/api/glossaries/savetest", json={"text": "two = Two\n"}).raise_for_status()
+            http.put("/glossaries/savetest", json={"text": "two = Two\n"}).raise_for_status()
 
             answers = [False, True]
             seen = dialogs(answer=lambda dialog: answers.pop(0)).seen
@@ -248,15 +248,15 @@ def test_saving_over_a_profile_changed_elsewhere_asks_first(page, goto, stack, d
 
             page.locator("#glosssave").click()
             expect(page.locator("#glossnote")).to_contain_text("Saved")
-            assert http.get("/ui/api/glossaries/savetest").json()["text"] == "one = One\nmine = Mine\n"
+            assert http.get("/glossaries/savetest").json()["text"] == "one = One\nmine = Mine\n"
         finally:
-            http.delete("/ui/api/glossaries/savetest")
+            http.delete("/glossaries/savetest")
 
 
 def test_vocabulary_recovers_after_the_service_was_down_at_load(page, goto, fake, browser_log):
     """A 503 at load used to read as a deployment with no vocabulary service,
     for good. It says the service did not answer, and the tab asks again."""
-    browser_log.allow(503, r"^/ui/api/glossaries$")
+    browser_log.allow(503, r"^/glossaries$")
     fake.fail(r"^/glossaries$", status=503, times=1)
     page.clock.install()
     goto("/ui/vocabulary")
@@ -274,7 +274,7 @@ def test_vocabulary_recovers_after_the_service_was_down_at_load(page, goto, fake
 
 
 def test_the_voice_list_recovers_after_tts_was_down_at_load(page, goto, fake, browser_log):
-    browser_log.allow(503, r"^/ui/api/voices$")
+    browser_log.allow(503, r"^/voices$")
     fake.fail(r"^/voices$", status=503, times=1)
     page.clock.install()
     goto("/ui/speak")
@@ -343,7 +343,7 @@ def test_the_engine_picker_follows_the_runner_without_a_reload(page, goto, stack
     page.locator("#voice").select_option(label="narrator")
     enabled = engine_radios(page).evaluate_all("els => els.filter(e => !e.disabled).map(e => e.value)")
     target = next(e for e in enabled if e != "chatterbox")
-    original = httpx.get(f"http://127.0.0.1:{stack.ports['long']}/health", timeout=5).json()["engines"]
+    original = stack.fake.backend_health("tts_long")["engines"]
     changed = copy.deepcopy(original)
     changed[target]["local"] = dict(changed[target]["local"], ready=False, why="not in TTS_LOCAL_ENGINES")
     changed[target]["runner"] = dict(changed[target]["runner"], ready=False, why="the runner is switched off")
@@ -433,7 +433,7 @@ def test_the_listening_chip_clears_after_fifteen_seconds_on_its_own_timer(page, 
     calm(page)
     pause(page)
     held = []
-    page.route(re.compile(r"/ui/api/satellites$"), lambda route: held.append(route))
+    page.route(re.compile(r"//[^/]+/satellites$"), lambda route: held.append(route))
     try:
         page.clock.run_for(30_100)
         until(page, lambda: held, "the next read of the lists")
@@ -446,7 +446,7 @@ def test_the_listening_chip_clears_after_fifteen_seconds_on_its_own_timer(page, 
         assert len(held) == 1, "the chip waited for a read of the lists"
     finally:
         # Unrouting lets the held reads go on to the hub.
-        page.unroute(re.compile(r"/ui/api/satellites$"))
+        page.unroute(re.compile(r"//[^/]+/satellites$"))
 
 
 # ---- jobs ------------------------------------------------------------------------------
@@ -483,7 +483,7 @@ def test_a_filter_answer_that_lands_late_does_not_replace_the_current_filter(pag
     goto("/ui/jobs?show=playable")
     page.locator("#jobfilter").select_option("failed")
     expect(page.locator(f'.job[data-job="{failed}"]')).to_be_visible()
-    until(page, lambda: any(r["path"] == "/ui/api/jobs" and "audio=present" in r["url"]
+    until(page, lambda: any(r["path"] == "/jobs" and "audio=present" in r["url"]
                             for r in browser_log.responses), "the held Playable listing", seconds=10)
     page.wait_for_timeout(300)
     expect(page.locator(f'.job[data-job="{done}"]')).to_have_count(0)
@@ -504,12 +504,12 @@ def test_a_job_deleted_while_a_poll_is_in_flight_does_not_come_back(page, goto, 
     held = []
     # The listing, with or without a filter in its query: Everything, the
     # default, sends none.
-    listing = re.compile(r"/ui/api/jobs(\?[^/]*)?$")
+    listing = re.compile(r"//[^/]+/jobs(\?[^/]*)?$")
     page.route(listing, lambda route: held.append(route))
     try:
         page.locator("#refresh").click()
         until(page, lambda: held, "the Refresh listing")
-        answer = held[0].fetch()
+        answer = fetch_as_page(held[0])
         assert job["id"] in answer.text(), "the held listing does not carry the job, so it proves nothing"
         page.locator(f'[data-forget="{job["id"]}"]').click()
         expect(row).to_have_count(0)
@@ -582,7 +582,7 @@ def test_returning_to_a_hidden_page_brings_the_open_view_up_to_date_and_marks_th
     stream_open(page)
     expect(page.locator("#satelliteevents li").first).to_contain_text("reconnected")
     asked = {r["path"] for r in browser_log.requests[mark:]}
-    assert {"/ui/api/satellites", "/ui/health", "/ui/api/satellites/events"} <= asked, asked
+    assert {"/satellites", "/health", "/satellites/events"} <= asked, asked
 
 
 def test_the_activity_stream_reconnects_after_a_hub_restart_with_the_tab_closed(page, goto, stack, browser_log):
@@ -590,10 +590,7 @@ def test_the_activity_stream_reconnects_after_a_hub_restart_with_the_tab_closed(
     good; nothing polls with the tab shut, so Activity stayed silent until a
     reload. The live layer opens another once the hub answers, and Activity
     marks the gap."""
-    # The hub going away is what this test does: its answers while it is gone
-    # and the stream it cuts are not faults.
-    for status in (502, 503):
-        browser_log.allow(status, r"^/ui/api/satellites")
+    lost_hub_is_not_a_fault(browser_log)
     goto("/ui")
     settled(page)
     stream_open(page)
@@ -602,7 +599,7 @@ def test_the_activity_stream_reconnects_after_a_hub_restart_with_the_tab_closed(
           "the stream lost with the hub")
     stack.start_hub()
     stream_open(page)
-    browser_log.failed[:] = [f for f in browser_log.failed if "/ui/api/satellites" not in f["url"]]
+    forget_cut_streams(browser_log)
     open_tab(page, "satellites")
     expect(page.locator("#satelliteevents li").first).to_contain_text("reconnected")
 
@@ -627,8 +624,7 @@ def test_a_change_made_in_home_assistant_is_seen_through_its_config_event(page, 
     goto("/ui/satellites")
     settled(page)
     calm(page)
-    httpx.patch(f"{stack.hub}/satellites/{KITCHEN}", json={"name": "Kitchen Two"},
-                timeout=5).raise_for_status()
+    stack.api.patch(f"/satellites/{KITCHEN}", json={"name": "Kitchen Two"}).raise_for_status()
     expect(page.locator(f'li.sat[data-id="{KITCHEN}"] .sat-name').first).to_have_text(
         "Kitchen Two", timeout=5_000)
 
@@ -638,13 +634,13 @@ def test_telemetry_size_follows_new_records_while_open(page, goto, stack, fake, 
     records meanwhile (here, turned on elsewhere and given a satellite's
     status to record) shows beside Download without reopening it; closed, it
     is not read at all."""
-    reads = lambda: len(browser_log.sent("GET", r"^/ui/api/satellites/telemetry$"))  # noqa: E731
+    reads = lambda: len(browser_log.sent("GET", r"^/satellites/telemetry$"))  # noqa: E731
     page.clock.install()
     goto("/ui/satellites/telemetry")
     settled(page)
     expect(page.locator("#tm-sum")).to_have_text("off")
     expect(page.locator("#tmsize")).to_have_text("Nothing recorded yet.")
-    hub = httpx.Client(base_url=stack.hub, timeout=5)
+    hub = stack.client()
     hub.put("/satellites/telemetry", json={"enabled": True, "level": "full"}).raise_for_status()
     fake.satellite_status("kitchen")
     until(page, lambda: hub.get("/satellites/telemetry").json().get("bytes", 0) > 0, "a record on the hub")

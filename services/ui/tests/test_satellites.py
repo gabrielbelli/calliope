@@ -517,13 +517,19 @@ def test_every_consequential_action_asks_first_and_nothing_prompts():
 
 def test_the_move_address_is_checked_as_the_hub_checks_it():
     """HubBody takes ^wss?://[^/\\s]+$ and up to 120 characters; a webhook,
-    the hub's ButtonAction pattern. Anything else would be a 422 the page
-    could have prevented."""
+    the name of a secret as the hub's SECRET_WEBHOOK takes it (D62). Anything
+    else would be a 422 the page could have prevented, and a raw address is
+    the 422 the hub keeps for it (use_secret)."""
     hub = (REPO / "services" / "satellites" / "app" / "main.py").read_text()
     assert 'pattern=r"^wss?://[^/\\s]+$", max_length=120' in hub
     assert "/^wss?:\\/\\/[^/\\s]+$/.test(url) || url.length > 120" in function("satelliteAct")
-    assert "webhook:https?://[^\\s/?#@]+(/\\S*)?" in hub
-    assert "const SAT_WEBHOOK = /^https?:\\/\\/[^\\s/?#@]+(\\/\\S*)?$/;" in CODE
+    imports = (REPO / "services" / "satellites" / "app" / "secret_import.py").read_text()
+    hub_hook = re.search(r'^SECRET_WEBHOOK = re\.compile\(r"\^webhook:secret:\((.*)\)\$"\)$', imports, re.M)
+    page_hook = re.search(r"^const SAT_HOOK_SECRET = /\^(.*)\$/;$", CODE, re.M)
+    assert hub_hook and page_hook, "the webhook secret's pattern moved on one side"
+    assert page_hook.group(1) == hub_hook.group(1)
+    assert '"webhook:secret:" + e.secret' in function("satMapping")
+    assert 'code="use_secret"' in hub and 'e.code === "use_secret"' in function("satellitePatch")
 
 
 def test_a_mute_on_side_alone_does_not_count_here_as_on_the_hub_and_the_board():
@@ -972,10 +978,13 @@ def test_every_wake_word_request_is_one_the_gateway_fence_can_read():
     and checks that voice-ui's PROXIED and the gateway both route it. It reads
     only a literal path and a literal method."""
     assert CODE.count('json("/satellites/wake-words", { method: "PUT"') == 1
-    assert CODE.count('json("/satellites/wake-words")') == 1
+    # The tab's own read, and Admin › Secrets' "used by", each a literal.
+    assert CODE.count('json("/satellites/wake-words")') == 2
     assert CODE.count('json("/satellites/llm/models", { method: "POST"') == 1
     assert CODE.count('json("/satellites/llm/test", { method: "POST"') == 1
-    assert CODE.count('json("/satellites/secrets", { method: "PUT"') == 1
+    # Keys go to the secret store now (D47), never to the hub.
+    assert "/satellites/secrets" not in CODE
+    assert CODE.count('json(`/admin/secrets/${encodeURIComponent(name)}`, { method: "PUT"') == 2
 
 
 def test_the_airplay_request_is_one_the_gateway_fence_can_read():

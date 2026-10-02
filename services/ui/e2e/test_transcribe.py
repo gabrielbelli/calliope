@@ -42,13 +42,13 @@ import wave
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-import httpx
 import pytest
+from conftest import fetch_as_page
 from fakes import DEFAULT_TRANSCRIPT
 from playwright.sync_api import expect
 from test_routes import here, history_length, open_tab, settled, wait_for_address
 
-TRANSCRIBED = re.compile(r"/ui/api/(v1/audio/transcriptions|transcribe)$")
+TRANSCRIBED = re.compile(r"^/(v1/audio/transcriptions|transcribe)$")
 
 
 # ---- media -----------------------------------------------------------------------------
@@ -112,7 +112,7 @@ def override_config(page, **fields) -> None:
     """The page's own /ui/config, answered with the server's real one and
     `fields` over it. Installed before the page loads; boot reads it once."""
     def answer(route) -> None:
-        response = route.fetch()
+        response = fetch_as_page(route)
         route.fulfill(response=response, json=response.json() | fields)
     page.route("**/ui/config", answer)
 
@@ -392,7 +392,7 @@ def test_stop_and_transcribe_records_from_the_microphone_and_transcribes(page, g
     expect(page.locator("#result")).to_be_visible(timeout=20_000)
     expect(page.locator("#sttrecrow")).to_be_hidden()
     expect(page.locator("#sttrec")).to_be_enabled()
-    sent = browser_log.sent("POST", r"^/ui/api/(v1/audio/transcriptions|transcribe)$")
+    sent = browser_log.sent("POST", r"^/(v1/audio/transcriptions|transcribe)$")
     assert len(sent) == 1, f"one press should send exactly one transcription: {sent}"
     assert stt_forms(fake, since)[-1]["file"]["filename"] == "recording.wav"
 
@@ -756,7 +756,7 @@ def test_transcribe_sends_verbose_json_with_word_and_segment_timings_by_default(
     extracted(page)
     since = fake.last_seq()
     response = transcribe(page)
-    assert urlparse(response.url).path == "/ui/api/v1/audio/transcriptions"
+    assert urlparse(response.url).path == "/v1/audio/transcriptions"
     form = stt_forms(fake, since)[-1]
     assert set(form) == {"file", "model", "response_format", "timestamp_granularities[]"}, form
     assert form["model"] == "parakeet" and form["response_format"] == "verbose_json"
@@ -879,7 +879,7 @@ def test_the_native_route_sends_only_the_file_and_shows_compute_figures(page, go
         expect(page.locator(greyed)).to_be_disabled()
     since = fake.last_seq()
     response = transcribe(page)
-    assert urlparse(response.url).path == "/ui/api/transcribe"
+    assert urlparse(response.url).path == "/transcribe"
     form = stt_forms(fake, since, r"^/transcribe$")[-1]
     assert set(form) == {"file"} and form["file"]["bytes"] == 44 + 10 * 16000 * 2, form
     assert not stt_forms(fake, since), "the native run also went to /v1"
@@ -906,7 +906,7 @@ def test_the_native_route_is_refused_for_audio_that_is_not_sixteen_kilohertz(pag
     expect(page.locator("#x-route")).to_have_value("v1")
     since = fake.last_seq()
     response = transcribe(page)
-    assert urlparse(response.url).path == "/ui/api/v1/audio/transcriptions"
+    assert urlparse(response.url).path == "/v1/audio/transcriptions"
     assert not stt_forms(fake, since, r"^/transcribe$")
 
 
@@ -988,7 +988,7 @@ def test_stop_during_transcription_aborts_and_says_stopped(page, goto, fake, med
 
 def test_a_failed_transcription_shows_the_services_reason(page, goto, fake, browser_log, media):
     fake.fail(r"^/v1/audio/transcriptions$", status=500, backend="stt", times=1)
-    browser_log.allow(500, r"^/ui/api/v1/audio/transcriptions$")
+    browser_log.allow(500, r"^/v1/audio/transcriptions$")
     goto("/ui")
     ready(page)
     choose(page, media["sixteen"])
@@ -1005,7 +1005,7 @@ def test_a_transcription_that_never_reaches_the_server_says_so_in_words(page, go
     ready(page)
     choose(page, media["sixteen"])
     extracted(page)
-    page.route("**/ui/api/v1/audio/transcriptions", lambda route: route.abort("aborted"))
+    page.route("**/v1/audio/transcriptions", lambda route: route.abort("aborted"))
     page.locator("#go-stt").click()
     expect(page.locator("#stt-note .note.bad")).to_have_text(
         "Transcription failed: This page could not reach the server. Check the connection and try again.")
@@ -1213,8 +1213,8 @@ def test_a_profile_saved_elsewhere_appears_in_the_chooser_when_transcribe_is_ent
     goto("/ui")
     ready(page)
     page.locator('#gloss button[data-gloss="tech"]').click()
-    with httpx.Client(base_url=stack.url, timeout=10) as other:
-        other.put("/ui/api/glossaries/fromtablet", json={"text": "kuber netes = Kubernetes\n"}).raise_for_status()
+    with stack.client() as other:
+        other.put("/glossaries/fromtablet", json={"text": "kuber netes = Kubernetes\n"}).raise_for_status()
         try:
             open_tab(page, "speak")
             page.clock.fast_forward(6000)
@@ -1224,12 +1224,12 @@ def test_a_profile_saved_elsewhere_appears_in_the_chooser_when_transcribe_is_ent
             expect(page.locator('#gloss button[data-gloss="fromtablet"]')).to_have_attribute(
                 "aria-pressed", "false")
         finally:
-            other.delete("/ui/api/glossaries/fromtablet")
+            other.delete("/glossaries/fromtablet")
 
 
 def test_the_chooser_is_hidden_when_the_service_lists_no_profiles(page, goto, fake, browser_log):
     fake.fail(r"^/glossaries$", status=503, backend="stt")
-    browser_log.allow(503, r"^/ui/api/glossaries$")
+    browser_log.allow(503, r"^/glossaries$")
     goto("/ui")
     ready(page)
     expect(page.locator("#glossbox")).to_be_hidden()

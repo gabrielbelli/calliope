@@ -182,7 +182,9 @@ def test_the_page_scales_with_the_readers_text_setting():
     assert rule(".masthead{").count("var(--measure)") == 1
     # The dock is the one thing on the page deliberately NOT on the measure: it
     # is a fixed object sized to the thumb, not to the text column.
-    assert "width:min(410px," in rule(".dock{")
+    # As wide as the tabs this session may open: 82px a tab, five for a
+    # speech account and seven for an admin.
+    assert "width:min(calc(82px * var(--tabs,5))," in rule(".dock{")
 
 
 # ---------------------------------------------------------------- materials --
@@ -453,7 +455,15 @@ def test_the_tabs_are_one_stop_and_the_arrows_move_between_them():
     assert "b.tabIndex = b === button ? 0 : -1" in handler
     for key in ("ArrowRight", "ArrowLeft", "Home", "End"):
         assert key in handler, f"{key} does nothing on the tablist"
-    assert "TABS[to].click();" in handler, "the keyboard has its own idea of a tab"
+    assert "shown[to].click();" in handler, "the keyboard has its own idea of a tab"
+    # Only over the tabs on the bar: a hidden tab is not a stop, and neither
+    # is one a phone moves to the name's menu.
+    assert "const shown = TABS.filter(docked);" in handler
+    assert 'const docked = b => !b.hidden && !(PHONE.matches && "menu" in b.dataset);' in SCRIPT
+    # The script and the stylesheet take Account and Admin off the bar at the
+    # same width, or the pill would count a column that is not drawn.
+    assert 'const PHONE = matchMedia("(max-width:600px)");' in SCRIPT
+    assert "@media (max-width:600px){.tabs button[data-menu]{display:none}}" in HTML
     assert 'tabindex="-1"' in HTML, "every tab is in the page's tab order at boot"
 
 
@@ -929,19 +939,18 @@ def test_the_runner_panel_asks_the_three_questions_separately():
     # Drawn from the health poll the page already runs. A second request would
     # be a second thing to fail and a second thing to disagree with.
     assert "  paintRunner();" in HTML
-    # THE PATH, PINNED. /ui/health is the UI's own document and it WRAPS the
-    # gateway's, so tts-long sits at gateway.health.backends.tts_long.health.
-    # The panel was written against the gateway's /health, read one level too
-    # shallow, found undefined and hid itself on a machine with a runner
-    # answering beside it. Both readers go through one accessor now.
+    # THE PATH, PINNED. The page reads the gateway's own /health now, where
+    # tts-long sits at backends.tts_long.health. The panel was once written
+    # against a different wrapping, read one level off, found undefined and
+    # hid itself on a machine with a runner answering beside it. Every reader
+    # goes through one accessor.
     assert "function ttsLongHealth()" in HTML
-    assert "HEALTH.gateway.health" in HTML.replace("HEALTH && HEALTH.gateway && HEALTH.gateway.health",
-                                                   "HEALTH.gateway.health")
+    assert "const b = HEALTH && HEALTH.backends && HEALTH.backends[name];" in HTML
     assert "const r = ttsLongHealth().runner;" in HTML
     assert "ttsLongHealth().realtime_factor" in HTML, "the rate reader drifted off the accessor"
     # visible(), not HTML: the comment above the accessor quotes the wrong
     # path deliberately, to record what it was.
-    assert "HEALTH.backends" not in visible(), "the shallow path is back"
+    assert "HEALTH.gateway" not in visible(), "the /ui/health wrapping is back"
     # Hidden completely when no runner is configured: a panel that always says
     # "none" is furniture.
     assert "if (!r) { box.hidden = true; return; }" in HTML
@@ -1199,7 +1208,7 @@ def test_stop_says_stopping_and_never_says_stopped():
     assert "stopped" not in body
     row = HTML[HTML.index("function renderJobs()"):]
     row = row[:row.index("\n}\n")]
-    assert 'stopping ? "stopping…" : job.status' in row
+    assert 'stopping ? "stopping…" : esc(job.status)' in row
     # And the button goes, so the same request cannot be sent twice.
     assert "live && !stopping ?" in row
 
@@ -1372,9 +1381,9 @@ def test_the_pill_and_the_wash_are_decorative_and_the_state_is_not_in_them():
     # The icons too: each button already has a name beside it, so an icon that
     # announced itself would say the name of the tab twice.
     icons = HTML[HTML.index('<div class="tabs"'):HTML.index("<!-- ==================================================== /the dock ====")]
-    # Five since the Satellites tab.
-    assert icons.count("<svg viewBox") == 5
-    assert icons.count('aria-hidden="true" focusable="false"') == 5
+    # Seven since Account and Admin.
+    assert icons.count("<svg viewBox") == 7
+    assert icons.count('aria-hidden="true" focusable="false"') == 7
 
 
 def test_the_bar_is_one_rounded_rectangle_drawn_by_the_stylesheet():
@@ -1408,8 +1417,8 @@ def test_the_bar_is_one_rounded_rectangle_drawn_by_the_stylesheet():
     markup = dock_markup()
     for gone in ("<linearGradient", 'class="skin"', 'class="bead"', 'class="cast"'):
         assert gone not in markup, f"{gone} is back in the dock"
-    # The only drawings left in the dock are the five icons.
-    assert markup.count("<svg") == 5
+    # The only drawings left in the dock are the seven icons.
+    assert markup.count("<svg") == 7
     # Nothing to fall back from, so nothing marks that the script ran.
     assert 'classList.add("js")' not in SCRIPT
     assert ".js " not in BARE_CSS
@@ -1828,9 +1837,9 @@ def test_the_page_tells_you_which_tab_you_are_on_from_across_the_room():
     travels. You do not read which tab you are on; the room changes colour."""
     dock = HTML[HTML.index('<div class="rail">'):HTML.index("<!-- ==================================================== /the dock ====")]
     accents = re.findall(r'--acc:(#[0-9A-Fa-f]{6})', dock)
-    # Five since the Satellites tab.
-    assert len(accents) == 5, f"not every tab carries an accent: {accents}"
-    assert len(set(accents)) == 5, f"two tabs share an accent: {accents}"
+    # Seven since Account and Admin.
+    assert len(accents) == 7, f"not every tab carries an accent: {accents}"
+    assert len(set(accents)) == 7, f"two tabs share an accent: {accents}"
     # READ FROM THE STYLESHEET, NOT WRITTEN TWICE. A palette with a second copy
     # in the script is a palette that drifts the first time one of them moves.
     body = js_between("const DOCKACC", "function dockPlace(")
@@ -1839,7 +1848,10 @@ def test_the_page_tells_you_which_tab_you_are_on_from_across_the_room():
     # the room is the colour of the selection by construction rather than by
     # coincidence.
     assert 'const DOCKGLOW = [$("highlight"), $("bloom")]' in SCRIPT
-    assert 'for (const el of DOCKGLOW) el.style.setProperty("--glow-rgb", DOCKACC[at]);' in function("dockPlace")
+    # The colour is the selected tab's own, found among every tab; the pill's
+    # place is counted among the tabs this session may open.
+    assert 'for (const el of DOCKGLOW) el.style.setProperty("--glow-rgb", DOCKACC[lit]);' in function("dockPlace")
+    assert "const lit = Math.max(0, DOCKTABS.indexOf(found < 0 ? selected : shown[at]));" in function("dockPlace")
     assert "rgb(var(--glow-rgb) / var(--bloom-a))" in rule(".bloom{")
     assert "background:rgb(var(--glow-rgb) / var(--pill-a))" in rule(".tabs .highlight{")
     # The name and the icon take the tab's own accent, lifted toward white so
@@ -2665,7 +2677,8 @@ def test_a_failure_with_no_reason_of_its_own_is_said_in_words():
     assert "reason(payload, failure(response.status))" in code
     api = function("api")
     assert 'if (err && err.name === "AbortError") throw err;' in api, "Stop would read as a failure"
-    assert "could not reach the server" in api
+    assert "throw unreached();" in api
+    assert "could not reach the server" in function("unreached")
     said = function("failure")
     for status in ("404", "409", "413", "429", "500", "503", "504"):
         assert status in said

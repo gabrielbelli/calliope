@@ -34,6 +34,20 @@ talk to 127.0.0.1 and nowhere else. Then the tests themselves.
 One browser per session, and one context and one page per test: a context is a
 fresh profile in all but name (storage, cookies, cache, permissions), which is
 the isolation a test needs, at a fraction of a browser's cost.
+
+SIGNED IN ONCE, THROUGH THE PAGE. The session's first act is the deployment's
+first sign-in: admin, with the CALLIOPE_ADMIN_PASSWORD the stack made up, on
+/login, then a password of the session's choosing on the forced change (D21).
+What that sign-in showed and sent is kept for test_auth.py, because it can
+happen only once per gateway. The speech user is created by the admin and
+signs in for the first time the same way. Every test's page then starts from
+the cookie of that sign-in and nothing else, so a test is signed in without
+spending a sign-in: the gateway allows twenty attempts per address per ten
+minutes (D19), and every test here comes from 127.0.0.1. A test that signs out,
+changes a password or must meet the step-up prompt signs in for itself, and
+never with the shared session, which every other test is still using. Every
+attempt, a page's or the harness's, is counted, and the test that spends one
+past st.SIGN_IN_BUDGET fails saying so (sign_ins_within_budget).
 """
 
 from __future__ import annotations
@@ -129,6 +143,18 @@ class Monitor(threading.Thread):
 # ---- the session ---------------------------------------------------------------------
 
 
+# The people a test can be, besides the admin: the speech user every role
+# test reads, and a second one for what one person must not see of another's.
+SPEECH, OTHER = "sam", "robin"
+# How long a step that checks or sets a password may take, in ms. Argon2id is
+# slow on purpose (64 MiB, three passes, D17) and the gateway runs two at a
+# time, so on a machine busy with other work one sign-in has taken over ten
+# seconds, the default wait. Well under a test's own 60 s (pytest.ini): a test
+# that runs out its clock is stopped by a signal in the middle of a Playwright
+# call, and the browser is gone for every test after it.
+SIGN_IN_MS = 25_000
+
+
 class E2ESession:
     def __init__(self) -> None:
         self.lock = st.MachineLock()
@@ -141,6 +167,8 @@ class E2ESession:
         self.leaks: list[str] = []
         self.swept: list[st.Proc] = []
         self._groups: set[int] = set()
+        # What the admin's first sign-in showed and sent (first_sign_in).
+        self.bootstrap: dict[str, Any] = {}
 
     def open(self) -> None:
         self.lock.acquire()
@@ -149,6 +177,114 @@ class E2ESession:
         self.timer = st.watchdog(SESSION_SECONDS, "the browser session")
         self.stack = st.Stack(deadline=SESSION_SECONDS).start()
         self.monitor.start()
+        self.first_sign_in(self.stack.admin, record=self.bootstrap)
+        self.stack.provision()
+        self.person(SPEECH)
+
+    # -- people --
+
+    def new_context(self, viewport: str | tuple[int, int] = "desktop", *, scheme: str = "light",
+                    mobile: bool | None = None, reduced_motion: str = "no-preference",
+                    notifications: str = "denied", state: dict[str, Any] | None = None,
+                    **options: Any):
+        browser = self.launch()
+        size = VIEWPORTS[viewport] if isinstance(viewport, str) else {"width": viewport[0], "height": viewport[1]}
+        mobile = viewport == "mobile" if mobile is None else mobile
+        permissions = ["microphone", "clipboard-read", "clipboard-write"]
+        if notifications == "granted":
+            permissions.append("notifications")
+        context = browser.new_context(
+            viewport=size, color_scheme=scheme, reduced_motion=reduced_motion,
+            is_mobile=mobile, has_touch=mobile, device_scale_factor=2 if mobile else 1,
+            locale="en-GB", timezone_id="Europe/London", service_workers="block",
+            accept_downloads=True, permissions=permissions, storage_state=state, **options)
+        # NOTIFICATIONS ARE AN ANSWER NOBODY IS ASKED FOR. Queueing a job asks
+        # for the permission; the answer is said before the page runs (above).
+        answer = "granted" if notifications == "granted" else "denied"
+        context.add_init_script(NOTIFICATIONS % (answer, answer))
+        context.on("response", self._attempted)
+        context.set_default_timeout(10_000)
+        context.set_default_navigation_timeout(20_000)
+        return context
+
+    def _attempted(self, response) -> None:
+        """A page's sign-in or step-up, counted against the budget (st.Attempts)."""
+        if response.request.method == "POST" and self.stack is not None:
+            self.stack.attempts.note(urlparse(response.url).path, response.status, "from a page")
+
+    def first_sign_in(self, person: st.Account, record: dict[str, Any] | None = None) -> None:
+        """`person`'s first sign-in, through /login as anyone's is: the password
+        they were given, then the forced change to one of their own, which
+        lands on the page (D21, D25). Their session is kept for the tests.
+
+        With `record`, what the browser was shown is kept in it: every
+        response's text, and at each step the markup and what every field
+        holds, for test_auth.py to search for the value that must not be
+        there."""
+        stack = self.stack
+        context = self.new_context()
+        page = context.new_page()
+        if record is not None:
+            record.update(responses=[], shown=[], change_fields=[])
+
+            def keep(response) -> None:
+                try:
+                    text = response.text()
+                except Exception:  # a redirect, or a body already gone: nothing to search
+                    text = ""
+                record["responses"].append({"url": response.url, "status": response.status,
+                                            "text": text})
+
+            page.on("response", keep)
+
+            def look(step: str) -> None:
+                record["shown"].append({"step": step, "url": page.url, "html": page.content(),
+                                        "values": page.locator("input").evaluate_all(
+                                            "els => els.map(e => e.value)")})
+        try:
+            page.goto(stack.url + "/ui", wait_until="load")
+            page.locator("#username").fill(person.username)
+            page.locator("#password").fill(person.password)
+            page.locator("#signin-button").click()
+            page.locator("#change").wait_for(state="visible", timeout=SIGN_IN_MS)
+            if record is not None:
+                record["change_fields"] = page.locator("#change input").evaluate_all(
+                    "els => els.filter(e => e.checkVisibility())"
+                    ".map(e => ({id: e.id, autocomplete: e.autocomplete}))")
+                look("change")
+            chosen = st.new_password()
+            page.locator("#new-password").fill(chosen)
+            page.locator("#confirm-password").fill(chosen)
+            page.locator("#change-button").click()
+            page.wait_for_url(stack.url + "/ui", timeout=SIGN_IN_MS)
+            page.locator("[role=tab]").first.wait_for(state="visible")
+            if record is not None:
+                look("signed in")
+            person.password = chosen
+            # The cookie and nothing else: what the page keeps in its storage
+            # belongs to the test that wrote it.
+            person.state = {"cookies": context.storage_state()["cookies"], "origins": []}
+        finally:
+            context.close()
+
+    def person(self, username: str) -> st.Account:
+        """A signed-in person of this session, created by the admin and signed
+        in through the page the first time they are asked for."""
+        known = self.stack.people.get(username)
+        if known is None or known.state is None:
+            known = known or self.stack.create_person(username)
+            self.first_sign_in(known)
+        return known
+
+    def state(self, username: str | None) -> dict[str, Any] | None:
+        return None if username is None else self.person(username).state
+
+    def key(self, username: str, preset: str) -> str:
+        """A key of `preset` for `username`, made once per session."""
+        person = self.person(username)
+        if preset not in person.keys:
+            person.keys[preset] = self.stack.mint_key(person, preset)
+        return person.keys[preset]
 
     def browser_groups(self) -> set[int]:
         if self.browser is not None and not self._groups:
@@ -347,24 +483,12 @@ class Pages:
 
     def new(self, viewport: str | tuple[int, int] = "desktop", *, scheme: str = "light",
             mobile: bool | None = None, reduced_motion: str = "no-preference",
-            notifications: str = "denied", **options: Any):
-        browser = self.session.launch()
-        size = VIEWPORTS[viewport] if isinstance(viewport, str) else {"width": viewport[0], "height": viewport[1]}
-        mobile = viewport == "mobile" if mobile is None else mobile
-        permissions = ["microphone", "clipboard-read", "clipboard-write"]
-        if notifications == "granted":
-            permissions.append("notifications")
-        context = browser.new_context(
-            viewport=size, color_scheme=scheme, reduced_motion=reduced_motion,
-            is_mobile=mobile, has_touch=mobile, device_scale_factor=2 if mobile else 1,
-            locale="en-GB", timezone_id="Europe/London", service_workers="block",
-            accept_downloads=True, permissions=permissions, **options)
-        # NOTIFICATIONS ARE AN ANSWER NOBODY IS ASKED FOR. Queueing a job asks
-        # for the permission; the answer is said before the page runs (above).
-        answer = "granted" if notifications == "granted" else "denied"
-        context.add_init_script(NOTIFICATIONS % (answer, answer))
-        context.set_default_timeout(10_000)
-        context.set_default_navigation_timeout(20_000)
+            notifications: str = "denied", user: str | None = "admin", **options: Any):
+        """A page signed in as `user` (the admin by default, SPEECH, OTHER, or
+        any username, created on first use), or as nobody with user=None."""
+        context = self.session.new_context(
+            viewport, scheme=scheme, mobile=mobile, reduced_motion=reduced_motion,
+            notifications=notifications, state=self.session.state(user), **options)
         self.contexts.append(context)
         page = context.new_page()
         self.log.attach(page)
@@ -375,6 +499,32 @@ class Pages:
             with contextlib.suppress(Exception):
                 context.close()
         self.contexts.clear()
+
+
+def password_if_asked(page, password: str, done, seconds: float = 15.0) -> None:
+    """Wait until `done` is visible, entering the password first if the page
+    asks for it again (D13). The shared admin session entered it when the
+    harness minted its key, so whether the prompt comes depends on how long
+    ago that was; a test about the prompt itself signs in afresh instead."""
+    prompt = page.locator("#stepup")
+    ends = time.monotonic() + seconds
+    while not done.is_visible():
+        if prompt.is_visible():
+            page.locator("#stepup-password").fill(password)
+            page.locator("#stepup-ok").click()
+            prompt.wait_for(state="hidden", timeout=SIGN_IN_MS)
+            ends = time.monotonic() + seconds
+            continue
+        assert time.monotonic() < ends, "never happened: the change, with the password if it was asked for"
+        page.wait_for_timeout(100)
+
+
+def fetch_as_page(route):
+    """route.fetch(), saying what the page's own fetch() says about itself.
+    Playwright sends it from outside the page, without the Fetch Metadata the
+    browser adds, and the gateway refuses a cookie request that carries none
+    (D15)."""
+    return route.fetch(headers=route.request.headers | st.SAME_ORIGIN)
 
 
 # ---- fixtures ------------------------------------------------------------------------
@@ -415,8 +565,9 @@ def browser_log() -> BrowserLog:
 @pytest.fixture
 def new_page(e2e, browser_log):
     """new_page(viewport="desktop"|"mobile"|(w, h), scheme="light"|"dark",
-    mobile=None, reduced_motion="no-preference", notifications="denied"|"granted")
-    -> a Page in a new context."""
+    mobile=None, reduced_motion="no-preference", notifications="denied"|"granted",
+    user="admin"|SPEECH|OTHER|None) -> a Page in a new context, signed in as
+    `user`, or as nobody with None."""
     pages = Pages(e2e, browser_log)
     yield pages.new
     pages.close()
@@ -426,8 +577,45 @@ def new_page(e2e, browser_log):
 
 @pytest.fixture
 def page(new_page):
-    """A desktop page (1440 x 900, light) in a fresh context."""
+    """A desktop page (1440 x 900, light) in a fresh context, signed in as the admin."""
     return new_page()
+
+
+@pytest.fixture
+def admin_page(page):
+    """The admin's page: `page` by its other name, for a test about roles."""
+    return page
+
+
+@pytest.fixture
+def speech_page(new_page):
+    """A desktop page signed in as SPEECH, a person with the speech role."""
+    return new_page(user=SPEECH)
+
+
+@pytest.fixture
+def people(e2e) -> Callable[[str], st.Account]:
+    """people(username) -> the Account, created and signed in on first use:
+    the admin as "admin", the speech users as SPEECH and OTHER."""
+    return e2e.person
+
+
+@pytest.fixture
+def api_key(e2e) -> Callable[..., str]:
+    """api_key(preset, user="admin") -> a key of that preset, made by that
+    person with their own session, as the Account tab makes one, once per
+    session."""
+    return lambda preset, user="admin": e2e.key(user, preset)
+
+
+@pytest.fixture(scope="session")
+def first_sign_in(e2e) -> dict[str, Any]:
+    """What the session's first sign-in showed and sent, kept because it can
+    happen once per gateway: `responses` (url, status, text), `shown` (the
+    markup and every field's value at the forced change and once signed
+    in), `change_fields` (the forced change's visible fields), and the
+    `bootstrap` value itself, to search for."""
+    return e2e.bootstrap | {"bootstrap": e2e.stack.bootstrap}
 
 
 @pytest.fixture
@@ -478,6 +666,30 @@ def pytest_runtest_makereport(item, call):
     report = yield
     setattr(item, "rep_" + report.when, report)
     return report
+
+
+@pytest.fixture(autouse=True)
+def sign_ins_within_budget(e2e):
+    """The test that spends the sign-in attempt past st.SIGN_IN_BUDGET, or
+    meets the gateway's throttle, fails and says so, whatever else it was
+    about: otherwise the 429s land on later tests as failures nobody can
+    explain."""
+    yield
+    over = e2e.stack.attempts.take()
+    if over:
+        pytest.fail("\n".join(over), pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def no_secret_left(stack, browser_log):
+    """Whatever a test put in the gateway's secret store, by stack.store_secret
+    or through the page, is cleared after it. The store is the gateway's and
+    outlives every test and every hub restart (D38), so a secret one test
+    stored would otherwise be in the next one's Admin › Secrets, and be what
+    the next test's hub finds."""
+    yield
+    if stack.stored or browser_log.sent("PUT", r"^/admin/secrets/"):
+        stack.clear_secrets()
 
 
 @pytest.fixture(autouse=True)

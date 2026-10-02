@@ -112,10 +112,14 @@ function loadVoices() { calls.push({ name: "voices", at: now }); LOADED.voices =
 const engineIds = () => Object.keys(engines);
 const engineOffline = id => engines[id];
 const ttsLongHealth = () => tts;
-// The gateway's health, as /ui/health wraps it, with or without a hub.
-const withHub = reachable => ({ gateway: { health: { backends: {
-  stt: { reachable: true }, satellites: { reachable } } } } });
-const withoutHub = { gateway: { health: { backends: { stt: { reachable: true } } } } };
+// The gateway's /health as a session holding health:read is answered, with
+// or without a hub; and the session's scopes, every one unless a scenario
+// takes satellites:read away.
+const withHub = reachable => ({ status: "ok", backends: {
+  stt: { reachable: true }, satellites: { reachable } } });
+const withoutHub = { status: "ok", backends: { stt: { reachable: true } } };
+const scopes = new Set(["satellites:read"]);
+const holds = scope => scopes.has(scope);
 
 eval(SECTION + "\n;(async () => {\n" + SCENARIO + "\n})().catch(e => { console.error(e); process.exit(2); });");
 """
@@ -144,6 +148,24 @@ def test_the_stream_is_opened_at_start_without_the_satellites_tab(tmp_path):
                                    open: !!SATELLITES.events }));
     """)
     assert got == {"count": 1, "listen": 1, "open": True}
+
+
+def test_a_session_that_may_not_read_the_satellites_never_asks_the_hub(tmp_path):
+    """A speech account holds no satellites:read. The stream and its list
+    read would each be a 403 the reader never asked for, at load, after a
+    return to the page and on every rung of the retry ladder; health naming
+    a reachable hub changes nothing."""
+    got = run(tmp_path, """
+      scopes.delete("satellites:read");
+      HEALTH = withHub(true);
+      liveStart();
+      await advance(0);
+      hide(); show();
+      await advance(120000);
+      console.log(JSON.stringify({ count: count("count"), listen: count("listen"),
+                                   hub: liveHub() }));
+    """)
+    assert got == {"count": 0, "listen": 0, "hub": False}, got
 
 
 def test_the_stream_is_left_to_the_poll_when_the_satellites_tab_is_open(tmp_path):

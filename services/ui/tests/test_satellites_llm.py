@@ -19,9 +19,9 @@ What they prevent:
     name could be changed or that provider's key stored;
   * a key kept anywhere on the page after it is stored: in the draft, a Save,
     a note or the browser's storage;
-  * a key stored under a name the environment sets, where it would never be
-    sent, or cleared without a question, or pasted into a box that nothing
-    can store from, where it stayed;
+  * a key stored for any host but the word's own, a stored key's hosts or
+    readers widened from a word's box, a key cleared without a question, or
+    one pasted into a box that nothing can store from, where it stayed;
   * a key box that asked a password manager to make up a password;
   * a language model word's fixes in Home Assistant's words, about a token;
   * a Test that saves, or that tests the saved action instead of the form.
@@ -34,7 +34,6 @@ NAME = "SATELLITES_LLM_API_KEY"
 
 LLM_HUB = """
 hub.env = { SATELLITES_LLM_API_KEY: false };
-hub.secrets = {};
 const llmWord = (name, extra) => ({
   name, threshold: 0.5, satellites: ["*"], mode: "conversation", language: null,
   action: { destination: { type: "llm", base_url: "https://llm.example.com/v1", model: "gpt-test-mini",
@@ -127,7 +126,6 @@ def test_a_key_goes_by_itself_only_where_the_word_already_sends_it(tmp_path):
     else waits for List models, and the pair pressed is remembered."""
     got = run(tmp_path, LLM_HUB + """
       hub.env = { SATELLITES_LLM_API_KEY: true };
-      hub.secrets = { SATELLITES_LLM_API_KEY: "hub" };
       await satellitesRefresh(); await settle();
       const saved = hub.modelCalls.slice();
       for (const [url] of LLM_PRESETS.filter(([u]) => u)) {
@@ -170,7 +168,6 @@ def test_a_key_stored_while_an_address_is_in_the_form_lists_its_models(tmp_path)
     that provider's, so its models are asked with it, without a press."""
     got = run(tmp_path, LLM_HUB + f"""
       hub.env = {{ SATELLITES_LLM_API_KEY: true }};
-      hub.secrets = {{ SATELLITES_LLM_API_KEY: "hub" }};
       await satellitesRefresh(); await settle();
       wakeEdit("hey_jarvis", w => wakeField(w, "preset", "https://api.deepseek.com")); await settle();
       const before = hub.modelCalls.length;
@@ -201,11 +198,11 @@ def test_a_stored_key_is_sent_once_and_is_nowhere_on_the_page_afterwards(tmp_pat
       console.log(JSON.stringify({{ sent: hub.secretCalls, emptied: box.value, onPage: page.includes(KEY),
                                    state, askedAgain: hub.modelCalls.length - before, notes }}));
     """)
-    # Trimmed, sent once, in the body the hub takes.
+    # Trimmed, sent once, to the secret store and nowhere else.
     assert got["sent"] == [{"name": NAME, "value": KEY}], got
     assert got["emptied"] == "", "the box still holds the key"
     assert got["onPage"] is False, "the key is somewhere on the page"
-    assert got["state"] == {"hint": f"A key is stored on the hub as {NAME}.", "canStore": True,
+    assert got["state"] == {"hint": f"A key is in the secret store as {NAME}.", "canStore": True,
                             "canClear": True}
     # A model list asked without the key may have been refused: asked again.
     assert got["askedAgain"] == 1, got
@@ -225,52 +222,87 @@ def test_a_key_that_is_empty_or_malformed_is_never_sent(tmp_path):
     assert got["emptied"] == ""
 
 
-def test_a_key_the_environment_sets_cannot_be_replaced_from_the_page(tmp_path):
+def test_a_key_the_store_holds_can_be_replaced_and_a_new_name_can_be_stored(tmp_path):
+    """The store wins and the environment is no source any more (D44, D47):
+    a key the store holds can be replaced or cleared from the box, and a name
+    no saved action reads yet can be stored, the hub saying on the next read
+    whether it holds one."""
     got = run(tmp_path, LLM_HUB + """
-      hub.secrets = { SATELLITES_LLM_API_KEY: "environment" };
       hub.env = { SATELLITES_LLM_API_KEY: true };
-      hub.environment = ["SATELLITES_LLM_API_KEY", "OPENROUTER_API_KEY"];
       await satellitesRefresh(); await settle();
       const state = wakeKeyState("SATELLITES_LLM_API_KEY", "hey_jarvis");
-      // A name no saved action reads yet, which the environment also sets:
-      // the page cannot know, so the hub says.
       const unknown = wakeKeyState("OPENROUTER_API_KEY", "hey_jarvis");
       const box = { value: "sk-test-another-one" };
       await wakeKeyStore("OPENROUTER_API_KEY", keyRow(box), stand());
-      console.log(JSON.stringify({ state, unknown, noName: wakeKeyState(null), notes, emptied: box.value }));
+      console.log(JSON.stringify({ state, unknown, noName: wakeKeyState(null), notes, emptied: box.value,
+                                   sent: hub.secretCalls.map(c => c.name) }));
     """)
-    assert got["state"] == {"hint": f"{NAME} is set in the hub's environment, which a stored key "
-                                    "cannot replace.", "canStore": False, "canClear": False}
+    assert got["state"] == {"hint": f"A key is in the secret store as {NAME}.", "canStore": True,
+                            "canClear": True}
     assert got["unknown"]["hint"] == ("Store a key as OPENROUTER_API_KEY, or save to learn whether "
-                                      "the environment sets it.")
-    assert got["notes"] == [["bad", "409 OPENROUTER_API_KEY is set in the hub's environment"]]
+                                      "the secret store has one.")
+    assert got["sent"] == ["OPENROUTER_API_KEY"] and got["notes"] == [], got
     assert got["emptied"] == ""
     assert got["noName"] == {"hint": "Name the key to send one; with no name, no key is sent.",
                              "canStore": False, "canClear": False}
 
 
-def test_the_key_box_is_off_when_store_is_and_a_key_left_in_it_is_emptied(tmp_path):
-    """Store was off for a name the environment sets, or none, while the box
-    still took a paste; Enter clicked the disabled Store, which did nothing,
-    and the key stayed in the box with no word said."""
+def test_a_key_stored_from_a_word_may_go_only_to_that_words_host_and_never_widens_a_stored_one(tmp_path):
+    """D41: a new secret stored from an action's box is read by the hub and
+    bound to that action's host. One the store already holds is given its new
+    value and nothing else: adding the word's host on the way past sent the
+    key wherever a Base URL pointed, a typo included, for every word sharing
+    it, and handed the hub a secret that was only tts-long's. Storing it from
+    a word it cannot serve is refused in the hub's words, before anything is
+    sent."""
     got = run(tmp_path, LLM_HUB + f"""
-      hub.secrets = {{ SATELLITES_LLM_API_KEY: "environment" }};
-      hub.env = {{ SATELLITES_LLM_API_KEY: true }};
       await satellitesRefresh(); await settle();
-      const env = wakeKeyState("SATELLITES_LLM_API_KEY", "hey_jarvis").canStore;
+      const store = base_url => wakeKeyStore("SATELLITES_LLM_API_KEY", keyRow({{ value: "{KEY}" }}), stand(),
+                                             base_url);
+      await store("https://llm.example.com/v1");
+      const first = hub.secretCalls[0];
+      hub.store.SATELLITES_LLM_API_KEY.consumers = ["satellites", "tts-long"];
+      await store("http://localhost:11434/v1");
+      const elsewhere = {{ sent: hub.secretCalls.length, said: notes[notes.length - 1] }};
+      await store("https://LLM.example.com.:443/v2");
+      const same = hub.secretCalls[1];
+      hub.store.SATELLITES_LLM_API_KEY.consumers = ["tts-long"];
+      await store("https://llm.example.com/v1");
+      const unread = {{ sent: hub.secretCalls.length, said: notes[notes.length - 1] }};
+      console.log(JSON.stringify({{ first, elsewhere, same, unread, store: hub.store.SATELLITES_LLM_API_KEY }}));
+    """)
+    assert got["first"]["allowed_hosts"] == ["https://llm.example.com:443"], got
+    assert got["first"]["consumers"] == ["satellites"] and got["first"]["kind"] == "bearer", got
+    assert got["elsewhere"] == {"sent": 1, "said": [
+        "bad", f"{NAME} may not be sent to http://localhost:11434: that host is not one of the "
+        "secret's allowed hosts (Admin › Secrets)"]}, got
+    assert got["same"] == {"name": NAME, "value": KEY}, "a stored secret's bindings were sent again"
+    assert got["unread"] == {"sent": 2, "said": [
+        "bad", f"{NAME} is not one the satellites hub may read. Store this under another name, "
+        "or add the hub to its services in Admin › Secrets."]}, got
+    assert got["store"]["allowed_hosts"] == ["https://llm.example.com:443"], got
+
+
+def test_the_key_box_is_off_when_store_is_and_a_key_left_in_it_is_emptied(tmp_path):
+    """Store is off for a name that is not one, or none, while the box still
+    took a paste; Enter clicked the disabled Store, which did nothing, and the
+    key stayed in the box with no word said."""
+    got = run(tmp_path, LLM_HUB + f"""
+      await satellitesRefresh(); await settle();
+      const bad = wakeKeyState("sk-not-a-name", "hey_jarvis").canStore;
       const noName = wakeKeyState(null).canStore;
       const pasted = {{ value: "{KEY}", disabled: false }};
-      wakeKeyBox(pasted, stand(), env);
+      wakeKeyBox(pasted, stand(), bad);
       const empty = {{ value: "", disabled: false }};
       wakeKeyBox(empty, stand(), noName);
       const saidOnce = notes.length;
       // Once Store can take a key again, so can the box.
       const back = {{ value: "", disabled: true }};
       wakeKeyBox(back, stand(), wakeKeyState("OPENROUTER_API_KEY", "hey_jarvis").canStore);
-      console.log(JSON.stringify({{ env, noName, pasted, empty, saidOnce, back, notes,
+      console.log(JSON.stringify({{ bad, noName, pasted, empty, saidOnce, back, notes,
                                    sent: hub.secretCalls }}));
     """)
-    assert got["env"] is False and got["noName"] is False
+    assert got["bad"] is False and got["noName"] is False
     assert got["pasted"] == {"value": "", "disabled": True}, "a key stayed in a box nothing can store"
     assert got["empty"] == {"value": "", "disabled": True}
     assert got["notes"] == [["bad", "The pasted key was emptied: no key can be stored under this name."]]
@@ -303,7 +335,6 @@ def test_a_language_model_words_fixes_say_key_where_home_assistants_say_token(tm
 def test_clearing_a_key_asks_first_and_sends_null(tmp_path):
     got = run(tmp_path, LLM_HUB + """
       hub.words = [llmWord("hey_jarvis"), { ...llmWord("alexa"), mode: "command" }];
-      hub.secrets = { SATELLITES_LLM_API_KEY: "hub" };
       hub.env = { SATELLITES_LLM_API_KEY: true };
       await satellitesRefresh(); await settle();
       const shared = wakeKeyState("SATELLITES_LLM_API_KEY", "hey_jarvis");
@@ -315,7 +346,7 @@ def test_clearing_a_key_asks_first_and_sends_null(tmp_path):
       const after = wakeKeyState("SATELLITES_LLM_API_KEY", "hey_jarvis");
       console.log(JSON.stringify({ shared, asked, declined, sent: hub.secretCalls, after }));
     """)
-    assert got["shared"]["hint"] == f"A key is stored on the hub as {NAME}. Also used by alexa."
+    assert got["shared"]["hint"] == f"A key is in the secret store as {NAME}. Also used by alexa."
     question = f"Clear the key stored as {NAME}? Every action that names it stops sending it."
     assert got["asked"] == [question, question]
     assert got["declined"] == 0, "a declined question still cleared the key"
@@ -344,7 +375,7 @@ def test_the_test_sends_the_draft_destination_and_says_how_long_or_what_the_prov
     assert got["ok"] == {"ok": True, "text": "Answered in 1.3 s, the first words in 0.4 s: Hello there."}
     said = ("The model did not answer: the LLM refused the key in SATELLITES_LLM_API_KEY (401): "
             "Incorrect API key provided: [key hidden]")
-    assert got["bad"] == {"ok": False, "text": said}
+    assert got["bad"]["ok"] is False and got["bad"]["text"] == said
     assert got["notes"] == [["bad", said]]
     # A Test saves nothing, and the edit is still the reader's.
     assert got["puts"] == 0 and got["draft"] is True
@@ -507,7 +538,7 @@ def test_replacing_a_key_other_words_send_asks_first(tmp_path):
     pasted key in the box, for a Key name of its own."""
     got = run(tmp_path, LLM_HUB + f"""
       hub.words = [llmWord("hey_jarvis"), llmWord("alexa")];
-      hub.secrets = {{ SATELLITES_LLM_API_KEY: "hub" }};
+      hub.env = {{ SATELLITES_LLM_API_KEY: true }};
       await satellitesRefresh(); await settle();
       const box = {{ value: "{KEY}" }};
       confirming = false;

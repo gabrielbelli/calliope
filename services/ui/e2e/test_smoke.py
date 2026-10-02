@@ -5,6 +5,8 @@ The tabs are read off the page rather than listed here: whatever the tab bar
 holds, each [role=tab] must select itself and show the panel its
 aria-controls names. That is the WAI-ARIA contract the page already keeps, and
 it survives the tabs being renamed, reordered or given paths of their own.
+A tab the bar does not show at this width (Account and Admin on a phone) is
+opened from the name's menu, which is where a person finds it there.
 """
 
 from __future__ import annotations
@@ -30,7 +32,11 @@ def test_every_tab_opens_its_own_panel_and_is_photographed(new_page, goto, scree
 
     for name, panel in tabs:
         tab = page.locator(f"[role=tab][aria-controls='{panel}']")
-        tab.click()
+        if tab.is_visible():
+            tab.click()
+        else:
+            page.locator("#who > summary").click()
+            page.locator(f"#who-{name}").click()
         page.locator(f"#{panel}").wait_for(state="visible")
         assert tab.get_attribute("aria-selected") == "true", f"{name} did not select itself"
         hidden_others = page.locator(f"[role=tabpanel]:not(#{panel})").evaluate_all(
@@ -57,23 +63,24 @@ def test_every_tab_opens_its_own_panel_and_is_photographed(new_page, goto, scree
             " && forms.some(f => e.textContent.toLowerCase().includes(f)))"
             ".map(e => e.textContent.trim())", forms)
         assert not said_again, f"{name} says its own name again under the masthead: {said_again}"
-        # And the first card sits under the title that names it, not halfway
-        # down the viewport: an auto margin used to open about 250px between
-        # them on a short panel.
-        gap = page.evaluate("""panel => {
-          const card = [...document.querySelectorAll(`#${panel} > .card`)].find(c => c.checkVisibility());
-          return card.getBoundingClientRect().top - document.getElementById("tagline").getBoundingClientRect().bottom;
-        }""", panel)
-        assert 0 <= gap <= 48, f"{name}: {gap:.0f}px between the title and the first card"
-        tops.append(round(page.evaluate(
-            "panel => [...document.querySelectorAll(`#${panel} > .card`)].find(c => c.checkVisibility())"
-            ".getBoundingClientRect().top", panel)))
+        # And what the panel shows first sits under the title that names it,
+        # not halfway down the viewport: an auto margin used to open about
+        # 250px between them on a short panel. The first thing drawn, not the
+        # first card: Admin opens on the row that switches its sections.
+        first = """panel => [...document.getElementById(panel).children]
+          .find(c => c.checkVisibility() && c.getBoundingClientRect().height > 0)
+          .getBoundingClientRect().top"""
+        gap = page.evaluate(first, panel) - page.evaluate(
+            "() => document.getElementById('tagline').getBoundingClientRect().bottom")
+        assert 0 <= gap <= 48, f"{name}: {gap:.0f}px between the title and what the panel shows first"
+        tops.append(round(page.evaluate(first, panel)))
         screenshot(f"smoke-{form}-{scheme}-{name}", target=page)
 
-    # Where every tagline fits on one line, the card starts at the same height
-    # on every tab, as the masthead does; a phone wraps the longer taglines.
+    # Where every tagline fits on one line, the panel starts at the same
+    # height on every tab, as the masthead does; a phone wraps the longer
+    # taglines.
     if form == "desktop":
-        assert len(set(tops)) == 1, f"the first card moves between tabs: {tops}"
+        assert len(set(tops)) == 1, f"what a panel shows first moves between tabs: {tops}"
 
     assert not browser_log.errors, f"uncaught errors on the page: {browser_log.errors}"
     assert not browser_log.bad_responses(), f"missing routes or server errors: {browser_log.bad_responses()}"

@@ -17,7 +17,7 @@ catalogues:
     Chatterbox Turbo  English only; temperature only; clips over 5 s
     Voxtral           its own preset voices, each carrying its language
 
-A cloned voice's option is `chatterbox:<name>` once /ui/health has named the
+A cloned voice's option is `chatterbox:<name>` once /health has named the
 engines, which is why most tests wait for that before choosing one (ready()).
 
 A clip a test makes is deleted again when the test ends, from the test's
@@ -38,6 +38,7 @@ from typing import Any
 
 import httpx
 import pytest
+from conftest import fetch_as_page
 from playwright.sync_api import expect
 from test_routes import history_length, open_tab, seeded_job, settled
 
@@ -93,15 +94,16 @@ def media(tmp_path_factory) -> dict[str, Path]:
 
 
 class Clips:
-    """Cloned voices on the page server, as another device sees them."""
+    """The admin's cloned voices on the page server, as another device of
+    theirs sees them: through the gateway with an admin key."""
 
-    def __init__(self, base: str) -> None:
-        self.base = base
+    def __init__(self, http: httpx.Client) -> None:
+        self.http = http
         self.made: list[str] = []
 
     def add(self, name: str, path: Path) -> None:
-        answer = httpx.post(f"{self.base}/ui/clips", data={"name": name},
-                            files={"file": (path.name, path.read_bytes(), "audio/wav")}, timeout=30)
+        answer = self.http.post("/ui/clips", data={"name": name},
+                                files={"file": (path.name, path.read_bytes(), "audio/wav")}, timeout=30)
         answer.raise_for_status()
         self.made.append(name)
 
@@ -110,7 +112,7 @@ class Clips:
         self.made.append(name)
 
     def listed(self) -> dict[str, dict[str, Any]]:
-        voices = httpx.get(f"{self.base}/ui/clips", timeout=10).json()["voices"]
+        voices = self.http.get("/ui/clips").json()["voices"]
         return {voice["name"]: voice for voice in voices}
 
 
@@ -119,10 +121,11 @@ def clips(stack):
     """add(name, path) puts a cloned voice on the server before the page
     asks; every name added or kept() is deleted when the test ends, so no
     test sees another's voices."""
-    store = Clips(stack.url)
-    yield store
-    for name in store.made:
-        httpx.delete(f"{stack.url}/ui/clips/{name}", timeout=10)
+    with stack.client() as http:
+        store = Clips(http)
+        yield store
+        for name in store.made:
+            http.delete(f"/ui/clips/{name}")
 
 
 # ---- helpers ---------------------------------------------------------------------------
@@ -130,7 +133,7 @@ def clips(stack):
 
 def ready(page) -> None:
     """Speak as a reader finds it once everything has answered: the router
-    has resolved the address, and /ui/health is in, which is what names the
+    has resolved the address, and /health is in, which is what names the
     engines and so the values of the cloned voices' options."""
     settled(page)
     page.wait_for_function("""() => engineIds().length > 0
@@ -200,7 +203,10 @@ def open_expert(page, which: str = "fast") -> None:
 
 
 def stored_jobs(page) -> list[str]:
-    return [job["id"] for job in page.evaluate("JSON.parse(localStorage.getItem('aiv.jobs') || '[]')")]
+    """The jobs this browser remembers for the person signed in: their own
+    list, aiv.jobs.<user id>, since two people may share a browser (§2.3)."""
+    return [job["id"] for job in page.evaluate(
+        "() => JSON.parse(localStorage.getItem('aiv.jobs.' + ME.user.id) || '[]')")]
 
 
 def bad_colour(page) -> str:
@@ -262,13 +268,13 @@ def test_typing_portuguese_labels_auto_detect_and_filters_the_voices(page, goto,
 def test_choosing_a_language_lists_its_voices_again(page, goto, browser_log):
     goto("/ui/speak")
     ready(page)
-    asked = len(browser_log.sent("GET", r"^/ui/api/voices$"))
+    asked = len(browser_log.sent("GET", r"^/voices$"))
     page.locator("#lang").select_option("es")
     page.wait_for_function("""() => [...document.getElementById("voice").options]
       .filter(o => o.value.startsWith("k:")).length === 3""")
     assert kokoro(page) == ["ef_dora", "em_alex", "em_santa"]
     expect(page.locator("#voice")).to_have_value("k:ef_dora")
-    assert len(browser_log.sent("GET", r"^/ui/api/voices$")) == asked + 1
+    assert len(browser_log.sent("GET", r"^/voices$")) == asked + 1
     # Every language again: the voice chosen for Spanish is kept, not reset.
     page.locator("#lang").select_option("auto")
     page.wait_for_function("""() => [...document.getElementById("voice").options]
@@ -383,11 +389,11 @@ def test_the_result_reports_realtime_ignored_parameters_and_a_clamped_speed(page
     added to its answer here, as the real service writes them, to see that
     the page reports what it is told."""
     def deviations(route) -> None:
-        answer = route.fetch()
+        answer = fetch_as_page(route)
         route.fulfill(response=answer, headers={**answer.headers, "x-ignored-parameters": "instructions, model",
                                                 "x-speed-clamped": "4 to 2"})
 
-    page.route("**/ui/api/v1/audio/speech", deviations)
+    page.route("**/v1/audio/speech", deviations)
     goto("/ui/speak")
     ready(page)
     page.locator("#text").fill(SENTENCE)
@@ -839,7 +845,7 @@ def test_a_clip_from_a_link_selects_the_new_voice(page, goto, clips):
 
 def test_a_link_title_is_shown_as_it_is_written(page, goto):
     def titled(route) -> None:
-        answer = route.fetch()
+        answer = fetch_as_page(route)
         route.fulfill(response=answer, json={**answer.json(), "title": "Q&A with Ada <live>"})
 
     page.route("**/ui/resolve", titled)
@@ -1096,7 +1102,7 @@ def test_a_job_tts_long_refuses_queues_nothing_and_stays_on_speak(page, goto, fa
     for status in (429, 503, 504):
         fake.fail(r"^/jobs$", status=status, method="POST", backend="tts_long", times=1,
                   headers={"Retry-After": "30"}, json_body={"detail": "busy"})
-        with page.expect_response(lambda r: r.url.endswith("/ui/api/jobs") and r.request.method == "POST") as answer:
+        with page.expect_response(lambda r: r.url.endswith("/jobs") and r.request.method == "POST") as answer:
             page.locator("#go-tts-quiet").click()
         assert answer.value.status == status
         expect(page.locator("#go-tts-quiet")).to_be_enabled()
@@ -1149,7 +1155,7 @@ def test_entering_speak_asks_for_the_voices_again_only_once_they_are_five_second
     settled(page)
     page.wait_for_function("() => NAV.settled.has('voices')")
     loaded = page.evaluate("LOADED.voices")
-    asked = len(browser_log.sent("GET", r"^/ui/api/voices$"))
+    asked = len(browser_log.sent("GET", r"^/voices$"))
     open_tab(page, "speak")
     assert page.evaluate("LOADED.voices") == loaded
     open_tab(page, "transcribe")
@@ -1157,7 +1163,7 @@ def test_entering_speak_asks_for_the_voices_again_only_once_they_are_five_second
     page.clock.fast_forward(6_000)
     open_tab(page, "speak")
     expect(page.locator("#voice option", has_text="e2e-elsewhere")).to_have_count(1)
-    assert len(browser_log.sent("GET", r"^/ui/api/voices$")) == asked + 1
+    assert len(browser_log.sent("GET", r"^/voices$")) == asked + 1
 
 
 def test_choosing_a_voice_rewrites_the_address_and_adds_no_history(page, goto):
@@ -1215,12 +1221,12 @@ def test_opening_an_expert_panel_by_hand_is_a_place_and_closing_it_goes_back(pag
 
 def test_a_link_to_a_cloned_voice_survives_a_health_answer_that_lands_after_the_voices(page, goto):
     held: list = []
-    page.route("**/ui/health", lambda route: held.append(route))
+    page.route("**/health", lambda route: held.append(route))
     goto("/ui/speak?voice=chatterbox:narrator")
     page.wait_for_function("() => NAV.settled.has('voices')")
     for route in held:
         route.continue_()
-    page.unroute("**/ui/health")
+    page.unroute("**/health")
     page.wait_for_function("() => engineIds().length > 0")
     expect(page.locator("#speak-note")).not_to_contain_text("does not have", timeout=3000)
     expect(page.locator("#voice")).to_have_value("chatterbox:narrator", timeout=3000)

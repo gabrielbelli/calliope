@@ -4,9 +4,25 @@
     POST /ui/commit    MeTube /start (or re-add, when a clip range was chosen)
     POST /ui/abandon   MeTube /delete from BOTH queues, then verify
     GET  /ui/progress  MeTube /history, as percent / speed / eta
-    POST /ui/fetch     MeTube's file -> multipart -> gateway -> stt-stack
+    POST /ui/fetch     MeTube's file -> multipart -> the gateway's internal
+                       listener, as the person who asked (D64) -> stt-stack
     POST /ui/captions  MeTube's .vtt/.srt -> the page. NO stt CALL AT ALL
     GET  /ui/media     MeTube's finished file -> the browser, byte ranges and all
+
+EVERY LINK HAS AN OWNER, AND EVERY ROUTE BUT /ui/resolve CHECKS IT FIRST (D36).
+The token is the URL, which anyone can guess, and MeTube's queue belongs to
+nobody, so /ui/resolve records who asked (app/owners.py) and every other route
+answers 404 to anybody else -- before MeTube is asked anything, so a stranger's
+link costs no request and reveals nothing. A URL another person has pending is
+a 409 on resolve. A record MeTube holds that nobody owns (this process
+restarted) is reachable only with `jobs:read:all`, and resolving it again is
+no way round that: it is a 409 on resolve to everyone else.
+
+THE TRANSCRIPTION IS THE USER'S, NOT THIS SERVICE'S. /ui/fetch arrives with a
+delegation token beside the identity assertion; it is sent on, with this
+service's own key, to the gateway's internal listener, which re-checks the
+person's session or key live and counts the token's uses (D64). The run record
+is then owned by that person, and a person signed out since cannot use it.
 
 /ui/media IS THE ONE ROUTE HERE THAT SENDS MEDIA DOWNWARDS, and it is opt-in at
 every step rather than a hole in the design above. Everything else in this file
@@ -64,6 +80,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import secrets
 import time
 from typing import Any, AsyncIterator
 
@@ -71,11 +89,22 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
+from voice_common import identity
 from voice_common.errors import error_response
 
-from . import clips, config, guard, metube, probe
+from . import clips, config, guard, metube, owners, probe
 
 log = logging.getLogger("voice-ui.ingest")
+
+# identity.pub and service.key, from this service's credential volume (D7).
+# One instance, shared with identity.install in main.py, so the key that
+# verifies an assertion and the key that is sent on /ui/fetch are read from
+# the same place.
+CREDENTIALS = identity.Credentials()
+
+# Who resolved each link. Empty at start, which is what makes a record MeTube
+# kept across a restart reachable only with jobs:read:all.
+OWNERS = owners.Owners()
 
 # What /v1/audio/transcriptions accepts. Kept here rather than imported from
 # the gateway because this service must not depend on that one's internals,
@@ -114,10 +143,9 @@ GRANULARITIES = frozenset({"word", "segment"})
 
 router = APIRouter()
 
-# Per-caller budget for /ui/resolve. That route spawns a process which makes an
-# outbound request to a host the caller chose; unmetered, it is a port and host
-# scanner with a nice JSON interface. Keyed on the presented API key, falling
-# back to the peer address when authentication is off.
+# Per-person budget for /ui/resolve, keyed on the assertion's `sub` (D36). That
+# route spawns a process which makes an outbound request to a host the caller
+# chose; unmetered, it is a port and host scanner with a nice JSON interface.
 _recent: dict[str, list[float]] = {}
 
 
@@ -190,6 +218,28 @@ def _unavailable(exc: metube.MeTubeError) -> Response:
                           code="ingestion_unavailable")
 
 
+def _unknown_token() -> Response:
+    return error_response(404, "MeTube has no record of that link.",
+                          code="unknown_token", param="token")
+
+
+def _foreign(request: Request, token: str) -> Response | None:
+    """The 404 for a link this caller did not resolve, or None if it may use it.
+
+    The same answer MeTube's own silence gets, so a stranger's link and a link
+    nobody has pasted cannot be told apart. A link nobody owns -- one MeTube
+    kept across a restart of this process -- is reachable with jobs:read:all
+    and by nobody else.
+    """
+    claims = identity.claims_of(request)
+    holder = OWNERS.owner(token)
+    if holder == claims.sub:
+        return None
+    if holder is None and identity.has(claims, "jobs:read:all"):
+        return None
+    return _unknown_token()
+
+
 @router.post("/ui/resolve")
 async def resolve(request: Request, body: ResolveRequest) -> Response:
     if not metube.configured():
@@ -199,12 +249,8 @@ async def resolve(request: Request, body: ResolveRequest) -> Response:
             "MeTube instance on this host. File upload still works.",
             code="ingestion_not_configured")
 
-    # The bucket the rate limit counts in. Since the key box was removed no
-    # browser sends an Authorization header, so this is the client address in
-    # practice -- which is the better bucket anyway: one key shared by the
-    # whole household used to be one allowance for all of it.
-    who = request.headers.get("authorization") or (
-        request.client.host if request.client else "-")
+    claims = identity.claims_of(request)
+    who = claims.sub
     if _rate_limited(who):
         return error_response(
             429, f"Too many links resolved; the limit is "
@@ -218,9 +264,62 @@ async def resolve(request: Request, body: ResolveRequest) -> Response:
     except guard.GuardError as exc:
         return error_response(400, str(exc), code="refused_url", param="url")
 
+    # WHOSE IT IS, decided before MeTube is told anything, and by one resolve
+    # of this link at a time: a second person pasting it while the first
+    # person's resolve is still waiting on MeTube is answered after it, so they
+    # see the first person's claim and MeTube's record of it rather than the
+    # gap between the two (owners.Owners.turn).
+    client = _client(request)
+    async with OWNERS.turn(url):
+        holder = OWNERS.owner(url)
+        if holder != who:
+            try:
+                held = await client.find(url)
+            except metube.MeTubeError as exc:
+                return _unavailable(exc)
+            if held is None and holder is not None:
+                # MeTube has let it go, so there is no download left to
+                # protect: the link is nobody's and anyone may take it.
+                OWNERS.release(url, holder)
+                holder = None
+            if held is not None and holder is not None:
+                # One record is one download, and sharing it would hand one
+                # person's progress, file and transcript to the other.
+                return error_response(
+                    409, "Someone else on this Calliope has that link in "
+                         "progress. Try again once theirs is done.",
+                    code="pending_for_another_user", param="url")
+            if held is not None and not identity.has(claims, "jobs:read:all"):
+                # A record nobody owns -- kept across a restart of this
+                # process, or whose claim aged out -- may be somebody's live
+                # download. Resolving it would make it the caller's, so the
+                # rule every other route applies to it applies here too.
+                return error_response(
+                    409, "MeTube already holds a download of that link that "
+                         "nobody here owns, so only an administrator can use "
+                         "or clear it.",
+                    code="pending_for_another_user", param="url")
+            # Nothing else claims this link while the turn is held.
+            OWNERS.claim(url, who)
+
+        response: Response | None = None
+        try:
+            response = await _resolve_owned(client, url)
+        finally:
+            if response is not None and response.status_code == 200:
+                OWNERS.keep(url, who)
+            elif holder != who:
+                # A resolve that did not succeed leaves no claim behind --
+                # unless the caller held the link before this request, when a
+                # failed second resolve must not cost them the first.
+                OWNERS.release(url, who)
+        return response
+
+
+async def _resolve_owned(client: metube.MeTube, url: str) -> Response:
+    """The rest of /ui/resolve, once the caller owns the link."""
     # Layer two, and the one that decides. MeTube's url_guard runs inside this
     # call; if it refuses we return its message verbatim and stop.
-    client = _client(request)
     try:
         await client.add(url, auto_start=False)
     except metube.MeTubeError as exc:
@@ -246,8 +345,16 @@ async def resolve(request: Request, body: ResolveRequest) -> Response:
                      or "MeTube could not resolve that link."),
             code="refused_url", param="url")
 
-    # Layer three, and only now: a URL both guards have already accepted.
-    facts = await probe.run(url) if probe.available() else None
+    # Layer three, and only now: a URL both guards have already accepted. The
+    # probe resolves the host once more just before it spawns (D36); a name
+    # that has moved to a private address since layer one is refused here, and
+    # MeTube's pending record goes with it.
+    try:
+        facts = await probe.run(url) if probe.available() else None
+    except probe.DestinationNotAllowed as exc:
+        await client.abandon(url)
+        return error_response(400, str(exc), code="destination_not_allowed",
+                              param="url")
 
     title = (facts or {}).get("title") or entry.get("title") or url
     duration = (facts or {}).get("duration")
@@ -280,11 +387,18 @@ async def resolve(request: Request, body: ResolveRequest) -> Response:
 
 @router.post("/ui/commit")
 async def commit(request: Request, body: CommitRequest) -> Response:
+    if (refused := _foreign(request, body.token)) is not None:
+        return refused
     client = _client(request)
     try:
-        url = guard.check(body.token)
+        guard.check(body.token)
     except guard.GuardError as exc:
         return error_response(400, str(exc), code="refused_url", param="token")
+    # The token exactly as _foreign judged it, not what guard.check returns:
+    # that is stripped, so " " + someone else's link has no owner, passes
+    # _foreign for a holder of jobs:read:all, and would then reach the other
+    # person's record (D36). Every other route uses the token as given, too.
+    url = body.token
 
     # THE GATE IS ENFORCED HERE, NOT ONLY IN THE PAGE. Without this, POST
     # /ui/commit succeeded on a token that had never been resolved, and with
@@ -362,11 +476,16 @@ async def commit(request: Request, body: CommitRequest) -> Response:
 
 @router.post("/ui/abandon")
 async def abandon(request: Request, body: TokenRequest) -> Response:
+    if (refused := _foreign(request, body.token)) is not None:
+        return refused
     client = _client(request)
     try:
         reaped = await client.abandon(body.token)
     except metube.MeTubeError as exc:
         return _unavailable(exc)
+    if reaped:
+        # Nothing left to own, so the link is free for whoever pastes it next.
+        OWNERS.release(body.token, identity.claims_of(request).sub)
     # Reported rather than assumed. A false here means MeTube still holds the
     # record and someone should look, which is strictly better than a green
     # tick over an orphan.
@@ -376,14 +495,15 @@ async def abandon(request: Request, body: TokenRequest) -> Response:
 
 @router.get("/ui/progress")
 async def progress(request: Request, token: str) -> Response:
+    if (refused := _foreign(request, token)) is not None:
+        return refused
     client = _client(request)
     try:
         found = await client.find(token)
     except metube.MeTubeError as exc:
         return _unavailable(exc)
     if found is None:
-        return error_response(404, "MeTube has no record of that link.",
-                              code="unknown_token", param="token")
+        return _unknown_token()
 
     where, entry = found
     status = entry.get("status")
@@ -406,6 +526,11 @@ async def progress(request: Request, token: str) -> Response:
     }))
 
 
+# What may not appear in a value written into a multipart header or field:
+# a quote or backslash ends the quoted filename, and CR or LF ends the line.
+_FRAME_BREAKING = re.compile(r'["\\\x00-\x1f\x7f]')
+
+
 def _multipart(boundary: str, fields: list[tuple[str, str]], *, filename: str,
                chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
     """A multipart body streamed from a remote response, never buffered.
@@ -421,7 +546,13 @@ def _multipart(boundary: str, fields: list[tuple[str, str]], *, filename: str,
     ingest -- 131 MB for the brief's own 2h14m example -- into a container with
     a 512 MB limit, or spooling it to a disk this service otherwise never
     touches. Multipart is four lines of framing; neither of those is worth it.
+
+    THE FILENAME IS A VIDEO'S TITLE, chosen by whoever uploaded it, so what
+    would end the quoted parameter is replaced here, where the frame is built.
+    stt keeps the rest of it for the run record.
     """
+    filename = _FRAME_BREAKING.sub("_", filename)
+
     async def body() -> AsyncIterator[bytes]:
         for name, value in fields:
             yield (f"--{boundary}\r\n"
@@ -462,15 +593,19 @@ async def clip_from_link(request: Request, body: ClipFromLink) -> Response:
     two-hour interview cost twenty seconds of download. That is why cloning
     from a link is cheap enough to be an ordinary thing to do rather than a
     reason to go and find the file yourself.
+
+    THE CLIP IS THE CALLER'S, in their own namespace (D35), like an upload.
     """
+    if (refused := _foreign(request, body.token)) is not None:
+        return refused
+    claims = identity.claims_of(request)
     client = _client(request)
     try:
         found = await client.find(body.token)
     except metube.MeTubeError as exc:
         return _unavailable(exc)
     if found is None:
-        return error_response(404, "MeTube has no record of that link.",
-                              code="unknown_token", param="token")
+        return _unknown_token()
 
     where, entry = found
     filename = entry.get("filename")
@@ -501,8 +636,10 @@ async def clip_from_link(request: Request, body: ClipFromLink) -> Response:
             f"before importing.",
             code="clip_too_large", param="token")
 
+    owner = clips.owner_of(claims)
     try:
-        saved = clips.save(body.name, response.content, replace=body.replace)
+        saved = clips.save(body.name, response.content, owner=owner,
+                           replace=body.replace)
     except clips.ClipError as exc:
         return error_response(400, str(exc), code="invalid_clip", param="name")
 
@@ -510,13 +647,15 @@ async def clip_from_link(request: Request, body: ClipFromLink) -> Response:
     # is written, and leaving it in MeTube's `done` list is litter in somebody
     # else's application.
     try:
-        await client.abandon(body.token)
+        if await client.abandon(body.token):
+            OWNERS.release(body.token, claims.sub)
     except metube.MeTubeError:
-        log.warning("clip imported but the MeTube record was not reaped: %s",
-                    body.token)
+        # The link itself is never logged: it is what this person fetched.
+        log.warning("clip imported but the MeTube record was not reaped")
 
     return Response(media_type="application/json", status_code=201,
-                    content=_json({"voice": saved, "voices": clips.listing()}))
+                    content=_json({"voice": saved,
+                                   "voices": clips.listing(owner)}))
 
 
 @router.post("/ui/captions")
@@ -537,14 +676,15 @@ async def captions(request: Request, body: TokenRequest) -> Response:
     that must agree about a cue, in two languages, with only one of them
     tested. So this route reads bytes and decides nothing about them.
     """
+    if (refused := _foreign(request, body.token)) is not None:
+        return refused
     client = _client(request)
     try:
         found = await client.find(body.token)
     except metube.MeTubeError as exc:
         return _unavailable(exc)
     if found is None:
-        return error_response(404, "MeTube has no record of that link.",
-                              code="unknown_token", param="token")
+        return _unknown_token()
 
     where, entry = found
     filename = entry.get("filename")
@@ -623,7 +763,7 @@ async def captions(request: Request, body: TokenRequest) -> Response:
 
 @router.post("/ui/fetch")
 async def fetch(request: Request, body: TokenRequest) -> Response:
-    """Stream MeTube's finished file into the gateway's transcription route.
+    """Stream MeTube's finished file into the transcription route, as the person who asked.
 
     SERVER-SIDE, and that is the point: the browser never downloads the media.
     The 131 MB of a two-hour podcast goes MeTube -> here -> gateway ->
@@ -632,15 +772,36 @@ async def fetch(request: Request, body: TokenRequest) -> Response:
     CORS_ALLOWED_ORIGINS is empty, `on_prepare` returns early and emits no CORS
     headers, and its socket.io server was constructed with
     cors_allowed_origins=[], so a browser page cannot call MeTube at all.
+
+    AS THE PERSON, NOT AS THIS SERVICE (D64). The gateway hands this request a
+    delegation token for the signed-in user; it goes on, unread, to the
+    gateway's internal listener beside this service's own key, and the gateway
+    checks there that the person's session or key is still live. This service
+    holds no scope that can transcribe on its own, so a request without a
+    token stops here, before anything is downloaded.
     """
+    if (refused := _foreign(request, body.token)) is not None:
+        return refused
+    delegation = identity.delegation_of(request)
+    if delegation is None:
+        return error_response(
+            403, "This request carries no delegation for the person who sent "
+                 "it, so nothing can be transcribed on their behalf.",
+            code="delegation_refused")
+    if CREDENTIALS.service_key() is None:
+        return error_response(
+            503, "This service's key has not been written to its credential "
+                 "volume yet, so it cannot reach the gateway. It appears "
+                 "within seconds of the gateway starting.",
+            type_="server_error", code="not_ready", headers={"Retry-After": "5"})
+
     client = _client(request)
     try:
         found = await client.find(body.token)
     except metube.MeTubeError as exc:
         return _unavailable(exc)
     if found is None:
-        return error_response(404, "MeTube has no record of that link.",
-                              code="unknown_token", param="token")
+        return _unknown_token()
     where, entry = found
     filename = entry.get("filename")
     if where != "done" or entry.get("status") != metube.FINISHED or not filename:
@@ -708,11 +869,16 @@ async def fetch(request: Request, body: TokenRequest) -> Response:
                 400, f"timestamp_granularities must be one of "
                      f"{', '.join(sorted(GRANULARITIES))}, not {value!r}",
                 code="invalid_granularity", param="timestamp_granularities")
-    # The vocabulary profiles this request selected, forwarded verbatim and
-    # deliberately NOT validated here: stt owns the list and answers 400 naming
-    # an unknown profile, so a second copy of that check in this service would
-    # be another thing to keep in step with a directory it cannot see.
+    # The vocabulary profiles this request selected. Which names exist, and
+    # which this person may see, is stt's to say and it answers 400 naming an
+    # unknown one -- so the only check here is the frame's own: a value that
+    # could end its part is refused before it is written into one.
     glossary = (query.get("glossary") or "").strip()
+    if _FRAME_BREAKING.search(glossary):
+        return error_response(
+            400, "glossary names a vocabulary profile, and a profile name has "
+                 "no quotes, backslashes or control characters in it",
+            code="invalid_glossary", param="glossary")
     fields = [
         # Required by /v1 validation, and it does NOT choose an engine --
         # Parakeet runs regardless and says so in x-stt-engine.
@@ -736,31 +902,61 @@ async def fetch(request: Request, body: TokenRequest) -> Response:
                         f"ingested file exceeded {config.MAX_UPLOAD_BYTES} bytes")
                 yield chunk
 
-    boundary = "----calliope-ingest-boundary-9f2c1a"
-    try:
-        upstream_response = await http.send(
+    async def send(key: str) -> httpx.Response:
+        # A boundary nobody can predict, because the file is somebody else's
+        # bytes: a fixed one written into a video's audio track would end the
+        # part early and open a field of the uploader's choosing.
+        boundary = f"calliope-{secrets.token_hex(16)}"
+        return await http.send(
             http.build_request(
-                "POST", f"{config.GATEWAY_URL}/v1/audio/transcriptions",
-                headers={
-                    "content-type": f"multipart/form-data; boundary={boundary}",
-                    # THIS SERVICE'S KEY when UI_GATEWAY_API_KEY is set, and
-                    # the caller's forwarded when it is not -- one decision,
-                    # made in config.gateway_authorization, so this hop cannot
-                    # drift from the proxy's. The page has no key box any more,
-                    # so on the deployment this is written for the inbound
-                    # header is always absent and the outbound one is ours.
-                    **({"authorization": _auth}
-                       if (_auth := config.gateway_authorization(
-                           request.headers.get("authorization"))) else {}),
-                },
+                "POST", f"{config.GATEWAY_INTERNAL_URL}/v1/audio/transcriptions",
+                # Named, never copied from the inbound request (D65). The
+                # identity assertion is not among them and cannot be:
+                # outbound_headers refuses it by name.
+                headers=identity.outbound_headers(
+                    authorization=f"Bearer {key}",
+                    content_type=f"multipart/form-data; boundary={boundary}",
+                    x_calliope_delegation=delegation),
                 content=_multipart(boundary, fields, filename=str(filename),
                                    chunks=upstream()),
                 timeout=httpx.Timeout(960.0, connect=5.0),
             ),
             stream=True,
         )
+
+    key = CREDENTIALS.service_key() or ""
+    try:
+        upstream_response: httpx.Response | None = await send(key)
+        if upstream_response.status_code == 401:
+            # Our key, not the person's: a refused delegation is a 403
+            # (§3.7). The gateway may have rotated the key, so read it again
+            # and try once more if it changed (§2.4). The gateway checks the
+            # key before it counts a use of the delegation, so the retry does
+            # not spend the token's second use.
+            await upstream_response.aclose()
+            upstream_response = None
+            fresh = CREDENTIALS.reload_service_key()
+            if fresh is not None and fresh != key:
+                upstream_response = await send(fresh)
+                if upstream_response.status_code == 401:
+                    await upstream_response.aclose()
+                    upstream_response = None
+        if upstream_response is None:
+            # Never relayed as a 401, which the page reads as "sign in again"
+            # (§4.3) and which no sign-in would fix.
+            log.error("the gateway's internal listener refused this "
+                      "service's key; link transcription is unavailable "
+                      "until service.key matches")
+            return error_response(
+                503, "The gateway refused this service's own key, so the "
+                     "link cannot be transcribed. It is a deployment fault, "
+                     "not your sign-in.",
+                type_="server_error", code="service_key_refused",
+                headers={"Retry-After": "30"})
     except httpx.RequestError as exc:
-        log.warning("ingest fetch failed: %s", exc)
+        # The type only: an exception's text can carry a URL, and the link is
+        # what this person fetched.
+        log.warning("ingest fetch failed: %s", type(exc).__name__)
         return error_response(
             502, f"could not hand the downloaded audio to the gateway: "
                  f"{type(exc).__name__}",
@@ -858,16 +1054,19 @@ async def media(request: Request, token: str) -> Response:
     scrub for a URL that is never fetched on this path, only looked up in a
     dictionary. The URL was guarded twice before anything was downloaded, by
     /ui/resolve and by MeTube's own url_guard, and the /history lookup below is
-    what proves this is that same link.
+    what proves this is that same link. And before either, the link must be
+    the caller's own (D36): a <video src> carries the session cookie like any
+    other request, so a guessed URL is no way into someone else's download.
     """
+    if (refused := _foreign(request, token)) is not None:
+        return refused
     client = _client(request)
     try:
         found = await client.find(token)
     except metube.MeTubeError as exc:
         return _unavailable(exc)
     if found is None:
-        return error_response(404, "MeTube has no record of that link.",
-                              code="unknown_token", param="token")
+        return _unknown_token()
 
     where, entry = found
     filename = entry.get("filename")
@@ -888,9 +1087,11 @@ async def media(request: Request, token: str) -> Response:
     # UP UNTOUCHED. Range because that is the whole point, and If-Range because
     # a conditional range without it is not conditional: a player that holds a
     # stale ETag would be handed a slice of a DIFFERENT file and would splice
-    # the two together with no error anywhere.
-    forwarded = {header: request.headers[header]
-                 for header in ("range", "if-range") if header in request.headers}
+    # the two together with no error anywhere. These two by name and nothing
+    # else (D65): MeTube has no authentication, and is told nothing about who
+    # is asking.
+    forwarded = identity.outbound_headers(range=request.headers.get("range"),
+                                          if_range=request.headers.get("if-range"))
 
     http: httpx.AsyncClient = request.app.state.client
     try:

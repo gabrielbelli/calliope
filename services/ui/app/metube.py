@@ -41,8 +41,11 @@ assumed the other way.
 AND ONE THING THAT IS NOT OURS TO FIX. MeTube has NO AUTHENTICATION of any
 kind: Config._DEFAULTS carries no auth, user, password or token key, and an
 unauthenticated GET /history from off-NAS returns 200. This service does not
-widen that -- our ingestion routes sit behind the gateway's key check, so we
-are a strictly narrower client of something already open to the LAN. But
+widen that -- our ingestion routes need a signed-in person with ingest:links,
+and each link answers only the person who resolved it -- so we are a strictly
+narrower client of something already open to the LAN. Nothing about the
+caller is sent to MeTube: every request below is built from named values, and
+never from the inbound request's headers (D65). But
 shipping a UI that makes MeTube load-bearing is the moment to close it:
 unpublish 30097 or firewall it to the NAS and reach it by LAN IP. That is a
 deployment change, it is in this service's README, and it must not be allowed

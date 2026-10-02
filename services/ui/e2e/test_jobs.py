@@ -24,15 +24,14 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qsl
 
-import httpx
 import pytest
 from playwright.sync_api import expect
 from test_routes import history_length, seeded_job, settled, wait_for_address
 
 ROW_BUTTONS = "#tab-jobs .row > button, #tab-jobs .job .acts > button"
-# A listing of the runs, through either door: a filtered one leaves by the
-# gateway's own /jobs (see test_a_filtered_listing_is_asked_through_the_pages_own_door).
-LISTING = r"^(/ui/api)?/jobs$"
+# A listing of the runs: the gateway's own /jobs, the one door the page has
+# (see test_a_filtered_listing_is_asked_through_the_pages_own_door).
+LISTING = r"^/jobs$"
 UNREACHABLE = "This page could not reach the server. Check the connection and try again."
 # The query each filter sends, from JOB_FILTERS in the page. Everything sends
 # none, and a kind other than All kinds adds `kind`.
@@ -54,14 +53,9 @@ def seeded(fake):
     fake.reset()
 
 
-def tts_long(stack) -> str:
-    """The fake tts-long itself, for what a test needs to know or change
-    behind the page's back."""
-    return f"http://127.0.0.1:{stack.ports['long']}"
-
-
-def record(stack, job: str) -> dict:
-    return httpx.get(f"{tts_long(stack)}/jobs/{job}", timeout=5).json()
+def record(stack, job: str) -> dict | None:
+    """What tts-long keeps of a run, behind the page's back; None once it is gone."""
+    return stack.fake.job(job)
 
 
 def job_row(page, job: str):
@@ -196,7 +190,7 @@ def test_each_filter_and_kind_is_a_new_request_and_is_remembered(page, goto, sta
     asked = listings(browser_log)[before:]
     assert asked, "changing the filter asked for nothing"
     assert query(asked[-1]) == wanted, f"asked {asked[-1]['query']!r} for {show}/{kind}"
-    answer = httpx.get(f"{tts_long(stack)}/jobs", params=wanted, timeout=5).json()["jobs"]
+    answer = stack.api.get("/jobs", params=wanted).json()["jobs"]
     shown = page.locator("#joblist .job").evaluate_all("rows => rows.map(r => r.dataset.job)")
     assert sorted(shown) == sorted(j["id"] for j in answer), "the rows are not the service's answer"
 
@@ -214,7 +208,7 @@ def test_a_filtered_listing_is_asked_through_the_pages_own_door(page, goto, brow
     goto("/ui/jobs?show=failed&kind=clone")
     settled(page)
     asked = listings(browser_log)
-    assert asked and all(r["path"] == "/ui/api/jobs" for r in asked), [(r["path"], r["query"]) for r in asked]
+    assert asked and all(r["path"] == "/jobs" for r in asked), [(r["path"], r["query"]) for r in asked]
 
 
 @pytest.mark.parametrize("shape", ["flat", "grouped", "absent"])
@@ -224,7 +218,7 @@ def test_filter_options_show_counts_except_playable_and_failures(page, goto, sta
     names. Playable and Failures each cover two states the service counts
     apart, so they say no number rather than one this page added up; and a
     listing with no counts says none at all."""
-    answer = httpx.get(f"{tts_long(stack)}/jobs", timeout=5).json()
+    answer = stack.api.get("/jobs").json()
     counts = answer["counts"]
     if shape == "grouped":
         answer["counts"] = {"all": counts["all"],
@@ -247,7 +241,7 @@ def test_filter_options_show_counts_except_playable_and_failures(page, goto, sta
         [f"All kinds{n('all')}", f"Cloned voices{n('clone')}", f"Speech{n('speech')}",
          f"Transcriptions{n('transcribe')}"])
     if shape == "flat":
-        httpx.delete(f"{tts_long(stack)}/jobs/{seeded_job(stack, 'speech', 'done')}", timeout=5)
+        stack.api.delete(f"/jobs/{seeded_job(stack, 'speech', 'done')}")
         refreshed(page)
         expect(page.locator("#jobfilter option").first).to_have_text(f"Everything ({counts['all'] - 1})")
         expect(page.locator("#jobkind option").nth(2)).to_have_text("Speech (0)")
@@ -299,9 +293,9 @@ def test_a_filter_that_hides_every_run_offers_to_show_everything(page, goto):
 
 def test_an_empty_filter_says_how_many_records_it_hides(page, goto, stack):
     """The count is of every record, and one record is said as one."""
-    for job in httpx.get(f"{tts_long(stack)}/jobs", timeout=5).json()["jobs"]:
+    for job in stack.api.get("/jobs").json()["jobs"]:
         if job["kind"] != "transcribe":
-            httpx.delete(f"{tts_long(stack)}/jobs/{job['id']}", timeout=5)
+            stack.api.delete(f"/jobs/{job['id']}")
     goto("/ui/jobs?show=failed")
     settled(page)
     expect(page.locator("#joblist .hint")).to_have_text(
@@ -315,8 +309,8 @@ def test_an_empty_filter_says_how_many_records_it_hides(page, goto, stack):
 def test_a_service_with_no_runs_says_what_will_land_here(page, goto, stack):
     """Nothing is filtered and nothing is there: no count, no way out of a
     filter, and nothing left in the title."""
-    for job in httpx.get(f"{tts_long(stack)}/jobs", timeout=5).json()["jobs"]:
-        httpx.delete(f"{tts_long(stack)}/jobs/{job['id']}", timeout=5)
+    for job in stack.api.get("/jobs").json()["jobs"]:
+        stack.api.delete(f"/jobs/{job['id']}")
     goto("/ui/jobs")
     settled(page)
     expect(page.locator("#joblist")).to_have_text(
@@ -382,7 +376,7 @@ def test_a_job_list_that_fails_at_load_does_not_claim_there_are_no_runs(page, go
 
 
 def test_a_truncated_listing_says_older_runs_need_narrower_filters(page, goto, stack, fake):
-    answer = httpx.get(f"{tts_long(stack)}/jobs", timeout=5).json() | {"truncated": True}
+    answer = stack.api.get("/jobs").json() | {"truncated": True}
     fake.fail(r"^/jobs$", status=200, method="GET", backend="tts_long", json_body=answer)
     goto("/ui/jobs")
     settled(page)
@@ -620,7 +614,7 @@ def test_opening_a_rows_text_loads_it_once_and_keeps_it_open_across_polls(page, 
     expect(row.locator("details.jobtext")).not_to_have_attribute("open", "")
     row.locator("details.jobtext > summary").click()
     expect(row.locator("[data-text]")).to_have_text(text)
-    assert len(browser_log.sent("GET", rf"^/ui/api/jobs/{job}$")) == 1
+    assert len(browser_log.sent("GET", rf"^/jobs/{job}$")) == 1
 
 
 def test_a_rows_text_that_cannot_be_loaded_says_why_and_is_asked_for_again(page, goto, stack, fake,
@@ -630,14 +624,14 @@ def test_a_rows_text_that_cannot_be_loaded_says_why_and_is_asked_for_again(page,
     settled(page)
     fake.fail(rf"^/jobs/{job}$", status=503, method="GET", backend="tts_long", times=1,
               json_body={"detail": "the job store is being rebuilt"})
-    browser_log.allow(503, rf"^/ui/api/jobs/{job}$")
+    browser_log.allow(503, rf"^/jobs/{job}$")
     summary = job_row(page, job).locator("details.jobtext > summary")
     summary.click()
     expect(job_row(page, job).locator("[data-text]")).to_have_text("Could not load it: the job store is being rebuilt")
     summary.click()
     summary.click()
     expect(job_row(page, job).locator("[data-text]")).to_have_text(record(stack, job)["text"])
-    assert len(browser_log.sent("GET", rf"^/ui/api/jobs/{job}$")) == 2
+    assert len(browser_log.sent("GET", rf"^/jobs/{job}$")) == 2
 
 
 def test_opening_a_rows_text_puts_the_job_in_the_address_and_closing_it_goes_back(page, goto, stack):
@@ -677,9 +671,9 @@ def test_a_job_address_the_service_cannot_answer_for_keeps_the_link_and_says_not
     is not known, so the link stays and no note claims anything."""
     job = seeded_job(stack, "clone", "done", "present")
     fake.fail(r"^/jobs", status=503, method="GET", backend="tts_long")
-    browser_log.allow(503, r"^/ui/api/jobs")
+    browser_log.allow(503, r"^/jobs")
     goto(f"/ui/jobs/{job}")
-    until(page, lambda: any(r["status"] == 503 and r["path"] == f"/ui/api/jobs/{job}"
+    until(page, lambda: any(r["status"] == 503 and r["path"] == f"/jobs/{job}"
                             for r in browser_log.responses), "the job's own record asked for")
     page.wait_for_timeout(300)
     assert page.evaluate("location.pathname + location.search") == f"/ui/jobs/{job}"
@@ -708,7 +702,7 @@ def test_play_loads_the_audio_into_the_one_player_and_starts_it(page, goto, stac
     refreshed(page)
     assert page.locator("#jobplayer").evaluate("p => p.src") == source
     page.wait_for_function(playing)
-    assert len(browser_log.sent("GET", rf"^/ui/api/jobs/{job}/audio$")) == 1
+    assert len(browser_log.sent("GET", rf"^/jobs/{job}/audio$")) == 1
 
 
 def test_close_the_player_stops_and_hides_it(page, goto, stack):
@@ -726,7 +720,7 @@ def test_the_quieter_engines_loudness_note_is_shown_once(page, goto, stack, fake
     """Turbo normalises 5 dB under the default engine, which sounds like a
     fault; the player says so the first time it plays one, and never again
     in this browser. The figures are the service's, from /health."""
-    engines = httpx.get(f"{tts_long(stack)}/health", timeout=5).json()["engines"]
+    engines = stack.fake.backend_health("tts_long")["engines"]
     engines["chatterbox"]["loudness_lufs"] = -22
     engines["chatterbox-turbo"]["loudness_lufs"] = -27
     fake.health("tts_long", engines=engines)
@@ -762,10 +756,10 @@ def test_play_on_audio_that_is_gone_says_it_is_not_available(page, goto, stack, 
     goto("/ui/jobs")
     settled(page)
     if failure == "unreachable":
-        page.route(re.compile(rf"/ui/api/jobs/{job}/audio$"), lambda route: route.abort("aborted"))
+        page.route(re.compile(rf"/jobs/{job}/audio$"), lambda route: route.abort("aborted"))
     else:
         fake.fail(rf"^/jobs/{job}/audio$", status=failure, method="GET", backend="tts_long")
-        browser_log.allow(failure, rf"^/ui/api/jobs/{job}/audio$")
+        browser_log.allow(failure, rf"^/jobs/{job}/audio$")
     job_row(page, job).locator("[data-play]").click()
     expect(page.locator("#jobplaying")).to_have_text(said)
     assert not page.locator("#jobplayer").evaluate("p => p.hasAttribute('src')")
@@ -791,7 +785,7 @@ def test_download_the_audio_saves_a_wav_named_after_the_job(page, goto, stack, f
     assert download.suggested_filename == f"{job}.wav"
     assert Path(download.path()).read_bytes()[:4] == b"RIFF"
     expect(button).to_have_text("Download the audio")
-    assert len(browser_log.sent("GET", rf"^/ui/api/jobs/{job}/audio$")) == 1
+    assert len(browser_log.sent("GET", rf"^/jobs/{job}/audio$")) == 1
 
 
 @pytest.mark.parametrize(("failure", "said"), [
@@ -804,7 +798,7 @@ def test_download_on_audio_not_ready_says_so_in_words(page, goto, stack, fake, d
     job = seeded_job(stack, "clone", "done", "present")
     dialogs()
     fake.fail(rf"^/jobs/{job}/audio$", status=failure, times=1, backend="tts_long")
-    browser_log.allow(failure, rf"^/ui/api/jobs/{job}/audio$")
+    browser_log.allow(failure, rf"^/jobs/{job}/audio$")
     goto(f"/ui/jobs/{job}")
     settled(page)
     job_row(page, job).locator("[data-get]").click()
@@ -817,7 +811,7 @@ def test_download_while_the_server_cannot_be_reached_says_so(page, goto, stack, 
     dialogs()
     goto("/ui/jobs")
     settled(page)
-    page.route(re.compile(rf"/ui/api/jobs/{job}/audio$"), lambda route: route.abort("aborted"))
+    page.route(re.compile(rf"/jobs/{job}/audio$"), lambda route: route.abort("aborted"))
     job_row(page, job).locator("[data-get]").click()
     page.wait_for_function("() => !document.querySelector('[data-get][aria-busy]')")
     assert [message for _, message in dialogs.seen] and UNREACHABLE in dialogs.seen[-1][1], dialogs.seen
@@ -838,7 +832,7 @@ def test_stop_and_keep_whats_done_marks_the_row_stopping_then_cancelled(page, go
     expect(status(page, job)).to_have_text("stopping…")
     expect(job_row(page, job).locator("[data-stop]")).to_have_count(0)
     expect(status(page, job)).to_have_text("cancelled", timeout=5_000)
-    assert len(browser_log.sent("DELETE", rf"^/ui/api/jobs/{job}$")) == 1
+    assert len(browser_log.sent("DELETE", rf"^/jobs/{job}$")) == 1
     assert actions(page, job) == ["Play", "Download the audio", "Delete the audio", "Delete the record too"]
 
 
@@ -849,7 +843,7 @@ def test_a_stop_the_service_refuses_puts_the_row_back_and_says_why(page, goto, f
     settled(page)
     fake.fail(rf"^/jobs/{job}$", status=409, method="DELETE", backend="tts_long", times=1,
               json_body={"detail": "that job is finishing and cannot be stopped now"})
-    browser_log.allow(409, rf"^/ui/api/jobs/{job}$")
+    browser_log.allow(409, rf"^/jobs/{job}$")
     job_row(page, job).locator("[data-stop]").click()
     until(page, lambda: dialogs.seen, "the refusal said")
     assert dialogs.seen == [("alert", "Could not stop it: that job is finishing and cannot be stopped now")]
@@ -883,7 +877,7 @@ def test_retry_resubmits_a_failed_clone_with_its_engine_and_controls(page, goto,
     assert {k: sent.get(k) for k in ("voice", "model", "exaggeration", "cfg_weight", "temperature", "language")} \
         == {"voice": "narrator", "model": "chatterbox", "exaggeration": 0.7, "cfg_weight": 0.3,
             "temperature": 0.9, "language": "en"}, sent
-    assert len(browser_log.sent("GET", rf"^/ui/api/jobs/{job}$")) == 1
+    assert len(browser_log.sent("GET", rf"^/jobs/{job}$")) == 1
 
 
 def test_retry_runs_the_same_text_again(page, goto, stack, fake, dialogs, browser_log):
@@ -904,13 +898,13 @@ def test_retry_falls_back_on_what_this_browser_sent_when_the_record_is_gone(page
                                                                            browser_log):
     """The service swept the record of a run this browser queued. What this
     browser kept of the request is then the only copy, and Retry sends it."""
-    browser_log.allow(404, r"^/ui/api/jobs/[0-9a-f-]+$")
+    browser_log.allow(404, r"^/jobs/[0-9a-f-]+$")
     job = failed_clone(fake)
     params = {"voice": "narrator", "text": "Kept by this browser.", "model": "chatterbox"}
     goto("/ui/jobs")
     settled(page)
     page.evaluate("([id, params]) => adopt(id, params)", [job, params])
-    httpx.delete(f"{tts_long(stack)}/jobs/{job}", timeout=5)
+    stack.api.delete(f"/jobs/{job}")
     refreshed(page)
     expect(job_row(page, job)).to_be_visible()
     job_row(page, job).locator("[data-retry]").click()
@@ -960,7 +954,7 @@ def test_speak_again_on_a_run_whose_text_was_not_kept_says_so(page, goto, fake, 
     job_row(page, job).locator("[data-again]").click()
     until(page, lambda: dialogs.seen, "the refusal said")
     assert dialogs.seen == [("alert", "The text for that run was not kept, so it cannot be said again.")]
-    assert not browser_log.sent("POST", r"^/ui/api/speak$")
+    assert not browser_log.sent("POST", r"^/speak$")
 
 
 def test_copy_the_transcript_puts_it_on_the_clipboard(page, goto, stack, browser_log):
@@ -977,7 +971,7 @@ def test_copy_the_transcript_puts_it_on_the_clipboard(page, goto, stack, browser
     expect(copy).to_have_text("Copied")
     assert page.evaluate("() => navigator.clipboard.readText()") == text
     expect(copy).to_have_text("Copy the transcript")
-    assert len(browser_log.sent("GET", rf"^/ui/api/jobs/{job}$")) == 1
+    assert len(browser_log.sent("GET", rf"^/jobs/{job}$")) == 1
 
 
 def test_copy_on_a_transcript_that_was_not_kept_says_so(page, goto, fake, dialogs):
@@ -1008,12 +1002,12 @@ def test_delete_the_audio_asks_and_keeps_the_record(page, goto, stack, dialogs, 
     until(page, lambda: dialogs.seen, "the question")
     assert dialogs.seen == [("confirm", asked)]
     page.wait_for_timeout(300)
-    assert not browser_log.sent("DELETE", r"^/ui/api/jobs/")
+    assert not browser_log.sent("DELETE", r"^/jobs/")
     assert actions(page, job)[0] == "Play"
     job_row(page, job).locator("[data-delaudio]").click()
     expect(job_row(page, job)).to_contain_text("The audio was deleted. This record was kept.")
     assert actions(page, job) == ["Delete the record"]
-    assert [r["path"] for r in browser_log.sent("DELETE", r"^/ui/api/jobs/")] == [f"/ui/api/jobs/{job}/audio"]
+    assert [r["path"] for r in browser_log.sent("DELETE", r"^/jobs/")] == [f"/jobs/{job}/audio"]
     assert record(stack, job)["audio"] == {"state": "deleted"}
 
 
@@ -1028,13 +1022,13 @@ def test_deleting_a_record_with_audio_asks_first(page, goto, stack, dialogs, bro
     job_row(page, job).locator("[data-forget]").click()
     until(page, lambda: dialogs.seen, "the question")
     page.wait_for_timeout(300)
-    assert not browser_log.sent("DELETE", r"^/ui/api/jobs/")
+    assert not browser_log.sent("DELETE", r"^/jobs/")
     expect(job_row(page, job)).to_be_visible()
     job_row(page, job).locator("[data-forget]").click()
     expect(job_row(page, job)).to_have_count(0)
     assert dialogs.seen == [("confirm", asked)] * 2
-    assert [r["path"] for r in browser_log.sent("DELETE", r"^/ui/api/jobs/")] == [f"/ui/api/jobs/{job}"]
-    assert httpx.get(f"{tts_long(stack)}/jobs/{job}", timeout=5).status_code == 404
+    assert [r["path"] for r in browser_log.sent("DELETE", r"^/jobs/")] == [f"/jobs/{job}"]
+    assert record(stack, job) is None
 
 
 def test_deleting_a_transcript_asks_first(page, goto, stack, dialogs, browser_log):
@@ -1052,10 +1046,10 @@ def test_deleting_a_transcript_asks_first(page, goto, stack, dialogs, browser_lo
         "never kept, and it cannot be transcribed again from here. It is deleted on the server, so it goes "
         "from every device."))]
     page.wait_for_timeout(300)
-    assert not browser_log.sent("DELETE", r"^/ui/api/jobs/")
+    assert not browser_log.sent("DELETE", r"^/jobs/")
     job_row(page, job).locator("[data-forget]").click()
     expect(job_row(page, job)).to_have_count(0)
-    assert httpx.get(f"{tts_long(stack)}/jobs/{job}", timeout=5).status_code == 404
+    assert record(stack, job) is None
 
 
 @pytest.mark.parametrize("which", ["failed clone", "audio deleted", "kokoro run"])
@@ -1069,7 +1063,7 @@ def test_deleting_a_record_with_nothing_to_lose_does_not_ask(page, goto, stack, 
     job_row(page, job).locator("[data-forget]").click()
     expect(job_row(page, job)).to_have_count(0)
     assert dialogs.seen == []
-    assert [r["path"] for r in browser_log.sent("DELETE", r"^/ui/api/jobs/")] == [f"/ui/api/jobs/{job}"]
+    assert [r["path"] for r in browser_log.sent("DELETE", r"^/jobs/")] == [f"/jobs/{job}"]
     refreshed(page)
     expect(job_row(page, job)).to_have_count(0)
 
@@ -1080,7 +1074,7 @@ def test_deleting_a_record_the_service_no_longer_has_takes_the_row_off(page, got
     goto("/ui/jobs")
     settled(page)
     fake.fail(rf"^/jobs/{job}$", status=404, method="DELETE", backend="tts_long", times=1)
-    browser_log.allow(404, rf"^/ui/api/jobs/{job}$")
+    browser_log.allow(404, rf"^/jobs/{job}$")
     job_row(page, job).locator("[data-forget]").click()
     expect(job_row(page, job)).to_have_count(0)
 
@@ -1096,7 +1090,7 @@ def test_a_delete_the_service_refuses_says_why_and_keeps_the_row(page, goto, sta
     settled(page)
     fake.fail(rf"^/jobs/{job}{path}$", status=503, method="DELETE", backend="tts_long",
               json_body={"detail": "the volume is read-only"})
-    browser_log.allow(503, rf"^/ui/api/jobs/{job}{path}$")
+    browser_log.allow(503, rf"^/jobs/{job}{path}$")
     job_row(page, job).locator(f"[data-{button}]").click()
     until(page, lambda: len(dialogs.seen) == 2, "the question and the refusal")
     assert dialogs.seen[1] == ("alert", said)
@@ -1137,11 +1131,11 @@ RUNNERS = {
 
 @pytest.mark.parametrize("case", list(RUNNERS))
 def test_the_gpu_runner_panel_says_its_state_reason_and_gpu(page, goto, stack, fake, case):
-    """From /ui/health, which the page reads anyway: the state is the
+    """From /health, which the page reads anyway: the state is the
     headline, why it will not take work is its own line, and the GPU line
     says what the card is doing. The usual mode, "auto", is not said at all."""
     change, headline, why, gpu = RUNNERS[case]
-    runner = httpx.get(f"{tts_long(stack)}/health", timeout=5).json()["runner"] | change
+    runner = stack.fake.backend_health("tts_long")["runner"] | change
     fake.health("tts_long", runner=runner)
     goto("/ui/jobs")
     expect(page.locator("#runnerbox")).to_be_visible()
@@ -1233,7 +1227,7 @@ def test_polling_slows_down_for_old_jobs_and_when_the_page_is_hidden(page, goto,
     hide(page)
     assert advance(page, browser_log, 10) == (1, 30_000)
     assert advance(page, browser_log, 29_000)[0] == 0
-    httpx.delete(f"{tts_long(stack)}/jobs/{job}", timeout=5)
+    stack.api.delete(f"/jobs/{job}")
     assert advance(page, browser_log, 2_000) == (1, 30_000)
     expect(status(page, job)).to_have_text("cancelled")
     assert advance(page, browser_log, 95_000)[0] == 0, "a hidden page with nothing live asked for its jobs"
@@ -1245,8 +1239,8 @@ def test_a_job_deleted_on_another_device_leaves_the_open_list_at_the_next_poll(p
     goto("/ui/jobs")
     settled(page)
     expect(job_row(page, job)).to_be_visible()
-    with httpx.Client(base_url=stack.url, timeout=10) as phone:
-        phone.delete(f"/ui/api/jobs/{job}").raise_for_status()
+    with stack.client() as phone:
+        phone.delete(f"/jobs/{job}").raise_for_status()
     page.clock.fast_forward(31_000)
     expect(job_row(page, job)).to_have_count(0)
 

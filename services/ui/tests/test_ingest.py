@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from conftest import ADMIN
+
 URL = "https://media.example/watch?v=abcdef"
 
 
@@ -104,17 +106,22 @@ def test_an_unreachable_metube_is_still_a_502(client):
     assert response.json()["error"]["code"] == "ingestion_unavailable"
 
 
-def test_commit_refuses_a_token_that_was_never_resolved(client):
+def test_commit_refuses_a_token_that_was_never_resolved(client, sign):
     """The confirm gate is the server's, not only the page's.
 
     POST /ui/commit used to succeed on any URL, and with clip_start set it went
     straight to /add auto_start:true -- a download starting with no resolve step
     and no dialog. The page never took that path, so "nothing is fetched until
     the user agrees" was a property of the page rather than of the service.
+
+    A link nobody resolved belongs to nobody, so a person meets the ownership
+    gate first (404); a holder of jobs:read:all gets past that one and still
+    meets this one.
     """
     api, _, tube = client()
-    response = api.post("/ui/commit",
-                        json={"token": URL, "clip_start": 0, "clip_end": 600})
+    body = {"token": URL, "clip_start": 0, "clip_end": 600}
+    assert api.post("/ui/commit", json=body).status_code == 404
+    response = api.post("/ui/commit", json=body, headers=sign(scopes=ADMIN))
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "not_resolved"
     assert not any(path == "/add" for path, _ in tube.calls), \
@@ -238,17 +245,6 @@ def test_resolve_is_rate_limited_so_it_is_not_a_scanner(client):
     response = api.post("/ui/resolve", json={"url": URL})
     assert response.status_code == 429
     assert response.headers["retry-after"] == "30"
-
-
-def test_a_job_audio_path_is_forwarded_whole(client):
-    """/jobs/{id} and /jobs/{id}/audio are separate table entries and a path
-    parameter does not match a slash, so the more specific one is not shadowed
-    by the shorter."""
-    api, gateway, _ = client()
-    api.get("/jobs/abc-123/audio")
-    assert gateway.seen[-1].url.path == "/jobs/abc-123/audio"
-    api.get("/jobs/abc-123")
-    assert gateway.seen[-1].url.path == "/jobs/abc-123"
 
 
 def test_the_download_url_carries_the_folder_metube_put_the_file_in():
