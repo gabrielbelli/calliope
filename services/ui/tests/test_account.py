@@ -493,7 +493,7 @@ def test_a_stale_page_and_a_wait_are_said_and_nothing_else_is_taken_over(tmp_pat
       await api("/ui/resolve", { method: "POST" });
       const wait = $("toast").textContent;
       $("toast").textContent = "";
-      answer("/ui/resolve", 409, { error: { code: "pending_for_another_user", message: "Someone else." } });
+      answer("/ui/resolve", 409, { error: { code: "in_progress", message: "Already downloading." } });
       const theirs = await api("/ui/resolve", { method: "POST" });
       console.log(JSON.stringify({ stale, wait, after: $("toast").textContent, status: theirs.status,
                                    went: location.assigned }));

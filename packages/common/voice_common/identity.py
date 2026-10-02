@@ -21,7 +21,7 @@ refused rather than tolerated.
 **The headers never travel onward** (D65). install() deletes every
 `X-Calliope-*` header from the request scope once it has read them, and only
 the parsed claims (and, on the paths that delegate, the raw delegation token)
-are left on `request.state`. A handler that proxies its request to MeTube, Home
+are left on `request.state`. A handler that proxies its request to a link's host, Home
 Assistant or the GPU runner has nothing to forward by mistake; outbound
 clients build their headers with `outbound_headers`, which takes explicit
 values and no mapping.
@@ -849,7 +849,7 @@ def outbound_headers(**explicit: str | None) -> dict[str, str]:
     the other onward. A value with CR or LF is refused, so a value cannot
     become a second header.
 
-    For the backends' clients (MeTube, Home Assistant, LLMs, webhooks, the
+    For the backends' clients (a link's host, Home Assistant, LLMs, webhooks, the
     GPU runner, the gateway's internal listener). The gateway's own forwarder
     sets the assertion itself and does not use this.
     """

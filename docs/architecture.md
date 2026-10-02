@@ -91,7 +91,7 @@ deployed.
 | `tts` — Kokoro | ~0.33 GB | see §4.4 | no | ONNX Runtime again |
 | `tts-long` — Chatterbox | 6.6 GB | 0.21× | yes, CPU wheel | Twenty times heavier and twenty times slower than Kokoro, so it loads lazily and unloads after 600 s idle. A model a thousandth its size must not queue behind that |
 | `gateway` | `mem_limit: 512m` | — | no | The only process that checks a credential, and the only published port. Two Argon2id hashes at a time take about 128 MiB of it |
-| `ui` | `mem_limit: 384m` | — | no | It spawns `yt-dlp` on a URL a browser chose |
+| `ui` | `mem_limit: 512m` | — | no | It runs `yt-dlp` on a URL a browser chose, in a child process that checks every connection |
 | `satellites` | 228 to 326 MiB, measured with 0 to 6 satellites; `mem_limit: 512m` | front-end 0.03 to 0.05 per satellite | no | A socket per device, and echo cancellation and wake word models on every satellite's microphones. Optional, so the rest of the stack must not depend on it |
 
 The gateway and the page hold no model, so the only figures worth quoting
@@ -315,8 +315,8 @@ Every route below needs a scope; the gateway's README has the table
 | `GET /`, `GET /ui` | `/` redirects to `/ui` with a session, to `/login` without one |
 | `GET /ui/<tab>[/…]` | Seven tabs, Account and Admin among them; each needs a session and its own scope |
 | `GET /ui/config` | The features and limits the page draws itself with |
-| `GET`, `POST /ui/clips`; `DELETE /ui/clips/{name}`; `POST /ui/clips/from-link` | The reference-clip store |
-| `POST /ui/resolve`, `/ui/commit`, `/ui/abandon`; `GET /ui/progress` | Link ingestion through MeTube |
+| `GET`, `POST /ui/clips`; `DELETE /ui/clips/{name}` | The reference-clip store |
+| `POST /ui/resolve`, `/ui/commit`, `/ui/abandon`; `GET /ui/progress` | Link ingestion: yt-dlp in a guarded child process |
 | `POST /ui/fetch`, `POST /ui/captions`; `GET /ui/media` | Transcribe an ingested file, take its subtitles instead, or play it back |
 
 **Satellites**, when `GATEWAY_SATELLITES_URL` is set
@@ -882,7 +882,7 @@ the box it came from rather than a requirement:
 | `stt-stack` | 10 | 6g |
 | `tts-stack` | 8 | 2g |
 | `tts-long` | 10 | 10g |
-| `voice-ui` | 1 | 384m |
+| `voice-ui` | 1 | 512m |
 | `voice-satellites` | 1 | 512m |
 
 Set the container's CPU limit **and** the service's `*_THREADS` to the same
@@ -985,8 +985,9 @@ outage.
 **Sign-in needs a host name of its own.** `CALLIOPE_PUBLIC_ORIGIN` is
 required, `https://`, on a host name that serves nothing but Calliope on any
 port. A browser keeps one set of cookies per host name and ignores the port,
-so a sibling HTTPS service under the same name (MeTube, Gitea, the NAS's own
-pages) could hand a reader's browser a session of its choosing. The gateway
+so a sibling HTTPS service under the same name (another app on the same host,
+or the NAS's own pages) could hand a reader's browser a session of its
+choosing. The gateway
 honours a session only on that host; the NAS's own address on 30080 still
 answers API keys. Unset, the gateway starts locked and says so.
 
@@ -1021,49 +1022,37 @@ satellite's microphone on. Mosquitto as Home Assistant's add-on lets every
 broker user publish to every topic until an ACL is added; the hub's README
 has one.
 
-**MeTube has no authentication of any kind.** Its configuration has no `auth`,
-`user`, `password` or `token` key; `/add`, `/start`, `/delete`, `/retry` and
-`/history` are all open, and an unauthenticated `GET /history` from off-NAS
-answers 200. Calliope's ingestion routes are a strictly narrower client of
-something already open, so this does not widen the hole — but shipping a page
-that makes MeTube load-bearing is the moment to close it, because after that an
-abuse of its port is a Calliope outage. The fix is a deployment one: unpublish
-that port or firewall it to the NAS, and point `UI_METUBE_URL` at a LAN IP.
-Point it at a LAN IP rather than through a reverse proxy in any case — a
-hostname would go out to the router and hairpin straight back, adding a proxy
-and a TLS handshake as failure modes for a hop between two containers on the
-same box.
+**Every connection the downloader makes is checked.** voice-ui fetches a
+pasted link itself, with yt-dlp in a child process (`app/fetcher.py`), and
+the same rules apply in two layers. A stdlib pre-filter in the server refuses
+anything but http and https, userinfo, and ports other than 80 and 443, then
+resolves the name and checks **every** address it answers — loopback, RFC
+1918, ULA, link-local including `169.254.169.254`, CGNAT, multicast,
+reserved, unspecified, and IPv4-mapped or NAT64-wrapped IPv6 of any of those;
+`localhost*`, `*.local`, `*.internal` and `metadata.google.internal` are
+refused by name before resolution is attempted. Then the child installs the
+same rules on every `getaddrinfo` answer and every `connect`, `connect_ex` and
+`sendto` before it imports yt-dlp, so redirects, URLs found inside a page,
+DASH fragments and DNS rebinding are covered for the probe and the download
+alike. **Still open, stated rather than hidden:** a native network stack —
+ffmpeg, aria2c, curl_cffi — would bypass the child's check, so the image
+carries none and its build fails if one arrives; and code running inside the
+child can undo the check, so a compromised yt-dlp is limited only by the
+network. voice-ui needs nothing on the LAN, so an egress rule for it may block
+private ranges with no exception. It must also block the home's own WAN
+address and public IPv6 prefix: a router with NAT loopback hands those to the
+reverse proxy, often with a LAN source address, so a proxy's access list must
+not trust a source address alone (ADR 0024).
 
-**The SSRF backstop is the network, not the code.** There are three layers: a
-stdlib pre-filter (http/https only, no userinfo, ports 80 and 443 only, then
-`getaddrinfo` and a check of **every** address the name resolves to — loopback,
-RFC 1918, ULA, link-local including `169.254.169.254`, CGNAT, multicast,
-reserved, unspecified, and IPv4-mapped IPv6 of any of those; `localhost*`,
-`*.local`, `*.internal` and `metadata.google.internal` refused by name before
-resolution is attempted); MeTube's own `url_guard.validate_url`, which is better
-than ours because it also installs a connect-time `getaddrinfo` hook inside the
-download subprocess and so covers redirects and DNS rebinding during the
-download; and only then the metadata probe. **Still open, stated rather than
-hidden:** yt-dlp's extraction follows redirects, and neither guard covers a
-redirect *during extraction* to an internal host. The impact is blind SSRF — the
-probe's output is reduced to five scalars, nothing is written to disk, and no
-response body ever reaches a caller. Write the egress rule for this container;
-do not assume it. `UI_PROBE=0` removes the probe entirely, at the cost of a
-title-only confirm card.
-
-**Every declined link has already left a record in MeTube.** `POST /add` runs
-before the probe, deliberately, so the two guards see the URL first. That makes
-`/ui/abandon` the other half of `/ui/resolve` rather than a nicety, and it
-**verifies**, because MeTube's `/delete` answers `{"status":"ok"}` when it has
-deleted nothing at all. The same trap applies to `/start`: `ids` there are URLs,
-not the short `id` field, and a wrong one returns `ok` and silently does
-nothing.
-
-**Ingested files accumulate and nothing removes them.** There is no shared
-volume to delete through, and `DELETE_FILE_ON_TRASHCAN` is a global MeTube
-setting that would make the user's own trashcan button delete their music. Prune
-the ingest folder by mtime on a schedule; move to a second, dedicated MeTube
-instance with its own dataset if ingest volume ever becomes real.
+**Downloaded files are a small cache, and it prunes itself.** A finished
+download is kept under a hashed name in the `ui-cache` volume, one per person,
+link and kind. A file of 128 MiB or less is kept a day after its last use, and
+all of them together stay under `UI_CACHE_BYTES` (1 GiB), least recently used
+out first. A bigger file is not cached: it goes when its job goes, when the
+same person finishes another big file, or an hour after its last use. Before a
+download starts, free space minus what running downloads may still write must
+leave its cap and 64 MiB, or the download fails with that reason.
+`UI_CACHE_BYTES=0` turns the cache off.
 
 **The upload ceiling is the gateway's, not the recogniser's.** `services/stt/app/main.py` reads an
 `UploadFile` whole with no `Content-Length` check, no cap and no streaming, so a
@@ -1227,9 +1216,10 @@ a defect that really happened:
 - **`ffmpeg` is checked as a binary**, not just as a wheel, because the encoders
   shell out to it and `response_format` defaults to mp3 — a missing binary is a
   500 on the default request shape.
-- **`yt-dlp` is checked as a binary on PATH** for the same reason: the page
-  spawns it, and an install that shipped the package without its console script
-  would build cleanly and degrade every confirm card to a title.
+- **`yt-dlp` is imported in the image** beside `app.fetcher` and
+  `app.downloads`, which run it as a library in a child process; and the
+  build fails if ffmpeg, aria2c or curl_cffi arrives, because each would
+  connect where the child's guard cannot see.
 - **The page itself is checked into the image.** It is `COPY`d rather than
   built, so the one way it disappears is a Containerfile that forgot
   `app/static`.
@@ -1331,7 +1321,7 @@ Counted at `15f4667`, one commit past `v0.1.1`, run locally:
 | `services/tts` | 97 | Needs `ffmpeg` on PATH |
 | `services/tts-long` | 328, 2 deselected | One test needs a real socket: it measures time to first byte, and `TestClient` runs the application to completion before it answers |
 | `services/gateway` | 165, of which 8 are the live smoke test | Mock backends wired in through httpx's own transport layer, so every test runs the real proxy code — header filtering, streaming, timeout mapping, auth — with only the socket replaced. The deselected 8 are the live smoke test |
-| `services/ui` | 505 | TestClient over an httpx `MockTransport`. **Nothing starts a server and nothing may**, and `yt-dlp` is never spawned |
+| `services/ui` | 505 | TestClient over an httpx `MockTransport`. **Nothing starts a server and nothing may.** The downloader child is a stub that opens no socket; the real one runs only against loopback |
 | `docs/tests` | 64 | `compose.yaml` against the code, and the prose against the deployment |
 
 The satellites work added three suites, and grew three of the above. Counted
@@ -1550,6 +1540,7 @@ runs 0001–0010 and 0012–0023; there is no 0011.
 | [0021 — Satellites install only firmware signed on the developer's machine, and the hub cannot waive it](adr/0021-signed-firmware.md) | accepted |
 | [0022 — Everything is behind a login, and the gateway is the only place that checks one](adr/0022-everything-behind-a-login.md) | accepted |
 | [0023 — Every secret the stack holds is in one encrypted store in the gateway](adr/0023-one-secret-store.md) | accepted |
+| [0024 — voice-ui fetches pasted links itself, with a small cache](adr/0024-links-fetched-in-voice-ui.md) | accepted |
 
 Smaller decisions from the satellites work are recorded where they apply
 rather than in records of their own:

@@ -204,7 +204,7 @@ only their own keys
 | [`services/tts`](services/tts/README.md) | `calliope-tts` | Kokoro-82M, 54 voices, six output formats | 0.33 GB |
 | [`services/tts-long`](services/tts-long/README.md) | `calliope-tts-long` | Chatterbox and Chatterbox Turbo, as jobs | 6.6 GB |
 | [`services/gateway`](services/gateway/README.md) | `calliope-gateway` | Sign-in, API keys, routing, the secret store, one health answer | — |
-| [`services/ui`](services/ui/README.md) | `calliope-ui` | The page, and link ingestion through MeTube | — |
+| [`services/ui`](services/ui/README.md) | `calliope-ui` | The page, and link ingestion | — |
 | [`services/satellites`](services/satellites/README.md) | `calliope-satellites` | The satellite hub: adoption, wake words, echo cancellation, what each word does. Optional | 228 to 326 MiB, measured with 0 to 6 satellites |
 
 On the deployed NAS: Parakeet 8.5–10.4× realtime, Kokoro 1.8× at four threads
@@ -280,7 +280,6 @@ choose, or are optional.
 | `CALLIOPE_TRUSTED_PROXIES`, `CALLIOPE_PROXY_PROTOCOL` | a reverse proxy in front | Its address, so sign-in limits and the audit see real client addresses. Never the Docker bridge's subnet ([gateway: Behind a reverse proxy](services/gateway/README.md#behind-a-reverse-proxy)) |
 | the gateway `healthcheck` | dials the gateway over `https` | Change it to `http` if the gateway serves plain HTTP behind a proxy |
 | `TTS_RUNNER_*` and the `runner-key` bind mount | an optional GPU box on another LAN | Delete both. `tts-long` runs everything locally without it |
-| `UI_METUBE_URL` | a MeTube instance on that LAN | Delete it and the link box is not rendered. MeTube has no authentication of its own, so firewall it if you do configure one |
 | `AIV_HOST_LABEL`, `cpus:`, `mem_limit:` | a label stamped into every job record, and the size of the original box | Your own name, and limits that fit your machine |
 | `voice-satellites` and `GATEWAY_SATELLITES_URL` | the satellite hub, for devices on Wi-Fi | Delete the block and set the URL to `""` if you have no satellites. If you keep it, keep TLS: release firmware connects only to `wss://`, and trusts Let's Encrypt's roots unless it is built with your CA's ([Deploy](services/satellites/README.md#deploy)) |
 

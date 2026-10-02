@@ -11,7 +11,8 @@ itself.
         v
   voice-gateway:8080 ──── /ui/* + X-Calliope-Identity ────►  voice-ui:8090
                                                                  │
-        /ui/resolve /commit /abandon /progress /media /captions ─┼──► MeTube (by host address)
+        /ui/resolve /commit /abandon /progress /media /captions ─┼──► a yt-dlp child ──► the internet, :80 and :443
+                                                                 ├──► the `ui-cache` volume
         /ui/clips                                                ├──► the shared `voices` volume
         /ui/fetch ─── its own key + the person's delegation ─────┴──► voice-gateway:8081 ──► stt-stack
 ```
@@ -43,11 +44,11 @@ Admin are the gateway's ([Account and Admin](#account-and-admin)).
 | | |
 |---|---|
 | **Reached at** | `https://<host>/ui`, through the gateway, after signing in. This service publishes no port |
-| **Talks to** | MeTube, and the gateway's internal listener for one thing: transcribing a download. Never `:8000`, `:8001` or `:8002`, and it shares no network with them |
+| **Talks to** | The gateway's internal listener for one thing, transcribing a download, and through its downloader child to public addresses on ports 80 and 443. Nothing on the LAN. Never `:8000`, `:8001` or `:8002`, and it shares no network with them |
 | **Auth** | the gateway's. Every request arrives with the gateway's signed assertion of who is asking, and anything without one is refused. This service decides whose data a request touches, never whether it may be made |
 | **Image** | 320 MB, measured. The gateway is 286 MB on the same machine and `python:3.13-slim-trixie` is 215 MB |
 | **Build step** | none. One HTML file, inline CSS and JS, no framework, no `node_modules`, no CDN |
-| **Degrades** | MeTube down or unset → link box hidden or disabled, uploads and TTS unaffected. A backend down → the page loads and its health pills say which |
+| **Degrades** | `UI_LINKS=0` or a `/cache` it cannot write → link box hidden, uploads and TTS unaffected. A probe that does not answer → a card with no length or size, and the fetch still works. A backend down → the page loads and its health pills say which |
 
 ---
 
@@ -214,14 +215,13 @@ whose data it touches.**
   (`me`, `all`, `system` or a user ID; anything else is a `400`). The top
   level of `/voices` is the system's. Nobody can speak in another person's
   voice, an admin included: tts-long resolves `voice` among the caller's own.
-- **Links.** `/ui/resolve` records who resolved each link, and every route
-  that takes a link answers `404` to anyone else, before MeTube is asked
-  anything. A link someone else has in progress is a `409
-  pending_for_another_user`, and so is one MeTube holds that nobody here
-  owns (after a restart): only `jobs:read:all` may take those. Two people
-  resolving one link at once are answered in turn. The resolve allowance is
-  per person, and the map of owners is bounded (64 links per person, 4,096
-  in all, forgotten after 24 hours unused).
+- **Links.** A link is one person's job: jobs are keyed by the person and the
+  link together, so every route that takes a link answers `404` to anyone
+  else, before anything runs. Two people pasting one link get a download each
+  and a cached file each, and neither can see, stop or play the other's. The
+  resolve allowance is per person, and the jobs are bounded (64 per person,
+  4,096 in all, forgotten after 24 hours unused; a running download is never
+  the one dropped).
 - **`/ui/fetch`**, which sends a finished download to be transcribed, is the
   one call this service makes with a credential. It sends the file to the
   gateway's internal listener, `http://voice-gateway:8081`, with this
@@ -231,127 +231,127 @@ whose data it touches.**
   key the gateway refuses is a `503 service_key_refused`, not a `401`: the
   person is still signed in, and the fault is the deployment's.
 
-Every outbound request, to MeTube or to the gateway, is built from named
-headers and never from the inbound request's.
+Every outbound request to the gateway is built from named headers and never
+from the inbound request's. The downloader child is told a link, a kind, a cap
+and a language, and nothing about who is asking.
 
-## Security: read this before setting `UI_METUBE_URL`
+## What the downloader may reach
 
-**MeTube has no authentication of any kind.** Its configuration has no `auth`,
-`user`, `password` or `token` key; `/add`, `/start`, `/delete`, `/retry` and
-`/history` are all open, and an unauthenticated `GET /history` from off-NAS
-answers 200. That is true today, with or without this service.
+**This container fetches pasted links itself.** `app/fetcher.py` is the only
+process that imports `yt_dlp`: a child of the server, run as
+`python -I app/fetcher.py` with four fixed variables, in a session of its own.
+The server reads one JSON line at a time from it, at most 64 KiB each, into
+named fields, and never imports yt-dlp itself.
 
-This service does not widen it. Our ingestion routes need a signed-in person
-with `ingest:links`, and a link answers only the person who pasted it, so we
-are a narrower client of something already open to the LAN.
-
-But **shipping a UI that makes MeTube load-bearing is the moment to close it**:
-after this deploys, an outage or an abuse of port 30097 becomes an Calliope
-outage. The fix is not in this code. Unpublish 30097, or
-firewall it to the NAS, and point `UI_METUBE_URL` at the LAN IP.
-
-### The SSRF story, in three layers
+### The SSRF story, in two layers
 
 `app/guard.py` carries the full reasoning; the short form:
 
-1. **Our stdlib pre-filter.** http/https only, no userinfo, ports 80 and 443
-   only, then `getaddrinfo` and a check of **every** address the name resolves
-   to — loopback, RFC 1918, ULA, link-local (which includes
-   `169.254.169.254`), CGNAT, multicast, reserved, unspecified, and IPv4-mapped
-   IPv6 of any of those. `localhost*`, `*.local`, `*.internal` and
-   `metadata.google.internal` are refused by name before resolution is even
-   attempted.
-2. **MeTube's own `url_guard.validate_url`,** which runs inside its `POST /add`
-   and is better than ours: ingress validation *plus* a connect-time
-   `getaddrinfo` hook installed in the download subprocess, so it covers
-   redirects and DNS rebinding during the download itself.
-3. **Our probe, third,** and only on a URL both guards have already accepted.
+1. **A stdlib pre-filter in the server,** on `/ui/resolve` and `/ui/commit`.
+   http/https only, no userinfo, ports 80 and 443 only, then `getaddrinfo`
+   and a check of **every** address the name resolves to — loopback, RFC 1918,
+   ULA, link-local (which includes `169.254.169.254`), CGNAT, multicast,
+   reserved, unspecified, and IPv4-mapped or NAT64 IPv6 of any of those.
+   `localhost*`, `*.local`, `*.internal` and `metadata.google.internal` are
+   refused by name before resolution is even attempted.
+2. **The same rules at every connection, inside the child.** Before it
+   imports yt-dlp it replaces `socket.getaddrinfo` and `socket.socket`'s
+   `connect`, `connect_ex` and `sendto`, so every answer a name resolves to and
+   every peer a socket opens is checked. That covers redirects, URLs found
+   inside a page, DASH fragments and DNS rebinding, for the probe and the
+   download alike. A refusal comes back as `400 destination_not_allowed`.
 
-That ordering is deliberate and it has a cost: because `POST /add` runs before
-the probe, every link the user declines has left a pending record in MeTube. So
-`/ui/abandon` is not a nicety, it is the other half of `/ui/resolve` — and it
-**verifies**, because MeTube's `/delete` answers `{"status":"ok"}` when it
-deletes nothing at all.
+**Still open, stated rather than hidden.** A native network stack — ffmpeg,
+aria2c, curl_cffi — connects in C and never passes the child's check, so the
+image carries none and its build fails if one arrives. And the check is a
+patch inside the child's own interpreter: if yt-dlp itself were compromised,
+its code could undo it, then read this service's key, every person's clips and
+downloads, and send them out. The key opens nothing without a person's
+delegation; against compromised code **the backstop is the network.** This
+container needs nothing on the LAN, so an egress rule for it may block RFC 1918,
+ULA and link-local ranges with no exception. It must also block the home's own
+WAN address and public IPv6 prefix: a router with NAT loopback hands those to
+the reverse proxy, often with a LAN source address, so a proxy's access list
+must not trust a source address alone. Write the rule down; do not assume it
+([ADR 0024](../../docs/adr/0024-links-fetched-in-voice-ui.md)).
 
-**Still open, stated rather than hidden.** yt-dlp's extraction follows
-redirects, and neither guard covers a redirect *during* extraction to an
-internal host; MeTube documents that exact limitation in its own docstring.
-The impact is *blind* SSRF — the probe's output is parsed into five scalars,
-nothing is written to disk, and no response body is ever returned to a caller.
-**The real backstop is network isolation:** this container has no business
-reaching the NAS's other services. `compose.yaml` keeps it off the network the
-backends are on, but the NAS's own LAN is still reachable, and an egress rule
-on the Calliope app is the fix for that. Write it down; do not assume it.
-
-The probe now checks the destination itself as well: it resolves the host
-again right before starting yt-dlp and refuses, with `400
-destination_not_allowed`, any address that is loopback, link-local, private,
-CGNAT, unique-local or unspecified. yt-dlp runs with a fixed environment of
-three variables, so nothing in this container's environment reaches it.
-
-`UI_PROBE=0` removes the probe entirely, at the cost of a title-only confirm
-card.
+**The child is held to its share.** Its data is capped at 256 MiB and its OOM
+score raised to 1000, so a gzip bomb or a huge page ends in an error line and
+the kernel kills a child before the server. It may write at most the cap of
+its kind (500 MiB, 8 MiB for subtitles, nothing at all for a probe), enforced
+three ways. A probe has 20 s, the wait for a slot included; a download 30
+minutes, then its process group is killed. At most three downloads and two
+probes run at once, two downloads and one probe per person.
 
 ---
 
-## Ingestion: what MeTube can and cannot do
+## Ingestion without ffmpeg
 
-`auto_start:false` on `POST /add` **genuinely resolves without downloading** —
-verified against MeTube's source and live. `POST /start {ids}` commits;
-`POST /delete {ids, where}` abandons. `download_type:"audio"` means a two-hour
-4K video never has its video stream pulled: about 1 MB a minute at opus, so
-~131 MB for a 2h14m podcast rather than tens of gigabytes.
+**Nothing is downloaded before the user says so.** `/ui/resolve` runs a probe
+that writes nothing and leaves a pending job; `/ui/commit` starts the download,
+or finds it in the cache; `/ui/abandon` drops the job, kills a running
+download and deletes a file too big to cache.
 
-**But there is no duration and no size in what MeTube exposes.** Its
-`DownloadInfo` has no duration field anywhere in its source, `size` stays
-`null` until the download finishes, and the full yt-dlp info-dict is stored and
-then deliberately stripped (`_PUBLIC_EXCLUDED_FIELDS`). MeTube resolves
-duration and throws it away.
+**One native file per link, nothing merged, converted or trimmed.** There is
+no ffmpeg in the image, so:
 
-So the confirm dialog needs a **metadata probe** of our own —
-`yt-dlp -J --skip-download --no-config --no-cache-dir`, in a subprocess with a
-20 s hard kill and a `cwd` it cannot write, whose output is reduced to five
-scalars. That is not embedding a downloader: there is no output template, no
-writable path, no format selection, no post-processing, no cookies, no
-concurrency and no disk. Its failure mode is a missing estimate, never a
-blocked fetch.
-
-### Sharp edges, all verified
-
-| Fact | Consequence |
+| What | How |
 |---|---|
-| `ids` in `/start` and `/delete` are **URLs**, not the short `id` field | A wrong id returns `{"status":"ok"}` and silently does nothing |
-| An `auto_start:false` item lands in **`pending`**, not `queue` | `/history` returns three lists; reading `queue` finds nothing |
-| `auto_start` defaults to **true** when the field is `None` | It is always sent explicitly |
-| `filename` is `OUTPUT_TEMPLATE` sanitised and byte-trimmed | **Never predicted** — read back from `/history` and percent-encoded |
-| Terminal success is `status == "finished"` | Anything else in `done` means the status was rewritten to `error` and `filename` nulled |
-| A *rejected* add still creates a record, in `done` | Abandon clears both queues |
-| `DELETE_FILE_ON_TRASHCAN` defaults false and is unset here | `/delete where=done` clears the record and **leaves the file** — see cleanup below |
-| `AUDIO_DOWNLOAD_DIR` defaults to `%%DOWNLOAD_DIR`, unset here | `/download/` and `/audio_download/` are the same directory, which is why `UI_METUBE_FOLDER` is mandatory in effect |
-| `download_type:"captions"` sets yt-dlp's `skip_download` | What finishes is a `.vtt` or `.srt` and **no media**. The `/history` entry differs from an audio one in the filename and nothing else, which is why the suffix is what tells them apart |
-| `CORS_ALLOWED_ORIGINS` is empty | A browser **cannot** call MeTube at all. Every call is server-side from this container, which is the right shape anyway |
+| Audio | Opus at 96 kbit/s or less first (YouTube's itag 250, about 0.5 MB a minute), then any audio-only stream, then the smallest file with picture and sound, for its sound |
+| Keep the video | Only where the site offers one file with picture and sound, 720p or less preferred. **YouTube offers none** without a JavaScript runtime, so the box is greyed there, with "(not offered for this link)" |
+| Start at, Stop at | The whole audio comes down once, and stt transcribes only the window (`clip_start`, `clip_end`). The player opens on it |
+| A clip for cloning | AAC first, sources up to ten minutes; the browser cuts the clip out |
+| HLS-only sites | Refused at resolve: *This site offers no stream this server can fetch without ffmpeg.* Without ffmpeg an HLS download is MPEG-TS in an `.mp4` no browser plays |
+| Live and upcoming streams | Refused at resolve, with the reason |
+| Playlists and channels | Refused at resolve: paste the link of one video |
 
-**Cleanup is the one thing delegation does not solve.** Files accumulate in
-`stt-ingest/` and nothing removes them: we have no shared volume to delete
-through, and setting `DELETE_FILE_ON_TRASHCAN=true` is global and would make
-the user's own trashcan button delete their music. Start with a TrueNAS cron
-pruning that directory by mtime. Move to a second, dedicated MeTube instance
-with its own dataset if ingest volume ever gets real. Do not silently pick the
-global flag.
+A finished file is checked before it is kept: exactly one regular file,
+called `media.` with an allowed suffix, more than 0 bytes and within the cap.
+An audio-only `.webm` or `.mp4` is renamed `.weba` or `.m4a`, so the page picks
+the `<audio>` element.
+
+### The cache
+
+It only avoids downloading the same thing twice. A finished file is
+`/cache/<sha256 of person, link and kind>.<ext>` in the `ui-cache` volume, and
+the directory listing is the index: no database, no timer, no state anywhere
+else. Last use is the file's atime, moved on a cache hit, a transcription, a
+subtitle read and a playback; mtime never changes, so the player's ETag stays
+the same.
+
+| Rule | Value |
+|---|---|
+| A file of 128 MiB or less | Kept a day after its last use. All of them together stay under `UI_CACHE_BYTES` (1 GiB), least recently used out first |
+| A bigger file | Not cached. Deleted on abandon, when its job goes, when the same person finishes another big file, or an hour after its last use |
+| `UI_CACHE_BYTES=0` | The cache is off: every file is big |
+| Before a download | Free space minus what running downloads may still write must leave the cap and 64 MiB, evicting small files first; otherwise the download fails and says so |
+| What is deleted | Only names the cache wrote, and the `jobs/` work directories. A `UI_CACHE_DIR` pointed at the wrong directory loses nothing |
+
+Entries are per person, so a hit tells nobody what anyone else fetched.
+Deleting the volume costs re-downloads and nothing else. Jobs are in memory: a
+restart loses a download in progress, and resolving the link again finds the
+cached file.
+
+### Keeping yt-dlp current
+
+YouTube breaks yt-dlp every few weeks. `yt-dlp` is pinned in
+`requirements.txt`, `.github/dependabot.yml` opens a pull request for each
+release, and `/health` reports the version that runs. When links start failing
+with an extractor error, merge the bump, tag a release, and update compose.
 
 ---
 
 ## Subtitles instead of a transcription
 
 A video with **real, human-written subtitles already has a transcript**. The
-confirm card offers to take it, and `POST /ui/commit {captions:true}` asks
-MeTube for `download_type:"captions"` — yt-dlp then sets `skip_download`,
-fetches the subtitle track alone and writes a `.vtt` or `.srt`. About two
+confirm card offers to take it, and `POST /ui/commit {captions:true}` starts a
+captions download — yt-dlp skips the media, fetches the subtitle track alone in
+the language the probe found, and writes a `.vtt` or `.srt`. About two
 seconds, no media, no Parakeet, and a better transcript than this stack would
 produce from the audio.
 
 **That path was broken, and this is what was wrong with it.** `/ui/fetch`
-streams whatever `filename` MeTube reported into
+streamed whatever file had finished into
 `/v1/audio/transcriptions`, and there was no branch for a subtitle file. So the
 `.vtt` was handed to `stt-stack`, which passes its bytes to libav, which was
 being asked to decode a text file as media. The button on the card could not
@@ -365,21 +365,13 @@ answers `409 not_media` for a `.vtt`/`.srt` filename and `/ui/captions` answers
 `409 not_captions` for media — so a page regression cannot put a subtitle file
 back on the wire to the transcriber.
 
-Three details worth having written down:
+Two details worth having written down:
 
 - **The parsing happens in the browser.** The page already has a SubRip/WebVTT
   parser for the karaoke highlight (`CUE_LINE`, `parseSubtitles`), and a second
   one in Python would be two implementations that must agree about what a cue
   is, in two languages, with only one of them tested. The route reads bytes and
   decides nothing about them.
-- **Two static directories, and only accidentally one.** MeTube serves
-  `DOWNLOAD_DIR` at `/download/` and `AUDIO_DOWNLOAD_DIR` at
-  `/audio_download/`; the latter defaults to `%%DOWNLOAD_DIR` and is unset
-  here, so today both resolve to the same place. A captions download is the one
-  file that would not follow if they were ever set apart — `skip_download`
-  writes it beside the *video* — so `/ui/captions` tries the audio route first
-  and falls back to the video one, one extra request only on the path that has
-  already 404'd.
 - **The format asked for is the format written.** yt-dlp writes WebVTT unless
   told otherwise, so someone who chose SubRip would otherwise get a file named
   `.srt` with WebVTT inside it, and someone who chose Text — the default, and
@@ -516,6 +508,16 @@ Only `.wav` is accepted, because the browser always sends one. That is what
 lets the server-side validation be the stdlib `wave` module rather than
 librosa.
 
+**From a link, the browser cuts the clip.** The sheet resolves the link,
+commits it for a clip and waits up to two minutes; then the recording comes
+down from `/ui/media`, and the same code that cuts an upload cuts this one, from
+Start at for Take seconds, to a 24 kHz WAV with a preview and **Save voice**.
+There is no ffmpeg on the server to trim with, so the whole recording comes
+down, and the server takes sources of up to **ten minutes** for this (`400
+too_long_for_clip` otherwise, with the reason): the browser has to hold the
+recording to cut it. A recording the browser cannot decode is said to and
+never sent as it is.
+
 ---
 
 ## Long jobs
@@ -614,8 +616,8 @@ on this path.
 | Speak — Kokoro | Yes | **None exist** | None |
 | Jobs — Chatterbox | Yes | **None exist** | None |
 
-The link path is the interesting refusal. `/ui/fetch` streams MeTube's file
-straight into the gateway server-side and the browser never receives a byte —
+The link path is the interesting refusal. `/ui/fetch` streams the downloaded
+file straight into the gateway server-side and the browser never receives a byte —
 that is the design, and it is what makes a two-hour podcast cost the laptop a
 transcript rather than 131 MB. A player would mean a new route serving the
 media down to the browser, which is the one thing that architecture exists to
@@ -743,27 +745,29 @@ player:
    `response_format` and nothing else, so requesting granularities would not
    have reached stt even if the page had asked.
 3. **The media never reached the browser.** That one is deliberate and stays
-   the default: `/ui/fetch` streams MeTube → gateway → stt server-side, which
-   is what makes a two-hour podcast cost a transcript rather than 131 MB.
+   the default: `/ui/fetch` streams the cached file → gateway → stt
+   server-side, which is what makes a two-hour podcast cost a transcript
+   rather than 131 MB.
 
-`GET /ui/media` is the way back and it is narrow. It serves the file MeTube has
-**already** downloaded, only for a token this page resolved, only for a
-filename that is media, and only below `UI_MAX_MEDIA_BYTES`. It **relays** byte
-ranges rather than parsing them: MeTube's static route already answers `206`
-with `Content-Range` and `Accept-Ranges` — verified live — so `Range` and
-`If-Range` go up untouched and the answer comes back untouched. Ranges are not
-a nicety: without them a `<video>` plays from the start and ignores every
-scrub.
+`GET /ui/media` is the way back and it is narrow. It serves a file this
+service has **already** downloaded, only for the caller's own finished job,
+and only a file that is media. It is Starlette's `FileResponse` over the
+cache: `Range`, `If-Range` and `416` are answered properly, with
+`X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox` and
+`Cache-Control: private, no-store`, because the bytes are a stranger's. Ranges
+are not a nicety: without them a `<video>` plays from the start and ignores
+every scrub. A trimmed link opens the player on its window with `#t=`.
 
 Both elements are `preload="metadata"`, so a transcript that is read and never
 played still costs nothing; the bytes come off the NAS when someone presses
 play. The sidecar buttons work on that path as they always did.
 
-**Keeping the video is opt-in, per link, and off by default.** `download_type:
-"audio"` never pulls the video stream, which is the entire reason a link is
-affordable, so the tick sits on the confirm card next to the row it changes:
-the Download line stops saying "131 MB of audio only" and starts saying
-"video — gigabytes, not the 131 MB of audio". With it off, an audio-only link
+**Keeping the video is opt-in, per link, and off by default.** Audio-only
+never pulls the picture, which is the entire reason a link is affordable, so
+the tick sits on the confirm card next to the row it changes: the Download line
+stops saying "131 MB of audio only" and starts saying "more than the 131 MB of
+audio". Where the site has no single file with picture and sound, the tick is
+greyed and says so. With it off, an audio-only link
 still plays and the transcript still follows along — a karaoke highlight needs
 a clock, not a picture; only the caption band needs the frame.
 
@@ -804,7 +808,7 @@ The two halves are **never blended into one figure**. Download and transcribe
 are separate lines, because for long media the download is the slow half and
 one merged number hides which half to blame. The download half is shown as a
 **size**, not a time: this container has no idea what the source's bandwidth
-is, and MeTube reports the real `speed` and `eta` once it is actually
+is, and the downloader reports the real `speed` and `eta` once it is actually
 downloading.
 
 ---
@@ -1270,15 +1274,14 @@ Every variable is optional and every default degrades rather than fails.
 |---|---|---|
 | `CALLIOPE_RUN_DIR` | `/run/calliope` | Where this service's key and the gateway's public key are: `calliope-svc-ui`, mounted read-only. `/health` says `not_ready` until both exist |
 | `UI_GATEWAY_INTERNAL_URL` | `http://voice-gateway:8081` | The gateway's internal listener, the one address `/ui/fetch` sends to. Only that address or a loopback `http://` one (for tests on one machine) is accepted; anything else falls back to the default, with an ERROR that names the variable and not its value |
-| `UI_METUBE_URL` | *(unset)* | MeTube, **by host address**. Unset hides the link box entirely |
-| `UI_METUBE_FOLDER` | `stt-ingest` | Mandatory in effect — see the table above |
-| `UI_METUBE_FORMAT` | `opus` | ~1 MB a minute. MeTube 400s on any `quality` but `best` for it |
-| `UI_METUBE_VIDEO_FORMAT` | `mp4` | Only when "keep the video" is ticked. mp4 because it is remuxed, not re-encoded, and a browser will actually render it |
-| `UI_PROBE` | on | `0` removes yt-dlp from the running system; the card degrades to a title |
-| `UI_PROBE_TIMEOUT` | `20` | Hard kill, not a suggestion |
+| `UI_LINKS` | on | `0` hides the link box. File upload and TTS are unaffected |
+| `UI_CACHE_DIR` | `/cache` | Finished downloads and downloads in progress: the `ui-cache` volume. Not writable means links are off, and the log says so |
+| `UI_MAX_DOWNLOAD_BYTES` | 500 MiB | The most one audio, clip or video download may write. Keep it at or below the gateway's `GATEWAY_UPLOAD_MAX_BYTES`, which leaves room for the multipart framing |
+| `UI_CACHE_BYTES` | 1 GiB | Every cached file of 128 MiB or less, together. `0` turns the cache off |
+| `UI_PROBE_TIMEOUT` | `20` | The probe's time limit, the wait for a slot included. Past it the card has no length or size |
+| `UI_FETCHER` | *(unset)* | **Tests only.** A script run in place of `app/fetcher.py`; the browser harness points it at `tests/fake_fetcher.py`. Set, the log warns |
 | `UI_MAX_UPLOAD_BYTES` | 2 GiB | Checked on `Content-Length` before a byte is forwarded |
-| `UI_MAX_CAPTION_BYTES` | 8 MiB | `/ui/captions` buffers rather than streams. An hour of dialogue is ~100 KB; this catches a file that is not subtitles |
-| `UI_MAX_MEDIA_BYTES` | 4 GiB | The ceiling on `/ui/media` playback. **Its own setting**: `UI_MAX_UPLOAD_BYTES` bounds what stt reads into memory, this bounds what a laptop pulls down a domestic line |
+| `UI_MAX_CAPTION_BYTES` | 8 MiB | The cap for a subtitles download. `/ui/captions` buffers rather than streams, and an hour of dialogue is ~100 KB |
 | `UI_CONFIRM_SECONDS` | `600` | Below this **and** the size threshold, no dialog |
 | `UI_CONFIRM_BYTES` | 50 MiB | The second gate, not an alternative |
 | `UI_STT_RTF` | `8.5` | The conservative seed. The page measures its own |
@@ -1287,7 +1290,10 @@ Every variable is optional and every default degrades rather than fails.
 | `UI_MAX_CLIP_BYTES` | 25 MiB | |
 | `UI_MAX_CLIP_SECONDS` | `30` | Trimmed client-side, enforced server-side |
 | `UI_RESOLVE_PER_MINUTE` | `12` | Per person, so `/ui/resolve` is not a free scanner |
-| `VOICE_CHOWN_DIRS` | `/voices` | What the entrypoint takes ownership of before dropping to uid 1000. Never `/run/calliope`, which is read-only |
+| `VOICE_CHOWN_DIRS` | `/voices /cache` | What the entrypoint takes ownership of before dropping to uid 1000. Never `/run/calliope`, which is read-only |
+
+A link setting of an earlier release that this one no longer reads is named
+in one warning at start-up if it is still set, never with its value.
 
 ### Why the confirm thresholds are those numbers
 
@@ -1311,9 +1317,9 @@ docker build -f services/ui/Containerfile -t calliope-ui .
 # Run, on a network the gateway shares and no backend is on. No port: every
 # request must come through the gateway, which signs it.
 docker run --network edge \
-  -e UI_METUBE_URL=http://192.0.2.10:30097 \
   -v calliope-svc-ui:/run/calliope:ro \
   -v voices:/voices \
+  -v ui-cache:/cache \
   calliope-ui
 ```
 
@@ -1332,18 +1338,25 @@ cd services/ui && pytest -q
 
 **No test starts a server, and none may.** The suite is
 `fastapi.testclient.TestClient` over an httpx `MockTransport` standing in for
-both the gateway's internal listener and MeTube, so the whole resolve →
-confirm → fetch flow, the upload ceiling and the clip store run in-process
-with no socket anywhere. `yt-dlp` is never spawned: the tests replace
-`app.probe.run`. Every request is signed as the gateway would sign it, with
+the gateway's internal listener, so the whole resolve → confirm → fetch flow,
+the upload ceiling and the clip store run in-process. The downloader is a real
+child process and a stand-in one: `UI_FETCHER` points at
+`tests/fake_fetcher.py`, which speaks `app/fetcher.py`'s protocol, chooses what
+to do by a word in the link and opens no socket, so the spawning, the time
+limits, the one-file rule and the cache all run for real
+(`tests/test_downloads.py`). The real `app/fetcher.py` is tested on its own
+(`tests/test_fetcher.py`): its guard on refusals that happen before a packet
+leaves, its formats on synthetic lists, and one real download from a loopback
+server. Every request is signed as the gateway would sign it, with
 `voice_common.conformance`'s test keys.
 
 The identity rules have their own files: `tests/test_conformance.py` (the
 shared suite every service runs: no assertion, a wrong audience, an expired
 or forged one), `tests/test_owners.py` (a link answers only the person who
-resolved it), `tests/test_clips.py` (clip namespaces), `tests/test_delegation.py`
-(`/ui/fetch` sends the delegation and this service's key and nothing else)
-and `tests/test_probe.py` (no private destination reaches yt-dlp).
+resolved it), `tests/test_clips.py` (clip namespaces) and
+`tests/test_delegation.py` (`/ui/fetch` sends the delegation and this
+service's key and nothing else, and the downloader is told nothing about who
+is asking).
 `tests/test_account.py` runs the page's session layer in Node: the sign-in
 redirect, the step-up prompt, a missing scope, locked mode, and the key form,
 the roles Admin › Users offers and the scopes the page asks before drawing a
@@ -1392,21 +1405,20 @@ the network.
 |---|---|
 | `app/static/ui.html` | The whole UI, the Satellites tab included. Inline CSS and JS, no build step, no external request of any kind — it works on a NAS with no internet |
 | `app/main.py` | The page and its addresses, its CSP, `/ui/config`, the clip routes, and `identity.install` |
-| `app/ingest.py` | Resolve, commit, abandon, progress, fetch, and the delegation `/ui/fetch` sends |
-| `app/owners.py` | Who resolved each link, bounded |
-| `app/metube.py` | A narrow client, with every verified trap written down |
-| `app/probe.py` | Five scalars out of a URL, and not one byte of media |
+| `app/ingest.py` | Resolve, commit, abandon, progress, fetch, captions and media, and the delegation `/ui/fetch` sends |
+| `app/downloads.py` | Each person's jobs, the child runs and their limits, and the cache |
+| `app/fetcher.py` | The child: the only process that imports yt-dlp, with the guard installed first |
 | `app/guard.py` | What a pasted URL has to survive. **Read this before relaxing anything in it** |
 | `app/clips.py` | The reference-clip store |
 | `app/config.py` | Every knob, with the measurement behind each default |
 
 ## What we reused rather than wrote
 
-- **MeTube** (AGPL, called over HTTP so no licence reach) — the entire
-  downloader: extractors, cookies, retries, concurrency, format selection,
-  audio-only extraction, an SSRF guard better than ours, and file serving with
-  Range support. Delegating means no extractor rot to chase and, because
-  `/audio_download/` is HTTP, **no shared volume between two TrueNAS apps**.
+- **yt-dlp** (Unlicense), as a library in a child process — every extractor,
+  format selection and the download itself. The child adds the guard, the
+  limits and the one-file rule around it, and nothing else.
+- **Starlette's `FileResponse`** — byte ranges, `If-Range` and `416` for
+  playback, rather than a range parser of our own.
 - **devnen/Chatterbox-TTS-Server** (MIT, `server.py:670-753`) — the
   reference-audio upload sequence, transplanted in shape.
 - **resemble-ai/chatterbox** (MIT) **as a specification only** — the parameter

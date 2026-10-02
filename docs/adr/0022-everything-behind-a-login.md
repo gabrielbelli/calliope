@@ -219,7 +219,9 @@ example ACL.
 - **Link ingestion is checked at the first hop only.** voice-ui refuses an
   address that resolves to a private, loopback or link-local range before it
   starts yt-dlp, but redirects inside yt-dlp, DNS rebinding and MeTube's own
-  fetches are not covered.
+  fetches are not covered. *Superseded by
+  [ADR 0024](0024-links-fetched-in-voice-ui.md): voice-ui fetches links
+  itself, and every connection its downloader makes is checked.*
 
 ## Rejected
 

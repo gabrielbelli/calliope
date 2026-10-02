@@ -102,7 +102,7 @@ def new_client() -> httpx.AsyncClient:
         follow_redirects=False)
 
 
-# The variables of the release that fetched links through MeTube. Named in one
+# The link settings of the release before links were fetched here. Named in one
 # warning if any is still set, never with its value. One string, split, so no
 # name is a quoted literal: docs/tests reads a quoted name as a setting the
 # code still reads, and a compose file that sets one must keep failing there.

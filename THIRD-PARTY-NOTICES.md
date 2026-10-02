@@ -17,22 +17,6 @@ Three categories, deliberately kept apart:
 
 ## Depended on
 
-### MeTube — `alexta69/metube` — **AGPL-3.0**
-
-Used for URL ingestion. **`services/ui/app/metube.py` is an HTTP client and
-contains none of MeTube's code**, and that is a deliberate licence decision
-rather than a style one.
-
-AGPL-3.0's §13 obliges an operator who *modifies* the program and lets users
-interact with it over a network to offer them the modified source. Calling a
-separate program's network API is not a derivative work, and the operator here
-runs the published image unmodified on his own machine. Forking or vendoring
-MeTube would have been a materially different answer, and would have pulled
-this repository's UI service into AGPL territory.
-
-**If anyone later vendors, patches or embeds MeTube, that reasoning stops
-holding.** Re-read this section first.
-
 ### pip dependencies
 
 | Package | Version | Licence |
@@ -53,9 +37,11 @@ every backend verifies the assertion (`packages/common`). idna spells a host
 name the way httpx connects to it, so a secret's allowed hosts match the
 place the value is actually sent (`voice_common.origins`).
 
-yt-dlp is used **as a metadata probe only** — `extract_info(download=False)`,
-to resolve a pasted link to a title, duration and size so the user can confirm
-before anything is fetched. The fetching itself is MeTube's job.
+yt-dlp is used **as a library in a child process**
+(`services/ui/app/fetcher.py`), to resolve a pasted link to a title, duration
+and size so the user can confirm before anything is fetched, and then to
+download its audio, its video or its subtitles. Installed bare, and with no
+ffmpeg: nothing is merged, converted or post-processed.
 
 ### pip dependencies of the satellite hub (`services/satellites`)
 
@@ -135,9 +121,12 @@ no attribution; this entry and the satellite hub's README name the source.
 ### SearXNG — `searxng/searxng` — **AGPL-3.0**
 
 The `web_search` tool calls a SearXNG instance that the operator runs, over
-its JSON API. No SearXNG code is in this repository or in an image, and
-calling a separate program's network API does not make the hub a derivative
-work, as for MeTube above.
+its JSON API. No SearXNG code is in this repository or in an image. AGPL-3.0's
+§13 obliges an operator who *modifies* the program and lets users interact
+with it over a network to offer them the modified source; calling a separate
+program's network API is not a derivative work, so the hub is not one, and the
+operator runs SearXNG's published image as it is. Vendoring or patching
+SearXNG would be a different answer: re-read this before doing either.
 
 ### The Brazilian Portuguese Parakeet — `alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx` — **CC BY 4.0**
 
