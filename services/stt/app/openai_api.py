@@ -50,6 +50,10 @@ this surface used to drop eleven of them.
                              which biases unconditionally and has no switch.
                              Off by default because irrelevant vocabulary is a
                              measured accuracy cost — see _boost
+  clip_start, clip_end       an EXTENSION: transcribe only this window of the
+                             file, with every time on the file's own timeline.
+                             Only the window is decoded. Refused with
+                             stream=true and on /v1/audio/translations
   languages[], diarisation   refused by name; nothing here can do them
   unknown fields             refused by name. CreateTranscriptionRequest sets
                              additionalProperties: false, and lenience here is
@@ -116,6 +120,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from collections.abc import Iterator
 from typing import Any
@@ -166,6 +171,10 @@ TRANSCRIPTION_FIELDS = frozenset({
     # switches on decode-time biasing for this request under Parakeet; see
     # _boost for why that has to be asked for rather than assumed.
     "boost",
+    # The third extension: transcribe only this window of the file, times on
+    # the file's own timeline. voice-ui sends it for a link's Start at and
+    # Stop at, because it has no ffmpeg to cut the audio with; see _window.
+    "clip_start", "clip_end",
 })
 TRANSLATION_FIELDS = frozenset({
     "file", "model", "prompt", "response_format", "temperature",
@@ -667,6 +676,32 @@ def _stream(form, engine, response_format: str) -> bool:  # noqa: ANN001
     return True
 
 
+# A day. Past it a window is a mistake, and int(1e308 * 16000) would be an
+# OverflowError and a 500 rather than a 400 naming the field.
+MAX_WINDOW_SECONDS = 86400.0
+
+
+def _window(form) -> tuple[float, float | None] | None:  # noqa: ANN001
+    """(clip_start, clip_end) in seconds of the file, or None when neither is sent.
+
+    Only the window is decoded and transcribed (audio.decode), and every time
+    in the answer is on the file's own timeline, so a player of the whole file
+    lines up with it. clip_end absent means to the end.
+    """
+    start, end = _float(form, "clip_start"), _float(form, "clip_end")
+    if start is None and end is None:
+        return None
+    message = ("'clip_end' must be after 'clip_start', and both between 0 and "
+               f"{MAX_WINDOW_SECONDS:.0f}.")
+    for name, value in (("clip_start", start), ("clip_end", end)):
+        if value is not None and not (math.isfinite(value)
+                                      and 0.0 <= value <= MAX_WINDOW_SECONDS):
+            raise _bad(message, param=name)
+    if end is not None and end <= (start or 0.0):
+        raise _bad(message, param="clip_end")
+    return start or 0.0, end
+
+
 def _chunking(form) -> pipeline.Tuning:  # noqa: ANN001
     """chunking_strategy, honoured against the VAD this service already runs.
 
@@ -946,6 +981,8 @@ _TRANSCRIPTION_SCHEMA = _schema({
     "keywords": {"type": "array", "items": {"type": "string"}},
     "glossary": {"type": "string"},
     "boost": {"type": "boolean"},
+    "clip_start": {"type": "number", "minimum": 0, "maximum": MAX_WINDOW_SECONDS},
+    "clip_end": {"type": "number", "minimum": 0, "maximum": MAX_WINDOW_SECONDS},
     "response_format": {"type": "string", "enum": list(FORMATS)},
     "temperature": {"type": "number", "minimum": 0, "maximum": 1},
     "include": {"type": "array", "items": {"type": "string", "enum": ["logprobs"]}},
@@ -1051,6 +1088,9 @@ async def transcriptions(request: Request,
     _reject_diarisation(form)
     _reject_languages(form)
     streaming = _stream(form, engine, response_format)
+    window = _window(form)
+    if window is not None and streaming:
+        raise _unsupported("clip_start", "cannot be combined with stream=true")
     granularities = _granularities(form, response_format)
     want_logprobs = _include(form, engine, response_format)
     tuning = _chunking(form)
@@ -1084,7 +1124,7 @@ async def transcriptions(request: Request,
     if streaming:
         return await _stream_response(data, opts, tuning, engine, rules)
     return await _run(data, opts, tuning, engine, response_format,
-                      granularities, want_logprobs, rules,
+                      granularities, want_logprobs, rules, window=window,
                       origin=pipeline.Origin(route="/v1/audio/transcriptions",
                                              client="openai",
                                              model_requested=model_requested,
@@ -1153,7 +1193,8 @@ async def translations(request: Request,
 async def _run(data: bytes, opts: asr.Options, tuning: pipeline.Tuning,
                engine, response_format: str, granularities: tuple[str, ...],  # noqa: ANN001
                want_logprobs: bool, rules=None,  # noqa: ANN001
-               origin: pipeline.Origin | None = None) -> Response:
+               origin: pipeline.Origin | None = None,
+               window: tuple[float, float | None] | None = None) -> Response:
     try:
         with pipeline.slot():
             # Blocking CPU work, kept off the event loop: declared inline it
@@ -1162,7 +1203,7 @@ async def _run(data: bytes, opts: asr.Options, tuning: pipeline.Tuning,
             # working correctly.
             result = await run_in_threadpool(
                 pipeline.run, data, opts, allow_resample=True, tuning=tuning,
-                rules=rules, origin=origin, recogniser=engine)
+                rules=rules, origin=origin, recogniser=engine, window=window)
     except pipeline.Busy as exc:
         raise _busy() from exc
     except HTTPException as exc:

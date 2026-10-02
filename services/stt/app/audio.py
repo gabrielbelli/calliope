@@ -17,6 +17,13 @@ it; using it directly costs an explicit pin and lets libsndfile leave.
 The source sample rate is reported rather than hidden, because the two routes
 disagree about it on purpose: /v1 resamples, because no OpenAI client expects
 anything else, and the native route still refuses. See pipeline.decode.
+
+A WINDOW KEEPS ONLY ITS OWN SAMPLES. clip_start and clip_end (an extension on
+/v1/audio/transcriptions) are applied while decoding, counted in samples after
+resampling, and decoding stops at clip_end. Memory then follows the window,
+not the file: ten minutes out of a ten-hour recording no longer costs ten
+hours of float32. There is no seek, so frames before clip_start are decoded
+and thrown away.
 """
 
 from __future__ import annotations
@@ -42,8 +49,8 @@ class Decoded:
     source_channels: int
 
 
-def decode(raw: bytes) -> Decoded:
-    """Decode any container libav reads into 16 kHz mono float32.
+def decode(raw: bytes, window: tuple[float, float | None] | None = None) -> Decoded:
+    """Decode any container libav reads into 16 kHz mono float32, or one window of it.
 
     Resampling always happens; whether it is *allowed* is the caller's
     decision, which is why source_rate comes back rather than being consumed
@@ -52,6 +59,20 @@ def decode(raw: bytes) -> Decoded:
     instead of two.
     """
     import av  # noqa: PLC0415 - libav's import pulls the codec tables; keep it off module load
+
+    first = int(window[0] * SAMPLE_RATE) if window else 0
+    last = int(window[1] * SAMPLE_RATE) if window and window[1] is not None else None
+    seen = 0                                    # samples produced, on the 16 kHz timeline
+    chunks: list[np.ndarray] = []
+
+    def keep(chunk: np.ndarray) -> bool:        # False once past the end
+        nonlocal seen
+        start, seen = seen, seen + chunk.size
+        if last is not None and start >= last:
+            return False
+        if seen > first:
+            chunks.append(chunk[max(first - start, 0):None if last is None else last - start])
+        return True
 
     try:
         with av.open(BytesIO(raw), metadata_errors="ignore") as container:
@@ -67,14 +88,18 @@ def decode(raw: bytes) -> Decoded:
             resampler = av.audio.resampler.AudioResampler(
                 format="flt", layout="mono", rate=SAMPLE_RATE
             )
-            chunks: list[np.ndarray] = []
+            going = True
             for frame in container.decode(stream):
-                for resampled in resampler.resample(frame):
-                    chunks.append(resampled.to_ndarray().reshape(-1))
+                going = all(keep(resampled.to_ndarray().reshape(-1))
+                            for resampled in resampler.resample(frame))
+                if not going:
+                    break
             # Flush: swresample holds a tail of samples inside its filter delay,
             # and dropping it truncates the last few milliseconds of every clip.
-            for resampled in resampler.resample(None):
-                chunks.append(resampled.to_ndarray().reshape(-1))
+            if going:
+                for resampled in resampler.resample(None):
+                    if not keep(resampled.to_ndarray().reshape(-1)):
+                        break
     except AudioError:
         raise
     except Exception as exc:  # noqa: BLE001 - the client needs the reason

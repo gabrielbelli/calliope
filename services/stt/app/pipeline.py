@@ -333,7 +333,8 @@ def slot() -> Iterator[None]:
         release()
 
 
-def decode(data: bytes, *, allow_resample: bool) -> np.ndarray:
+def decode(data: bytes, *, allow_resample: bool,
+           window: tuple[float, float | None] | None = None) -> np.ndarray:
     """Bytes to 16 kHz mono float32.
 
     `allow_resample` is False for the native route and True for /v1, and the
@@ -343,9 +344,11 @@ def decode(data: bytes, *, allow_resample: bool) -> np.ndarray:
     clients this service already has. No OpenAI client anticipates it — a
     44.1 kHz mp3 is the ordinary case there — so the compatibility route
     resamples, which is what the specification's nine input formats require.
+
+    `window` keeps only (clip_start, clip_end) seconds of it; see audio.decode.
     """
     try:
-        decoded = audio.decode(data)
+        decoded = audio.decode(data, window)
     except audio.AudioError as exc:
         raise HTTPException(400, f"could not decode audio: {exc}") from exc
 
@@ -356,6 +359,10 @@ def decode(data: bytes, *, allow_resample: bool) -> np.ndarray:
             "resample before sending",
         )
     return decoded.samples
+
+
+def _shifted(word: asr.Word, offset: float) -> asr.Word:
+    return replace(word, start=word.start + offset, end=word.end + offset)
 
 
 def _speech(samples: np.ndarray, tuning: Tuning) -> vad.Speech:
@@ -598,7 +605,8 @@ def run(data: bytes, opts: asr.Options | None = None, *,
         allow_resample: bool = False, tuning: Tuning | None = None,
         rules: list[tuple[re.Pattern[str], str]] | None = None,
         origin: Origin | None = None,
-        recogniser: asr.Parakeet | asr.Whisper | None = None) -> Result:
+        recogniser: asr.Parakeet | asr.Whisper | None = None,
+        window: tuple[float, float | None] | None = None) -> Result:
     """Transcribe one clip. Blocking CPU work — never call this on the loop.
 
     `rules` is this request's compiled glossary, from the profiles it selected.
@@ -618,7 +626,16 @@ def run(data: bytes, opts: asr.Options | None = None, *,
     carrying a vocabulary is transcribed without it.
 
     `recogniser` is the engine the request chose; None is the default.
+
+    `window` is (clip_start, clip_end) in seconds of the file, clip_end None
+    for the end: only those samples are decoded and transcribed, and every
+    time in the result is shifted back onto the file's own timeline, so a
+    player of the whole file lines up with it. `audio_seconds` is the
+    window's length.
     """
+    # Named apart from the loop below, whose `window` is one pass of the
+    # recogniser rather than the part of the file that was asked for.
+    excerpt = window
     model = recogniser or engine()
     opts = opts or asr.Options()
     tuning = tuning or Tuning()
@@ -637,7 +654,9 @@ def run(data: bytes, opts: asr.Options | None = None, *,
     if not HOTWORDS_ENABLED and (opts.hotwords or opts.vocabulary or opts.boost):
         opts = replace(opts, hotwords=None, vocabulary=(), boost=False)
 
-    samples = decode(data, allow_resample=allow_resample)
+    samples = decode(data, allow_resample=allow_resample, window=excerpt)
+    if excerpt is not None and samples.size == 0:
+        raise HTTPException(400, "clip_start is past the end of the audio")
     if samples.size == 0:
         raise HTTPException(400, "audio contains no samples")
     audio_seconds = samples.size / SAMPLE_RATE
@@ -703,6 +722,14 @@ def run(data: bytes, opts: asr.Options | None = None, *,
     # so this is the identity when there is one window.
     segments = tuple(replace(segment, id=index)
                      for index, segment in enumerate(collected))
+    if excerpt is not None and excerpt[0]:
+        # Onto the file's timeline: the recogniser only ever saw the excerpt.
+        offset = excerpt[0]
+        words = [_shifted(word, offset) for word in words]
+        segments = tuple(replace(segment, start=segment.start + offset,
+                                 end=segment.end + offset,
+                                 words=tuple(_shifted(w, offset) for w in segment.words))
+                         for segment in segments)
     # Order-preserving, because it is the same automaton for every window and a
     # caller reading x-boost-applied wants the phrases once.
     applied = tuple(dict.fromkeys(boosted))

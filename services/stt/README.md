@@ -182,6 +182,7 @@ seen no events and raised nothing.
 | `language`, `temperature` | Honoured on Whisper, refused on Parakeet |
 | `prompt`, `keywords[]` | Honoured on **both**, in whichever halves the engine has. See [A request's own vocabulary](#a-requests-own-vocabulary) |
 | `glossary` | **Extension.** Named profiles, `glossary=tech,dictation`. Honoured on both engines. See [Glossary profiles](#glossary-profiles) |
+| `clip_start`, `clip_end` | **Extension.** Seconds of the file, 0 to 86400: only that window is decoded and transcribed, and every time in the answer is on the file's own timeline. Refused with `stream=true` and on `/v1/audio/translations` |
 | `include[]=logprobs` | Honoured on Parakeet, refused on Whisper |
 | `languages[]` | Refused: neither engine takes a candidate set |
 | `known_speaker_names[]`, `known_speaker_references[]` | Refused: nothing here diarises |
@@ -392,6 +393,12 @@ the allowlist beside `keywords[]` and `languages[]`, absent by default. A
 client that knows nothing about it behaves exactly as it would against OpenAI,
 and the four `/glossaries` routes that manage the profiles are deliberately
 native rather than `/v1`.
+
+**`clip_start` and `clip_end` are the third extension, on the same pattern.**
+voice-ui sends them for a pasted link's Start at and Stop at, because it has no
+ffmpeg and sends the whole file; this service decodes only that window,
+stopping at `clip_end`, and shifts every time it returns by `clip_start`, so a
+player of the whole file lines up with the transcript.
 
 **Glossary repair happens on strings**, when a profile was selected or a
 request sent terms of its own. It is applied to the whole transcript,
