@@ -186,7 +186,12 @@
   --bloom-a:.10; --bloom-top:#EFE7DA;
   /* Geometry. JS measures the bar and overwrites all four; these are only
      what the no-JS bar falls back to. */
-  --dock-r:18px; --bead-d:52px; --bead-cy:0px; --rise:38px;
+  --dock-r:18px; --bead-d:52px; --bead-cy:0px; --rise:42px;
+  /* THE BAR IS 84 TALL AND FLOATS 14 UP: the 76 and 22 it was, with 8px
+     added at the bottom, so its top edge, the socket and the bead stay where
+     they were and the row below the bead has room for the chosen tab's name
+     on the icons' own line. */
+  --dock-h:84px; --dock-gap:14px;
 }
 @media (prefers-color-scheme:dark){
   :root{
@@ -290,8 +295,8 @@ code,.num{font-family:var(--mono)}
 .wrap{max-width:var(--measure);margin:0 auto;position:relative;z-index:2;
   /* IT CLEARS THE DOCK. The navigation is a fixed object at the foot of the
      viewport now, not a lid at the top, so the column has to end above it or
-     the last control on every tab sits underneath the bar: 76px of dock, the
-     22px it floats by, one --s6 of air, and whatever the phone reserves for
+     the last control on every tab sits underneath the bar: 84px of dock, the
+     14px it floats by (the same 98 as the 76 and 22 it was), one --s6 of air, and whatever the phone reserves for
      its home indicator. */
   /* 124, NOT 98, AND THE DIFFERENCE IS THE BEAD. The comment used to budget
      "76px of dock, the 22px it floats by" -- but the bead rides ON the
@@ -382,7 +387,7 @@ code,.num{font-family:var(--mono)}
    icon and the label soft. That was the "resolution is strange" report.
    Flex centring rounds to whole pixels. */
 .rail{position:fixed;left:0;right:0;z-index:20;
-  bottom:calc(22px + env(safe-area-inset-bottom));
+  bottom:calc(var(--dock-gap) + env(safe-area-inset-bottom));
   display:flex;justify-content:center;pointer-events:none}
 .dock{position:relative;pointer-events:auto;
   /* 410 AND NOT 380, AND THE NUMBER IS THE CORNER. The socket's outer
@@ -393,7 +398,7 @@ code,.num{font-family:var(--mono)}
      410 there are 22, which is the reference's clearance. 82px a tab is
      that 410 for five, so an admin's seven get the same room each (--tabs,
      written by dockMeasure). */
-  width:min(calc(82px * var(--tabs,5)),calc(100% - 36px));height:76px;
+  width:min(calc(82px * var(--tabs,5)),calc(100% - 36px));height:var(--dock-h);
   touch-action:pan-y;-webkit-tap-highlight-color:transparent;
   /* No-JS fallback: a plain rounded bar. The script cuts the real skin. */
   background:var(--plate);border-radius:var(--dock-r)}
@@ -434,6 +439,9 @@ code,.num{font-family:var(--mono)}
    so Account and Admin move to the name's menu there; the script reads the
    same query (PHONE) to count the slots. */
 @media (max-width:600px){.tabs button[data-menu]{display:none}}
+/* A phone's columns are about 57px, and "Transcribe" tracked at .06em came
+   within 5px of the next icon; untracked, the word keeps clear of it. */
+@media (max-width:600px){.tabs .label{letter-spacing:0}}
 .tabs button[data-menu=always]{display:none}
 
 .tabs{position:absolute;inset:0;display:flex;padding-inline:clamp(26px,10.5%,54px)}
@@ -456,19 +464,24 @@ code,.num{font-family:var(--mono)}
   color:color-mix(in oklab,var(--icon-off) calc((1 - var(--t)) * 100%),var(--icon-on));
   transform:translate(-50%,-50%) translateY(calc(var(--t) * var(--rise) * -1));
   will-change:transform}
-.tabs .label{position:absolute;left:0;right:0;bottom:13%;
-  font-size:var(--t-micro);font-weight:600;letter-spacing:.06em;
+/* THE CHOSEN TAB'S NAME TAKES ITS ICON'S PLACE. Its icon has risen into the
+   bead, so the name sits on the line the other icons sit on, not under it:
+   pinned to the bar's foot, it floated in a band of its own below the row
+   and read as a fault. --t carries it, so while the bead travels the name
+   rises from under its icon (where a hover previews it) to the icons' line. */
+.tabs .label{position:absolute;left:0;right:0;
+  top:calc(50% + (1 - var(--t)) * 22px);transform:translateY(-50%);
+  font-size:var(--t-micro);font-weight:600;letter-spacing:.06em;line-height:1.2;
   color:var(--acc);opacity:0;
-  transform:translateY(calc((1 - var(--t)) * 7px));
   pointer-events:none;white-space:nowrap}
 /* A label belongs to the chosen tab. While the bead is dragged every label
    previews, so you can see what you are about to land on. */
 .tabs button[aria-selected=true] .label,
 .dock.dragging .label{opacity:var(--t)}
 /* WHERE CAN I GO, ANSWERED WITHOUT TRYING EACH ICON. Four of five tabs were
-   an unnamed glyph. Pointing at one, or tabbing to it, names it; the 7px
-   offset at t=0 keeps the word clear of the icon (label 58-73px, icon
-   26-50px in a 76px bar). */
+   an unnamed glyph. Pointing at one, or tabbing to it, names it; at t=0 the
+   name's centre is 22px under the icon's, which keeps the word clear of it
+   (icon 30-54px, name about 58-71px in the 84px bar). */
 @media (hover:hover){ .tabs button:hover .label{opacity:1} }
 .tabs button:focus-visible .label{opacity:1}
 
@@ -1700,7 +1713,7 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
    pin to a field -- a scope the account lacks, a stale page, a wait -- is said
    here and goes by itself; the control that was refused stays greyed. */
 .toast{position:fixed;left:50%;transform:translateX(-50%);z-index:30;
-  bottom:calc(22px + 76px + var(--s3) + env(safe-area-inset-bottom));
+  bottom:calc(var(--dock-gap) + var(--dock-h) + var(--s3) + env(safe-area-inset-bottom));
   max-width:min(34rem,calc(100% - 2rem));padding:var(--s2) var(--s3);
   border-radius:var(--radius-s);background:var(--accent);color:var(--accent-ink);
   font-size:var(--t-label);line-height:1.45;box-shadow:var(--lift)}
@@ -4181,9 +4194,12 @@ function dockMeasure() {
   });
   G.span = G.slots.length > 1 ? G.slots[1] - G.slots[0] : W;
   G.W = W; G.H = H;
-  G.R = dclamp(H * 0.20, 13, 20);
+  /* THE BEAD AND THE CORNER ARE SIZED FROM THE 76 THE BAR WAS. The 8px it
+     grew is all below the row, so neither may grow with it. */
+  const REF = Math.min(H, 76);
+  G.R = dclamp(REF * 0.20, 13, 20);
   G.CY = 0;                                /* the bead rides ON the surface */
-  let D = Math.min(H * 0.68, G.span * 0.78);
+  let D = Math.min(REF * 0.68, G.span * 0.78);
   /* The outer shoulder has to clear the bar's own corner, so shrink the bead
      until the whole socket fits between the first tab's centre and the arc. */
   const room = G.slots[0] - G.R - 6;

@@ -442,7 +442,7 @@ def test_where_am_i_does_not_scroll_off_the_screen():
     to the viewport at every width and every scroll position."""
     rail = rule(".rail{")
     assert "position:fixed" in rail, "the navigation can scroll away again"
-    assert "bottom:calc(22px + env(safe-area-inset-bottom))" in rail, \
+    assert "bottom:calc(var(--dock-gap) + env(safe-area-inset-bottom))" in rail, \
         "the dock is not held off the bottom edge, or ignores the home indicator"
     # The tablist is inside the dock, and the dock is inside the rail.
     dock = HTML[HTML.index('<div class="rail">'):HTML.index("<!-- ==================================================== /the dock ====")]
