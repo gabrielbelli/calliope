@@ -10810,6 +10810,9 @@ function satTriggered(ev) {
    have done. */
 function satWakeRejected(ev) {
   const how = ev.mode === "log" ? "would have been ignored" : "ignored";
+  /* Dropped because the double-check could not run (STT busy or down), not
+     because it heard something else: said as such, never as heard “”. */
+  if (ev.unchecked) return `${wwLabel(ev.word)} ${how}: the double-check could not run`;
   return `${wwLabel(ev.word)} ${how}: heard “${ev.heard || ""}”`;
 }
 

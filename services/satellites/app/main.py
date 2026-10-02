@@ -396,7 +396,7 @@ class WakeCheck:
     first, in mode "log" the hub acts first."""
 
     __slots__ = ("heard", "mode", "spellings", "captures", "held", "decision", "transcript",
-                 "matched", "ms", "clip", "acted")
+                 "matched", "ms", "clip", "acted", "unchecked")
 
     def __init__(self, heard: listening.Heard, settings: routing.VerifySettings, captures: bool):
         self.heard, self.mode, self.spellings = heard, settings.mode, list(settings.spellings)
@@ -404,8 +404,10 @@ class WakeCheck:
         self.held: list[listening.Command] = []
         # accepted, rejected (mode "on"), would_reject (mode "log"), or error:
         # STT failed or took too long, and the wake went ahead. None until
-        # STT has answered.
+        # STT has answered. `unchecked`: rejected because STT could not
+        # answer, not because it heard something else.
         self.decision: str | None = None
+        self.unchecked = False
         self.transcript: str | None = None
         self.matched: str | None = None
         self.ms: float | None = None
@@ -1431,9 +1433,14 @@ class Hub:
         """STT on the wake word's own audio, told to listen for the word
         (verify.vocabulary, the transcription's `boost`), the word looked for
         in what it heard (verify.matches), and then what the word's mode
-        says. A check STT could not answer lets the wake through (`error`):
-        the model has already fired, and a hub whose STT is down must still
-        answer.
+        says. A check STT could not answer lets a TRIGGER through (`error`):
+        the model has already fired, and a trigger sends nothing anywhere.
+        A command or conversation word it drops instead (rejected,
+        `unchecked`): what follows the wake is about to be transcribed and
+        sent to the word's destination, which may be outside the house. On
+        2 Oct 2026 a busy STT let a video's "hey_claude" through unchecked
+        and a language model got the room's speech. A command whose STT is
+        that slow would mostly have failed anyway.
 
         In a task, never on the listener: the Ear keeps processing the
         microphones while STT works. The STT call is a task of its own, and
@@ -1459,10 +1466,13 @@ class Hub:
         except TimeoutError:
             said = TimeoutError(f"no answer within {verify.VERIFY_TIMEOUT_S:g} s")
         if isinstance(said, Exception):  # no answer in time, an STT error, no STT at all
-            check.decision = "error"
-            log.info("satellite %s: %s let through unchecked: %s", s.id, heard.wake_word,
-                     str(said) if isinstance(said, (TimeoutError, routing.DestinationError))
-                     else type(said).__name__)
+            why = (str(said) if isinstance(said, (TimeoutError, routing.DestinationError))
+                   else type(said).__name__)
+            if check.mode == "on" and check.captures:
+                check.decision, check.unchecked = "rejected", True
+            else:
+                check.decision = "error"
+                log.info("satellite %s: %s let through unchecked: %s", s.id, heard.wake_word, why)
         else:
             check.transcript = said
             check.matched = verify.matches(check.transcript,
@@ -1484,12 +1494,17 @@ class Hub:
             self.record_wake(s, heard, "superseded", check)
             return
         if check.decision in ("rejected", "would_reject"):
-            log.info("satellite %s: %s (score %s) %s: STT did not hear the word", s.id,
-                     heard.wake_word, heard.score,
-                     "ignored" if check.decision == "rejected" else "would have been ignored")
+            if check.unchecked:
+                log.info("satellite %s: %s (score %s) ignored: the double-check could not run (%s)",
+                         s.id, heard.wake_word, heard.score, why)
+            else:
+                log.info("satellite %s: %s (score %s) %s: STT did not hear the word", s.id,
+                         heard.wake_word, heard.score,
+                         "ignored" if check.decision == "rejected" else "would have been ignored")
             log.debug("satellite %s: STT heard %r for %s", s.id, check.transcript, heard.wake_word)
             self.publish({"type": "wake_rejected", "satellite": s.id, "word": heard.wake_word,
-                          "score": heard.score, "heard": check.heard_text(), "mode": check.mode})
+                          "score": heard.score, "heard": check.heard_text(), "mode": check.mode,
+                          "unchecked": check.unchecked})
             check.clip = await self._keep_clip(s, heard)
         if check.mode == "log":
             if check.acted is not None:

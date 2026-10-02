@@ -745,11 +745,17 @@ Portuguese and 31,976 of English (FLEURS, mTEDx, Tatoeba):
 A clip holds about five words, so a TV that fires the model on everyday
 speech still gets past the check in fewer than 1 in 1,000 clips.
 
-**It fails open.** An STT that errs, is not set, or has not answered within
-1.5 s lets the wake through, recorded as `error`: the model has already
-fired, and a satellite must not go deaf because STT is down. The
-transcription is not left running past those 1.5 s either, so a slow STT is
-not given a TV's wakes to transcribe ahead of the commands.
+**When STT cannot answer, it fails closed for anything that sends speech
+on.** An STT that errs, is not set, or has not answered within 1.5 s drops a
+command or conversation word's wake: what follows it would otherwise be
+transcribed and sent to the word's destination unchecked, which may be a
+language model outside the house. It is recorded as `rejected` and published
+as `wake_rejected` with `unchecked: true`, and the page says "the
+double-check could not run". On 2 Oct 2026 a busy STT let a video's
+`hey_claude` through this way. A trigger word sends nothing anywhere, so it
+still fails open (`error`): a hub whose STT is down still turns on the
+lights. The transcription is not left running past those 1.5 s either, so a
+slow STT is not given a TV's wakes to transcribe ahead of the commands.
 
 **A second wake while a check is under way** on the same satellite supersedes
 it, and so do the stop button, a mute, a disconnect and the listener starting

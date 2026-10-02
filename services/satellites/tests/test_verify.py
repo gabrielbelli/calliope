@@ -335,24 +335,51 @@ def test_record_only_never_blocks_and_says_what_it_would_have_done(client, app, 
         "mode": "log", "decision": "would_reject", "matched": None}
 
 
+def failing(failure: str):
+    return (answering(delay=3.0) if failure == "timeout"
+            else lambda request, said: httpx.Response(500, text="the engine fell over"))
+
+
 @pytest.mark.parametrize("failure", ["error", "timeout"])
-def test_a_failing_stt_lets_the_wake_through(client, app, events, services, plug, monkeypatch, failure):
-    """The model has already fired: an STT that fails, or takes longer than
-    VERIFY_TIMEOUT_S, must not silence a satellite set to "on"."""
+def test_a_failing_stt_drops_a_command_word(client, app, events, services, plug, monkeypatch, failure):
+    """A check STT cannot answer drops a command or conversation word: what
+    follows the wake would otherwise be transcribed and sent on unchecked
+    (2 Oct 2026, a busy STT let a video's hey_claude reach a language model).
+    Said as "could not run", never as a word heard."""
     monkeypatch.setattr(verify, "VERIFY_TIMEOUT_S", 0.3)
-    services.check = (answering(delay=3.0) if failure == "timeout"
-                      else lambda request, said: httpx.Response(500, text="the engine fell over"))
+    services.check = failing(failure)
     with client.websocket_connect("/satellites/ws") as ws:
         adopt(client, ws)
         save(client, ALEXA_ON)
         telemetry_on(client)
-        plug(ws).send(said("alexa"))
-        [done] = wait(lambda: of(events, "routed"), what="the answer")
+        sat = plug(ws)
+        sat.send(said("alexa"))
+        [dropped] = wait(lambda: of(events, "wake_rejected"), what="the dropped wake")
+        time.sleep(0.5)
+    assert of(events, "routed") == [] and noticed(sat) == []
+    assert (dropped["unchecked"], dropped["heard"], dropped["mode"]) == (True, None, "on")
     [record] = wakes(app, 1)
-    assert done["error"] is None and of(events, "wake_rejected") == []
     assert (record["decision"], record["verify"]["decision"], record["verify"]["heard"]) == (
-        "started", "error", None)
+        "rejected", "rejected", None)
     assert record["verify"]["ms"] < 3000
+
+
+@pytest.mark.parametrize("failure", ["error", "timeout"])
+def test_a_failing_stt_still_lets_a_trigger_through(client, app, events, services, plug, monkeypatch, failure):
+    """A trigger sends nothing anywhere, so the model's word alone still
+    fires it when STT cannot answer: a hub whose STT is down still turns on
+    the lights."""
+    monkeypatch.setattr(verify, "VERIFY_TIMEOUT_S", 0.3)
+    services.check = failing(failure)
+    with client.websocket_connect("/satellites/ws") as ws:
+        adopt(client, ws)
+        save(client, {"name": "alexa", "mode": "trigger", "verify": {"mode": "on"}})
+        telemetry_on(client)
+        plug(ws).send(said("alexa"))
+        wait(lambda: of(events, "triggered"), what="the trigger")
+    assert of(events, "wake_rejected") == []
+    [record] = wakes(app, 1)
+    assert record["verify"]["decision"] == "error"
 
 
 def test_off_never_calls_the_stt(client, app, events, services, plug):
