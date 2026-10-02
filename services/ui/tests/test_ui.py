@@ -175,7 +175,7 @@ def test_only_the_page_s_own_inline_script_may_run(client):
     """A hash per inline script and nothing else (§4.7).
 
     'unsafe-inline' let any <script> or onerror= that reached the DOM run --
-    and a MeTube title is chosen by whoever uploaded the video. With a hash,
+    and a page title is chosen by whoever uploaded the video. With a hash,
     only the exact bytes this service served execute. 'self' is absent too:
     the page loads no script file, so allowing one from this origin would only
     admit something another route served.

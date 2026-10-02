@@ -583,7 +583,7 @@ def test_the_card_says_what_keeping_the_video_costs_before_it_is_fetched():
     gigabytes while the Download row goes on quoting 131 MB is a cost
     discovered afterwards rather than decided beforehand."""
     facts = body_of("function paintFacts(facts, compute)", "\n\n/* Bound once")
-    assert "gigabytes, not the ${human(facts.bytes)} of audio" in facts
+    assert "more than the ${human(facts.bytes)} of audio" in facts
     # And the row is repainted when the box changes, or it says the old number.
     assert '$("c-video").addEventListener("change"' in HTML
 
@@ -602,8 +602,10 @@ def test_the_new_copy_stays_under_the_line_length_this_page_holds_to():
     writing standard replaces with brackets, a colon or a full stop.
     """
     strings = [
-        "Keep the video (a much bigger download)",
-        "gigabytes, not megabytes",
+        "(a much bigger download)",
+        "(not offered for this link)",
+        "more than the audio alone",
+        "Only this part is transcribed. The audio is still downloaded whole.",
         "No player: this page cannot play that download.",
     ]
     for line in strings:
@@ -729,9 +731,9 @@ def test_a_mismatched_offset_count_is_ignored_rather_than_guessed():
 
 # ================================================ subtitles as transcript ==
 #
-# "This has real subtitles already" on the confirm card asks MeTube for
-# download_type "captions", which sets yt-dlp's skip_download and produces a
-# .vtt or .srt and no media. The page then sent that file to /ui/fetch, which
+# "This has real subtitles already" on the confirm card commits the captions
+# kind, which fetches the subtitle track and produces a .vtt or .srt and no
+# media. The page then sent that file to /ui/fetch, which
 # streams into /v1/audio/transcriptions -- so stt-stack was handed a text file
 # and asked to decode it as media. The button could not work as written, and
 # the failure surfaced two services away as a decode error.
@@ -1580,3 +1582,77 @@ def test_the_position_readout_is_a_measurement_not_an_estimate():
     lie."""
     sink = _sink()
     assert "mmss(at)" in sink and "clock(at)" not in sink
+
+
+# ======================================== links, fetched by this server ==
+#
+# voice-ui downloads a pasted link itself now, with no ffmpeg: nothing is
+# trimmed at the source, nothing is merged, and a live stream is refused. The
+# page says so where each of those used to be promised.
+
+
+def test_the_page_never_mentions_metube_or_its_port():
+    assert "metube" not in HTML.lower()
+    assert "30097" not in HTML
+    assert "/ui/clips/from-link" not in HTML
+
+
+def test_the_window_says_the_audio_is_still_downloaded_whole():
+    assert "Only this part is transcribed. The audio is still downloaded whole." in HTML
+    assert "Trimmed at the source" not in HTML
+
+
+def test_keep_the_video_is_greyed_where_the_link_has_no_single_file():
+    confirm = code(body_of("function showConfirm(facts)", "\n$(\"c-cancel\")"))
+    assert '$("c-video").disabled = facts.video === false;' in confirm
+    assert '"(not offered for this link)" : "(a much bigger download)"' in confirm
+    assert '<span id="c-video-note">(a much bigger download)</span>' in HTML
+
+
+def test_a_live_stream_has_no_card_of_its_own():
+    """The server refuses it at resolve with the reason, which resolveLink
+    shows under the box. There is no ten-minute escape to offer."""
+    confirm = code(body_of("function showConfirm(facts)", "\n$(\"c-cancel\")"))
+    assert "is_live" not in confirm and "c-ten" not in HTML
+    assert '$("c-end").value = "";' in confirm
+
+
+def test_a_trimmed_link_opens_the_player_on_its_window():
+    """stt's times are on the whole file's timeline, so the player plays the
+    whole file and #t= puts it where the transcript starts."""
+    fetch = code(body_of("async function startFetch(options)", "\nasync function watchDownload"))
+    assert "stt.clip = start != null || end != null ? { start: start || 0, end } : null;" in fetch
+    watch = code(body_of("async function watchDownload()", "\n/* ------"))
+    assert '"#t=" + stt.clip.start + (stt.clip.end != null ? "," + stt.clip.end : "")' in watch
+
+
+def test_a_failed_download_says_why_without_naming_a_downloader():
+    watch = code(body_of("async function watchDownload()", "\n/* ------"))
+    assert 'note(host, "bad", "Could not download that: " +' in watch
+    assert 'note($("stt-note"), "flat", "Queued…");' in HTML
+    assert "reaped" not in code(body_of("async function abandon()", "\n/* THE DOWNLOAD ROW"))
+
+
+def test_cloning_from_a_link_cuts_the_clip_in_the_browser():
+    """The whole recording comes down from /ui/media and goes through the same
+    preview and Save voice as an upload, cut to the chosen length."""
+    sheet = code(body_of('$("clipimport").addEventListener', '\n$("clipfile")'))
+    assert "body: JSON.stringify({ token: cliplink.token, for_clip: true })" in sheet
+    assert "clip_start" not in sheet
+    assert "i < 120" in sheet
+    assert '"Still downloading. Try again in a minute."' in sheet
+    assert 'await api("/ui/media?token=" + token)' in sheet
+    assert "cliplink.title, { take });" in sheet
+    assert '"Fetched. Listen, then save it."' in sheet
+    assert sheet.index("prepareClip(") < sheet.index("forgetClipLink()")
+
+
+def test_a_link_s_recording_is_cut_and_never_sent_whole():
+    """Its original bytes are up to ten minutes untrimmed, or a .weba the clip
+    store refuses, so a failed decode says so instead of uploading them."""
+    clip = code(body_of("async function prepareClip(file, suggestedName, link)",
+                        '\n$("rec").addEventListener'))
+    assert "Math.min(link.take || CONFIG.max_clip_seconds, CONFIG.max_clip_seconds)" in clip
+    assert "toWav(file, 24000, longest, from)" in clip
+    refused = clip.index('"This browser could not decode that recording."')
+    assert clip.index("&& link)") < refused < clip.index("clip = file;")

@@ -365,7 +365,7 @@ def test_the_asserted_reduced_motion_rule_is_still_one_line_by_itself():
 
 
 def test_a_progress_bar_moves_a_transform_and_not_a_width():
-    """THE SILENT ONE. Both write sites -- the MeTube download bar and
+    """THE SILENT ONE. Both write sites -- a link's download bar and
     renderJobs -- set the bar from script, so missing one leaves a bar frozen
     at zero with no error anywhere. width also animated layout on a two-second
     timer, and its transition was dead code besides: renderJobs reassigns

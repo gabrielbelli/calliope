@@ -1044,7 +1044,7 @@ details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
   border:1px solid var(--line);overflow:hidden;margin:var(--s2) 0 var(--s1)}
 /* transform, NOT width. Progress animated a layout property on a two-second
    timer; scaleX moves it to the compositor. Both write sites are template
-   literals inside an innerHTML string -- renderJobs() and the MeTube download
+   literals inside an innerHTML string -- renderJobs() and a link's download
    bar -- and the 95% cap is now a 0.95 cap. */
 /* --live AND NOT --accent, because a progress bar is the definition of
    "happening now" and it is the one object in a job row that is moving. It is
@@ -2192,9 +2192,9 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
            machinery below -- the picture, the caption band, the karaoke
            highlight -- worked only for a dropped file, and a pasted link is
            what this user actually uses. A finished link now plays through
-           /ui/media, which relays MeTube's own byte ranges so the element can
-           seek. Still hidden for a captions download, where skip_download
-           means there is genuinely no media anywhere -- see #sttwhy. -->
+           /ui/media, which serves the downloaded file with byte ranges so the
+           element can seek. Still hidden for a captions download, where there
+           is genuinely no media anywhere -- see #sttwhy. -->
       <div id="sttplay" hidden>
         <!-- TWO ELEMENTS, ONE VISIBLE AT A TIME. A <video> cannot be an
              <audio>, and the picture is the whole point when the file has
@@ -2333,9 +2333,9 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
           <button class="tight" id="cliporfile" type="button">Upload a clip instead</button>
           <input type="file" id="clipfile" hidden accept="audio/*,video/*">
         </div>
-        <!-- A LINK IS A THIRD SOURCE, and the cheap one. yt-dlp trims at the
-             source, so taking twenty seconds out of a two-hour interview
-             downloads twenty seconds. -->
+        <!-- A LINK IS A THIRD SOURCE. The recording is fetched whole, up to
+             ten minutes of it, and this browser cuts the clip out, as it does
+             for an uploaded file. -->
         <div class="row">
           <input type="text" id="cliplink" placeholder="…or paste a link"
                  aria-label="Link to a recording of your voice">
@@ -3218,18 +3218,20 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
       <div><label for="c-end">Stop at (seconds)</label>
         <input type="number" id="c-end" min="0" step="1" placeholder="whole thing"></div>
     </div>
-    <!-- Was three lines explaining that yt-dlp trims before downloading. The
-         reader is on a confirmation card deciding whether to fetch something;
-         what they need is that trimming costs nothing, not how. -->
-    <div class="hint">Trimmed at the source. The rest is never downloaded.</div>
-    <!-- OFF BY DEFAULT AND PER LINK. download_type "audio" never pulls the
-         video stream at all, which is the whole reason a 2h14m podcast costs
-         ~131 MB rather than gigabytes, so this must never become the default
-         and must never be remembered from last time. The Download row above
-         changes the moment it is ticked: the cost is stated where the decision
-         is made, not in a paragraph underneath it. -->
+    <!-- The reader is on a confirmation card deciding whether to fetch
+         something; what they need is what a window saves and what it does
+         not. There is no ffmpeg on the server, so nothing is trimmed there:
+         the audio comes down whole and stt transcribes only the window. -->
+    <div class="hint">Only this part is transcribed. The audio is still downloaded whole.</div>
+    <!-- OFF BY DEFAULT AND PER LINK. Audio-only never pulls the picture at
+         all, which is the whole reason a 2h14m podcast costs ~131 MB, so this
+         must never become the default and must never be remembered from last
+         time. The Download row above changes the moment it is ticked: the cost
+         is stated where the decision is made, not in a paragraph underneath
+         it. Greyed for a link that has no single file with picture and sound,
+         which joining two streams would need ffmpeg for. -->
     <label style="margin-top:10px;display:block"><input type="checkbox" id="c-video"
-      style="width:auto"> Keep the video (a much bigger download)</label>
+      style="width:auto"> Keep the video <span id="c-video-note">(a much bigger download)</span></label>
     <div id="c-subs"></div>
   </div>
   <div class="foot">
@@ -3659,7 +3661,7 @@ function unreached() {
      429                     said, with the wait
      503 locked              the whole page, with what to fix
 
-   Everything else -- a 404, a 409 for a link somebody else is fetching, a
+   Everything else -- a 404, a 409 for a link that is already downloading, a
    422 that names a field -- is the caller's, because only the caller knows
    where to say it. The response is handed back either way, so a caller that
    reads the body still can. */
@@ -5796,19 +5798,23 @@ const stt = { file:null, prepared:null, rate:null, seconds:null, token:null,
                  failed. */
               noVideo:false,
               /* WHAT A FINISHED LINK CAN BE PLAYED FROM, or null. Set by
-                 watchDownload once MeTube says the file is on disk:
-                 {url, video}. The url is /ui/media, which relays MeTube's own
-                 byte ranges so the element can seek; nothing is fetched from
-                 it until someone presses play. Null for a file drop, where the
+                 watchDownload once the server says the file is downloaded:
+                 {url, video}. The url is /ui/media, which serves it with byte
+                 ranges so the element can seek; nothing is fetched from it
+                 until someone presses play. Null for a file drop, where the
                  bytes are already in this browser, and for a captions
-                 download, where skip_download means there is no media at all. */
-              media:null };
+                 download, where there is no media at all. */
+              media:null,
+              /* The window the last commit asked for, {start, end} in seconds,
+                 or null. stt transcribes only that part, with times on the
+                 whole file's timeline, so the player opens on it with #t=. */
+              clip:null };
 
-/* WHICH ELEMENT A FINISHED DOWNLOAD BELONGS IN, read off the name MeTube
-   actually wrote rather than off what was asked for. A request for video that
-   came back as audio -- an extractor with no muxed format, a live stream that
-   ended -- must not put a black rectangle on screen with nothing saying why.
-   The same list is app/ingest.py's VIDEO_SUFFIXES. */
+/* WHICH ELEMENT A FINISHED DOWNLOAD BELONGS IN, read off the name of the file
+   that was actually downloaded rather than off what was asked for. A file with
+   no picture comes back named .weba or .m4a, and must not put a black
+   rectangle on screen with nothing saying why. The same list is
+   app/ingest.py's VIDEO_SUFFIXES. */
 const VIDEO_FILE = /\.(mp4|m4v|mkv|webm|mov)$/i;
 
 $("browse").addEventListener("click", () => $("file").click());
@@ -5837,9 +5843,8 @@ $("drop").addEventListener("drop", ev => {
    preventDefault(), so the browser went on to run its own default paste as
    well and inserted the same string a second time at the caret. Pasting into
    the url box produced ".../reel/DCH9NdDpXis/https://www.instagram.com/reel/
-   DCH9NdDpXis/", which was then sent to MeTube and came back "MeTube accepted
-   the link and then had no record of it" -- a confusing error about a URL the
-   user never typed.
+   DCH9NdDpXis/", which was then sent to the server and came back as an error
+   about a URL the user never typed.
 
    When the paste is already landing in the url box, the right move is to do
    NOTHING to the value and let the browser insert it: that keeps the caret,
@@ -11415,10 +11420,10 @@ function updateRouteAvailability() {
      upload + native  /transcribe takes a file and nothing else -- no
                       response_format, no granularities, no include[], no
                       chunking_strategy
-     a link           /ui/fetch streams MeTube's file into /v1 with `model`,
-                      `response_format` and the timestamp granularities, and
-                      no other field (ingest.py fetch), so those are the ones
-                      that survive
+     a link           /ui/fetch streams the downloaded file into /v1 with
+                      `model`, `response_format`, the timestamp granularities
+                      and the window, and no other field (ingest.py fetch), so
+                      those are the ones that survive
 
    Disabled rather than hidden: the reason a control is unavailable is the
    route select sitting beside it, and a control that vanishes takes its own
@@ -11464,7 +11469,7 @@ async function resolveLink() {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ url }) });
     stt.facts = facts; stt.token = facts.token; stt.file = null; stt.prepared = null;
-    stt.captions = false; stt.media = null; stt.noVideo = false;
+    stt.captions = false; stt.media = null; stt.noVideo = false; stt.clip = null;
     syncActionLabel();
     $("picked").hidden = false;
     $("picked").innerHTML = `<span class="filechip">${esc(facts.title)}
@@ -11499,24 +11504,18 @@ $("url").addEventListener("keydown", e => { if (e.key === "Enter") resolveLink()
 async function abandon() {
   const token = stt.token;
   stt.token = null; stt.facts = null; stt.captions = false; stt.media = null;
+  stt.clip = null;
   syncActionLabel();
   $("picked").hidden = true;
   $("go-stt").disabled = true;
   updateRouteAvailability();
   if (!token) return;
   try {
-    /* NOT OPTIONAL. Resolving calls MeTube's /add before probing — on purpose,
-       so its url_guard is what decides whether a URL may be fetched — which
-       means every declined link has left a pending record behind. */
-    const out = await json("/ui/abandon", {
+    /* So the server lets the link go: a running download is stopped, and a
+       file too big to cache is deleted now rather than kept for an hour. */
+    await json("/ui/abandon", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ token }) });
-    if (!out.reaped) {
-      /* Deleting by the wrong id in MeTube answers {"status":"ok"} and does
-         nothing, which is why a failed reap is worth reporting at all. */
-      note($("stt-note"), "warn", `MeTube still has a record of that link.
-        Check its queue on port 30097.`);
-    }
   } catch (err) { note($("stt-note"), "warn", "Could not abandon it: " + err.message); }
 }
 
@@ -11525,17 +11524,16 @@ async function abandon() {
    turns 131 MB into gigabytes while the card goes on quoting 131 MB is how a
    cost gets discovered afterwards instead of decided beforehand.
 
-   The size cannot be given as a number and is not invented as one. probe.py's
-   _best_audio_bytes deliberately measures the largest AUDIO-only format --
-   filesize_approx on a 4K video is the whole video and would make the card warn
-   about tens of gigabytes we were never going to fetch -- so with the video
-   kept there is no measured figure to quote. The honest form is the comparison,
-   and it is one line. */
+   The size cannot be given as a number and is not invented as one. The probe
+   measures the stream it would fetch for the AUDIO -- the size of the whole
+   video would make the card warn about a download we were never going to make
+   -- so with the video kept there is no measured figure to quote. The honest
+   form is the comparison, and it is one line. */
 function paintFacts(facts, compute) {
   const video = $("c-video").checked;
   const download = video
-    ? (facts.bytes ? `gigabytes, not the ${human(facts.bytes)} of audio`
-                   : "gigabytes, not megabytes")
+    ? (facts.bytes ? `more than the ${human(facts.bytes)} of audio`
+                   : "more than the audio alone")
     : (facts.bytes ? human(facts.bytes) + " of audio only"
                    : "unknown, audio only");
   const rows = [
@@ -11563,7 +11561,14 @@ function showConfirm(facts) {
      expensive answer is never the one already selected when the card opens --
      not even because it was selected for the previous link. */
   $("c-video").checked = false;
-  $("c-title").textContent = facts.is_live ? "This is a live stream." : "Fetch this?";
+  /* GREYED, NOT HIDDEN, where the site has no single file with picture and
+     sound: joining two streams needs ffmpeg, which the server does not carry,
+     and the parenthesis says why the box cannot be ticked. Unknown (no probe)
+     leaves it on offer, and the server answers if it cannot. */
+  $("c-video").disabled = facts.video === false;
+  $("c-video-note").textContent = facts.video === false
+    ? "(not offered for this link)" : "(a much bigger download)";
+  $("c-title").textContent = "Fetch this?";
   $("c-sub").textContent = facts.uploader ? facts.title + " · " + facts.uploader : facts.title;
 
   /* THE TWO ESTIMATES ARE NEVER BLENDED. For long media the download is the
@@ -11571,18 +11576,14 @@ function showConfirm(facts) {
      The download half is deliberately shown as a SIZE and not as a time: this
      container has no idea what the source's bandwidth is, and a fabricated
      "about 40 seconds" would be the one number on this card that was invented
-     rather than measured. MeTube reports the real speed and eta once it is
-     actually downloading, and that is what the progress line shows. */
+     rather than measured. The downloader reports the real speed and eta once
+     it is actually downloading, and that is what the progress line shows. */
   paintFacts(facts, compute);
 
+  /* A live stream never reaches this card: the server refuses it at resolve,
+     with the reason, and resolveLink shows that under the box. */
   let live = "";
-  if (facts.is_live) {
-    /* A live stream has no end. Fetching it is not "big", it is unbounded, so
-       it gets its own wording and its own escape rather than the generic one. */
-    live = `<div class="note bad"><strong>The stream has no end.</strong>
-      It downloads until you stop it.
-      <div class="acts"><button class="small" id="c-ten" type="button">Take the first 10 minutes</button></div></div>`;
-  } else if (compute && compute > CONFIG.stt_budget_seconds) {
+  if (compute && compute > CONFIG.stt_budget_seconds) {
     /* Past the ceiling the gateway answers 504 and the work is thrown away.
        The reader trims; the status code is not part of the decision. And the
        old wording said "Trim it below", which names no control at all. */
@@ -11590,14 +11591,11 @@ function showConfirm(facts) {
       Set Start at and Stop at to trim it.</div>`;
   }
   if (!facts.probed) {
-    /* MeTube resolves length and size and exposes neither, so with the probe
-       off or defeated there is nothing to quote. The fetch itself is fine. */
+    /* The probe gave no answer in time, so there is nothing to quote. The
+       fetch itself is fine. */
     live += `<div class="note flat">No length or size for this link. The estimate is unavailable.</div>`;
   }
   $("c-live").innerHTML = live;
-  if (facts.is_live) $("c-ten") && $("c-ten").addEventListener("click", () => {
-    $("c-start").value = 0; $("c-end").value = 600;
-  });
 
   $("c-subs").innerHTML = facts.has_subtitles
     ? `<div class="note ok"><strong>This has real subtitles already</strong>, written by a person.
@@ -11607,7 +11605,7 @@ function showConfirm(facts) {
     dialog.close(); startFetch({ captions: true });
   });
 
-  $("c-start").value = ""; $("c-end").value = facts.is_live ? 600 : "";
+  $("c-start").value = ""; $("c-end").value = "";
   dialog.showModal();
 }
 
@@ -11621,10 +11619,9 @@ $("c-go").addEventListener("click", () => {
 });
 
 async function startFetch(options) {
-  /* WHICH ROUTE READS THE FINISHED FILE. A captions commit asks MeTube for
-     download_type "captions", which sets yt-dlp's skip_download and produces a
-     .vtt or .srt and no media at all -- so what finishes is a transcript, not
-     something to transcribe. This flag is how watchDownload knows, and getting
+  /* WHICH ROUTE READS THE FINISHED FILE. A captions commit fetches the
+     subtitle track and no media at all, a .vtt or an .srt -- so what finishes
+     is a transcript, not something to transcribe. This flag is how watchDownload knows, and getting
      it wrong is the bug this path shipped with: the subtitle file went to
      /ui/fetch and was streamed into stt as if it were audio. */
   stt.captions = !!(options && options.captions);
@@ -11633,7 +11630,10 @@ async function startFetch(options) {
      -- the captions button after a look at the card -- would otherwise leave
      the previous run's player pointed at a file that is about to be replaced. */
   stt.media = null; stt.noVideo = false;
-  note($("stt-note"), "flat", "Queued with MeTube…");
+  const start = options && options.clip_start != null ? options.clip_start : null;
+  const end = options && options.clip_end != null ? options.clip_end : null;
+  stt.clip = start != null || end != null ? { start: start || 0, end } : null;
+  note($("stt-note"), "flat", "Queued…");
   try {
     await json("/ui/commit", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -11682,14 +11682,18 @@ async function watchDownload() {
          The FILENAME decides which element, never what was asked for. A video
          commit that came back as audio -- an extractor with no muxed format --
          would otherwise put a black rectangle on screen. */
-      stt.media = { url: "/ui/media?token=" + encodeURIComponent(stt.token),
+      /* A window opens the player on it: the transcript's times are on the
+         whole file's timeline, so #t= is all the highlight needs. */
+      const opening = stt.clip
+        ? "#t=" + stt.clip.start + (stt.clip.end != null ? "," + stt.clip.end : "") : "";
+      stt.media = { url: "/ui/media?token=" + encodeURIComponent(stt.token) + opening,
                     video: VIDEO_FILE.test(state.filename || "") };
       note(host, "ok", "Downloaded. Transcribing…");
       transcribeToken();
       return;
     }
     if (state.where === "done" || state.status === "error") {
-      note(host, "bad", "MeTube could not download that: " +
+      note(host, "bad", "Could not download that: " +
            (state.error || "no reason given") + ".");
       $("go-stt").disabled = false;
       return;
@@ -11700,10 +11704,10 @@ async function watchDownload() {
        at the next tick and a press landing on the tick hit a button that was
        already gone. The note is made the first time (or again if something
        else wrote this host meanwhile) and each tick changes only the words
-       and the bar. textContent, not esc() into markup: speed and eta come out
-       of MeTube's /history like the error text did, so they are a remote
-       server's strings, and now they are never parsed as markup at all.
-       human() and clock() format whatever they are given. */
+       and the bar. textContent, not esc() into markup: speed and eta come
+       from the downloader and the error text from a remote site, so they
+       are never parsed as markup at all. human() and clock() format whatever
+       they are given. */
     if (!$("stopdl") || !host.querySelector(".dlsaid")) {
       noteHtml(host, "flat", '<span class="dlsaid"></span><div class="bar-track"><div class="bar-fill"></div></div><button class="link" id="stopdl" type="button">Stop and forget it</button>');
       $("stopdl").addEventListener("click", abandon, { once: true });
@@ -11792,10 +11796,10 @@ function granularities(format) {
 
 async function transcribeToken() {
   /* THE MEDIA STILL DOES NOT COME DOWN HERE TO BE TRANSCRIBED. The UI
-     container streams MeTube's file straight into a multipart POST at the
-     gateway, which is what keeps a two-hour podcast off this connection and is
-     also the only way it can work at all — MeTube emits no CORS headers, so a
-     browser cannot fetch from it. What changed is the ASK: this route now
+     container streams the downloaded file straight into a multipart POST at
+     the gateway, which is what keeps a two-hour podcast off this connection,
+     and sends the commit's window with it for stt to cut. What changed is the
+     ASK: this route now
      carries the granularities too, so the response has the cues the highlight
      is drawn from. Playback is a separate, later, opt-in request to
      /ui/media, made by the element and only once play is pressed. */
@@ -11850,13 +11854,13 @@ function syncActionLabel() {
 
 /* THE CAPTIONS PATH, WHICH CALLS NOTHING THAT TRANSCRIBES.
 
-   "This has real subtitles already" on the confirm card commits the link as
-   download_type "captions". yt-dlp then sets skip_download, fetches the
-   subtitle track alone and writes a .vtt or .srt -- about two seconds, no
-   media, no Parakeet. What comes back IS the transcript, written by a person,
+   "This has real subtitles already" on the confirm card commits the link as a
+   captions download. yt-dlp then skips the media, fetches the subtitle track
+   alone and writes a .vtt or .srt -- about two seconds, no media, no
+   Parakeet. What comes back IS the transcript, written by a person,
    which is better than anything this stack would produce from the audio.
 
-   IT USED TO GO TO /ui/fetch, and that route streams MeTube's file into
+   IT USED TO GO TO /ui/fetch, and that route streams the downloaded file into
    /v1/audio/transcriptions. So the subtitle file was handed to stt-stack and
    libav was asked to decode a text file as media: the button could not work at
    all, and the failure arrived as a decode error from two services away. */
@@ -12363,14 +12367,15 @@ function sttVideo() {
 
    A dropped file is bytes this browser already holds: no request, no server,
    and the exact timeline the timings were measured on. A LINK has none of
-   that, and used to have nothing at all -- /ui/fetch streams MeTube's file
-   into the gateway server-side and the page received not one byte, which is
-   what keeps a two-hour podcast off this connection and is why #sttwhy existed.
+   that, and used to have nothing at all -- /ui/fetch streams the downloaded
+   file into the gateway server-side and the page received not one byte, which
+   is what keeps a two-hour podcast off this connection and is why #sttwhy
+   existed.
 
    /ui/media is the way back, and it is narrow on purpose: it serves the file
-   MeTube has ALREADY downloaded, relays MeTube's own byte ranges so the
-   element can seek, and is fetched by the element rather than by this page --
-   so a transcript that is read and never played still costs nothing.
+   the server has ALREADY downloaded, with byte ranges so the element can
+   seek, and is fetched by the element rather than by this page -- so a
+   transcript that is read and never played still costs nothing.
 
    Returns {file} or {url}, plus whether it has a picture worth an element.
    Null when there is genuinely nothing, which is now only the captions path
@@ -12513,8 +12518,8 @@ $("sttplayer").addEventListener("error", () => {
    back to it keeps the transcript, the highlight and the audio; only the band
    and the picture go, and they are what could not work. */
 $("sttvideo").addEventListener("error", () => {
-  /* A LINK FALLS BACK THE SAME WAY. stt.media.video is read off the filename
-     MeTube wrote, and a name ending .mkv is exactly the case canPlayType would
+  /* A LINK FALLS BACK THE SAME WAY. stt.media.video is read off the name of
+     the downloaded file, and a name ending .mkv is exactly the case canPlayType would
      have answered "maybe" to and then declined -- so the picture goes, the
      same file plays through the audio element, and the transcript, the
      highlight and the sound all survive. */
@@ -16674,23 +16679,23 @@ $("cliporfile").addEventListener("click", () => $("clipfile").click());
 /* ------------------------------------------- cloning from a link ------- */
 /*
   Reuses the ingestion the Transcribe tab already has, in the same order:
-  resolve to find out what it is, commit the WINDOW rather than the whole
-  thing, wait, then import. The only new server route is the last step --
-  /ui/clips/from-link, which keeps the bytes instead of transcribing them.
+  resolve to find out what it is, commit, wait. Then the recording comes down
+  from /ui/media and this browser cuts the clip out of it, exactly as it does
+  for an uploaded file, and the clip is saved with Save voice through
+  /ui/clips like any other.
 
-  The trim is not a convenience here, it is what makes this affordable.
-  clip_start and clip_end reach yt-dlp, which fetches only that window, so
-  taking twenty seconds out of a two-hour interview downloads twenty seconds.
+  THE WHOLE RECORDING COMES DOWN, which is why the server takes sources of up
+  to ten minutes here: there is no ffmpeg on it to trim with, and the browser
+  has to hold the recording to cut it. AAC first, because every browser's
+  decodeAudioData reads it.
 */
 let cliplink = null;
 
-/* NOT OPTIONAL, for the same reason abandon() is not on the other tab:
-   /ui/resolve calls MeTube's /add before it probes -- so its url_guard is what
-   decides whether a URL may be fetched at all -- and every link resolved and
-   then dropped has left a pending record behind. Cancel used to close the
-   sheet and leave the token, the record and the filled-in box exactly where
-   they were, so "Cancel" cancelled the part the user could see and none of the
-   part they could not. */
+/* NOT OPTIONAL, for the same reason abandon() is not on the other tab: the
+   server holds a job for every link resolved, and a running download goes on
+   until it is let go. Cancel used to close the sheet and leave the token, the
+   job and the filled-in box exactly where they were, so "Cancel" cancelled the
+   part the user could see and none of the part they could not. */
 async function forgetClipLink() {
   const token = cliplink && cliplink.token;
   cliplink = null;
@@ -16700,14 +16705,14 @@ async function forgetClipLink() {
     await json("/ui/abandon", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ token }) });
-  } catch { /* the sheet is closing either way; MeTube's queue is on 30097 */ }
+  } catch { /* the sheet is closing either way, and the server forgets it in a day */ }
 }
 
 $("clipresolve").addEventListener("click", async () => {
   const url = $("cliplink").value.trim();
   if (!url) return;
   $("clipresolve").disabled = true;
-  /* A second Resolve drops the first link rather than orphaning its record. */
+  /* A second Resolve drops the first link rather than orphaning its job. */
   if (cliplink) await forgetClipLink();
   note($("cliplinkhint"), "flat", "Resolving…");
   try {
@@ -16734,44 +16739,47 @@ $("clipresolve").addEventListener("click", async () => {
 
 $("clipimport").addEventListener("click", async () => {
   if (!cliplink) return;
-  const name = $("clipname").value.trim();
-  if (!name) { note($("cliplinkhint"), "bad", "Name it first."); return; }
-  const start = Math.max(0, Number($("clipstart").value) || 0);
   const take = Math.min(CONFIG.max_clip_seconds,
                         Math.max(3, Number($("cliplen").value) || 20));
 
   $("clipimport").disabled = true;
   try {
     note($("cliplinkhint"), "flat", "Fetching…");
-    await json("/ui/commit", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: cliplink.token, for_clip: true,
-                             clip_start: start, clip_end: start + take }) });
-
-    /* Polls the same route the Transcribe tab does. A trimmed window is
-       seconds of download, so this is a short wait rather than a job. */
-    const token = encodeURIComponent(cliplink.token);
-    for (let i = 0; i < 120; i++) {
-      const p = await json(`/ui/progress?token=${token}`);
-      if (p.ready) break;
-      if (p.status === "error") throw new Error(p.error || "the download failed");
-      note($("cliplinkhint"), "flat",
-           `Fetching… ${p.percent ? p.percent.toFixed(0) + "%" : ""}`);
-      await new Promise(r => setTimeout(r, 1000));
+    try {
+      await json("/ui/commit", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: cliplink.token, for_clip: true }) });
+    } catch (err) {
+      /* A press after "Still downloading" finds its own download running,
+         which is the one to wait for; anything else is the answer. */
+      if (err.code !== "in_progress") throw err;
     }
 
-    const out = await json("/ui/clips/from-link", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: cliplink.token, name, replace: true }) });
-    VOICES_SEQ.writes++;
-    note($("cliplinkhint"), "ok", `Saved as ${out.voice.name || name}.`);
-    cliplink = null;
-    $("cliprange").hidden = true;
+    /* Polls the same route the Transcribe tab does, for two minutes. */
+    const token = encodeURIComponent(cliplink.token);
+    let state = null;
+    for (let i = 0; i < 120; i++) {
+      state = await json(`/ui/progress?token=${token}`);
+      if (state.ready) break;
+      if (state.status === "error") throw new Error(state.error || "the download failed");
+      note($("cliplinkhint"), "flat",
+           `Fetching… ${state.percent ? state.percent.toFixed(0) + "%" : ""}`);
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    if (!state || !state.ready) {
+      note($("cliplinkhint"), "flat", "Still downloading. Try again in a minute.");
+      return;
+    }
+
+    const response = await api("/ui/media?token=" + token);
+    if (!response.ok) throw new Error(failure(response.status));
+    const blob = await response.blob();
+    const suffix = ((state.filename || "").match(/\.[^.]+$/) || [""])[0];
+    await prepareClip(new File([blob], "link" + suffix, { type: blob.type }),
+                      cliplink.title, { take });
+    note($("cliplinkhint"), clip ? "ok" : "", clip ? "Fetched. Listen, then save it." : "");
+    await forgetClipLink();
     $("cliplink").value = "";
-    await loadVoices();
-    $("voice").value = clipValue(out.voice.name || name);
-    onVoiceChange();
-    $("clone").hidden = true;
   } catch (err) {
     note($("cliplinkhint"), "bad", err.message);
   } finally { $("clipimport").disabled = false; }
@@ -16781,7 +16789,9 @@ $("clipfile").addEventListener("change", () => {
   if (file) prepareClip(file, file.name.replace(/\.[^.]+$/, ""));
 });
 
-async function prepareClip(file, suggestedName) {
+/* `link`, when there is one, is {take}: a recording fetched whole from a
+   link, which is cut to `take` seconds here and is never sent as it is. */
+async function prepareClip(file, suggestedName, link) {
   note($("clipnote"), "flat", "Converting…");
   try {
     /* ONLY WHEN THE ROW IS ON SCREEN. #clipstart lives in #cliprange, which is
@@ -16792,8 +16802,11 @@ async function prepareClip(file, suggestedName) {
        The same rule segments() follows: a control that is not on the screen
        does not get a say. */
     const from = $("cliprange").hidden ? 0 : Number($("clipstart").value) || 0;
+    const longest = link
+      ? Math.min(link.take || CONFIG.max_clip_seconds, CONFIG.max_clip_seconds)
+      : CONFIG.max_clip_seconds;
     let out = null;
-    try { out = await toWav(file, 24000, CONFIG.max_clip_seconds, from); }
+    try { out = await toWav(file, 24000, longest, from); }
     catch { out = null; }
 
     /* THE BROWSER IS NO LONGER REQUIRED TO UNDERSTAND THE FILE. decodeAudioData
@@ -16808,6 +16821,13 @@ async function prepareClip(file, suggestedName) {
        with librosa; converting here was an optimisation that had quietly
        become a requirement. */
     const tooShortToBeReal = out && out.seconds < 2 && file.size > 64 * 1024;
+    if ((!out || tooShortToBeReal) && link) {
+      /* NOT FOR A LINK: its original bytes are the whole recording, up to ten
+         minutes untrimmed, or a .weba that /ui/clips refuses. */
+      clip = null; $("saveclip").disabled = true;
+      note($("clipnote"), "bad", "This browser could not decode that recording.");
+      return;
+    }
     if (!out || tooShortToBeReal) {
       clip = file;
       clipSuffix = (file.name.match(/\.[^.]+$/) || [".wav"])[0].toLowerCase();

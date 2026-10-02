@@ -6,7 +6,7 @@ thing a real browser would add here is confirmation that html.parser and Blink
 agree about `<`.
 
 The hole was real. `$("picked").innerHTML = ...${facts.title}...` took the
-title of the page behind a pasted link -- yt-dlp's probe or MeTube's record --
+title of the page behind a pasted link -- what yt-dlp's probe reads off it --
 and interpolated it raw. The CSP this page was served with then was script-src
 'self' 'unsafe-inline', so an injected event handler EXECUTED; connect-src
 'self' stops an XHR exfiltrating, but not a navigation or a form POST. It needs
@@ -121,9 +121,8 @@ def test_a_paste_into_the_url_box_does_not_also_assign_the_value():
     The handler assigned `$("url").value = text` and returned without
     preventDefault(), so the default paste then inserted the same string again
     at the caret. A pasted Instagram link became
-    ".../reel/DCH9NdDpXis/https://www.instagram.com/reel/DCH9NdDpXis/", which
-    MeTube accepted and then had no record of -- an error message about a URL
-    the user never typed.
+    ".../reel/DCH9NdDpXis/https://www.instagram.com/reel/DCH9NdDpXis/", and the
+    server answered with an error message about a URL the user never typed.
     """
     body = _paste_handler()
     assign = body.index('$("url").value = text')
@@ -800,9 +799,10 @@ def test_the_native_route_greys_out_the_fields_it_cannot_carry():
 
 
 def test_a_link_greys_out_what_ui_fetch_cannot_carry():
-    """/ui/fetch streams MeTube's file into /v1 with `model` and
-    `response_format` and no other field (ingest.py), so on that path the route
-    select and everything under it was decoration.
+    """/ui/fetch streams the downloaded file into /v1 with `model`,
+    `response_format`, the granularities and the window and no other field
+    (ingest.py), so on that path the route select and most of what is under it
+    was decoration.
     """
     body = _code(_fn("function syncTranscribeControls()"))
     assert "const link = !!stt.token && !stt.file;" in body
@@ -964,9 +964,9 @@ def test_the_code_switch_note_points_at_a_control_that_is_there():
 
 
 def test_cancelling_the_clone_sheet_drops_the_resolved_link():
-    """/ui/resolve calls MeTube's /add before it probes, so every link resolved
-    and then dropped leaves a pending record behind -- which is why the
-    transcribe tab has abandon(). Cancel closed the sheet and left the token,
+    """The server holds a job for every link resolved, and a running download
+    goes on until it is let go -- which is why the transcribe tab has
+    abandon(). Cancel closed the sheet and left the token,
     the record and the filled-in box exactly where they were.
     """
     start = HTML.index('$("cancelclip").addEventListener')
