@@ -447,6 +447,20 @@ def test_the_one_file_rule(client, word, said):
     assert downloads.stats()["items"] == 0
 
 
+def test_a_clip_s_download_has_a_cap_of_its_own(client, monkeypatch):
+    """The ten minutes a clip source is allowed are the site's word, and the
+    browser decodes every byte of it, so the cap is what holds."""
+    api, _, fetches = client()
+    from app import config, downloads
+    fetched(api, URL, for_clip=True)
+    [call] = fetches.calls()
+    assert call["argv"][1:3] == ["clip", str(config.CLIP_SOURCE_BYTES)]
+    assert config.CLIP_SOURCE_BYTES < config.MAX_DOWNLOAD_BYTES
+    monkeypatch.setattr(config, "MAX_DOWNLOAD_BYTES", 1000)
+    assert downloads._cap(downloads.Job(sub=ALICE, url=URL, facts=None, seen=0.0,
+                                        kind="clip")) == 1000
+
+
 def test_the_child_is_isolated_and_told_nothing_but_four_variables(client):
     api, _, fetches = client()
     fetched(api, URL)

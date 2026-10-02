@@ -344,7 +344,13 @@ def drop(sub: str, url: str) -> None:
 
 
 def _cap(job: Job) -> int:
-    return config.MAX_CAPTION_BYTES if job.kind == "captions" else config.MAX_DOWNLOAD_BYTES
+    if job.kind == "captions":
+        return config.MAX_CAPTION_BYTES
+    if job.kind == "clip":
+        # The browser decodes all of it, and the length it was allowed on is
+        # the site's word, so the cap is what holds.
+        return min(config.CLIP_SOURCE_BYTES, config.MAX_DOWNLOAD_BYTES)
+    return config.MAX_DOWNLOAD_BYTES
 
 
 def _fail(job: Job, message: str) -> None:

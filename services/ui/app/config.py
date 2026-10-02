@@ -25,7 +25,7 @@ from voice_common.identity import GATEWAY_INTERNAL
 __all__ = [
     "GATEWAY_INTERNAL_URL", "IGNORED_INTERNAL_URL",
     "LINKS", "CACHE_DIR", "MAX_DOWNLOAD_BYTES", "CACHE_BYTES",
-    "CLIP_SOURCE_SECONDS", "FETCHER",
+    "CLIP_SOURCE_SECONDS", "CLIP_SOURCE_BYTES", "FETCHER",
     "PROBE_TIMEOUT", "MAX_UPLOAD_BYTES", "MAX_CAPTION_BYTES",
     "CONFIRM_SECONDS", "CONFIRM_BYTES", "STT_RTF_SEED", "STT_BUDGET_SECONDS",
     "VOICE_DIR", "MAX_CLIP_BYTES", "MAX_CLIP_SECONDS", "RESOLVE_PER_MINUTE",
@@ -100,6 +100,12 @@ CACHE_BYTES = int(os.getenv("UI_CACHE_BYTES", str(2**30)))
 # browser holds the whole recording to cut the clip out of it, and AAC at ten
 # minutes is about 10 MB.
 CLIP_SOURCE_SECONDS = 600.0
+
+# 64 MiB, the cap for that recording's download, because the ten minutes are
+# the site's word and the browser decodes every byte that arrives. Six times
+# ten minutes of AAC, and a short video where a site sends picture and sound
+# only together. Never above MAX_DOWNLOAD_BYTES.
+CLIP_SOURCE_BYTES = 64 * 2**20
 
 # Tests only: a script run as `python -I <path> ...` in place of
 # app/fetcher.py. The browser harness sets it so the real yt-dlp never runs

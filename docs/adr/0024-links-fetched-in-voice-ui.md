@@ -71,8 +71,9 @@ and returns times on the file's own timeline.
 - "Keep the video" works only where the site offers one file with picture and
   sound. YouTube offers none without a JavaScript runtime, so the box is
   greyed there.
-- Cloning from a link takes sources of up to ten minutes: the whole recording
-  comes down and the browser cuts the clip out of it.
+- Cloning from a link takes sources of up to ten minutes and 64 MiB: the
+  whole recording comes down and the browser cuts the clip out of it. The
+  length is the site's word, so the size cap is what holds.
 - `mem_limit` for voice-ui goes from 384m to 512m, for up to five children.
 - yt-dlp is pinned, and `.github/dependabot.yml` opens a pull request for each
   release; `/health` reports the version that runs. Until now MeTube absorbed

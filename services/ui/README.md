@@ -300,7 +300,7 @@ no ffmpeg in the image, so:
 | Audio | Opus at 96 kbit/s or less first (YouTube's itag 250, about 0.5 MB a minute), then any audio-only stream, then the smallest file with picture and sound, for its sound |
 | Keep the video | Only where the site offers one file with picture and sound, 720p or less preferred. **YouTube offers none** without a JavaScript runtime, so the box is greyed there, with "(not offered for this link)" |
 | Start at, Stop at | The whole audio comes down once, and stt transcribes only the window (`clip_start`, `clip_end`). The player opens on it |
-| A clip for cloning | AAC first, sources up to ten minutes; the browser cuts the clip out |
+| A clip for cloning | AAC first, sources up to ten minutes and 64 MiB; the browser cuts the clip out |
 | HLS-only sites | Refused at resolve: *This site offers no stream this server can fetch without ffmpeg.* Without ffmpeg an HLS download is MPEG-TS in an `.mp4` no browser plays |
 | Live and upcoming streams | Refused at resolve, with the reason |
 | Playlists and channels | Refused at resolve: paste the link of one video |
@@ -515,8 +515,9 @@ Start at for Take seconds, to a 24 kHz WAV with a preview and **Save voice**.
 There is no ffmpeg on the server to trim with, so the whole recording comes
 down, and the server takes sources of up to **ten minutes** for this (`400
 too_long_for_clip` otherwise, with the reason): the browser has to hold the
-recording to cut it. A recording the browser cannot decode is said to and
-never sent as it is.
+recording to cut it. The length is the site's word, so the download is also
+capped at 64 MiB, and a bigger one fails with the reason. A recording the
+browser cannot decode is said to and never sent as it is.
 
 ---
 
@@ -1276,7 +1277,7 @@ Every variable is optional and every default degrades rather than fails.
 | `UI_GATEWAY_INTERNAL_URL` | `http://voice-gateway:8081` | The gateway's internal listener, the one address `/ui/fetch` sends to. Only that address or a loopback `http://` one (for tests on one machine) is accepted; anything else falls back to the default, with an ERROR that names the variable and not its value |
 | `UI_LINKS` | on | `0` hides the link box. File upload and TTS are unaffected |
 | `UI_CACHE_DIR` | `/cache` | Finished downloads and downloads in progress: the `ui-cache` volume. Not writable means links are off, and the log says so |
-| `UI_MAX_DOWNLOAD_BYTES` | 500 MiB | The most one audio, clip or video download may write. Keep it at or below the gateway's `GATEWAY_UPLOAD_MAX_BYTES`, which leaves room for the multipart framing |
+| `UI_MAX_DOWNLOAD_BYTES` | 500 MiB | The most one audio or video download may write, and a clip's 64 MiB is never above it. Keep it at or below the gateway's `GATEWAY_UPLOAD_MAX_BYTES`, which leaves room for the multipart framing |
 | `UI_CACHE_BYTES` | 1 GiB | Every cached file of 128 MiB or less, together. A file bigger than this value on its own is not cached, as if it were over 128 MiB. `0` turns the cache off |
 | `UI_PROBE_TIMEOUT` | `20` | The probe's time limit, the wait for a slot included. Past it the card has no length or size |
 | `UI_FETCHER` | *(unset)* | **Tests only.** A script run in place of `app/fetcher.py`; the browser harness points it at `tests/fake_fetcher.py`. Set, the log warns |
