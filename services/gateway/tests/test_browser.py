@@ -12,6 +12,8 @@ asserts that the cookie bought them nothing:
 
 from __future__ import annotations
 
+import re
+
 import httpx
 import pytest
 from conftest import (PASSWORD, PUBLIC_ORIGIN, SAME_ORIGIN, MockBackend, bearer, gateway,
@@ -317,5 +319,9 @@ async def test_the_login_page_carries_a_strict_policy_and_no_external_asset(monk
     assert response.status_code == 200
     assert "script-src 'sha256-" in policy and "unsafe-inline" not in policy
     assert "frame-ancestors 'none'" in policy
-    assert " src=" not in response.text and "<link" not in response.text
+    assert "font-src data:;" in policy, "the display face is embedded as a data: URI"
+    # The one <link> is the favicon, inline as a data: URI like the app's.
+    assert " src=" not in response.text
+    assert all(' href="data:' in link
+               for link in re.findall(r"<link\b[^>]*>", response.text))
     assert "onerror=" not in response.text and "onclick=" not in response.text

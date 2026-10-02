@@ -199,7 +199,7 @@ def _login_page() -> tuple[str, str]:
 
     policy = ("default-src 'none'; "
               f"script-src {hashes('script')}; style-src {hashes('style')}; "
-              "connect-src 'self'; img-src 'self' data:; base-uri 'none'; "
+              "connect-src 'self'; img-src 'self' data:; font-src data:; base-uri 'none'; "
               "form-action 'none'; frame-ancestors 'none'")
     return html, policy
 
