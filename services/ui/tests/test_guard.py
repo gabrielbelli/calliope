@@ -45,9 +45,9 @@ def test_userinfo_is_refused_because_parsers_disagree_about_it():
 
 
 def test_only_ports_80_and_443():
-    # Every service on this NAS that is not meant to be reachable from the UI
-    # container is on a 300xx port, which is what this rule is for.
-    assert "ports 80 and 443" in refuse("http://example.com:30097/history")
+    # The apps beside this one on a home server listen on high ports, which
+    # is what this rule is for.
+    assert "ports 80 and 443" in refuse("http://example.com:30000/history")
     assert "ports 80 and 443" in refuse("http://example.com:8080/secret")
 
 
@@ -75,6 +75,16 @@ def test_an_ipv4_mapped_ipv6_address_is_unwrapped_first():
     # wrapper is not the same question as is_loopback on what is inside it.
     assert "loopback" in refuse("https://anything.example/",
                                 resolver("::ffff:127.0.0.1"))
+
+
+def test_a_nat64_address_is_unwrapped_too():
+    # 64:ff9b::/96 wraps an IPv4 host as well, and Python calls the wrapper
+    # global: 64:ff9b::7f00:1 is 127.0.0.1 on a network with NAT64.
+    assert "loopback" in refuse("https://anything.example/",
+                                resolver("64:ff9b::7f00:1"))
+    assert "private" in refuse("https://anything.example/",
+                               resolver("64:ff9b::a00:5"))
+    assert guard._forbidden("64:ff9b::5db8:d822") is None   # 93.184.216.34
 
 
 def test_every_answer_is_checked_not_just_the_first():

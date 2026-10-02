@@ -2,32 +2,30 @@
 
 READ THIS BEFORE RELAXING ANYTHING BELOW.
 
-This box hosts the user's other services. MeTube on 30097, Gitea on 30008,
-UniFi on 30072-75, rackula on 30323, the TrueNAS middleware itself on 443, and
-a handful of things bound to 127.0.0.1 that were never meant to leave the
-machine. A route that takes a URL from a browser and makes an outbound request
-with it is, unmodified, a way to ask this container to fetch any of those and
-tell the caller what came back. That is the whole of SSRF, and on a NAS the
-interesting targets are all on the near side of the firewall.
+This box hosts the owner's other services: the NAS's own pages, other apps on
+high ports, and a handful of things bound to 127.0.0.1 that were never meant
+to leave the machine. A route that takes a URL from a browser and makes an
+outbound request with it is, unmodified, a way to ask this container to fetch
+any of those and tell the caller what came back. That is the whole of SSRF,
+and on a NAS the interesting targets are all on the near side of the firewall.
 
-THREE LAYERS, IN THIS ORDER, AND THE ORDER IS THE DESIGN.
+TWO LAYERS, AND THEY APPLY THE SAME RULES.
 
-  1. This module. Stdlib only, no network, ~40 lines: scheme, userinfo, port,
-     then getaddrinfo and a check of EVERY address the name resolves to.
-  2. MeTube's own url_guard.validate_url, which runs inside its POST /add. It
-     is a serious two-layer guard -- ingress validation plus a connect-time
-     getaddrinfo hook installed in the download subprocess, so it also covers
-     redirects and DNS rebinding during the download itself. Verified live:
-     `http://localhost:8080/secret` comes back "Refusing to fetch internal
-     host", `http://10.0.0.5/x` comes back "Refusing to fetch internal
-     address". ALLOW_PRIVATE_ADDRESSES defaults false and is unset here.
-  3. Only then the yt-dlp probe (app/probe.py), and only on a URL MeTube has
-     already accepted. It never runs on a URL the first two layers rejected.
+  1. This module, in the server. Stdlib only, no network, ~40 lines: scheme,
+     userinfo, port, then getaddrinfo and a check of EVERY address the name
+     resolves to. It runs on /ui/resolve and /ui/commit, before any child is
+     spawned, so a URL it hates never reaches yt-dlp at all.
+  2. The same rules at every connection, inside app/fetcher.py. The child
+     replaces socket.getaddrinfo and socket.socket's connect, connect_ex and
+     sendto before it imports yt_dlp, so every answer a name resolves to and
+     every peer a socket is opened to goes through _forbidden() and the port
+     rule below. That covers what layer 1 cannot see: redirects, URLs found
+     inside a page, DASH fragments and DNS rebinding, for the probe and the
+     download alike.
 
-Layer 1 exists even though layer 2 is better, because layer 2 lives in another
-app that the operator can reconfigure without touching this repository, and
-because a URL our own guard hates should never become a log line in someone
-else's service either.
+Layer 1 exists even though layer 2 is complete, because it answers in the
+server with a message about the link, costs no process, and is what the rate
+limit and the log see.
 
 WHAT IS BLOCKED, AND WHY EACH ONE.
 
@@ -39,9 +37,9 @@ WHAT IS BLOCKED, AND WHY EACH ONE.
                                  starts when an @ is present, and the whole
                                  attack is making two parsers disagree.
   ports other than 80 and 443    an internal service is almost never on 80 or
-                                 443 on this box; every app listed above is on
-                                 a 300xx port. This single rule removes most
-                                 of the LAN as a target.
+                                 443 on a home server; the apps beside this
+                                 one listen on high ports. This single rule
+                                 removes most of the LAN as a target.
   loopback         127/8, ::1    the container's own listeners
   private          10/8, 172.16/12, 192.168/16, fc00::/7   the LAN, the NAS,
                                  and every other container on it
@@ -50,24 +48,21 @@ WHAT IS BLOCKED, AND WHY EACH ONE.
                                  on a NAS today, and the day this moves it is
                                  the first thing anyone tries
   CGNAT            100.64/10      carrier NAT, and Tailscale's range
-  multicast, reserved, unspecified, and IPv4-mapped IPv6 of any of the above
+  multicast, reserved, unspecified, and IPv4-mapped (::ffff:0:0/96) or
+  NAT64-wrapped (64:ff9b::/96) IPv6 of any of the above
 
   by name          localhost, *.localhost, metadata.google.internal, and the
-                   TrueNAS .local mDNS suffix -- belt and braces over the
-                   address check, which already covers them, for the case
-                   where resolution is the thing that is lying.
+                   .local mDNS suffix -- belt and braces over the address
+                   check, which already covers them, for the case where
+                   resolution is the thing that is lying.
 
-WHAT IS STILL OPEN, stated rather than hidden. yt-dlp's extraction follows
-redirects, and neither MeTube's ingress guard nor this one covers a redirect
-DURING extraction to an internal host -- MeTube documents that exact limitation
-in url_guard.py's own docstring, and notes that curl_cffi's native resolver
-bypasses even its socket guard. The impact is BLIND SSRF: the probe's output is
-parsed into five scalars, none of which is a response body, nothing is written
-to disk, and nothing is returned to the caller but a title, a duration, a size
-and two booleans. The real backstop is not code -- the gateway and this
-container have no business reaching the NAS's other services at all, and an
-egress rule on the calliope app is the fix. That belongs in the deployment, and
-it is written down in this service's README so it cannot be assumed.
+WHAT IS STILL OPEN, stated rather than hidden. A native network stack --
+ffmpeg, aria2c, curl_cffi -- resolves and connects in C and never passes
+through Python's socket module, so layer 2 cannot see it. The image carries
+none of them, and its build fails if one arrives (services/ui/Containerfile).
+The guard is not a sandbox either: code running inside the child can undo the
+patch. The control against that is the deployment's egress rule, which is
+written down in this service's README.
 """
 
 from __future__ import annotations
@@ -80,6 +75,10 @@ __all__ = ["GuardError", "check"]
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
 ALLOWED_PORTS = frozenset({80, 443})
+# The well-known NAT64 prefix (RFC 6052). On a network with NAT64,
+# 64:ff9b::7f00:1 is 127.0.0.1 by another name, and Python calls the wrapper
+# global.
+NAT64 = ipaddress.ip_network("64:ff9b::/96")
 BLOCKED_NAMES = ("localhost", "metadata.google.internal")
 BLOCKED_SUFFIXES = (".localhost", ".local", ".internal")
 
@@ -100,6 +99,9 @@ def _forbidden(address: str) -> str | None:
     # address inside it. Unwrap first, then ask once.
     if getattr(ip, "ipv4_mapped", None) is not None:
         ip = ip.ipv4_mapped  # type: ignore[assignment]
+    # The same for NAT64: the last 32 bits are the IPv4 host it reaches.
+    if ip.version == 6 and ip in NAT64:
+        ip = ipaddress.IPv4Address(int(ip) & 0xFFFF_FFFF)
 
     if ip.is_loopback:
         return f"{ip} is loopback"
