@@ -1169,6 +1169,8 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
   font-size:var(--t-body);margin:var(--s3) 0}
 .facts dt{color:var(--dim)}
 .facts dd{margin:0;font-family:var(--mono)}
+/* Facts that are words, not readings: set in the text face. */
+.facts.plain{font-size:var(--t-label)} .facts.plain dd{font-family:inherit}
 
 /* --------------------------------------------------------- transcript -- */
 /* PROMOTED FROM 13px TO 14px, which corrects an inversion: the longest
@@ -1776,13 +1778,19 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
    buttons; its own longest option is the narrowest it may get. */
 .admintable select{width:auto;min-width:max-content}
 .admintable tr.gone td{color:var(--dim)}
-.admintable .acts{display:flex;gap:var(--s1);flex-wrap:wrap}
+/* ONE LINE OF ACTIONS. Allowed to wrap, a row's buttons stacked three high
+   in the narrowest column the table could give them; held to one line, the
+   cell is as wide as its buttons and the row stays one row tall. */
+.admintable .acts{display:flex;gap:var(--s1);flex-wrap:nowrap;align-items:center}
+/* An address list: one host a line, never broken inside a host name. */
+.admintable .hosts>span{display:block}
 .admintable td.yes{text-align:center}
 .tag{display:inline-block;font-size:var(--t-micro);line-height:1.3;
   padding:0 .4em;border:1px solid var(--line);border-radius:999px;color:var(--dim);
   white-space:nowrap}
 .tag.warn{border-color:var(--warn);color:var(--warn)}
 .tag.bad{border-color:var(--bad);color:var(--bad)}
+.tag.good{border-color:var(--good);color:var(--good)}
 /* A KEY OR A TEMPORARY PASSWORD, SHOWN ONCE. Monospace, selectable whole,
    and nowhere else on the page: it is gone the moment it is dismissed. */
 .secretonce{font-family:var(--mono);overflow-wrap:anywhere;user-select:all;
@@ -17134,6 +17142,22 @@ function agentSaid(agent) {
     : /Mac OS X/.test(text) ? "macOS" : /Windows/.test(text) ? "Windows" : /Linux/.test(text) ? "Linux" : "";
   return [browser, system].filter(Boolean).join(" on ") || (text ? "another program" : "unknown");
 }
+/* Who did it, in a table cell: a service by its own name ("satellites"),
+   not "System (satellites)", and a person as userSaid has them. */
+function whoSaid(id) {
+  return /^svc:[a-z-]+$/.test(String(id || "")) ? String(id).slice(4) : userSaid(id);
+}
+/* A row button made the row's one filled action. */
+function primaryButton(button) { button.classList.add("primary"); return button; }
+/* "env SATELLITES_HA_TOKEN @ satellites" as a person would say it. The
+   variable is the row's own name when it came from the environment, so only
+   a file's variable is named. */
+function importedSaid(source) {
+  const m = /^(env|file) (\S+) @ (\S+)$/.exec(String(source || ""));
+  if (!m) return "Imported from " + source;
+  return m[1] === "env" ? `Imported from the ${m[3]} service's environment`
+    : `Imported from the ${m[3]} service's key file (${m[2]})`;
+}
 /* A button for a row, with its handler. */
 function rowButton(text, act, danger) {
   const button = make("button", { class: "small" + (danger ? " danger" : ""), type: "button", text });
@@ -17723,36 +17747,57 @@ function secretsDraw(answer, users) {
   const keyring = answer.keyring || {};
   $("secret-rotate").hidden = !keyring.rotatable;
   $("secrets").replaceChildren(rows.length ? tableOf(
-    ["Name", "Kind", "Read by", "May be sent to", "Changed", ""],
+    ["Name", "Read by", "May be sent to", "Changed", ""],
     rows.map(row => [
-      make("span", {}, make("code", { text: row.name }), " ",
-        row.set ? null : make("span", { class: "tag", text: "not set" }),
-        row.unreviewed ? make("span", { class: "tag warn", text: "unreviewed" }) : null,
-        row.undecryptable ? make("span", { class: "tag bad", text: "could not be decrypted" }) : null,
+      /* The kind sits under the name with the row's state, rather than in a
+         column of its own one word wide. */
+      make("span", {}, make("code", { text: row.name }),
+        make("span", { class: "sub" }, row.kind,
+          row.set ? null : [" ", make("span", { class: "tag", text: "not set" })],
+          row.unreviewed ? [" ", make("span", { class: "tag warn", text: "unreviewed" })] : null,
+          row.undecryptable ? [" ", make("span", { class: "tag bad", text: "could not be decrypted" })] : null),
         row.description ? make("div", { class: "hint", text: row.description }) : null,
-        row.imported_from ? make("div", { class: "hint", text: "Imported from " + row.imported_from }) : null),
-      row.kind,
+        row.imported_from ? make("div", { class: "hint", text: importedSaid(row.imported_from) }) : null),
+      /* "Used by" is what the hub's actions name, so it is said only of a
+         secret the hub reads; tts-long's key is used by tts-long itself. */
       two((row.consumers || []).join(", ") || "nobody",
-        ((used) => used ? "used by " + used : "")((users.get(row.name) || []).join("; ")
-          || (holds("satellites:admin") ? "nothing" : ""))),
-      (row.allowed_hosts || []).join(", ") || "nowhere",
-      two(row.updated_at ? dateSaid(row.updated_at) + (row.updated_by ? " by " + userSaid(row.updated_by) : "") : "",
-        "read " + (row.last_read_at ? dateSaid(row.last_read_at) + (row.last_read_by ? " by " + userSaid(row.last_read_by) : "") : "never")),
+        (row.consumers || []).includes("satellites")
+          ? ((used) => used ? "used by " + used : "")((users.get(row.name) || []).join("; ")
+            || (holds("satellites:admin") ? "nothing yet" : ""))
+          : ""),
+      (row.allowed_hosts || []).length
+        ? make("span", { class: "hosts" }, row.allowed_hosts.map(host => make("span", { text: host })))
+        : "nowhere",
+      two(row.updated_at ? dateSaid(row.updated_at) + (row.updated_by ? " by " + whoSaid(row.updated_by) : "") : "",
+        "read " + (row.last_read_at ? dateSaid(row.last_read_at) + (row.last_read_by ? " by " + whoSaid(row.last_read_by) : "") : "never")),
+      /* CONFIRM FIRST, AND THE ONE FILLED BUTTON, while the row waits for it:
+         it is the thing this row is asking for. */
       make("span", { class: "acts" },
+        row.unreviewed ? primaryButton(rowButton("Confirm", button => secretConfirm(row, button))) : null,
         rowButton(row.set ? "Replace" : "Set", () => secretEditor(row, "value")),
         rowButton("Bindings", () => secretEditor(row, "bindings")),
-        row.unreviewed ? rowButton("Confirm", button => secretConfirm(row, button)) : null,
         row.set ? rowButton("Clear", button => secretClear(row, button), true) : null)]),
-    i => rows[i].set ? null : "gone", { text: [0, 2, 3] })
+    i => rows[i].set ? null : "gone", { text: [0, 1] })
     : make("div", { class: "hint", text: "No secrets yet." }));
   for (const [i, tr] of [...$("secrets").querySelectorAll("tbody tr")].entries())
     tr.dataset.secret = rows[i].name;
-  $("secretstatus").replaceChildren(...(answer.status || []).map(item => make("div", { class: "hint",
-    text: `${item.label}: ${{ ok: "valid", expiring: "expiring soon", expired: "expired", unreadable: "cannot be read",
-      not_configured: "not configured", present: "present", absent: "absent", configured: "configured",
-      unknown: "unknown" }[item.state] || item.state}`
-      + (item.expires_at ? `, until ${dateSaid(item.expires_at)}` : "")
-      + (item.key_id ? `, key ${item.key_id}` : "") })));
+  /* WHAT STAYS OUTSIDE THE STORE, as facts with a state each: the
+     certificate, the runner's key file and the firmware key are held by the
+     services that use them, and are shown here so this is the one place to
+     look. "Not reported" is a service too old to say. */
+  const STATE = { ok: ["valid", "good"], expiring: ["expiring soon", "warn"], expired: ["expired", "bad"],
+    unreadable: ["cannot be read", "bad"], not_configured: ["not configured", ""], present: ["present", "good"],
+    absent: ["absent", ""], configured: ["configured", "good"], unknown: ["not reported", ""] };
+  const status = answer.status || [];
+  $("secretstatus").replaceChildren(...(status.length ? [
+    make("p", { class: "label-like", text: "Held outside the store" }),
+    make("dl", { class: "facts plain" }, status.flatMap(item => {
+      const [said, tone] = STATE[item.state] || [item.state, ""];
+      return [make("dt", { text: item.label }),
+        make("dd", {}, make("span", { class: "tag" + (tone ? " " + tone : ""), text: said }),
+          item.expires_at ? ` until ${dateSaid(item.expires_at)}` : "",
+          item.key_id ? [" key ", make("code", { text: item.key_id })] : "")];
+    }))] : []));
   if (ADMIN.focusSecret) {
     const tr = $("secrets").querySelector(`tr[data-secret="${CSS.escape(ADMIN.focusSecret)}"]`);
     ADMIN.focusSecret = "";

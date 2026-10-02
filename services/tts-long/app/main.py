@@ -126,7 +126,7 @@ from .dispatch import FINISHED, YIELDED, Dispatcher, LaneProbe
 from .encoders import MEDIA_TYPES, available_formats, encode, make_encoder
 from .remote import (RemoteSynth, RemoteUnavailable, RemoteYield, RunnerClient,
                      RunnerConfig)
-from .runner_key import RunnerKey
+from .runner_key import FILE_VARIABLE as RUNNER_KEY_FILE_VARIABLE, RunnerKey
 from .synth import SAMPLE_RATE, Synth, speech_tokens
 
 OUT_DIR = Path(os.getenv("TTS_OUTPUT_DIR", "/output"))
@@ -1879,6 +1879,16 @@ def _last_runner_snapshot() -> dict | None:
     return getattr(runner, "_snap", None) if runner is not None else None
 
 
+def _runner_key_file_present() -> bool:
+    """TTS_RUNNER_API_KEY_FILE is set and names a readable, non-empty file."""
+    path = os.environ.get(RUNNER_KEY_FILE_VARIABLE, "").strip()
+    try:
+        return bool(path) and os.path.isfile(path) and os.path.getsize(path) > 0 \
+            and os.access(path, os.R_OK)
+    except OSError:
+        return False
+
+
 async def _health() -> dict[str, object]:
     """The body, unchanged apart from the queue's new ceiling.
 
@@ -1918,6 +1928,11 @@ async def _health() -> dict[str, object]:
     return {
         "status": "ok",
         "model_loaded": pool is not None and pool.loaded,
+        # WHETHER THE RUNNER KEY'S FILE IS THERE, for Admin > Secrets, which
+        # lists it beside the store as the one key still held outside it. A
+        # boolean read off the filesystem, never the value; the gateway showed
+        # "unknown" for as long as this field did not exist.
+        "runner_key_file": _runner_key_file_present(),
         "threads": THREADS,
         "queued": dispatch.depth(),
         "queue_capacity": MAX_QUEUE,

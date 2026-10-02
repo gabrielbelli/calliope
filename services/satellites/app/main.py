@@ -2887,6 +2887,10 @@ def _health() -> dict:
                     "stt_engine": routing.current().stt_engine,
                     "load_error": routing.current().rules.load_error},
         "mqtt": h.bridge.health() if h.bridge else None,
+        # WHICH KEY FIRMWARE MUST BE SIGNED WITH, for Admin > Secrets: the
+        # public key's short id, or None with no SATELLITES_FIRMWARE_PUBKEY.
+        # A public name, never key material; without it the page said "unknown".
+        "firmware_key_id": signing.key_id(FIRMWARE_KEY) if FIRMWARE_KEY is not None else None,
     }
 
 
