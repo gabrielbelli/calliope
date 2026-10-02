@@ -62,6 +62,8 @@ import httpx
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 SERVICES = REPO / "services"
+# What the page server runs in place of app/fetcher.py (see Stack.start).
+FAKE_FETCHER = SERVICES / "ui" / "tests" / "fake_fetcher.py"
 
 # THE HARNESS'S OWN DIRECTORY: the lock, the per-run logs and data, the browser
 # profiles and the screenshots. Outside the repository, so nothing a run writes
@@ -324,9 +326,9 @@ class FakeControl:
         self._ok(self.http.delete("/__fake/requests"))
 
     def reset(self) -> None:
-        """Requests, failures, health overrides, transcript, jobs, glossaries and
-        MeTube back to how the session started. The hub is real and is not
-        reset here; see Stack.restart_hub."""
+        """Requests, failures, health overrides, transcript, jobs and glossaries
+        back to how the session started. The hub is real and is not reset
+        here; see Stack.restart_hub."""
         if self._ok(self.http.post("/__fake/reset"))["health_changed"]:
             self.fresh_health()
 
@@ -337,7 +339,7 @@ class FakeControl:
         """Answer requests matching `path` (a regular expression) with `status`
         instead of the fake's answer, `times` times or for ever; or, with
         status=None, only hold them for `delay` seconds first. backend is one
-        of stt, tts, tts_long, metube. With status=None, cut_after=n breaks a
+        of stt, tts, tts_long. With status=None, cut_after=n breaks a
         streamed /v1/audio/speech after n deltas with the service's in-band
         error frame, and `headers` go on that stream's response."""
         if json_body is None and body is None and status and status >= 400:
@@ -422,9 +424,6 @@ class FakeControl:
         port = self.base.rsplit(":", 1)[1]
         query = urlencode({"to": to, "username": username, "password": password})
         return f"http://{host}:{port}/__fake/elsewhere/sign-in?{query}"
-
-    def metube(self) -> dict[str, Any]:
-        return self._ok(self.http.get("/__fake/metube"))
 
     # -- satellites: kitchen (Korvo), lounge (Pi with AirPlay), hallway (Korvo, not adopted)
 
@@ -581,7 +580,7 @@ class Stack:
         self.run = RUNS / str(self.owner)
         self.children: dict[str, subprocess.Popen] = {}
         self.ports = {name: free_port() for name in
-                      ("stt", "tts", "long", "metube", "control", "hub", "gateway", "internal", "ui")}
+                      ("stt", "tts", "long", "control", "hub", "gateway", "internal", "ui")}
         self.url = f"http://127.0.0.1:{self.ports['gateway']}"
         self.ui_direct = f"http://127.0.0.1:{self.ports['ui']}"
         self.hub = f"http://127.0.0.1:{self.ports['hub']}"
@@ -620,7 +619,7 @@ class Stack:
         try:
             self._spawn("fakes", ["--fakes", "--repo", str(REPO), "--svc-dir", str(self.svc),
                                   *(f"--{n}-port={self.ports[n]}" for n in ("stt", "tts", "long",
-                                                                          "metube", "control"))],
+                                                                          "control"))],
                         cwd=HERE, env={})
             self._wait("fakes", f"http://127.0.0.1:{self.ports['control']}/__fake/health")
             self._spawn("gateway", ["--app", "app.main:app", "--app-dir", str(SERVICES / "gateway"),
@@ -647,34 +646,30 @@ class Stack:
             # answers, so the services after it start with their credentials.
             self._wait("gateway", f"{self.url}/health")
             self._start_hub()
+            ui = {"CALLIOPE_RUN_DIR": str(self.svc / "ui"),
+                  # THE REAL yt-dlp NEVER RUNS HERE. launch.py walls in the
+                  # page server's own sockets, and not those of a child it
+                  # spawns, so the downloader is the stand-in: stdlib only,
+                  # no socket, and what it does chosen by a word in the link
+                  # (services/ui/tests/fake_fetcher.py).
+                  "UI_FETCHER": str(FAKE_FETCHER),
+                  "UI_CACHE_DIR": str(self.run / "cache"),
+                  # The stand-in's `unprobed` sleeps; two seconds is how long
+                  # a test waits for the card that says so.
+                  "UI_PROBE_TIMEOUT": "2",
+                  # Twelve a minute is the deployment's rate limit for one
+                  # person, and a file of link tests passes it in under a
+                  # minute as the one admin, so it would read 429s it did not
+                  # cause.
+                  "UI_RESOLVE_PER_MINUTE": "600",
+                  "UI_VOICE_DIR": str(self.run / "voices"),
+                  "UI_LOG_LEVEL": "WARNING"}
+            if not ui.get("UI_FETCHER") or not Path(ui["UI_FETCHER"]).is_file():
+                raise RuntimeError("the page server would run the real yt-dlp, outside "
+                                   "launch.py's network wall; UI_FETCHER must name the stand-in")
             self._spawn("ui", ["--app", "app.main:app", "--app-dir", str(SERVICES / "ui"),
                                "--port", str(self.ports["ui"])],
-                        cwd=SERVICES / "ui", routed=True, env={
-                            "CALLIOPE_RUN_DIR": str(self.svc / "ui"),
-                            "UI_METUBE_URL": f"http://127.0.0.1:{self.ports['metube']}",
-                            # WAV, not the production opus: the fake MeTube
-                            # serves a WAV, and a name that says so keeps the
-                            # content type honest all the way to <audio>.
-                            "UI_METUBE_FORMAT": "wav",
-                            # THE PROBE ON, AND THE REAL yt-dlp OUT OF REACH. The
-                            # venv holds a real one, and it would reach for the
-                            # network from a subprocess launch.py does not wall
-                            # in, so the venv is left off this PATH altogether:
-                            # the only yt-dlp the page server can find is
-                            # e2e/bin/yt-dlp, which prints an info-dict chosen by
-                            # a word in the link (live, subs, long, unprobed) and
-                            # lets the confirm card's every branch be reached.
-                            # The page server itself is started by absolute path
-                            # and spawns nothing else.
-                            "UI_PROBE": "1",
-                            "PATH": f"{HERE / 'bin'}:/usr/bin:/bin",
-                            # Twelve a minute is the deployment's rate limit for
-                            # one person, and a file of link tests passes it in
-                            # under a minute as the one admin, so it would read
-                            # 429s it did not cause.
-                            "UI_RESOLVE_PER_MINUTE": "600",
-                            "UI_VOICE_DIR": str(self.run / "voices"),
-                            "UI_LOG_LEVEL": "WARNING"})
+                        cwd=SERVICES / "ui", routed=True, env=ui)
             self._wait("ui", f"{self.ui_direct}/health")
         except BaseException:
             self.stop()
@@ -966,6 +961,15 @@ class Stack:
         runs = sorted((p for p in RUNS.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime)
         for old in runs[:-KEEP_RUNS]:
             shutil.rmtree(old, ignore_errors=True)
+
+    def fetches(self) -> list[dict[str, Any]]:
+        """Every download the stand-in fetcher ran, oldest first: its argv
+        (fetch KIND CAP LANG -- URL), environment, cwd and pid. A cache hit
+        runs none."""
+        path = self.run / "cache" / "fetches.log"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines() if line]
 
     def violations(self) -> list[str]:
         path = self.run / "network-violations.log"

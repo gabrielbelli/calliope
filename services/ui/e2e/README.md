@@ -57,7 +57,7 @@ ps -axo pid=,ppid=,command= | awk '$3 ~ /chrome-headless-shell|launch\.py|playwr
 ```text
 browser -> gateway :8080 (real) -> page server, hub (real); stt, tts, tts-long (fakes.py)
            hub, page server -> gateway :8081 (internal, real) -> stt, tts (fakes.py)
-           page server -> MeTube (fakes.py)
+           page server -> its downloader child (../tests/fake_fetcher.py)
            scripted satellites (fakes.py) -> gateway device socket -> hub
 ```
 
@@ -133,13 +133,14 @@ outlives a hub restart and every test: `stack.store_secret` puts one there,
 and `conftest.py` clears the store after any test that stored one, that way or
 through the page.
 
-The page server runs with `UI_METUBE_FORMAT=wav`, a clip store that holds one
-voice, `narrator`, which is the admin's own, and a resolve limit of 600 a
-minute instead of 12, because a file of link tests runs as the one admin. Its
-metadata probe is on, and the only `yt-dlp` on its `PATH` is `bin/yt-dlp`, a
-shell script that prints an info-dict and touches nothing. The venv's real
-`yt-dlp` is left off that `PATH`, because it would reach for the network from
-a process `launch.py` does not wall in.
+The page server runs with a clip store that holds one voice, `narrator`, which
+is the admin's own, and a resolve limit of 600 a minute instead of 12, because
+a file of link tests runs as the one admin. Its downloader is the stand-in
+`services/ui/tests/fake_fetcher.py` (`UI_FETCHER`), which speaks the real
+child's protocol, writes into the run's own `cache/` and opens no socket.
+`stack.py` refuses to start the page server without it: the real yt-dlp would
+reach for the network from a child process, and `launch.py` walls in only the
+page server's own.
 
 A stack starts and signs in in about 10 seconds, once per session. The fake
 backends and the scripted satellites are in one process. Everything is in
@@ -204,7 +205,7 @@ inside it.
 
 | Call | What it does |
 |---|---|
-| `fake.requests(backend=, method=, path=, since=)` | What reached the fake backends, oldest first: method, path, query, the `x-` headers, status, and the JSON body or form fields (a file as its name, type and size). `identity` is who the gateway said asked (`sub`, `kind`, `cred`, `scopes`), or None. An `X-Calliope-*` header is recorded by name only, under `calliope_headers`, and a cookie or an `Authorization` header only as `cookie: true` and `authorization: true`; only `ha`, `llm` and `hook`, which are handed tokens a test made up, keep the `Authorization` value. `began` and `seq` are when the request arrived and when it was answered, on one clock. `backend` is `stt`, `tts`, `tts_long`, `metube`, or `ha`, `llm` and `hook` for what the hub sent a wake word's action or a button's webhook. `path` is a regular expression. |
+| `fake.requests(backend=, method=, path=, since=)` | What reached the fake backends, oldest first: method, path, query, the `x-` headers, status, and the JSON body or form fields (a file as its name, type and size). `identity` is who the gateway said asked (`sub`, `kind`, `cred`, `scopes`), or None. An `X-Calliope-*` header is recorded by name only, under `calliope_headers`, and a cookie or an `Authorization` header only as `cookie: true` and `authorization: true`; only `ha`, `llm` and `hook`, which are handed tokens a test made up, keep the `Authorization` value. `began` and `seq` are when the request arrived and when it was answered, on one clock. `backend` is `stt`, `tts`, `tts_long`, or `ha`, `llm` and `hook` for what the hub sent a wake word's action or a button's webhook. `path` is a regular expression. |
 | `fake.last_seq()`, `fake.clear_requests()` | For "only what happened after this point": the request log's clock now, and a log emptied. |
 | `fake.fail(path, status=500, method=, backend=, json_body=, times=, delay=, headers=, cut_after=)` | Answers matching requests with an error instead. With `status=None`, it only delays them, which is useful for loading states; with `status=None` and `cut_after=n`, a streamed `/v1/audio/speech` sends n deltas and then tts-stack's in-band error frame, with `headers` on its response (tts-long's `X-Job-Id`, say). |
 | `fake.health(backend, **fields)` | Merges fields over a backend's `/health` (`None` removes one), and returns once the gateway has probed the backends again: it keeps a probe for 5 s. For example, `fake.health("tts_long", runner=None)` hides the GPU runner panel. A field the gateway's allowlist does not name never reaches the page. |
@@ -215,8 +216,8 @@ inside it.
 | `fake.add_job(**fields)` | A tts-long job, the admin's unless `owner` says whose (`None` is a system record). Scripted by default: it is queued for 1 s, then finishes one segment every 1.2 s. Use `scripted=False, status="failed"` for a fixed state. |
 | `fake.jobs(**params)`, `fake.job(id)` | tts-long's listing over every job whoever owns it (the same filters and counts), and one job's whole record (`None` once it is gone). |
 | `fake.elsewhere(to, username, password, host="127.0.0.1")` | The address of another site's page that submits a sign-in form to `to` by itself: on `127.0.0.1` it is the gateway's site with another origin, on `localhost` another site. |
-| `fake.metube()` | The fake MeTube's downloads. |
-| `fake.reset()` | Restores the request log, failures, health, transcript, jobs, glossaries and MeTube to their start state. The hub is not reset. `stack.restart_hub()` gives a fresh one in about a second. |
+| `stack.fetches()` | Every download the stand-in fetcher ran, oldest first: its argv (`fetch KIND CAP LANG -- URL`), environment, cwd and pid. A cache hit runs none. |
+| `fake.reset()` | Restores the request log, failures, health, transcript, jobs and glossaries to their start state. The hub is not reset. `stack.restart_hub()` gives a fresh one in about a second. |
 
 ### The scripted satellites
 
@@ -260,10 +261,9 @@ Their wire shapes are copied from the real services.
 
 | Backend | Routes |
 |---|---|
-| stt-stack | `GET /health`; `POST /v1/audio/transcriptions` (`json`, `text`, `srt`, `vtt`, `verbose_json` with `words` and `segments` spread over the upload's length); `POST /v1/audio/translations` (Parakeet's 400); `POST /transcribe`. Both transcription routes apply the profiles named in a `glossary` field, as the caller may name them, to the transcript, and report the terms that changed it: `/transcribe` as `repaired`, `/v1` as the `x-glossary-repaired` header. A name the caller cannot see, another person's or `home-assistant` without its scope, is refused with 400 as an unknown profile, listing the names they can, as the service refuses it; `GET /glossaries` (with `?owner=`); `GET`, `PUT` and `DELETE /glossaries/{name}` (`dictation` and `tech` are built in and answer 409; a line without both sides of `=` is refused with its number). A person's profiles are theirs; the admin, who holds `glossaries:read:all`, reads and writes the system's unless `?owner=` names someone, and `home-assistant` is reserved. |
+| stt-stack | `GET /health`; `POST /v1/audio/transcriptions` (`json`, `text`, `srt`, `vtt`, `verbose_json` with `words` and `segments` spread over the upload's length, or over the `clip_start` to `clip_end` window of it, with the times on the whole file's timeline); `POST /v1/audio/translations` (Parakeet's 400); `POST /transcribe`. Both transcription routes apply the profiles named in a `glossary` field, as the caller may name them, to the transcript, and report the terms that changed it: `/transcribe` as `repaired`, `/v1` as the `x-glossary-repaired` header. A name the caller cannot see, another person's or `home-assistant` without its scope, is refused with 400 as an unknown profile, listing the names they can, as the service refuses it; `GET /glossaries` (with `?owner=`); `GET`, `PUT` and `DELETE /glossaries/{name}` (`dictation` and `tech` are built in and answer 409; a line without both sides of `=` is refused with its number). A person's profiles are theirs; the admin, who holds `glossaries:read:all`, reads and writes the system's unless `?owner=` names someone, and `home-assistant` is reserved. |
 | tts-stack | `GET /health`; `GET /voices` (Kokoro's names and the OpenAI aliases); `POST /v1/audio/speech` (`pcm` and `wav` are real; `mp3`, `opus`, `aac` and `flac` are WAV bytes under their own content type; `stream_format=sse` sends half-second deltas); `POST /speak` (with `X-Segment-Offsets`) |
 | tts-long | `GET /health` (the engines from `voice_common.engines`, both lanes, an idle GPU runner); `POST /jobs` (owned by whoever the gateway says asked); `GET /jobs` (the caller's own, or `?owner=all`, `system` or a user ID with `jobs:read:all`, filtered before the counts and the limit; with `kind`, `audio`, `status` and `limit`); `GET` and `DELETE /jobs/{id}`; `GET` and `DELETE /jobs/{id}/audio` (somebody else's job answers 404 unless `?owner=` covers it); `POST /v1/audio/speech` |
-| MeTube | `POST /add` (a URL containing `unsupported` is refused), `/start`, `/delete`; `GET /history` (a download finishes 3 s after it starts, and one whose URL contains `broken` fails then, with MeTube's error); `GET /audio_download/…` and `/download/…` (one exact path per finished file, with ranges) |
 
 At the start, the admin's Jobs tab has five jobs: a finished clone with audio,
 one whose audio was deleted, a failed clone, a Kokoro run and a transcription.
@@ -274,16 +274,20 @@ Links are resolved without the network. `launch.py` answers
 `example.com`, `example.org` and `example.net` with a public address, so use
 those in link tests. Any other name fails, as it would with no network.
 
-The probe answers by a word in the link, so each branch of the confirm card can
-be reached:
+The stand-in fetcher answers by a word in the link, so each branch of the
+confirm card and of a download can be reached. A download takes three seconds
+and writes a 12 s WAV. The whole list is in `fake_fetcher.py`'s docstring.
 
-| Word in the link | What `bin/yt-dlp` reports |
+| Word in the link | What it does |
 |---|---|
-| `unprobed` | Nothing: it exits 1, as a stale extractor does, and the card has no length or size |
-| `live` | A live stream, with no length and no size |
-| `long` | 7200 s |
-| `subs` | 180 s, with subtitles a person wrote |
-| anything else | 180 s and 2.7 MB of audio |
+| `unprobed` | Sleeps past the two-second probe limit: the card has no length or size |
+| `live`, `playlist` | Refused at resolve, with the reason |
+| `private`, `unsupported` | The guard's refusal, an extractor's failure |
+| `long` | 7200 s, 55 MB |
+| `subs` | Subtitles a person wrote, in English |
+| `video` | One file with picture and sound, so "Keep the video" is offered |
+| `broken` | Resolves, then fails to download with a 403 |
+| anything else | 180 s and 1.4 MB of audio, no subtitles, no single file |
 
 ## Running the stack without a browser
 

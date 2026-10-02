@@ -3,8 +3,9 @@ stack.
 
 WHAT IS ASSERTED, AND WHERE IT IS READ. What the page sent is read twice: from
 the browser's own request log (browser_log) for the page's routes, and from the
-fakes' log (fake.requests) for what arrived at stt-stack and MeTube, where a
-multipart form is parsed into its fields. What the page shows is read off the
+fakes' log (fake.requests) for what arrived at stt-stack, where a multipart
+form is parsed into its fields. What the page server downloaded is read from
+the stand-in downloader's own log (stack.fetches()). What the page shows is read off the
 page. Nothing is ever heard: the browser runs with --mute-audio, and a player
 is judged by its element's state (src, readyState, currentTime), never by
 sound.
@@ -16,11 +17,12 @@ written once per module (the `media` fixture): WAVs at 16 and 44.1 kHz, a
 forty-second one for the compute budget, random bytes named .mp3 that no
 browser can decode, and, when ffmpeg is on PATH, a WebM with a picture.
 
-LINKS. Resolving a link runs the page server's metadata probe, which on this
-stack is e2e/bin/yt-dlp: it answers by a word in the link (live, subs, long,
-unprobed), and the fake MeTube fails a download whose link says "broken" and
-refuses one that says "unsupported". Links use example.com, the one name the
-stack's resolver answers. A fake download takes three seconds.
+LINKS. Resolving a link and fetching it run the page server's downloader
+child, which on this stack is services/ui/tests/fake_fetcher.py: it answers by
+a word in the link (live, playlist, private, subs, video, long, unprobed,
+unsupported, broken) and opens no socket. Links use example.com, the one name
+the stack's resolver answers. A fake download takes three seconds and is a 12 s
+WAV.
 
 THE CONFIG. Two ceilings come from the server (/ui/config): the upload ceiling
 and the gateway's compute budget. A test that needs one lower answers the
@@ -43,10 +45,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import pytest
-from conftest import fetch_as_page
+from conftest import USER_JOBS, fetch_as_page
 from fakes import DEFAULT_TRANSCRIPT
 from playwright.sync_api import expect
-from test_routes import here, history_length, open_tab, settled, wait_for_address
+from test_routes import held, here, history_length, open_tab, settled, wait_for_address
 
 TRANSCRIBED = re.compile(r"^/(v1/audio/transcriptions|transcribe)$")
 
@@ -160,8 +162,9 @@ def expert(page) -> None:
 
 
 def link(word: str = "talk") -> str:
-    """A link of its own for each test, so MeTube's record of one is never
-    another's. The suffix is hex, which spells none of the stand-ins' words."""
+    """A link of its own for each test, so neither its job nor its cached file
+    is another test's. The suffix is hex, which spells none of the stand-in's
+    words."""
     return f"https://example.com/{word}-{uuid.uuid4().hex[:8]}"
 
 
@@ -193,10 +196,6 @@ def fetched(page) -> None:
 
 def committed(browser_log) -> list[dict]:
     return [r["json"] for r in browser_log.sent("POST", r"^/ui/commit$")]
-
-
-def metube(fake, since: int, path: str) -> list[dict]:
-    return fake.requests(backend="metube", path=path, since=since)
 
 
 def words_of(text: str) -> int:
@@ -253,7 +252,7 @@ def test_dropping_a_file_on_the_drop_zone_prepares_it_like_choosing_one(page, go
 
 def test_dropping_a_link_fills_the_box_and_does_not_resolve_it(page, goto, browser_log):
     """A link dragged out of another tab lands in the box with the caret in
-    it. Resolving is a press of its own: it adds the link to MeTube."""
+    it. Resolving is a press of its own: it runs a probe on the server."""
     goto("/ui")
     ready(page)
     url = link()
@@ -412,20 +411,19 @@ def test_a_refused_microphone_says_so_and_points_to_a_file(page, goto):
 # ---- links -----------------------------------------------------------------------------
 
 
-def test_resolving_a_link_opens_the_confirm_card_and_downloads_nothing(page, goto, fake, browser_log):
+def test_resolving_a_link_opens_the_confirm_card_and_downloads_nothing(page, goto, stack, browser_log):
     goto("/ui")
     ready(page)
-    since = fake.last_seq()
+    before = len(stack.fetches())
     url = link()
     resolve(page, url)
     assert [r["json"] for r in browser_log.sent("POST", r"^/ui/resolve$")] == [{"url": url}]
-    added = metube(fake, since, r"^/add$")
-    assert [a["json"]["auto_start"] for a in added] == [False], f"resolving started a download: {added}"
-    assert not metube(fake, since, r"^/start$") and not committed(browser_log)
+    assert len(stack.fetches()) == before, "resolving started a download"
+    assert not committed(browser_log)
     slug = url.rsplit("/", 1)[1]
     expect(page.locator("#c-title")).to_have_text("Fetch this?")
     expect(page.locator("#c-sub")).to_have_text(f"Probed talk {slug} · Example Channel")
-    assert facts(page) == {"Length": "3m 00s", "Download": "2.7 MB of audio only",
+    assert facts(page) == {"Length": "3m 00s", "Download": "1.4 MB of audio only",
                            "Transcribe": "about 20 seconds at 8.5×"}
     expect(page.locator("#c-live")).to_be_empty()
     expect(page.locator("#c-start")).to_have_value("")
@@ -435,11 +433,11 @@ def test_resolving_a_link_opens_the_confirm_card_and_downloads_nothing(page, got
     page.locator("#c-cancel").click()
 
 
-def test_resolving_says_nothing_is_downloaded_yet_and_holds_the_button(page, goto, fake):
-    fake.fail(r"^/add$", status=None, backend="metube", delay=1.5, times=1)
+def test_resolving_says_nothing_is_downloaded_yet_and_holds_the_button(page, goto):
+    """`unprobed` holds the probe until its two-second limit."""
     goto("/ui")
     ready(page)
-    page.locator("#url").fill(link())
+    page.locator("#url").fill(link("unprobed"))
     page.locator("#resolve").click()
     expect(page.locator("#linkhint")).to_have_text("Resolving. Nothing is downloaded yet.")
     expect(page.locator("#resolve")).to_be_disabled()
@@ -460,10 +458,14 @@ def test_enter_in_the_link_box_resolves_it(page, goto, browser_log):
 
 
 @pytest.mark.parametrize(("url", "said"), [
-    ("https://example.com/unsupported-thing", "Unsupported URL"),
+    ("https://example.com/unsupported-thing",
+     "Could not read that link: Unsupported URL: https://example.com/unsupported-thing"),
     ("https://example.com:8080/talk", "only ports 80 and 443 are fetched, not 8080"),
-], ids=["metube-refuses", "the-guard-refuses"])
-def test_an_unsupported_link_says_why_under_the_box(page, goto, fake, url, said):
+    ("https://example.com/private-thing", "refusing to fetch: 10.0.0.5 is a private address"),
+    ("https://example.com/playlist-of-talks",
+     "That link is a playlist or a channel. Paste the link of one video."),
+], ids=["the-downloader-cannot-read-it", "the-guard-refuses", "the-child-refuses", "a-playlist"])
+def test_an_unsupported_link_says_why_under_the_box(page, goto, url, said):
     goto("/ui")
     ready(page)
     page.locator("#url").fill(url)
@@ -475,66 +477,86 @@ def test_an_unsupported_link_says_why_under_the_box(page, goto, fake, url, said)
 
 
 def test_an_unprobed_link_says_there_is_no_length_or_size(page, goto):
-    """The probe failed, so the card has MeTube's title and nothing else, and
-    says the estimate is missing rather than drawing one from nothing."""
+    """The probe gave no answer in time, so the card has the link and nothing
+    else, and says the estimate is missing rather than drawing one from
+    nothing."""
     goto("/ui")
     ready(page)
     url = link("unprobed")
     resolve(page, url)
     expect(page.locator("#c-live")).to_have_text("No length or size for this link. The estimate is unavailable.")
     assert facts(page) == {"Length": "unknown", "Download": "unknown, audio only", "Transcribe": "unknown"}
-    expect(page.locator("#c-sub")).to_have_text("Example talk: " + url.rsplit("/", 1)[1].replace("-", " "))
+    expect(page.locator("#c-sub")).to_have_text(url)
     expect(page.locator("#picked .filechip")).to_contain_text("duration unknown")
+    expect(page.locator("#c-video")).to_be_enabled()
     page.locator("#c-cancel").click()
 
 
 def test_ticking_keep_the_video_changes_the_download_row_and_is_cleared_for_the_next_link(page, goto):
     goto("/ui")
     ready(page)
-    resolve(page, link())
+    resolve(page, link("video"))
     page.locator("#c-video").check()
-    assert facts(page)["Download"] == "gigabytes, not the 2.7 MB of audio"
+    assert facts(page)["Download"] == "more than the 1.4 MB of audio"
     page.locator("#c-video").uncheck()
-    assert facts(page)["Download"] == "2.7 MB of audio only"
+    assert facts(page)["Download"] == "1.4 MB of audio only"
     page.locator("#c-video").check()
     page.locator("#c-cancel").click()
-    resolve(page, link())
+    resolve(page, link("video"))
     expect(page.locator("#c-video")).not_to_be_checked()
-    assert facts(page)["Download"] == "2.7 MB of audio only"
+    assert facts(page)["Download"] == "1.4 MB of audio only"
     page.locator("#c-cancel").click()
 
 
-def test_keeping_the_video_asks_metube_for_the_video(page, goto, fake, browser_log):
+def test_keep_the_video_is_greyed_when_the_site_has_no_single_file(page, goto):
+    """Joining a picture-only and a sound-only stream needs ffmpeg, which the
+    server does not carry, so the box says so instead of failing later."""
     goto("/ui")
     ready(page)
-    since = fake.last_seq()
     resolve(page, link())
+    expect(page.locator("#c-video")).to_be_disabled()
+    expect(page.locator("#c-video")).not_to_be_checked()
+    expect(page.locator("#c-video-note")).to_have_text("(not offered for this link)")
+    page.locator("#c-cancel").click()
+    resolve(page, link("video"))
+    expect(page.locator("#c-video")).to_be_enabled()
+    expect(page.locator("#c-video-note")).to_have_text("(a much bigger download)")
+    page.locator("#c-cancel").click()
+
+
+def test_keeping_the_video_fetches_the_video(page, goto, stack, browser_log):
+    goto("/ui")
+    ready(page)
+    before = len(stack.fetches())
+    url = link("video")
+    resolve(page, url)
     page.locator("#c-video").check()
     fetched(page)
     assert committed(browser_log)[-1]["video"] is True
-    started = [a["json"] for a in metube(fake, since, r"^/add$") if a["json"]["auto_start"]]
-    assert started and started[-1]["download_type"] == "video", started
+    [run] = stack.fetches()[before:]
+    assert run["argv"][:2] == ["fetch", "video"] and run["argv"][-1] == url
     expect(page.locator("#sttplay")).to_be_visible()
 
 
-def test_dont_fetch_closes_the_card_and_abandons_the_link(page, goto, fake, browser_log):
+def test_dont_fetch_closes_the_card_and_abandons_the_link(page, goto, browser_log):
     goto("/ui")
     ready(page)
     url = link()
     resolve(page, url)
+    assert held(page, browser_log, url) == 200
     with page.expect_response(lambda r: urlparse(r.url).path == "/ui/abandon") as answer:
         page.locator("#c-cancel").click()
     assert answer.value.json() == {"token": url, "reaped": True}
     expect(page.locator("#confirm")).not_to_have_attribute("open", "")
     assert [r["json"] for r in browser_log.sent("POST", r"^/ui/abandon$")] == [{"token": url}]
-    assert url not in fake.metube(), "MeTube still has the declined link"
+    assert held(page, browser_log, url) == 404, "the server still holds the declined link"
     expect(page.locator("#picked")).to_be_hidden()
     expect(page.locator("#go-stt")).to_be_disabled()
     expect(page.locator("#stt-note")).to_be_empty()
     assert not committed(browser_log)
 
 
-def test_escape_on_the_confirm_card_abandons_the_link(page, goto, fake, browser_log):
+def test_escape_on_the_confirm_card_abandons_the_link(page, goto, browser_log):
     goto("/ui")
     ready(page)
     url = link()
@@ -542,58 +564,70 @@ def test_escape_on_the_confirm_card_abandons_the_link(page, goto, fake, browser_
     with page.expect_response(lambda r: urlparse(r.url).path == "/ui/abandon"):
         page.keyboard.press("Escape")
     expect(page.locator("#confirm")).not_to_have_attribute("open", "")
-    assert url not in fake.metube()
+    assert held(page, browser_log, url) == 404
     expect(page.locator("#picked")).to_be_hidden()
     assert not committed(browser_log)
 
 
-def test_fetch_and_transcribe_downloads_then_transcribes_with_timings(page, goto, fake, browser_log):
-    """MeTube downloads the audio (the only time anything is downloaded), the
-    page server hands it to stt itself, and the page asks for the body that
-    carries word and segment timings, so the transcript can be followed."""
+def test_fetch_and_transcribe_downloads_then_transcribes_with_timings(page, goto, fake, stack, browser_log):
+    """The page server downloads the audio (the only time anything is
+    downloaded) and hands it to stt itself, and the page asks for the body
+    that carries word and segment timings, so the transcript can be followed."""
     goto("/ui")
     ready(page)
     since = fake.last_seq()
+    before = len(stack.fetches())
     url = link()
     resolve(page, url)
     with page.expect_response(lambda r: urlparse(r.url).path == "/ui/fetch", timeout=20_000) as answer:
         page.locator("#c-go").click()
         expect(page.locator("#confirm")).not_to_have_attribute("open", "")
         said = page.locator("#stt-note .dlsaid")
-        expect(said).to_have_text(re.compile(r"^Downloading \d+% · 2\.4 MB/s · \ds left$"))
+        expect(said).to_have_text(re.compile(r"^Downloading \d+% · 0\.1 MB/s · \ds left$"))
         expect(page.locator("#stt-note .bar-fill")).to_be_attached()
         expect(page.locator("#go-stt")).to_be_disabled()
     assert answer.value.ok
     expect(page.locator("#result")).to_be_visible()
     expect(page.locator("#stt-note")).to_be_empty()
     assert committed(browser_log) == [{"token": url, "clip_start": None, "clip_end": None, "video": False}]
-    assert len(metube(fake, since, r"^/start$")) == 1, "an untrimmed audio fetch starts the parked record"
+    [run] = stack.fetches()[before:]
+    assert run["argv"][:2] == ["fetch", "audio"], run
     query = parse_qs(urlparse(answer.value.url).query)
     assert query == {"response_format": ["verbose_json"], "timestamp_granularities": ["word", "segment"]}
     form = stt_forms(fake, since)[-1]
     assert form["model"] == "parakeet" and form["response_format"] == "verbose_json"
     assert form["timestamp_granularities[]"] == ["word", "segment"]
-    assert form["file"]["filename"].endswith(".wav"), form
+    assert "clip_start" not in form and "clip_end" not in form
+    assert form["file"]["filename"] == f"Probed talk {url.rsplit('/', 1)[1]}.wav", form
     expect(page.locator("#transcript .cue")).to_have_count(words_of(DEFAULT_TRANSCRIPT))
     expect(page.locator("#result-meta")).to_contain_text("12 s of audio")
     expect(page.locator("#go-stt")).to_be_enabled()
 
 
 def test_a_trimmed_link_sends_its_start_and_stop_seconds(page, goto, fake, browser_log):
+    """The whole audio is downloaded, stt hears only the window, and the player
+    opens on it: the times are on the whole file's timeline."""
     goto("/ui")
     ready(page)
     since = fake.last_seq()
     url = link()
     resolve(page, url)
-    page.locator("#c-start").fill("30")
-    page.locator("#c-end").fill("90")
+    expect(page.locator("#confirm .body > .hint")).to_have_text(
+        "Only this part is transcribed. The audio is still downloaded whole.")
+    page.locator("#c-start").fill("2")
+    page.locator("#c-end").fill("7")
     fetched(page)
-    assert committed(browser_log)[-1] == {"token": url, "clip_start": 30, "clip_end": 90, "video": False}
-    started = [a["json"] for a in metube(fake, since, r"^/add$") if a["json"]["auto_start"]]
-    assert len(started) == 1 and started[0]["clip_start"] == 30 and started[0]["clip_end"] == 90, started
+    assert committed(browser_log)[-1] == {"token": url, "clip_start": 2, "clip_end": 7, "video": False}
+    form = stt_forms(fake, since)[-1]
+    assert (form["clip_start"], form["clip_end"]) == ("2.0", "7.0"), form
+    expect(page.locator("#result-meta")).to_contain_text("5 s of audio")
+    player = page.locator("#sttplayer")
+    assert player.get_attribute("src") == "/ui/media?token=" + quote(url, safe="") + "#t=2,7"
+    page.wait_for_function("() => document.getElementById('sttplayer').readyState >= 1")
+    assert abs(player.evaluate("p => p.currentTime") - 2.0) < 0.2, "the player did not open on the window"
 
 
-def test_stop_and_forget_it_abandons_a_download_in_progress(page, goto, fake, browser_log):
+def test_stop_and_forget_it_abandons_a_download_in_progress(page, goto, browser_log):
     """The note's own way out: the link is let go on the server, and the
     poll that was waiting on it asks nothing more."""
     goto("/ui")
@@ -608,7 +642,6 @@ def test_stop_and_forget_it_abandons_a_download_in_progress(page, goto, fake, br
     mark = len(browser_log.requests)
     expect(page.locator("#picked")).to_be_hidden()
     expect(page.locator("#go-stt")).to_be_disabled()
-    assert url not in fake.metube(), "MeTube still has the abandoned download"
     # One poll interval and a little more, watched from here in short steps.
     ends = time.monotonic() + 3.0
     while time.monotonic() < ends:
@@ -616,12 +649,12 @@ def test_stop_and_forget_it_abandons_a_download_in_progress(page, goto, fake, br
     later = [r["path"] + "?" + r["query"] for r in browser_log.requests[mark:]]
     assert not [p for p in later if p.startswith("/ui/progress")], f"the poll went on after Stop: {later}"
     expect(page.locator("#stt-note")).not_to_contain_text("Lost track of the download")
+    assert held(page, browser_log, url) == 404, "the server still holds the abandoned download"
 
 
-def test_a_finished_link_plays_through_the_media_route_with_ranges(page, goto, fake, browser_log):
+def test_a_finished_link_plays_through_the_media_route_with_ranges(page, goto, browser_log):
     goto("/ui")
     ready(page)
-    since = fake.last_seq()
     url = link()
     resolve(page, url)
     fetched(page)
@@ -632,36 +665,35 @@ def test_a_finished_link_plays_through_the_media_route_with_ranges(page, goto, f
     page.wait_for_function("() => document.getElementById('sttplayer').readyState >= 1")
     assert abs(player.evaluate("p => p.duration") - 12.0) < 0.2
     assert browser_log.sent("GET", r"^/ui/media$"), "the player never asked the media route"
-    served = metube(fake, since, r"^/(audio_)?download/")
-    assert any(s["headers"].get("range") and s["status"] == 206 for s in served), \
-        f"MeTube was never asked for a byte range: {served}"
+    ranged = page.evaluate("""async url => {
+      const r = await fetch(url, { headers: { Range: "bytes=0-99" } });
+      return [r.status, r.headers.get("content-range"), (await r.arrayBuffer()).byteLength];
+    }""", player.get_attribute("src"))
+    assert ranged[0] == 206 and ranged[1].startswith("bytes 0-99/") and ranged[2] == 100, ranged
 
 
-def test_a_live_stream_offers_the_first_ten_minutes(page, goto, fake, browser_log):
+def test_a_live_stream_is_refused_with_the_reason(page, goto, stack, browser_log):
+    """Recording one needs ffmpeg, which the server does not carry: there is no
+    card, and nothing is downloaded."""
+    goto("/ui")
+    ready(page)
+    before = len(stack.fetches())
+    page.locator("#url").fill(link("live"))
+    page.locator("#resolve").click()
+    expect(page.locator("#linkhint")).to_contain_text("This is a live or upcoming stream.")
+    expect(page.locator("#confirm")).not_to_have_attribute("open", "")
+    expect(page.locator("#picked")).to_be_hidden()
+    assert len(stack.fetches()) == before and not committed(browser_log)
+
+
+def test_a_link_with_real_subtitles_reads_them_instead_of_transcribing(page, goto, fake, stack, browser_log,
+                                                                       media):
+    """Subtitles a person wrote are already the transcript: only they are
+    fetched, the page parses them, and stt is never asked."""
     goto("/ui")
     ready(page)
     since = fake.last_seq()
-    resolve(page, link("live"))
-    expect(page.locator("#c-title")).to_have_text("This is a live stream.")
-    expect(page.locator("#c-live .note.bad")).to_contain_text("The stream has no end.")
-    assert facts(page)["Length"] == "unknown"
-    expect(page.locator("#c-end")).to_have_value("600")
-    page.locator("#c-end").fill("")
-    page.locator("#c-ten").click()
-    expect(page.locator("#c-start")).to_have_value("0")
-    expect(page.locator("#c-end")).to_have_value("600")
-    fetched(page)
-    assert committed(browser_log)[-1]["clip_start"] == 0 and committed(browser_log)[-1]["clip_end"] == 600
-    started = [a["json"] for a in metube(fake, since, r"^/add$") if a["json"]["auto_start"]]
-    assert started[-1]["clip_end"] == 600, started
-
-
-def test_a_link_with_real_subtitles_reads_them_instead_of_transcribing(page, goto, fake, browser_log, media):
-    """Subtitles a person wrote are already the transcript: MeTube fetches only
-    them, the page parses them, and stt is never asked."""
-    goto("/ui")
-    ready(page)
-    since = fake.last_seq()
+    before = len(stack.fetches())
     resolve(page, link("subs"))
     expect(page.locator("#c-subs .note.ok")).to_contain_text("This has real subtitles already")
     with page.expect_response(lambda r: urlparse(r.url).path == "/ui/captions", timeout=20_000):
@@ -671,11 +703,11 @@ def test_a_link_with_real_subtitles_reads_them_instead_of_transcribing(page, got
     expect(page.locator("#result")).to_be_visible()
     expect(page.locator("#stt-note")).to_be_empty()
     assert committed(browser_log)[-1]["captions"] is True
-    started = [a["json"] for a in metube(fake, since, r"^/add$") if a["json"]["auto_start"]]
-    assert started[-1]["download_type"] == "captions", started
+    [run] = stack.fetches()[before:]
+    assert run["argv"][1:4] == ["captions", str(8 * 1024**2), "en"], run
     assert not stt_forms(fake, since) and not browser_log.sent("POST", r"^/ui/fetch"), "the subtitles were transcribed"
     expect(page.locator("#result-meta")).to_have_text(re.compile(r"^subtitles · \d+ cues$"))
-    expect(page.locator("#transcript")).to_contain_text("Calliope is listening.")
+    expect(page.locator("#transcript")).to_contain_text("The first line.")
     expect(page.locator("#sttwhy")).to_have_text("No player: no media was downloaded.")
     expect(page.locator("#sttplay")).to_be_hidden()
     expect(page.locator("#dl-srt")).to_be_visible()
@@ -692,46 +724,53 @@ def test_a_link_past_the_budget_asks_to_be_trimmed(page, goto):
     goto("/ui")
     ready(page)
     resolve(page, link("long"))
-    assert facts(page) == {"Length": "2h 00m", "Download": "110 MB of audio only",
+    assert facts(page) == {"Length": "2h 00m", "Download": "55 MB of audio only",
                            "Transcribe": "about 14 minutes at 8.5×"}
     expect(page.locator("#c-live .note.warn")).to_contain_text("This will not finish in one request.")
     expect(page.locator("#c-live .note.warn")).to_contain_text("Set Start at and Stop at to trim it.")
     page.locator("#c-cancel").click()
 
 
-def test_a_download_metube_cannot_finish_says_so_and_reenables_transcribe(page, goto):
+def test_a_download_that_fails_says_why_and_reenables_transcribe(page, goto):
     goto("/ui")
     ready(page)
     resolve(page, link("broken"))
     page.locator("#c-go").click()
     expect(page.locator("#go-stt")).to_be_disabled()
     expect(page.locator("#stt-note .note.bad")).to_have_text(
-        "MeTube could not download that: ERROR: [generic] Unable to download webpage: "
+        "Could not download that: [generic] Unable to download webpage: "
         "HTTP Error 403: Forbidden.", timeout=10_000)
     expect(page.locator("#go-stt")).to_be_enabled()
     expect(page.locator("#result")).to_be_hidden()
 
 
-def test_removing_a_finished_link_lets_it_go_on_the_server(page, goto, fake):
+def test_removing_a_finished_link_lets_it_go_on_the_server(page, goto, stack, browser_log):
+    """The job goes; the small file stays in the cache, so resolving and
+    fetching the link again downloads nothing."""
     goto("/ui")
     ready(page)
     url = link()
     resolve(page, url)
     fetched(page)
-    assert url in fake.metube()
+    assert held(page, browser_log, url) == 200
     with page.expect_response(lambda r: urlparse(r.url).path == "/ui/abandon"):
         page.locator("#unpick").click()
     expect(page.locator("#picked")).to_be_hidden()
     expect(page.locator("#go-stt")).to_be_disabled()
-    assert url not in fake.metube()
+    assert held(page, browser_log, url) == 404
+    before = len(stack.fetches())
+    resolve(page, url)
+    fetched(page)
+    assert len(stack.fetches()) == before, "the cached file was downloaded again"
 
 
 def test_transcribing_a_fetched_link_again_asks_stt_without_downloading_it_again(
-        page, goto, fake, browser_log):
-    """The finished file stays on the NAS, so a second run with another
+        page, goto, fake, stack, browser_log):
+    """The finished file stays on the server, so a second run with another
     format is a second /ui/fetch and no second download."""
     goto("/ui")
     ready(page)
+    before = len(stack.fetches())
     resolve(page, link())
     fetched(page)
     since = fake.last_seq()
@@ -740,10 +779,33 @@ def test_transcribing_a_fetched_link_again_asks_stt_without_downloading_it_again
     with page.expect_response(lambda r: urlparse(r.url).path == "/ui/fetch"):
         page.locator("#go-stt").click()
     expect(page.locator("#go-stt")).to_be_enabled()
-    assert len(committed(browser_log)) == 1, "the second run downloaded again"
+    assert len(committed(browser_log)) == 1, "the second run committed again"
+    assert len(stack.fetches()) == before + 1, "the second run downloaded again"
     assert stt_forms(fake, since)[-1]["response_format"] == "text"
     expect(page.locator("#transcript .cue")).to_have_count(0)
     expect(page.locator("#sttplayhint")).to_have_text("No timings in this response.")
+
+
+def test_two_people_fetch_one_link_at_the_same_time(page, new_page, goto, stack):
+    """One link, two people: a download each, under two cache keys, and
+    neither can see the other's."""
+    other = new_page(user=USER_JOBS)
+    url = link()
+    before = len(stack.fetches())
+    for each in (page, other):
+        goto("/ui", target=each)
+        ready(each)
+        resolve(each, url)
+    for each in (page, other):
+        each.locator("#c-go").click()
+    for each in (page, other):
+        expect(each.locator("#result")).to_be_visible(timeout=20_000)
+    runs = stack.fetches()[before:]
+    assert len(runs) == 2, runs
+    assert runs[0]["cwd"] != runs[1]["cwd"]
+    cached = sorted(p.name for p in (Path(stack.run) / "cache").iterdir()
+                    if re.fullmatch(r"[0-9a-f]{64}\.wav", p.name))
+    assert len(cached) >= 2
 
 
 # ---- what is sent, and what comes back -------------------------------------------------

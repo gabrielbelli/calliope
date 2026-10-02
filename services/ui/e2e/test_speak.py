@@ -40,7 +40,7 @@ import httpx
 import pytest
 from conftest import fetch_as_page
 from playwright.sync_api import expect
-from test_routes import history_length, open_tab, seeded_job, settled
+from test_routes import held, history_length, open_tab, seeded_job, settled
 
 SENTENCE = "The quick brown fox jumps over the lazy dog, and then it does it again."
 # About twenty seconds of speech at the fake's 15 characters a second, and
@@ -798,9 +798,10 @@ def resolve(page, url: str) -> None:
     page.locator("#clipresolve").click()
 
 
-def test_a_clip_from_a_link_fetches_only_the_chosen_window_and_saves_it(page, goto, fake, clips, browser_log):
-    """yt-dlp trims at the source, so the window asked for is what MeTube is
-    told to fetch: start 5 s, take 12 s, end at 17 s."""
+def test_a_clip_from_a_link_is_cut_in_the_browser_and_saved(page, goto, stack, clips, browser_log):
+    """The recording comes down whole (there is no ffmpeg on the server to trim
+    with), this browser cuts the chosen five seconds out of it from 2 s, and
+    the clip goes through the same preview and Save voice as an upload."""
     link = "https://example.com/podcast-episode"
     goto("/ui/speak/clone")
     ready(page)
@@ -811,24 +812,29 @@ def test_a_clip_from_a_link_fetches_only_the_chosen_window_and_saves_it(page, go
     expect(page.locator("#clipname")).to_have_value("probed-talk-podcast-episode")
     expect(page.locator("#cliplen")).to_have_attribute("max", "30")
     assert browser_log.sent("POST", r"^/ui/resolve$")[-1]["json"] == {"url": link}
-    page.locator("#clipname").fill("e2e-link")
-    clips.kept("e2e-link")
-    page.locator("#clipstart").fill("5")
-    page.locator("#cliplen").fill("12")
-    mark = fake.last_seq()
+    page.locator("#clipstart").fill("2")
+    page.locator("#cliplen").fill("5")
+    before = len(stack.fetches())
     page.locator("#clipimport").click()
-    expect(hint).to_have_text("Saved as e2e-link.", timeout=20_000)
-    assert browser_log.sent("POST", r"^/ui/commit$")[-1]["json"] == {
-        "token": link, "for_clip": True, "clip_start": 5, "clip_end": 17}
-    added = arrived(fake, mark, "metube", r"^/add$")[-1]["json"]
-    assert (added["url"], added["clip_start"], added["clip_end"]) == (link, 5, 17)
-    assert browser_log.sent("POST", r"^/ui/clips/from-link$")[-1]["json"] == {
-        "token": link, "name": "e2e-link", "replace": True}
+    expect(hint).to_have_text("Fetched. Listen, then save it.", timeout=20_000)
+    assert browser_log.sent("POST", r"^/ui/commit$")[-1]["json"] == {"token": link, "for_clip": True}
+    [run] = stack.fetches()[before:]
+    assert run["argv"][:2] == ["fetch", "clip"], run
+    assert browser_log.sent("GET", r"^/ui/media$"), "the recording never came down"
+    expect(page.locator("#clipnote")).to_contain_text("5.0 s ready.")
+    expect(page.locator("#clippreview")).to_be_visible()
     expect(page.locator("#cliprange")).to_be_hidden()
     expect(page.locator("#cliplink")).to_have_value("")
+    assert held(page, browser_log, link) == 404, "the link was not let go once the clip was cut"
+    page.locator("#clipname").fill("e2e-link")
+    clips.kept("e2e-link")
+    page.locator("#saveclip").click()
+    expect(page.locator("#speak-note")).to_have_text("e2e-link is ready.")
     expect(page.locator("#clone")).to_be_hidden()
     assert option(page, "e2e-link")
-    assert "e2e-link" in clips.listed()
+    saved = clips.listed()["e2e-link"]
+    assert saved["seconds"] == pytest.approx(5.0, abs=0.05)
+    assert len(browser_log.sent("POST", r"^/ui/clips$")) == 1
 
 
 def test_a_clip_from_a_link_selects_the_new_voice(page, goto, clips):
@@ -836,11 +842,30 @@ def test_a_clip_from_a_link_selects_the_new_voice(page, goto, clips):
     ready(page)
     resolve(page, "https://example.net/second-interview")
     expect(page.locator("#cliprange")).to_be_visible()
+    page.locator("#clipimport").click()
+    expect(page.locator("#cliplinkhint")).to_have_text("Fetched. Listen, then save it.", timeout=20_000)
     page.locator("#clipname").fill("e2e-linked")
     clips.kept("e2e-linked")
-    page.locator("#clipimport").click()
-    expect(page.locator("#cliplinkhint")).to_have_text("Saved as e2e-linked.", timeout=20_000)
+    page.locator("#saveclip").click()
+    expect(page.locator("#speak-note")).to_have_text("e2e-linked is ready.")
     expect(page.locator("#voice")).to_have_value(option(page, "e2e-linked"), timeout=3000)
+
+
+def test_a_clip_link_over_ten_minutes_is_refused_with_the_reason(page, goto, stack, browser_log):
+    """The browser has to hold the whole recording to cut the clip out, so
+    the server takes sources of ten minutes or less, and says so."""
+    goto("/ui/speak/clone")
+    ready(page)
+    resolve(page, "https://example.com/long-interview")
+    expect(page.locator("#cliplinkhint")).to_have_text("Probed talk long-interview · 2h 00m")
+    before = len(stack.fetches())
+    page.locator("#clipimport").click()
+    expect(page.locator("#cliplinkhint .note.bad")).to_have_text(
+        "Cloning from a link takes recordings up to 10 minutes long, and this one is 120:00. "
+        "Your browser cuts the clip out and has to hold the whole recording to do it. "
+        "Download it and upload the part you want.")
+    expect(page.locator("#clipimport")).to_be_enabled()
+    assert len(stack.fetches()) == before and not browser_log.sent("GET", r"^/ui/media$")
 
 
 def test_a_link_title_is_shown_as_it_is_written(page, goto):
@@ -865,6 +890,7 @@ def test_resolving_a_second_clip_link_abandons_the_first(page, goto, browser_log
     resolve(page, second)
     expect(hint).to_have_text("Probed talk second-talk · 3m 00s")
     assert [a["json"] for a in browser_log.sent("POST", r"^/ui/abandon$")] == [{"token": first}]
+    assert held(page, browser_log, first) == 404 and held(page, browser_log, second) == 200
     # The name the first link suggested is the reader's now, and is kept.
     expect(page.locator("#clipname")).to_have_value("probed-talk-first-talk")
 
@@ -884,6 +910,7 @@ def test_cancel_on_the_clone_sheet_abandons_a_resolved_link_and_returns_to_a_kok
     expect(page.locator("#cliprange")).to_be_hidden()
     abandoned = eventually(lambda: browser_log.sent("POST", r"^/ui/abandon$"))
     assert [a["json"] for a in abandoned] == [{"token": link}]
+    assert eventually(lambda: held(page, browser_log, link) == 404)
     page.wait_for_function("""() => location.pathname === "/ui/speak"
       && new URLSearchParams(location.search).get("voice") === "k:bm_george" """)
 
@@ -892,7 +919,8 @@ def test_a_clip_link_that_cannot_be_used_says_why_under_the_box(page, goto):
     goto("/ui/speak/clone")
     settled(page)
     resolve(page, "https://example.com/unsupported-thing")
-    expect(page.locator("#cliplinkhint .note.bad")).to_contain_text("Unsupported URL")
+    expect(page.locator("#cliplinkhint .note.bad")).to_contain_text(
+        "Could not read that link: Unsupported URL")
     expect(page.locator("#cliprange")).to_be_hidden()
     expect(page.locator("#clipresolve")).to_be_enabled()
 

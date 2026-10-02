@@ -14,8 +14,10 @@ test run on the user's Mac sits on the same LAN as the live hub. An environment
 variable pointing each service at a fake is a convention; this is a wall. Name
 resolution answers only for loopback names (and for the IANA documentation
 domains, which the page server's URL guard insists on resolving to a public
-address before it will hand a link to MeTube), and a connect to any address
-outside 127.0.0.0/8 or ::1 is refused before a packet leaves. Each refusal is
+address before it will take a link at all), and a connect to any address
+outside 127.0.0.0/8 or ::1 is refused before a packet leaves. The wall is this
+process's own: a child the page server spawns is not behind it, which is why
+the stack runs the page server with a downloader that opens no socket. Each refusal is
 appended to FILE, so the session can say what the stack tried to reach.
 
 THE ONE COMPOSE NAME A SERVICE CANNOT BE TOLD ABOUT. The hub and the page

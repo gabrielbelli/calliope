@@ -67,6 +67,15 @@ def settled(page) -> None:
     }""")
 
 
+def held(page, browser_log, url: str) -> int:
+    """What /ui/progress answers this page's person for `url`: 200 while the
+    server holds a job for it, 404 once it has let the link go. Asked by the
+    page itself, so it is that person's own job and nobody else's."""
+    browser_log.allow(404, r"^/ui/progress$")
+    return page.evaluate(
+        "async url => (await fetch('/ui/progress?token=' + encodeURIComponent(url))).status", url)
+
+
 def history_length(page) -> int:
     return page.evaluate("history.length")
 
@@ -635,10 +644,12 @@ def test_back_while_the_link_dialog_is_open_abandons_the_link(page, goto, browse
     page.locator("#url").fill("https://example.com/a-talk")
     page.locator("#resolve").click()
     expect(page.locator("#confirm")).to_have_attribute("open", "")
-    with page.expect_request(lambda r: r.method == "POST" and r.url.endswith("/ui/abandon")):
+    assert held(page, browser_log, "https://example.com/a-talk") == 200
+    with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith("/ui/abandon")):
         page.go_back()
     wait_for_address(page, "/ui/speak")
     expect(page.locator("#confirm")).not_to_have_attribute("open", "")
+    assert held(page, browser_log, "https://example.com/a-talk") == 404
 
 
 def test_restoring_any_address_sends_nothing_but_reads(page, goto, stack, browser_log):

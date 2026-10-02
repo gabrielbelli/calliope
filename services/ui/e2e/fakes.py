@@ -1,12 +1,13 @@
 """Everything the page reaches that is not the page server, the gateway or the
-hub: stt-stack, tts-stack, tts-long, MeTube, and the satellites themselves.
+hub: stt-stack, tts-stack, tts-long, and the satellites themselves. A pasted
+link is fetched by the page server's own child process, which on this stack
+is services/ui/tests/fake_fetcher.py (stack.py).
 
 One process, one event loop, one server per port:
 
     stt       stt-stack       transcriptions, /transcribe, glossaries, /health
     tts       tts-stack       /v1/audio/speech (audio or SSE), /speak, /voices
     long      tts-long        /jobs and their audio, /v1/audio/speech, /health
-    metube    MeTube          /add /start /delete /history and the two file routes
     control   this harness    /__fake/... : the request log, failures, satellites
 
 It is started by stack.py through launch.py, so it runs behind the same
@@ -178,7 +179,6 @@ class World:
         self.gloss_writable = True
         self.gloss_reason: str | None = None
         self.gloss_strict = False
-        self.metube: dict[str, dict[str, Any]] = {}
         self.satellites: dict[str, Satellite] = {}
         # Where the satellites connect (the gateway's device socket) and the
         # admin key they are adopted with, both told by the stack.
@@ -195,7 +195,6 @@ class World:
         self.health_overrides.clear()
         self.transcript = DEFAULT_TRANSCRIPT
         self.jobs.clear()
-        self.metube.clear()
         self.glossaries = {key: g for key, g in self.glossaries.items() if g["source"] == "builtin"}
         self.gloss_writable, self.gloss_reason, self.gloss_strict = True, None, False
         if not self.glossaries:
@@ -624,6 +623,15 @@ def stt_app(world: World) -> FastAPI:
     async def transcriptions(request: Request) -> Response:
         fields, seconds = await heard(request)
         fmt = fields.get("response_format", "json")
+        # THE WINDOW, as the real one cuts it: only that much audio is heard,
+        # and the times come back on the whole file's timeline.
+        start = float(fields.get("clip_start") or 0.0)
+        end = min(float(fields.get("clip_end") or seconds), seconds)
+        if "clip_start" in fields or "clip_end" in fields:
+            if end <= start:
+                return error(400, "clip_start is past the end of the audio",
+                             code="invalid_value", param="file")
+            seconds = end - start
         try:
             text, fired = repair(world, claims(request), fields.get("glossary"), world.transcript)
         except UnknownProfile as unknown:
@@ -631,6 +639,9 @@ def stt_app(world: World) -> FastAPI:
                               f"{', '.join(unknown.known) or 'none'}. See GET /glossaries.",
                          code="invalid_value", param="glossary")
         segments, words = timed(text, seconds)
+        for cue in (*segments, *words):
+            cue["start"] = round(cue["start"] + start, 2)
+            cue["end"] = round(cue["end"] + start, 2)
         headers = {"x-stt-engine": "parakeet-tdt-0.6b-v3", "x-realtime-factor": "8.8",
                    "x-audio-seconds": f"{seconds:.2f}"}
         if fired:
@@ -1243,119 +1254,6 @@ def long_app(world: World) -> FastAPI:
     @app.post("/v1/audio/speech")
     async def v1_speech(request: Request) -> Response:
         return await speech(world, request, 0.7)
-
-    return app
-
-
-# ---- MeTube ------------------------------------------------------------------------
-
-DOWNLOAD_SECONDS = 3.0
-
-
-def metube_entry(world: World, url: str) -> tuple[str, dict[str, Any]] | None:
-    entry = world.metube.get(url)
-    if entry is None:
-        return None
-    if entry["where"] == "queue":
-        elapsed = time.time() - entry["started"]
-        if elapsed >= DOWNLOAD_SECONDS and "broken" in url:
-            # A LINK THAT RESOLVES AND THEN FAILS TO DOWNLOAD, as a video taken
-            # down between the two does: MeTube files it under done with an
-            # error status and its message, and no file.
-            entry.update(where="done", status="error", percent=None, speed=None, eta=None,
-                         msg="ERROR: [generic] Unable to download webpage: HTTP Error 403: Forbidden")
-        elif elapsed >= DOWNLOAD_SECONDS:
-            entry.update(where="done", status="finished", percent=100, speed=None, eta=None,
-                         filename=entry["_filename"])
-        else:
-            entry.update(percent=round(100 * elapsed / DOWNLOAD_SECONDS, 1), speed=2.5e6,
-                         eta=round(DOWNLOAD_SECONDS - elapsed, 1))
-    return entry["where"], {k: v for k, v in entry.items() if not k.startswith("_") and k != "where"}
-
-
-def metube_app(world: World) -> FastAPI:
-    app = FastAPI(openapi_url=None)
-
-    @app.post("/add")
-    async def add(request: Request) -> dict[str, Any]:
-        body = await request.json()
-        url = body["url"]
-        if "unsupported" in url:
-            return {"status": "error", "msg": "ERROR: Unsupported URL: " + url}
-        slug = re.sub(r"[^a-z0-9]+", "-", url.lower().rstrip("/").rsplit("/", 1)[-1]).strip("-") or "talk"
-        kind = body.get("download_type") or "audio"
-        suffix = {"captions": "en.vtt", "video": "mp4"}.get(kind, body.get("format") or "wav")
-        world.metube[url] = {
-            "id": uuid.uuid4().hex[:11], "url": url, "title": "Example talk: " + slug.replace("-", " "),
-            "status": "pending", "size": None, "percent": None, "speed": None, "eta": None,
-            "live_status": "not_live", "filename": None, "folder": body.get("folder") or "",
-            "download_type": kind, "where": "pending", "_filename": f"{slug}.{suffix}",
-            "started": 0.0}
-        if body.get("auto_start", True):
-            world.metube[url].update(where="queue", status="downloading", percent=0, started=time.time())
-        return {"status": "ok"}
-
-    @app.post("/start")
-    async def start(request: Request) -> dict[str, Any]:
-        for url in (await request.json()).get("ids") or []:
-            entry = world.metube.get(url)
-            if entry and entry["where"] == "pending":
-                entry.update(where="queue", status="downloading", percent=0, started=time.time())
-        return {"status": "ok"}
-
-    @app.post("/delete")
-    async def delete(request: Request) -> dict[str, Any]:
-        body = await request.json()
-        for url in body.get("ids") or []:
-            found = metube_entry(world, url)
-            if found and (found[0] != "done") == (body.get("where") == "queue"):
-                del world.metube[url]
-        return {"status": "ok"}  # always ok, as the real one answers, deleted or not
-
-    @app.get("/history")
-    async def history() -> dict[str, Any]:
-        out: dict[str, list] = {"pending": [], "queue": [], "done": []}
-        for url in list(world.metube):
-            found = metube_entry(world, url)
-            if found:
-                out[found[0]].append(found[1])
-        return out
-
-    def serve(path: str, request: Request) -> Response:
-        # ONE EXACT PATH PER FINISHED DOWNLOAD, and a 404 for anything else,
-        # because the real MeTube is that strict: a fixture that served any
-        # path under the route is how a URL missing its folder once passed
-        # every test and failed every real download (services/ui/tests).
-        for url in list(world.metube):
-            metube_entry(world, url)
-        wanted_path = "/".join(p for p in path.split("/") if p)
-        entry = next((e for e in world.metube.values() if e.get("filename") and wanted_path ==
-                      "/".join(p for p in (e["folder"], e["filename"]) if p)), None)
-        if entry is None:
-            return PlainTextResponse("not found", status_code=404)
-        name = entry["filename"]
-        if name.endswith(".vtt"):
-            segments, _ = timed(world.transcript, 12.0)
-            body, kind = subtitles(segments, True).encode(), "text/vtt"
-        else:
-            body, kind = wav(12.0), ("video/mp4" if name.endswith(".mp4") else "audio/wav")
-        wanted = request.headers.get("range", "")
-        common = {"accept-ranges": "bytes", "etag": '"e2e-fake"'}
-        match = re.match(r"bytes=(\d*)-(\d*)$", wanted)
-        if match:
-            first = int(match.group(1) or 0)
-            last = min(int(match.group(2)) if match.group(2) else len(body) - 1, len(body) - 1)
-            return Response(body[first:last + 1], status_code=206, media_type=kind,
-                            headers=common | {"content-range": f"bytes {first}-{last}/{len(body)}"})
-        return Response(body, media_type=kind, headers=common)
-
-    @app.get("/audio_download/{path:path}")
-    async def audio_download(path: str, request: Request) -> Response:
-        return serve(path, request)
-
-    @app.get("/download/{path:path}")
-    async def download(path: str, request: Request) -> Response:
-        return serve(path, request)
 
     return app
 
@@ -2045,9 +1943,6 @@ def control_app(world: World) -> FastAPI:
                 '<script>document.getElementById("f").submit()</script>')
         return Response(page, media_type="text/html")
 
-    @app.get("/__fake/metube")
-    async def metube() -> dict[str, Any]:
-        return {url: {k: v for k, v in e.items() if not k.startswith("_")} for url, e in world.metube.items()}
 
     @app.post("/__fake/satellites/connect")
     async def connect_all(request: Request) -> dict[str, Any]:
@@ -2191,7 +2086,6 @@ async def serve(world: World, ports: dict[str, int]) -> None:
     apps = {"stt": Observed(stt_app(world), "stt", world),
             "tts": Observed(tts_app(world), "tts", world),
             "long": Observed(long_app(world), "tts_long", world),
-            "metube": Observed(metube_app(world), "metube", world),
             "control": control_app(world)}
     servers = [_Server(uvicorn.Config(apps[name], host="127.0.0.1", port=port, loop="asyncio",
                                       log_level="warning", lifespan="off", timeout_graceful_shutdown=2))
@@ -2215,9 +2109,9 @@ def main(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="fakes")
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--svc-dir", required=True, type=Path)
-    for name in ("stt", "tts", "long", "metube", "control"):
+    for name in ("stt", "tts", "long", "control"):
         parser.add_argument(f"--{name}-port", type=int, required=True)
     args = parser.parse_args(argv)
     world = World(args.repo, args.svc_dir)
     asyncio.run(serve(world, {name: getattr(args, f"{name}_port")
-                              for name in ("stt", "tts", "long", "metube", "control")}))
+                              for name in ("stt", "tts", "long", "control")}))
