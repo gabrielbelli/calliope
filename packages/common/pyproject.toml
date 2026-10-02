@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voice-common"
-version = "1.0.0"
+version = "2.0.0"
 description = "Shared wire contract for the calliope speech services."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,10 +12,19 @@ license = "BSD-2-Clause"
 license-files = ["LICENSE"]
 authors = [{ name = "Gabriel Belli" }]
 
-# Deliberately a floor and not a pin. Each consumer pins its own fastapi in
-# its requirements.txt — all four are on 0.121.2 today — and a pin here would
-# either duplicate that decision or fight it during a resolve.
-dependencies = ["fastapi>=0.115"]
+# fastapi is deliberately a floor and not a pin. Each consumer pins its own
+# fastapi in its requirements.txt — all four are on 0.121.2 today — and a pin
+# here would either duplicate that decision or fight it during a resolve.
+#
+# cryptography is pinned, and here rather than in each service, because it is
+# the identity contract itself: every backend verifies the gateway's Ed25519
+# assertions with it and the gateway signs them and hashes passwords with it
+# (Argon2id needs this release's API). One version in every image is the point,
+# and services/satellites already pins the same one.
+#
+# idna is a floor: voice_common.origins encodes host names with IDNA 2008, as
+# httpx does, and every consumer already has it through httpx or requests.
+dependencies = ["fastapi>=0.115", "cryptography==50.0.1", "idna>=3.7"]
 
 [project.optional-dependencies]
 # numpy is an extra so services/stt, which needs none of voice_common.audio,

@@ -1,6 +1,6 @@
 """The health CONTRACT, not the payload.
 
-Two decisions live here and nothing else does. The payloads themselves stay
+Three decisions live here and nothing else does. The payloads themselves stay
 per-service — they share only `status` and `threads`, and the rest is a
 callable the caller supplies.
 
@@ -9,22 +9,19 @@ having paid for it: a sync route runs on AnyIO's worker pool, forty threads
 shared with every other sync route in the app. tts-long's synthesis routes
 hold a thread for up to TTS_OPENAI_SYNC_TIMEOUT seconds each, so forty
 concurrent callers took the whole pool, `/health` stopped answering, and the
-orchestrator restarted a service that was merely busy. tts-stack and stt-stack
-still declare `def health()` and still have that exposure. Registering the
-route here removes the choice. The consequence is that `details` must not
-block — it runs on the event loop.
+orchestrator restarted a service that was merely busy. Registering the route
+here removes the choice. The consequence is that `details` must not block —
+it runs on the event loop.
 
-**The route and its authentication exemption are the same string.** That is
-the real job of this module. Today they are independent literals in every
-repo — tts-long/app/auth.py:56 says `{"/health"}` and app/main.py:175 says
-`@app.get("/health")`, with the matching pairs in the other two — free to
-disagree the moment someone renames one. install_health registers the route
-AND calls auth.exempt with the same value, so a container healthcheck cannot
-be locked out by a rename that looked local.
+**The route is PATH, and PATH is what voice_common.identity leaves open.** Both
+read the one constant, so a container healthcheck cannot be locked out by a
+rename that looked local. It used to be two literals per repo, free to
+disagree.
 
-Deliberately about thirty lines. This is the weakest of the core modules and
-it earns its place on the second point alone; if it starts growing a payload
-schema, that is the signal it was the wrong boundary.
+**What an operator must fix is in the body.** `ignored_variables` names every
+removed setting still present (voice_common.auth), and a service whose
+credential files the gateway has not written yet says `not_ready` (§2.4)
+rather than `ok`: it would refuse every request.
 """
 
 from __future__ import annotations
@@ -35,16 +32,22 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from .auth import exempt
+from .auth import ignored_variables
 
-__all__ = ["install_health"]
+__all__ = ["PATH", "install_health"]
+
+PATH = "/health"
+
+# Where identity.install leaves its middleware, so this route can ask whether
+# the credential files have arrived without importing the module that needs
+# `cryptography`.
+IDENTITY_STATE = "voice_common_identity"
 
 Details = Callable[[], "dict[str, Any] | Awaitable[dict[str, Any]]"]
 
 
-def install_health(app: FastAPI, details: Details | None = None,
-                   path: str = "/health") -> None:
-    """Register the health route and exempt exactly that path from auth.
+def install_health(app: FastAPI, details: Details | None = None) -> None:
+    """Register GET /health.
 
     `details` returns the per-service body — model_loaded, threads, queued.
     It is merged under a fixed `{"status": ...}` envelope and may override
@@ -52,9 +55,8 @@ def install_health(app: FastAPI, details: Details | None = None,
     It may be a coroutine function, but it must not block either way: see the
     module docstring.
     """
-    exempt(app, path)
 
-    @app.get(path)
+    @app.get(PATH)
     async def health() -> dict[str, Any]:  # noqa: D401 - the docstring is above
         payload: dict[str, Any] = {"status": "ok"}
         if details is not None:
@@ -62,4 +64,10 @@ def install_health(app: FastAPI, details: Details | None = None,
             if inspect.isawaitable(extra):
                 extra = await extra
             payload.update(extra)
+        guard = getattr(app.state, IDENTITY_STATE, None)
+        if guard is not None and not guard.credentials.ready and payload["status"] == "ok":
+            payload["status"] = "not_ready"
+        ignored = ignored_variables()
+        if ignored:
+            payload["ignored_variables"] = ignored
         return payload

@@ -2,18 +2,30 @@
 
 The shared wire contract for [services/stt](../../services/stt/README.md),
 [services/tts](../../services/tts/README.md),
-[services/tts-long](../../services/tts-long/README.md) and, for the error
-envelope, [services/gateway](../../services/gateway/README.md).
+[services/tts-long](../../services/tts-long/README.md),
+[services/satellites](../../services/satellites/README.md),
+[services/ui](../../services/ui/README.md) and
+[services/gateway](../../services/gateway/README.md).
 
 ```text
-voice_common.auth         API keys, the exemption set, the 401
-voice_common.errors       OpenAI's error envelope — all four fields — and the
-                          validation, 404/405 and unhandled-500 handlers
-voice_common.health       the health CONTRACT: async, and one string for route
-                          and exemption
+voice_common.identity     the gateway's signed assertion: verify, install,
+                          claims, the credential files, outbound headers
+voice_common.scopes       scopes, roles, key presets, service principals and
+                          the import allowlists, as code constants
+voice_common.auth         the removed key variables: named, ignored, never fatal
+voice_common.errors       OpenAI's error envelope — all four fields — the
+                          validation, 404/405 and unhandled-500 handlers, and
+                          one constructor per authentication error
+voice_common.audit        one audit row as one `audit {...}` stdout line
+voice_common.origins      `scheme://host:port`, the one spelling the secret
+                          store and its consumers compare allowed hosts in
+voice_common.health       the health CONTRACT: async, one path, and what an
+                          operator must fix
+voice_common.runlog       run records, sent through the gateway as this service
 voice_common.models       Segment, OpenAISpeechRequest — two bases, no more
 voice_common.logging      one basicConfig line, plus a level switch
 voice_common.audio        [audio] extra: pcm_bytes, check_rate, splice
+voice_common.engines      the engine catalogue the gateway and tts-long share
 voice_common.conformance  a pytest suite each consumer runs against its own app
 voice-entrypoint.sh       installed to /usr/local/bin: TLS, chown, setpriv
 ```
@@ -46,25 +58,21 @@ Two of the three outlived their discovery: the fix round patched only the copy
 a reviewer happened to be reading, and `stt-stack/app/auth.py:115` and
 `tts-long/app/auth.py:68` were both still encoding UTF-8, with
 `tts-long/app/auth.py:103` still matching `OPEN_PATHS` as an exact string, when
-this package landed. All three copies are deleted now — the only `app/auth.py`
-left in the tree is `services/gateway`'s, which is its own module by design:
-that service has a different env var and fans health out to three backends
-rather than reporting on itself.
+this package landed. All three copies were deleted then.
 
 This package is the union of every fix. The argument for it is measured, not
 predicted.
 
-One consequence worth stating, because it is a wire change and it was measured
-rather than predicted. The 401 this package builds carries all four envelope
-fields on *every* path, native routes included. It did not before: `stt` and
-`tts` each completed the envelope with an ASGI middleware that opened with
-`if not v1_path(scope["path"]): await self.app(...); return`, so their native
-401 shipped three keys and their `/v1` 401 shipped four. Both middlewares are
-deleted, so `POST /transcribe` and `POST /speak` with a bad key now answer with
-`"param": null` present. Status, `message`, `type` and `code` are byte-identical;
-only the key is new. `tts-long` shows no difference at all, because it rebound
-`voice_common.auth.error_response` at import time and was therefore already
-path-agnostic — which is the behaviour the shared code was built from.
+Since 2.0 there is no API key middleware here at all. The gateway checks every
+credential once, and hands each backend a 60-second assertion signed with
+Ed25519 that `voice_common.identity` verifies with the public key only. The
+same argument applies with more force: a verifier written five times would
+drift five ways, and each drift would be a way in.
+
+The 401 this package builds carries all four envelope fields on *every*
+path, native routes included, because the middleware that refuses a request
+renders through the same function as every exception handler
+(`errors.render`).
 
 ## What belongs here
 
@@ -93,23 +101,45 @@ an accident of scope.
 ## Using it
 
 ```python
-from fastapi import FastAPI
-from voice_common import auth, errors, health, logging as voice_logging
+from fastapi import FastAPI, Request
+from voice_common import errors, health, identity, logging as voice_logging
 
 log = voice_logging.setup("tts-stack", "TTS")
 
 app = FastAPI(title="tts-stack")
 errors.install_errors(app)                  # ApiError, validation, 404/405, 500
 health.install_health(app, details=lambda: {"threads": THREADS})
-auth.install(app, "TTS_API_KEYS")           # the env var name is the parameter
+identity.install(app, "tts")                # the audience is the parameter
+
+@app.get("/jobs")
+async def jobs(request: Request):
+    claims = identity.claims_of(request)    # sub, kind, scopes, cred
+    everyone = identity.has(claims, "jobs:read:all")
 ```
 
-`install_health` registers the route **and** exempts exactly that path from
-authentication, so the two can never name different strings. The order of the
-two calls does not matter.
+`identity.install` refuses every request without a valid assertion for this
+service, except `GET /health`. It removes `/docs`, `/redoc` and
+`/openapi.json`, places itself outermost whatever else is added, and deletes
+every `X-Calliope-*` header from the request before any handler or other
+middleware sees it. It never stops the process: a removed variable of the old
+key scheme is logged at ERROR every minute and named in `/health` as
+`ignored_variables`.
 
-Raise `errors.ApiError` from a handler; return `errors.error_response(...)` from
-middleware. `type_`, `code` and `param` are keyword-only, because two sibling
+The credential files are read from `CALLIOPE_RUN_DIR`, `/run/calliope` by
+default, where compose mounts the service's own volume read-only:
+`identity.pub` (the gateway's public keys, a JWK set) and `service.key` (this
+service's key for the gateway's internal listener). Until both exist the
+health body says `not_ready`.
+
+Outbound requests build their headers with `identity.outbound_headers(...)`,
+which takes named values only, so an inbound request's headers cannot be
+copied through by accident.
+
+Raise `errors.ApiError` from a handler; render it with `errors.render(...)` from
+middleware. The authentication errors each have one constructor —
+`errors.unauthenticated()`, `insufficient_scope([...])`, `session_required()`,
+`csrf()`, `locked(reason, variable)` and the rest — so the gateway and every
+backend refuse with the same code, sentence and challenge header. `type_`, `code` and `param` are keyword-only, because two sibling
 repos passed the first two positionally in opposite orders and nothing caught
 it — both are strings, both produce a valid-looking envelope, and the only
 symptom is a client reading a code out of the field that names a category.
@@ -122,17 +152,21 @@ for its presence.
 **`install_errors` stops at `/v1`.** Native routes keep FastAPI's
 `{"detail": ...}` and its 422, and an unhandled error on one stays a plain-text
 500. Those routes have clients that never touch the compatibility layer, and
-`errors.v1_path` is the one place that line is drawn.
+`errors.v1_path` is the one place that line is drawn. The native 422 is quiet,
+though: each error is reduced to `type`, `loc` and `msg`, so a refused body
+never comes back with a password or a token in it.
 
 ### The conformance suite
 
-The three backends run the whole suite this package ships, against the app each
-actually builds. That is what stops behaviour drifting in the parts each service
-still writes itself, and it makes a bad `voice-common` bump fail at the
-consumer's build rather than in production. The gateway runs one assertion out
-of it rather than the whole suite — it carries its own auth module and publishes
-no `/openapi.json`, so most of the rest does not describe it — and the one it
-runs, `assert_four_field_envelope`, is exported for exactly that.
+The three speech backends run the whole suite this package ships, against the
+app each actually builds. That is what stops behaviour drifting in the parts
+each service still writes itself, and it makes a bad `voice-common` bump fail
+at the consumer's build rather than in production. The hub and voice-ui have
+no `/v1` surface: they pass `v1_path=None` and a `probe_path` of their own
+(any route that needs an assertion), which skips the two `/v1` checks and
+runs every identity check against that route. The gateway, which signs
+assertions rather than verifying them, uses `assert_four_field_envelope` out
+of it, exported for exactly that.
 
 ```python
 # tests/test_conformance.py
@@ -142,14 +176,24 @@ from voice_common.conformance import Service, module_app
 
 @pytest.fixture
 def voice_service():
-    return Service(env_var="TTS_API_KEYS",
+    return Service(audience="tts",
                    build=module_app("app.main"),
                    v1_path="/v1/audio/speech")
 ```
 
-The star import is deliberate: it puts the tests in the consumer's own tree, so
-its conftest and fixtures apply. `pytest --pyargs` would collect them out of
-site-packages, where they cannot see the consumer's fixtures.
+The star import is deliberate: it puts the tests and the `calliope_gateway`
+fixture in the consumer's own tree, so its conftest and fixtures apply.
+`pytest --pyargs` would collect them out of site-packages, where they cannot
+see the consumer's fixtures.
+
+A consumer's other tests sign the assertions their requests need with the
+same fixture, rather than with a copy of the format:
+
+```python
+def test_a_user_sees_only_their_jobs(client, calliope_gateway):
+    headers = calliope_gateway.headers("tts-long", scopes=["jobs:read:own"])
+    assert client.get("/jobs", headers=headers).status_code == 200
+```
 
 ### The entrypoint
 
@@ -176,13 +220,14 @@ One line in each consuming service's `requirements.txt`, a path into this same
 tree:
 
 ```text
-./packages/common            # services/stt and services/gateway — no extras
-./packages/common[audio]     # services/tts and services/tts-long — numpy
+./packages/common            # services/stt, services/ui and services/gateway
+./packages/common[audio]     # services/tts, services/tts-long, services/satellites
 ```
 
-The gateway takes it for `voice_common.errors` and nothing else: it keeps its
-own auth module, its own health fan-out and its own entrypoint, so it needs no
-extras and does not install the audio helpers.
+Every consumer gets `cryptography`, pinned here: the backends verify the
+gateway's Ed25519 assertions with it, and the gateway signs them, and hashes
+passwords with Argon2id, from the same release. The gateway keeps its own
+health fan-out and its own entrypoint, so it needs no extras.
 
 **The path is relative to the working directory, not to the file.** pip
 resolves a path requirement against the process's cwd, so every install runs

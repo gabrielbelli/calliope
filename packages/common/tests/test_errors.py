@@ -10,6 +10,7 @@ Each assertion here names the copy that got it wrong.
 from __future__ import annotations
 
 import inspect
+import json
 
 import pytest
 from fastapi import FastAPI
@@ -17,8 +18,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException
 from starlette.testclient import TestClient
 
+from voice_common import errors
 from voice_common.errors import (ApiError, error_response, install_errors,
-                                 v1_path)
+                                 render, v1_path)
 from voice_common.errors import _union_branches
 
 
@@ -167,6 +169,28 @@ def test_native_routes_keep_fastapis_own_body(client: TestClient) -> None:
     response = client.post("/speak", json={})
     assert response.status_code == 422
     assert "detail" in response.json()
+
+
+def test_a_native_422_never_repeats_what_was_sent(client: TestClient) -> None:
+    """FastAPI's own 422 carries pydantic's `input`, which is the rejected value.
+
+    The hub measured a Home Assistant token pasted into the wrong field coming
+    back in the 422; a password sent to a login route must not do the same.
+    """
+    secret = "correct horse battery staple"
+    response = client.post("/speak", json={"input": "hi", "speed": secret})
+    assert response.status_code == 422
+    assert secret not in response.text
+    for error in response.json()["detail"]:
+        assert set(error) == {"type", "loc", "msg"}
+    assert response.json()["detail"][0]["loc"] == ["body", "speed"]
+
+
+def test_a_v1_400_never_repeats_what_was_sent_either(client: TestClient) -> None:
+    secret = "correct horse battery staple"
+    response = client.post("/v1/audio/speech", json={"input": "hi", "speed": secret})
+    assert response.status_code == 400
+    assert secret not in response.text
 
 
 @pytest.mark.parametrize(("path", "expected"),
@@ -417,3 +441,132 @@ def test_a_union_collapse_does_not_swallow_two_ordinary_field_errors() -> None:
                 {"loc": ("body", "segments", 0, "pause_after"), "msg": "b"}]
     assert _union_branches(ordinary) is None
     assert _union_branches([{"loc": ("body", "input"), "msg": "c"}]) is None
+
+
+# ── authentication and authorisation (D55) ────────────────────────────────────
+
+@pytest.mark.parametrize(("make", "status", "code"), [
+    (errors.unauthenticated, 401, "unauthenticated"),
+    (errors.invalid_api_key, 401, "invalid_api_key"),
+    (errors.api_key_expired, 401, "api_key_expired"),
+    (lambda: errors.insufficient_scope(["speech:speak"]), 403, "insufficient_scope"),
+    (errors.session_required, 403, "session_required"),
+    (errors.csrf, 403, "csrf"),
+    (errors.wrong_host, 403, "wrong_host"),
+    (lambda: errors.scope_not_grantable(["users:manage"]), 400, "scope_not_grantable"),
+    (errors.json_required, 415, "json_required"),
+    (lambda: errors.locked("bootstrap_required", "CALLIOPE_ADMIN_PASSWORD"), 503, "locked"),
+])
+def test_each_auth_error_has_one_status_and_one_code_in_the_envelope(
+        make, status: int, code: str) -> None:  # noqa: ANN001
+    """A client branches on `code`, so the gateway and every backend must agree on it."""
+    response = render(make())
+    assert response.status_code == status
+    body = json.loads(response.body)
+    assert set(body["error"]) == {"message", "type", "param", "code"}
+    assert body["error"]["code"] == code
+    assert body["error"]["message"].strip()
+
+
+def test_every_401_carries_a_challenge() -> None:
+    for make in (errors.unauthenticated, errors.invalid_api_key,
+                 errors.api_key_expired):
+        assert render(make()).headers["WWW-Authenticate"].startswith("Bearer")
+
+
+def test_a_rejected_key_says_invalid_token_and_a_missing_one_does_not() -> None:
+    """RFC 6750 §3: no error code when the request carried no credential at all."""
+    assert render(errors.unauthenticated()).headers["WWW-Authenticate"] == "Bearer"
+    assert render(errors.invalid_api_key()).headers["WWW-Authenticate"] == (
+        'Bearer error="invalid_token"')
+
+
+def test_insufficient_scope_names_every_missing_scope_in_the_challenge() -> None:
+    """Home Assistant reads this header to tell its user which preset to create."""
+    response = render(errors.insufficient_scope(["satellites:read", "models:read"]))
+    assert response.headers["WWW-Authenticate"] == (
+        'Bearer error="insufficient_scope", scope="models:read satellites:read"')
+    assert "models:read satellites:read" in json.loads(response.body)["error"]["message"]
+
+
+@pytest.mark.parametrize("bad", [[], ['speech:speak", realm="x'], ["*"]])
+def test_insufficient_scope_refuses_anything_that_could_break_the_header(
+        bad: list[str]) -> None:
+    with pytest.raises(ValueError):
+        errors.insufficient_scope(bad)
+
+
+def test_scope_not_grantable_names_the_field_in_param() -> None:
+    body = json.loads(render(errors.scope_not_grantable(["users:manage"])).body)
+    assert body["error"]["param"] == "scopes"
+    assert body["error"]["message"] == "An API key cannot hold: users:manage."
+
+
+def test_scope_not_grantable_counts_what_is_not_a_scope_and_never_repeats_it() -> None:
+    """The caller's strings reach a page; markup or a megabyte must not come back (recheck L9)."""
+    sent = ["users:manage", "<img src=x onerror=alert(1)>", "a" * 70 + ":read", 7]
+    message = errors.scope_not_grantable(sent).message
+    assert message == "An API key cannot hold: users:manage, 3 unrecognised scopes."
+    assert "<" not in message
+
+
+def test_scope_not_grantable_names_ten_scopes_and_counts_the_rest() -> None:
+    sent = [f"scope:{letter}" for letter in "abcdefghijklmnopqrstuvwxyz"] * 400
+    message = errors.scope_not_grantable(sent).message
+    assert message.startswith("An API key cannot hold: scope:a, scope:b,")
+    assert message.endswith("scope:j, 16 more.")
+    assert len(message) < 200
+
+
+def test_locked_carries_reason_and_variable_beside_the_error_object() -> None:
+    """Beside, not inside: the error object stays exactly four fields."""
+    body = json.loads(render(errors.locked("bootstrap_required",
+                                           "CALLIOPE_ADMIN_PASSWORD")).body)
+    assert body["reason"] == "bootstrap_required"
+    assert body["variable"] == "CALLIOPE_ADMIN_PASSWORD"
+    assert body["error"]["type"] == "server_error"
+    assert json.loads(render(errors.locked("argon2_selftest")).body)["variable"] is None
+
+
+@pytest.mark.parametrize(("reason", "variable"), [
+    ("bootstrap_required", "hunter2 is too short"),
+    ("bootstrap_required", "sk-live-1234"),
+    ("Bootstrap Required", None),
+])
+def test_locked_refuses_a_value_where_a_name_belongs(reason: str,
+                                                     variable: str | None) -> None:
+    """recheck L7: the page that shows this is public, so a value must never reach it."""
+    with pytest.raises(ValueError):
+        errors.locked(reason, variable)
+
+
+def test_extra_can_never_replace_the_error_object() -> None:
+    with pytest.raises(ValueError):
+        error_response(503, "x", extra={"error": "y"})
+
+
+def test_a_raised_auth_error_and_a_rendered_one_are_the_same_bytes() -> None:
+    """The gateway's middleware renders; its routes raise. One body either way."""
+    app = FastAPI()
+    install_errors(app)
+
+    @app.get("/auth/keys")
+    async def keys() -> None:
+        raise errors.session_required()
+
+    raised = TestClient(app).get("/auth/keys")
+    rendered = render(errors.session_required())
+    assert raised.status_code == rendered.status_code
+    assert raised.content == rendered.body
+
+
+def test_a_raised_401_keeps_its_own_challenge() -> None:
+    app = FastAPI()
+    install_errors(app)
+
+    @app.get("/v1/models")
+    async def models() -> None:
+        raise errors.invalid_api_key()
+
+    response = TestClient(app).get("/v1/models")
+    assert response.headers["WWW-Authenticate"] == 'Bearer error="invalid_token"'

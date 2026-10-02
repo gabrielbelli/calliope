@@ -64,7 +64,9 @@ the wire before anyone could reconcile them:
 The behaviour below is the correct one from each, not the majority one.
 
 THE BOUNDARY IS /v1. Native routes keep FastAPI's `{"detail": ...}` and its
-422 throughout, and an unhandled error on one is still a plain-text 500.
+422 throughout, and an unhandled error on one is still a plain-text 500. The
+one change on that side is that the 422 no longer repeats what was sent
+(quiet_validation_response), because a refused body may hold a password.
 Those routes have clients — bench/bench.py, the integration suite, Open WebUI
 — and reshaping them to tidy up a compatibility layer those clients never
 touch is how a working deployment breaks during a refactor. `v1_path` draws
@@ -75,21 +77,33 @@ wire-contract drift: stt-stack answered 422 to a bad /v1 body where the other
 two — and OpenAI itself — answer 400, so a client written against the real API
 mishandled the one service in the estate that claims to imitate it most
 closely.
+
+**Authentication and authorisation errors have one constructor each** (D55),
+at the bottom of this file: the gateway's middleware, its routes and every
+backend refuse with the same code, the same sentence and the same challenge
+header, and a client branches on `code` alone.
 """
 
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Iterable, Mapping
 
 from fastapi import FastAPI, Request, Response
-from fastapi.exception_handlers import (http_exception_handler,
-                                        request_validation_exception_handler)
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .scopes import SCOPE
+
 __all__ = ["ApiError", "error_response", "http_error_response",
-           "install_errors", "v1_path", "validation_error_response"]
+           "install_errors", "quiet_validation_response", "render", "v1_path",
+           "validation_error_response",
+           "unauthenticated", "invalid_api_key", "api_key_expired",
+           "insufficient_scope", "session_required", "csrf", "wrong_host",
+           "scope_not_grantable", "json_required", "locked"]
 
 log = logging.getLogger("voice_common.errors")
 
@@ -117,7 +131,8 @@ def error_response(status: int, message: str, *,
                    type_: str = "invalid_request_error",
                    code: str | None = None,
                    param: str | None = None,
-                   headers: dict[str, str] | None = None) -> JSONResponse:
+                   headers: dict[str, str] | None = None,
+                   extra: Mapping[str, str | None] | None = None) -> JSONResponse:
     """An error in OpenAI's envelope. `type_`, `code` and `param` are keyword-only.
 
     Keyword-only on purpose: see the module docstring. Two sibling repos passed
@@ -135,16 +150,24 @@ def error_response(status: int, message: str, *,
     reads, and WWW-Authenticate on a 401. It is a mapping rather than a string,
     so it carries no risk of being confused with the three above.
 
+    `extra` adds keys BESIDE `error`, never inside it: the four fields are
+    exactly what the schema names, and a client generated from it may reject a
+    fifth. The 503 `locked` body is the one user, for its `reason` and
+    `variable`.
+
     Only /v1 routes should use this. The native routes' `{"detail": ...}`
     bodies are part of a contract that already has clients, and reshaping them
     would break callers to tidy up a compatibility layer they never touch.
     """
-    return JSONResponse(status_code=status,
-                        content={"error": {"message": message,
-                                           "type": type_,
-                                           "param": param,
-                                           "code": code}},
-                        headers=headers)
+    content: dict[str, object] = {"error": {"message": message,
+                                            "type": type_,
+                                            "param": param,
+                                            "code": code}}
+    if extra:
+        if "error" in extra:
+            raise ValueError("extra must not replace the error object")
+        content.update(extra)
+    return JSONResponse(status_code=status, content=content, headers=headers)
 
 
 class ApiError(Exception):
@@ -165,7 +188,8 @@ class ApiError(Exception):
                  type_: str = "invalid_request_error",
                  code: str | None = None,
                  param: str | None = None,
-                 headers: dict[str, str] | None = None) -> None:
+                 headers: dict[str, str] | None = None,
+                 extra: Mapping[str, str | None] | None = None) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
@@ -173,6 +197,25 @@ class ApiError(Exception):
         self.code = code
         self.param = param
         self.headers = headers or {}
+        self.extra = dict(extra or {})
+
+
+def render(exc: ApiError) -> JSONResponse:
+    """The response for an ApiError, from a handler or from middleware alike.
+
+    The exception handler below calls this, and so does any middleware that
+    refuses a request before routing, so a raised 401 and a returned one
+    cannot differ by a byte.
+    """
+    response = error_response(exc.status, exc.message, type_=exc.type_,
+                              code=exc.code, param=exc.param,
+                              headers=exc.headers, extra=exc.extra)
+    if exc.status == 401:
+        # RFC 9110 wants a challenge on a 401. OpenAI's own API omits it;
+        # sending it costs nothing and keeps generic HTTP clients honest. A
+        # more specific challenge the error already carries is kept.
+        response.headers.setdefault("WWW-Authenticate", "Bearer")
+    return response
 
 
 def v1_path(path: str) -> bool:
@@ -271,6 +314,24 @@ def validation_error_response(exc: RequestValidationError) -> Response:
         param=field)
 
 
+def quiet_validation_response(exc: RequestValidationError) -> Response:
+    """A refused native body answered with what was wrong, never with what was sent.
+
+    FastAPI's own 422 carries pydantic's `input` for every error, which is the
+    rejected value itself, with `ctx` and `url` beside it. The hub measured it
+    (POST /satellites/ha/pipelines with a Home Assistant token pasted into the
+    wrong field answered 422 with the token in the body), and a login or a
+    password change must never do the same with a password. So every error is
+    reduced to {type, loc, msg}: pydantic v2's `msg` says what was expected,
+    not what arrived. The shape is still FastAPI's, so a client reading
+    `detail[].loc` and `detail[].msg` sees no difference.
+    """
+    return JSONResponse(status_code=422, content={"detail": [
+        {"type": error.get("type"), "loc": list(error.get("loc") or ()),
+         "msg": error.get("msg")}
+        for error in exc.errors()]})
+
+
 def http_error_response(request: Request, exc: StarletteHTTPException, *,
                         unknown_url_hint: str | None = None) -> Response:
     """404, 405 and every other bare HTTPException, in OpenAI's envelope.
@@ -325,26 +386,15 @@ def http_error_response(request: Request, exc: StarletteHTTPException, *,
 def install_errors(app: FastAPI) -> None:
     """Register the four handlers on the app. Call once, before serving.
 
-    Order against `auth.install` no longer matters. It used to: the shared
-    authentication middleware builds its 401 by calling `error_response`
-    directly — it runs outside the exception handlers and has nothing above it
-    to catch a raise — so while this module emitted three keys, each service
-    had to bolt on a middleware or rebind a module attribute to give that one
-    body its fourth. `error_response` carries `param` itself now, and the 401
-    the middleware returns is the same shape as every other error here.
+    Order against identity.install does not matter: a middleware that refuses
+    before routing renders through `render`, the same function the ApiError
+    handler below uses, so its body is the same shape as every other error.
     """
 
     @app.exception_handler(ApiError)
     async def _render(request: Request, exc: ApiError) -> Response:
         del request
-        response = error_response(exc.status, exc.message, type_=exc.type_,
-                                  code=exc.code, param=exc.param,
-                                  headers=exc.headers)
-        if exc.status == 401:
-            # RFC 9110 wants a challenge on a 401. OpenAI's own API omits it;
-            # sending it costs nothing and keeps generic HTTP clients honest.
-            response.headers["WWW-Authenticate"] = "Bearer"
-        return response
+        return render(exc)
 
     @app.exception_handler(RequestValidationError)
     async def _validation(request: Request,
@@ -357,12 +407,12 @@ def install_errors(app: FastAPI) -> None:
         message off that shape and raises a bare APIStatusError, which is the
         same silence a missing `input` deserved a sentence for.
 
-        The native routes keep FastAPI's own handler untouched: /v1 is a
-        compatibility boundary, and something out there already parses
-        `detail` on the routes that are not one.
+        The native routes keep FastAPI's `{"detail": [...]}` and its 422,
+        because something out there already parses `detail` on the routes
+        that are not /v1 — but quietly: see quiet_validation_response.
         """
         if not v1_path(request.url.path):
-            return await request_validation_exception_handler(request, exc)
+            return quiet_validation_response(exc)
         return validation_error_response(exc)
 
     @app.exception_handler(StarletteHTTPException)
@@ -393,3 +443,129 @@ def install_errors(app: FastAPI) -> None:
                             media_type="text/plain")
         return error_response(500, f"internal error: {exc}",
                               type_="server_error", code="internal_error")
+
+
+# ── Authentication and authorisation (D55) ────────────────────────────────────
+#
+# Each returns an ApiError: a route handler raises it, a middleware renders it
+# with `render`. One constructor per code, so the wording and the challenge
+# cannot differ between the gateway and a backend.
+
+_REASON = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_VARIABLE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+
+def unauthenticated(message: str = "Authentication required: sign in, or send "
+                                   "an API key as 'Authorization: Bearer <key>'."
+                    ) -> ApiError:
+    """401: no credential at all, or none this service can verify."""
+    return ApiError(401, message, code="unauthenticated",
+                    headers={"WWW-Authenticate": "Bearer"})
+
+
+def invalid_api_key() -> ApiError:
+    """401: a key was sent and it is not one. RFC 6750 names this invalid_token."""
+    return ApiError(401, "Incorrect API key provided.", code="invalid_api_key",
+                    headers={"WWW-Authenticate": 'Bearer error="invalid_token"'})
+
+
+def api_key_expired() -> ApiError:
+    """401: a real key past its expiry. Distinct, so a client can tell the user why."""
+    return ApiError(401, "This API key has expired. Create a new one under "
+                         "Account › API keys.", code="api_key_expired",
+                    headers={"WWW-Authenticate": 'Bearer error="invalid_token"'})
+
+
+def insufficient_scope(scopes: Iterable[str]) -> ApiError:
+    """403 naming every missing scope, in the body and in the RFC 6750 challenge.
+
+    The Home Assistant integration reads the challenge to tell its user which
+    preset to create (§5.1), so the list is machine-readable there: scopes are
+    space-separated, and the grammar admits no quote or backslash to escape.
+    """
+    needed = sorted(set(scopes))
+    if not needed or not all(SCOPE.fullmatch(scope) for scope in needed):
+        raise ValueError("insufficient_scope needs one or more well-formed scopes")
+    listed = " ".join(needed)
+    return ApiError(403, f"This credential lacks the scope it needs: {listed}.",
+                    code="insufficient_scope",
+                    headers={"WWW-Authenticate":
+                             f'Bearer error="insufficient_scope", scope="{listed}"'})
+
+
+def session_required() -> ApiError:
+    """403: a session-only route (D60) asked with an API key, whatever it holds."""
+    return ApiError(403, "This needs a signed-in session; an API key cannot do it.",
+                    code="session_required")
+
+
+def csrf() -> ApiError:
+    """403: a cross-site or unverifiable browser request (D14, D15)."""
+    return ApiError(403, "Cross-site request refused. Reload the page and try again.",
+                    code="csrf")
+
+
+def wrong_host() -> ApiError:
+    """403: a cookie login on a host name other than the public origin (D61)."""
+    return ApiError(403, "Sign in at Calliope's own address, not this one.",
+                    code="wrong_host")
+
+
+# How many refused scopes the 400 names before it only counts the rest, and
+# the longest string it will name. Far above any real request (the longest
+# scope is 20 characters) and far below one that makes the reply its echo.
+MAX_NAMED_SCOPES = 10
+MAX_NAMED_SCOPE_LENGTH = 64
+
+
+def scope_not_grantable(scopes: Iterable[object]) -> ApiError:
+    """400: a key asked for scopes it may never hold, or the owner's role lacks.
+
+    The scopes are named because the caller chose them; the request is the
+    caller's own and naming them discloses nothing. Only strings with a
+    scope's shape are named, and only the first ten, so the message can never
+    carry markup or grow with the request: anything else is counted, never
+    repeated (recheck L9).
+    """
+    named: set[str] = set()
+    unrecognised = 0
+    for scope in scopes:
+        if (isinstance(scope, str) and len(scope) <= MAX_NAMED_SCOPE_LENGTH
+                and SCOPE.fullmatch(scope)):
+            named.add(scope)
+        else:
+            unrecognised += 1
+    parts = sorted(named)[:MAX_NAMED_SCOPES]
+    if len(named) > len(parts):
+        parts.append(f"{len(named) - len(parts)} more")
+    if unrecognised:
+        parts.append(f"{unrecognised} unrecognised "
+                     f"{'scope' if unrecognised == 1 else 'scopes'}")
+    message = (f"An API key cannot hold: {', '.join(parts)}." if parts
+               else "An API key cannot hold the scopes requested.")
+    return ApiError(400, message, code="scope_not_grantable", param="scopes")
+
+
+def json_required() -> ApiError:
+    """415: login takes JSON only, so a cross-site HTML form cannot submit it (D61)."""
+    return ApiError(415, "Send this request as application/json.",
+                    code="json_required")
+
+
+def locked(reason: str, variable: str | None = None) -> ApiError:
+    """503: the gateway is in locked mode (D63), with what to fix beside `error`.
+
+    `variable` is the NAME of the setting to fix, never its value: a weak
+    bootstrap password or a stale key list must not be read back from a
+    public error page. Both are checked against a name's shape, so a value
+    passed by mistake raises here instead of reaching a client.
+    """
+    if not _REASON.fullmatch(reason):
+        raise ValueError("a locked reason is a lower-case code")
+    if variable is not None and not _VARIABLE.fullmatch(variable):
+        raise ValueError("a locked variable is an environment variable's name")
+    message = f"Calliope is locked ({reason})."
+    if variable:
+        message += f" Fix {variable} and restart the gateway."
+    return ApiError(503, message, type_="server_error", code="locked",
+                    extra={"reason": reason, "variable": variable})

@@ -1,4 +1,4 @@
 # The tests ship in the sdist because voice_common.conformance is meant to be
 # run, and a tarball whose own suite cannot run is a tarball nobody checks.
-recursive-include tests *.py
+recursive-include tests *.py *.json
 include voice-entrypoint.sh
