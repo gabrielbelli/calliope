@@ -1,10 +1,20 @@
 """Fixtures for the deployment-and-documentation tests.
 
 These tests belong to `compose.yaml` and to the prose, not to any one service,
-which is why they live under `docs/`. They import nothing from a service. The
-only package they touch is `packages/common/voice_common`, and only to read the
-engine catalogue — the single table both `tts-long` and the gateway derive their
-model lists from.
+which is why they live under `docs/`. They import nothing from a service: they
+read service source and Containerfiles as text, to ask whether a setting is
+read anywhere. From `packages/common/voice_common` they take the tables every
+service shares, so compose is checked against the one copy rather than a list
+of its own:
+
+- `engines`, the catalogue `tts-long` and the gateway derive their model lists
+  from;
+- `auth.REMOVED_VARIABLES`, the old key scheme's variables, none of which
+  compose may name;
+- `scopes.SERVICE_PRINCIPALS`, the services that each get a key volume;
+- `identity.GATEWAY_INTERNAL`, the internal listener's address, read from the
+  source with `ast` rather than imported, because `voice_common.identity`
+  needs fastapi and cryptography and these tests run without either.
 """
 
 from __future__ import annotations
@@ -86,7 +96,10 @@ def source() -> str:
     return _source()
 
 
-KEY = re.compile(r"\b(?:TTS|GATEWAY|STT|UI|SATELLITES|AIV|RUNLOG)_[A-Z0-9_]+\b")
+# The prefixes of the environment keys the services read. CALLIOPE_ is the
+# gateway's sign-in settings and the identity contract every service shares.
+PREFIXES = ("CALLIOPE", "TTS", "GATEWAY", "STT", "UI", "SATELLITES", "AIV", "RUNLOG")
+KEY = re.compile(r"\b(?:" + "|".join(PREFIXES) + r")_[A-Z0-9_]+\b")
 
 
 def keys_read_by_code(text: str, source_text: str) -> set[str]:

@@ -16,11 +16,14 @@ audible here and inaudible in production until somebody reads a waveform.
 
 from __future__ import annotations
 
+import ast
 import re
 
 import pytest
 
-from conftest import KEY, keys_read_by_code
+from conftest import KEY, PREFIXES, keys_read_by_code
+from voice_common.auth import REMOVED_VARIABLES
+from voice_common.scopes import SERVICE_PRINCIPALS
 
 TTS_LONG = "tts-long"
 GATEWAY = "voice-gateway"
@@ -267,7 +270,7 @@ def test_no_commented_out_knob_in_compose_is_read_by_nothing(compose_text, sourc
     """
     suggested = set()
     for line in compose_text.splitlines():
-        m = re.match(r'^\s*#\s*((?:TTS|GATEWAY|STT|UI|SATELLITES|AIV|RUNLOG)_[A-Z0-9_]+):\s*"',
+        m = re.match(r'^\s*#\s*((?:' + "|".join(PREFIXES) + r')_[A-Z0-9_]+):\s*"',
                      line)
         if m:
             suggested.add(m.group(1))
@@ -462,3 +465,201 @@ def test_the_satellite_image_carries_the_models_attribution_beside_them(root):
     assert re.search(r"cp \S*MODELS-NOTICE\.md /srv/models/NOTICE\.md", containerfile), \
         "the attribution does not land beside the models"
     assert "CC BY-NC-SA 4.0" in notice and "NonCommercial" in notice
+
+
+# -- sign-in: the identity contract, as deployed ------------------------------
+#
+# Every check below is a line of compose.yaml that the code depends on and
+# cannot see: a volume mounted in the wrong place, a URL that points round the
+# gateway, a variable a release removed. Each fails quietly at run time, which
+# is why it is caught here instead.
+
+# Compose's service names are DNS names and were never renamed to match the
+# directories (the top of compose.yaml says why), so which principal each one
+# runs as is written down here, once.
+PRINCIPAL_SERVICE = {"satellites": "voice-satellites", "ui": "voice-ui",
+                     "stt": "stt-stack", "tts": "tts-stack", "tts-long": "tts-long"}
+RUN_DIR = "/run/calliope"
+GATEWAY_ONLY_VOLUMES = ("gateway-data", "calliope-keys")
+
+
+def _mounts(compose, service: str) -> list[tuple[str, str, str]]:
+    """(source, target, mode) for each short-form volume entry."""
+    mounts = []
+    for entry in compose["services"][service].get("volumes") or []:
+        source, target, *mode = entry.split(":")
+        mounts.append((source, target, mode[0] if mode else "rw"))
+    return mounts
+
+
+def _gateway_internal(root) -> str:
+    """identity.GATEWAY_INTERNAL, read from the source.
+
+    Not imported: voice_common.identity needs fastapi and cryptography, and
+    this directory runs with neither (voice_common/__init__.py says so).
+    """
+    tree = ast.parse((root / "packages/common/voice_common/identity.py")
+                     .read_text(encoding="utf-8"))
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and getattr(node.targets[0], "id", None) == "GATEWAY_INTERNAL"):
+            return ast.literal_eval(node.value)
+    raise AssertionError("voice_common/identity.py no longer defines GATEWAY_INTERNAL")
+
+
+def _image_chown_dirs(root) -> list[str]:
+    text = (root / "services/gateway/Containerfile").read_text(encoding="utf-8")
+    m = re.search(r'VOICE_CHOWN_DIRS="([^"]*)"', text)
+    return m.group(1).split() if m else []
+
+
+def test_no_variable_the_sign_in_release_removed_is_in_compose(compose_text):
+    """H5: A LEFTOVER KEY VARIABLE LOCKS THE GATEWAY.
+
+    GATEWAY_API_KEYS and the five others are not ignored by the gateway: one
+    still set puts it in locked mode, and a backend logs an ERROR every
+    minute. Not even a commented-out line may name one, because a comment that
+    shows a key variable is a suggestion to set it.
+    """
+    named = sorted(name for name in REMOVED_VARIABLES if name in compose_text)
+    assert not named, (
+        f"compose.yaml names {named}, which this release removed "
+        f"(voice_common/auth.py, REMOVED_VARIABLES). Delete every mention.")
+
+
+def test_every_sign_in_variable_compose_names_is_read_by_the_code(compose_text, source):
+    """Every new variable is read by something.
+
+    The two tests above this section check keys that are set or suggested.
+    This one also covers a CALLIOPE_ key named only in prose, because the
+    prose is where an operator is told what to set before the first start.
+    """
+    named = {k for k in KEY.findall(compose_text) if k.startswith("CALLIOPE_")}
+    assert named, "the reader found no CALLIOPE_ key in compose.yaml"
+    dead = sorted(named - keys_read_by_code(compose_text, source))
+    assert not dead, f"compose.yaml names {dead} and no code reads them"
+
+
+def test_every_service_mounts_its_own_key_volume_read_only_and_no_other(compose):
+    """D7: the gateway writes each service's key; the service only reads it.
+
+    A service that mounted its volume read-write could replace identity.pub
+    and accept assertions it signed itself; one that mounted another
+    service's volume would hold that service's key.
+    """
+    assert set(PRINCIPAL_SERVICE) == set(SERVICE_PRINCIPALS), (
+        "voice_common.scopes.SERVICE_PRINCIPALS and this test's map disagree: "
+        f"{sorted(set(PRINCIPAL_SERVICE) ^ set(SERVICE_PRINCIPALS))}")
+    faults = []
+    for name, service in PRINCIPAL_SERVICE.items():
+        own = [m for m in _mounts(compose, service) if m[0].startswith("calliope-svc-")]
+        if own != [(f"calliope-svc-{name}", RUN_DIR, "ro")]:
+            faults.append(f"{service} mounts {own}, not calliope-svc-{name} "
+                          f"read-only at {RUN_DIR}")
+    gateway = {m[0]: m for m in _mounts(compose, GATEWAY)}
+    for name in PRINCIPAL_SERVICE:
+        volume = f"calliope-svc-{name}"
+        if gateway.get(volume, (None, None, None))[1:] != (f"/svc/{name}", "rw"):
+            faults.append(f"{GATEWAY} does not mount {volume} read-write at /svc/{name}")
+    for service in compose["services"]:
+        if service == GATEWAY:
+            continue
+        for source, _, _ in _mounts(compose, service):
+            if source in GATEWAY_ONLY_VOLUMES:
+                faults.append(f"{service} mounts {source}, which only the gateway may")
+            elif (source.startswith("calliope-svc-")
+                  and PRINCIPAL_SERVICE.get(source[len("calliope-svc-"):]) != service):
+                faults.append(f"{service} mounts {source}, another service's key")
+    declared = set(compose.get("volumes") or {})
+    for volume in [*GATEWAY_ONLY_VOLUMES, *(f"calliope-svc-{n}" for n in PRINCIPAL_SERVICE)]:
+        if volume not in declared:
+            faults.append(f"{volume} is not declared under the top-level volumes")
+    assert not faults, "; ".join(faults)
+
+
+def test_the_gateway_takes_ownership_of_every_key_volume_it_writes(compose, env_of, root):
+    """A volume mounted where the image has no directory arrives owned by root.
+
+    The gateway runs as uid 1000, and the entrypoint takes ownership only of
+    the paths VOICE_CHOWN_DIRS names, looking at the top of each and nothing
+    below it. /svc is the image's own and already uid 1000's, so naming /svc
+    alone leaves every calliope-svc-* volume root-owned, and minting the first
+    service key fails at start.
+    """
+    chown = (env_of(GATEWAY).get("VOICE_CHOWN_DIRS") or "").split() or _image_chown_dirs(root)
+    targets = [target for source, target, _ in _mounts(compose, GATEWAY)
+               if not source.startswith("/") and target != "/certs"]
+    missing = sorted(t for t in targets if t not in chown)
+    assert not missing, (
+        f"{GATEWAY} mounts {missing} and VOICE_CHOWN_DIRS ({' '.join(chown)}) does not "
+        f"name them, so they stay owned by root and the gateway cannot write to them")
+
+
+def test_the_hub_starts_only_after_the_gateway_is_healthy(compose):
+    """H5: the hub reaches stt, tts and its secrets only through :8081.
+
+    `service_healthy` is safe only because a gateway in locked mode is still
+    healthy; the gateway's healthcheck is what makes the condition mean
+    anything at all.
+    """
+    hub = compose["services"]["voice-satellites"]
+    assert (hub.get("depends_on") or {}).get(GATEWAY) == {"condition": "service_healthy"}, (
+        "voice-satellites must depend on voice-gateway with condition service_healthy")
+    assert compose["services"][GATEWAY].get("healthcheck"), (
+        "voice-gateway has no healthcheck, so service_healthy never comes true")
+
+
+def test_only_the_gateway_publishes_a_port_and_never_the_internal_listener(compose):
+    """D6: :8081 takes service keys over plain HTTP. Published, every service's
+    key would be one captured request away, and a backend port published is a
+    way round the only process that checks who is asking."""
+    faults = []
+    for name, svc in compose["services"].items():
+        for entry in svc.get("ports") or []:
+            container = str(entry).rsplit(":", 1)[-1].split("/")[0]
+            if name != GATEWAY or container != "8080":
+                faults.append(f"{name} publishes {entry}")
+    assert not faults, "; ".join(faults)
+
+
+def test_service_to_service_calls_go_through_the_internal_listener(env_of, root):
+    """The run log and the hub's speech calls carry a service key.
+
+    voice_common.runlog sends its key to the internal listener and nowhere
+    else: any other RUNLOG_URL turns the log off with one ERROR, so a stale
+    `http://tts-long:8002` here loses every run record and fails no request.
+    The hub's STT and TTS calls are refused by the backends unless the gateway
+    signed them.
+    """
+    internal = _gateway_internal(root)
+    wanted = {("stt-stack", "RUNLOG_URL"), ("tts-stack", "RUNLOG_URL"),
+              ("voice-satellites", "SATELLITES_STT_URL"),
+              ("voice-satellites", "SATELLITES_TTS_URL")}
+    wrong = sorted(f"{service}:{key}={env_of(service).get(key)}"
+                   for service, key in wanted
+                   if env_of(service).get(key, "").rstrip("/") != internal)
+    assert not wrong, f"these must be {internal}: {wrong}"
+
+
+def test_voice_ui_shares_no_network_with_a_backend(compose):
+    """voice-ui runs yt-dlp on addresses people paste.
+
+    On `edge` alone, the gateway is the only Calliope service it can reach,
+    so a process tricked into fetching an internal address meets nothing but
+    a gateway that wants an identity. Neither network may be internal: the
+    hub, tts-long and voice-ui all call out of the stack.
+    """
+    services = compose["services"]
+
+    def networks(name: str) -> set[str]:
+        return set(services[name].get("networks") or ["default"])
+
+    backends = [s for s in services if s not in (GATEWAY, "voice-ui")]
+    shared = {b: sorted(networks("voice-ui") & networks(b)) for b in backends}
+    assert not any(shared.values()), f"voice-ui shares a network with {shared}"
+    unreachable = sorted(s for s in services
+                         if s != GATEWAY and not networks(s) & networks(GATEWAY))
+    assert not unreachable, f"the gateway shares no network with {unreachable}"
+    internal = sorted(name for name, net in (compose.get("networks") or {}).items()
+                      if (net or {}).get("internal"))
+    assert not internal, f"{internal} are internal, and every service needs a way out"

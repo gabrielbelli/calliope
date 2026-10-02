@@ -154,3 +154,28 @@ anything over 15 KB. 16 KB killed the first attempt 17 ms in.
   firmware images are the next step for the device's own trust.
 - No discovery. A satellite is told its hub in the setup portal, or moved with
   `set-hub`, as UniFi's set-inform does.
+
+## Since sign-in
+
+**2026-10-02:** every other route went behind a login
+([ADR 0022](0022-everything-behind-a-login.md)), and this socket did not: the
+decision above stands, and the adoption token is still the device's only
+credential. Three things were added around it.
+
+- **The gateway vouches for the relay.** It adds a relay assertion
+  (`svc:gateway-relay`, audience `satellites`) to every socket it relays, and
+  the hub refuses a socket without one (close code 1008) and refuses that
+  assertion on every HTTP route (403 `relay_only`). The hub believes
+  `X-Forwarded-For` only beside a valid assertion.
+- **A web page cannot open the socket.** The gateway refuses an upgrade that
+  carries an `Origin` header, except `file://`, which the Korvo's WebSocket
+  library sends and no browser page can. The Pi satellite sends none.
+- **Unadopted devices are bounded.** The hub keeps at most 32 waiting for
+  adoption, evicting the oldest, and limits hellos without a valid token to
+  10 a minute per address. Adopted satellites reconnecting together, from one
+  address behind a proxy, are never held back.
+
+Adopt, forget and set-hub now need `satellites:admin`, opening a microphone
+(`listen`, now a POST, and `inject`) needs `satellites:listen` and is audited,
+and identify still works before adoption. Buttons' webhook addresses moved
+into the secret store ([ADR 0023](0023-one-secret-store.md)).

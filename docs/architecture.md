@@ -20,30 +20,56 @@ flowchart TB
   C["OpenAI SDK, curl,<br/>anything else"] --> G
   B["Browser"] --> G
   D["Satellites on Wi-Fi"] -->|"wss /satellites/ws"| G
-  G["<b>voice-gateway</b> :8080<br/>published as 30080"]
-  G -->|"/ and /ui/*"| U["<b>voice-ui</b> :8090"]
-  U -->|"/ui/api/*, signed"| G
+  G["<b>voice-gateway</b> :8080<br/>published as 30080<br/>sign-in, keys, scopes"]
+  G -->|"/ui/*"| U["<b>voice-ui</b> :8090"]
+  U -->|"/ui/fetch only,<br/>:8081, service key"| G
   G -->|"/v1/audio/transcriptions<br/>/transcribe, /glossaries"| S["<b>stt-stack</b> :8000"]
   G -->|"/speak, /voices<br/>/v1/audio/speech, fast"| T["<b>tts-stack</b> :8001"]
   G -->|"/jobs/*<br/>/v1/audio/speech, long"| L["<b>tts-long</b> :8002"]
   G -->|"/satellites/*, and the<br/>device socket, relayed"| H["<b>voice-satellites</b> :8003"]
-  H -->|"/v1/audio/transcriptions"| S
-  H -->|"/v1/audio/speech"| T
+  H -->|"speech, secrets<br/>:8081, service key"| G
+  S -->|"run records<br/>:8081, service key"| G
 ```
+
+Every arrow out of the gateway carries `X-Calliope-Identity`, a signed
+assertion of who is asking, and every service refuses a request without a
+valid one. Every arrow into `:8081` carries a service's own key.
 
 `voice-satellites` is optional. It is the one backend that calls others: it
 transcribes a satellite's command on `stt-stack` and speaks the reply through
-`tts-stack`, over the internal network and not through the gateway, and it
+`tts-stack`, through the gateway's internal listener with its own key, and it
 calls whatever a wake word's action names (Home Assistant, a language model,
-a webhook). The device socket is relayed frame for frame and is not behind
-`GATEWAY_API_KEYS`; a per-satellite adoption token is the credential
+a webhook), with a secret it reads from the gateway's store. The device socket
+is relayed frame for frame and needs no sign-in; a per-satellite adoption
+token is the credential, and the gateway adds a relay assertion
 ([ADR 0013](adr/0013-satellites-one-door.md)).
 
-The loop back from the page to the gateway is the point of it. `voice-ui` is a
-client of the gateway, never of a backend: it holds no key list, compares no
-token, and can answer nothing the gateway would not have answered. If an edit
-ever gives that container a URL for `stt-stack`, `tts-stack` or `tts-long`, that
-sentence stops being true.
+`voice-ui` is a client of the gateway, never of a backend, and `compose.yaml`
+keeps it on a network of its own with the gateway (`edge`) so it cannot be
+anything else. The page calls the gateway's own paths with its session
+cookie; `voice-ui` itself makes one call with a credential, `/ui/fetch`, which
+sends a finished download to `:8081` with its own key and the person's
+delegation token. If an edit ever gives that container a URL for `stt-stack`,
+`tts-stack` or `tts-long`, or puts it on `core`, the container that runs
+yt-dlp on pasted addresses can reach them directly.
+
+### Who is asking
+
+The gateway is the only process that checks a credential
+([ADR 0022](adr/0022-everything-behind-a-login.md)). People sign in at
+`/login` and get a session cookie; clients use API keys a person creates, each
+with its own scopes; services use keys the gateway writes onto their own
+volumes, accepted only on `:8081`. Two roles (`admin`, `speech`) and the key
+presets are code constants in `voice_common.scopes`. The gateway finds each
+route's scope with the router's own match, refuses or forwards, and signs
+what it forwards with Ed25519. The services verify that assertion with the
+public key alone, decide nothing about access, and keep each person's data
+apart: another person's job, vocabulary profile or cloned voice is a `404`.
+Every secret the stack holds (Home Assistant's token, language model keys,
+webhook addresses, the MQTT password, the GPU runner's key) is in one
+encrypted store in the gateway ([ADR 0023](adr/0023-one-secret-store.md)).
+A configuration fault locks the gateway instead of stopping it, so the
+satellites stay up while a person is told what to fix.
 
 The service names in `compose.yaml` are DNS names on the app-internal network,
 not directory names, and they are deliberately not renamed to match the layout.
@@ -63,12 +89,12 @@ deployed.
 | `stt` — Parakeet | 1.4 GB | see §4.2 | no | ONNX Runtime carries Parakeet and Silero; CTranslate2 carries Whisper |
 | `tts` — Kokoro | ~0.33 GB | see §4.4 | no | ONNX Runtime again |
 | `tts-long` — Chatterbox | 6.6 GB | 0.21× | yes, CPU wheel | Twenty times heavier and twenty times slower than Kokoro, so it loads lazily and unloads after 600 s idle. A model a thousandth its size must not queue behind that |
-| `gateway` | `mem_limit: 512m` | — | no | The auth boundary and the only published port |
+| `gateway` | `mem_limit: 512m` | — | no | The only process that checks a credential, and the only published port. Two Argon2id hashes at a time take about 128 MiB of it |
 | `ui` | `mem_limit: 384m` | — | no | It spawns `yt-dlp` on a URL a browser chose |
 | `satellites` | 228 to 326 MiB, measured with 0 to 6 satellites; `mem_limit: 512m` | front-end 0.03 to 0.05 per satellite | no | A socket per device, and echo cancellation and wake word models on every satellite's microphones. Optional, so the rest of the stack must not depend on it |
 
-The gateway and the page hold no model and no state, so the only figures worth
-quoting for them are their limits. Nothing has measured their resident size.
+The gateway and the page hold no model, so the only figures worth quoting
+for them are their limits. Nothing has measured their resident size.
 
 Chatterbox has no ONNX build, so torch is unavoidable there. The **CPU wheel**
 is deliberate: the CUDA wheels add several gigabytes, and the card this would
@@ -85,17 +111,23 @@ not fit in 6 GB of VRAM at fp32 regardless.
 | `tts-long-models` | `tts-long` at `/models` | Chatterbox's weights |
 | `tts-long-out` | `tts-long` at `/output` | Job audio, and one record per run |
 | `voices` | `voice-ui` read-write, `tts-long` read-only | Reference clips for cloning |
-| `nodes-data` | `voice-satellites` at `/data` | Adopted satellites (`satellites.json`, tokens as SHA-256 only), the wake words and their actions (`wake_words.json`), API keys stored from the page (`secrets.json`), uploaded firmware, wake word models, and debug audio when switched on. Named for the feature's pre-release name ([ADR 0013](adr/0013-satellites-one-door.md#renamed)) |
+| `nodes-data` | `voice-satellites` at `/data` | Adopted satellites (`satellites.json`, tokens as SHA-256 only), the wake words and their actions (`wake_words.json`), uploaded firmware, wake word models, and debug audio when switched on. Named for the feature's pre-release name ([ADR 0013](adr/0013-satellites-one-door.md#renamed)) |
+| `gateway-data` | `voice-gateway` at `/data` | `calliope.db`: users, sessions and API keys (hashes only), the encrypted secrets, the audit |
+| `calliope-keys` | `voice-gateway` at `/keys` | The identity signing key, a generated secret-store key, and the marker that the first-access password was used. Never in the same backup as `gateway-data` |
+| `calliope-svc-<name>`, five | `voice-gateway` at `/svc/<name>`, read-write; the service at `/run/calliope`, read-only | That service's key and the gateway's public key. Minted again at start when missing |
 
-**`secrets.json` holds keys in plain text, so every backup of `nodes-data`
-holds them too** ([ADR 0015](adr/0015-the-hub-may-hold-a-key.md)). A key set
-in the hub's environment instead is not on the volume, and wins over a stored
-one.
+**No key is on a service's own volume any more.** An older hub's
+`secrets.json` is imported into the gateway's store at its first start, then
+overwritten with zeros and removed ([ADR 0023](adr/0023-one-secret-store.md)).
+**`calliope-keys` and `gateway-data` are backed up separately**: together
+they decrypt every stored secret, and losing both at once re-arms the
+first-access password if `CALLIOPE_ADMIN_PASSWORD` is still set.
 
-Two things are not on that list. The gateway mounts only `/etc/certificates`
-read-only and keeps nothing. And **`tts-long`'s queue is a dict in one process**,
+One thing is not on that list: **`tts-long`'s queue is a dict in one process**,
 so a restart empties it while the files sit in the volume and survive; the
-`runs/{id}.json` record is the index and the audio is an attachment.
+`runs/{id}.json` record is the index and the audio is an attachment. Each
+record now says whose run it was (`owner`, `credential`); one without an
+owner is the system's.
 
 Audio and records expire on separate clocks. Audio goes after `TTS_AUDIO_TTL`
 (a day) and the row stays, marked `audio.state: "expired"`; the record goes
@@ -113,9 +145,11 @@ the estate cannot plant a file the lightest one will serve.
 
 ### The shared package
 
-`packages/common` is the wire contract: `auth`, `errors`, `health`, `models`,
-`engines` (the shared catalogue), `runlog`,
-`logging`, an `[audio]` extra, a `[conformance]` extra, and
+`packages/common` is the wire contract: `identity` (the signed assertion,
+its verification and the credential files), `scopes` (roles, presets and the
+scope table), `audit`, `auth` (which now only reports the removed key
+variables), `errors`, `health`, `models`, `engines` (the shared catalogue),
+`runlog`, `logging`, an `[audio]` extra, a `[conformance]` extra, and
 `voice-entrypoint.sh` installed to `/usr/local/bin`.
 
 It exists because `app/auth.py` existed in three repositories, once each, and
@@ -165,9 +199,12 @@ keys and their `/v1` 401 shipped four. `POST /transcribe` and `POST /speak` with
 a bad key now answer with `"param": null` present; status, `message`, `type` and
 `code` are byte-identical.
 
-`services/gateway/app/auth.py` is the one `app/auth.py` left in the tree, and
-that is by design: a different environment variable, and a `/health` that fans
-out to three backends rather than reporting on itself.
+No service checks a key any more, the gateway's old `app/auth.py` included.
+The gateway checks every credential; each service runs
+`voice_common.identity.install`, one copy, which verifies the gateway's
+assertion and refuses everything else. `voice_common.conformance` checks that
+every service does: no assertion, a wrong audience, an expired one and a
+forged one are each a `401` in the shared envelope.
 
 **What deliberately stays out** of the package: Kokoro's voice table, recogniser
 loading, the Silero VAD, glossary repair, Chatterbox's job queue, per-wheel
@@ -214,7 +251,8 @@ a different engine, a different voice, no error anywhere. The filter is on
 `EngineFacts.owned_by` rather than on catalogue membership, so that the day the
 fast path's own `kokoro` gets a catalogue row it is not suddenly answered 404.
 
-**What the gateway never does:** retry, cache, rate-limit, load-balance, trip a
+**What the gateway never does:** retry, cache, rate-limit a speech route
+(sign-in is throttled, which is a different thing), load-balance, trip a
 circuit breaker, pre-flight a health check, or rewrite a body beyond reading
 `model`. The budget that decides all of those: a 2-second dictation clip is
 190–240 ms of recognition at the deployed rate, so a feature that adds 20 ms has
@@ -239,8 +277,9 @@ Responses stream in every case.
 
 Everything not in these tables is a 404 in the OpenAI envelope with
 `code: unknown_url`. There is no catch-all: `/docs`, `/redoc` and
-`/openapi.json` are **not** proxied, because `stt-stack` deliberately puts its
-own behind a key and a wildcard would quietly undo that.
+`/openapi.json` are **not** proxied, and every service switches its own off.
+Every route below needs a scope; the gateway's README has the table
+([What each route needs](../services/gateway/README.md#what-each-route-needs)).
 
 **OpenAI-shaped**
 
@@ -272,25 +311,34 @@ own behind a key and a wildcard would quietly undo that.
 
 | Route | Notes |
 |---|---|
-| `GET /`, `GET /ui` | `/` redirects to `/ui` |
-| `GET /ui/config`, `GET /ui/health` | What the page is allowed to render, and what is up |
+| `GET /`, `GET /ui` | `/` redirects to `/ui` with a session, to `/login` without one |
+| `GET /ui/<tab>[/…]` | Seven tabs, Account and Admin among them; each needs a session and its own scope |
+| `GET /ui/config` | The features and limits the page draws itself with |
 | `GET`, `POST /ui/clips`; `DELETE /ui/clips/{name}`; `POST /ui/clips/from-link` | The reference-clip store |
 | `POST /ui/resolve`, `/ui/commit`, `/ui/abandon`; `GET /ui/progress` | Link ingestion through MeTube |
 | `POST /ui/fetch`, `POST /ui/captions`; `GET /ui/media` | Transcribe an ingested file, take its subtitles instead, or play it back |
-| `POST`, `GET`, `PUT`, `PATCH`, `DELETE /ui/api/{rest}` | The page's own XHRs, forwarded verbatim; `voice-ui` strips the prefix and sends them back with its key attached. `PATCH` came with the Satellites tab |
 
 **Satellites**, when `GATEWAY_SATELLITES_URL` is set
 
 | Route | Notes |
 |---|---|
 | `GET`, `POST`, `PUT`, `PATCH`, `DELETE /satellites/...` | Streamed through to `voice-satellites`, each listed on its own in `SATELLITES_PATHS`. [`services/satellites`](../services/satellites/README.md#routes) has what each does. Unset, they answer 503 |
-| `WS /satellites/ws`, `WS /nodes/ws` | The device socket, relayed frame for frame and **not** behind the key. `/nodes/ws` is the path pre-release firmware dials |
+| `WS /satellites/ws`, `WS /nodes/ws` | The device socket, relayed frame for frame with no sign-in, and a relay assertion added. `/nodes/ws` is the path pre-release firmware dials |
 
-**Unauthenticated**
+**Sign-in, accounts and the internal listener**
 
-`GET /health`, and `/health/` with the trailing slash, matched after stripping
-it. That is the only exemption, and it is registered by the same call that
-registers the route, so the two can never name different strings.
+| Route | Notes |
+|---|---|
+| `GET /login`, `POST /auth/login` | Public. JSON only, on the public origin's host only, throttled |
+| `GET /auth/me`, `POST /auth/password`, `/auth/logout`, `/auth/step-up`, `/auth/sessions`, `/auth/keys` | The signed-in person's own account. Sessions only |
+| `/admin/users`, `/admin/roles`, `/admin/keys`, `/admin/secrets`, `/admin/audit` | Admin. Sessions only, except the audit, which a `monitor` key may read |
+| `:8081` `POST /runs`, `/internal/secrets/*` | The services' own calls, with their own keys; never published |
+
+**Public**
+
+`GET /health` (liveness only), `GET /login`, `POST /auth/login`, `GET /` and
+the device socket. Nothing else answers without a credential, and a route
+without a requirement cannot be registered: binding the route table raises.
 
 ### 2.3 The chat route, and why it is not a chatbot
 
@@ -440,29 +488,27 @@ characters is still around 400 s of speech and half an hour of CPU. It removes
 the dead air and the client-side timeout. The realistic floor for first sound is
 one sentence, so 3–8 s of audio and 15–40 s of compute.
 
-### 2.6 The `/ui/api` seam
+### 2.6 The `/ui/api` seam, and why it is gone
 
-The page's XHRs come back to `voice-ui` rather than going straight to the
-gateway, so there is one origin: no CORS on the gateway, no preflight on every
-upload, and no second base URL to get wrong. `voice-ui` strips `/ui/api` and
-forwards, adding `Authorization` from `config.gateway_authorization` — one
-function, so the proxied routes, the key probe and the ingest hand-off cannot
-drift apart. An inbound header is **replaced**, not joined: HTTP lets a field
-name repeat, and two `Authorization` headers on the wire would let a caller
-choose which key the gateway read.
+The page's XHRs used to come back to `voice-ui`, which stripped `/ui/api` and
+forwarded them to the gateway with a key of its own attached. That made one
+origin, and it also made a seam belonging to neither side, which failed in
+the way seams do: **`PUT` was missing from the gateway's `/ui/api`
+passthrough** while both the page's own allowlist and the gateway's
+`/glossaries` routes had it, so saving a vocabulary profile died with a 405
+between two services that both supported the write. Worse, everyone who could
+reach `voice-ui` acted as that one key.
 
-That leaves a seam belonging to neither side, and it has already failed once.
-**`PUT` was missing from the gateway's `/ui/api` passthrough** while both the
-page's own allowlist and the gateway's `/glossaries` routes had it, so saving a
-vocabulary profile died with a 405 `method_not_supported` between two services
-that both supported the write. Nothing noticed until a profile was written
-against the deployed stack. Whoever adds a method to the page's forwarding table
-has to add it to `UI_PATHS` as well; a test named after the defect is what says
-so now.
+With sign-in the page calls the gateway's own paths, same origin, with its
+session cookie, and the gateway checks each call against the person's scopes.
+The forwarding table, the mount and the container's key are deleted. One
+origin is kept, so there is still no CORS and no preflight.
 
 The same shape produced two earlier gaps, both recorded in the code: `DELETE
 /jobs/{id}` was implemented in `tts-long` all along and unreachable from the
-published port, and `/ui/media` 404ed playback for the same reason.
+published port, and `/ui/media` 404ed playback for the same reason. A test in
+the gateway's suite now walks every request the page can issue and fails on
+any the route table does not answer.
 
 ### 2.7 Where the deviations are written down
 
@@ -822,9 +868,9 @@ a declaration rather than a blank.
 Every backend setting in it was copied verbatim from the deployed app —
 environment, `cpus`, `mem_limit`, volumes, tag, `pull_policy`, `restart` and
 healthcheck, unchanged to the character — because that file is about the network
-boundary and must not be able to alter anything else. The five lines that belong
-to the original machine, and what to do with each, are in the README's *Run it*
-table.
+boundary and must not be able to alter anything else. The lines that belong
+to the original machine, the sign-in settings every deployment has to choose,
+and what to do with each, are in the README's *Run it* table.
 
 As written it asks for **32 CPUs and about 19.4 GB** across the six, which is
 the box it came from rather than a requirement:
@@ -904,64 +950,75 @@ Two rules hold across all six:
 
 ### 6.4 `/health`
 
-It needs no key, it always answers **200** even when a backend is unreachable —
-read `status`, not the status code — and it says a great deal:
+It always answers **200**, even when a backend is unreachable or the gateway
+is locked, so read `status` and not the status code. How much it says depends
+on who asks:
 
-- **Per backend:** its internal URL, whether it was reachable, its HTTP status,
-  and its own body inlined rather than summarised. `model_loaded: false` on a
-  cold `tts-long` and `status: "loading"` on a starting `stt-stack` are the
-  answers to the question an operator is about to ask next.
-- **From `stt`:** the loaded recogniser, whether it accepts a vocabulary,
-  whether it translates, whether it streams, the glossary names, VAD state,
-  threads, and the host label.
-- **From `tts`:** voice count, default voice, threads, and the realtime factor
-  with its sample count — both absent until something has been synthesised.
-- **From `satellites`**, when it is deployed: how many satellites are online,
-  adopted and waiting, the wake word engine's state and thresholds, the STT
-  URL and engine the hub uses, and MQTT's state.
-- **From `tts-long`:** `model_loaded`, queue depth and capacity, the realtime
-  factor broken down by lane and by engine with the observation count for each,
-  the full engine catalogue (languages, controls, minimum reference seconds,
-  cold-load seconds, native sample rate) and, when a runner is configured, its
-  state, mode, machine state, limits, CPU and memory.
+- **Anyone:** `{"status": "ok"}` or `"degraded"`, and nothing else.
+- **`health:read`**, which the speech role and most presets hold: per backend,
+  whether it was reachable and the fields the page draws from. From `stt`,
+  the loaded recogniser and engines, whether it accepts a vocabulary,
+  translates or streams, the system and built-in glossary names and VAD
+  state. From `tts`, voice count, default voice and realtime factor. From
+  `tts-long`, `model_loaded`, queue depth and capacity, the realtime factors
+  by lane and by engine, and the engine catalogue with each lane's readiness.
+  From `satellites`, its status. `model_loaded: false` on a cold `tts-long`
+  and `status: "loading"` on a starting `stt-stack` are the answers to the
+  question an operator is about to ask next.
+- **`health:detail`** (admins and the `monitor` preset): each backend's
+  internal address and HTTP status, thread counts, host labels, the run log,
+  the GPU runner's state, the satellites' topology, MQTT, the variables a
+  backend ignores, and the gateway's own locked-mode reasons.
 
-It fans out on every call with **no cache**: three concurrent local requests,
-four with the satellite hub, a 5 s timeout each. Something polling it once a second would triple that rate onto
-the backends; nothing does today. The gateway's own healthcheck calls it, and it
-must never answer 503, because a 503 caused by a cold `tts-long` would have the
-orchestrator restart the one container that has to stay up to report the outage.
-
-Do not publish 30080 to the internet.
+Each tier is built from a list of named fields per backend, never a backend's
+body passed through, so a field a backend adds later appears in neither tier
+until someone decides which one it belongs to. Probes are cached for 5 s and
+shared while in flight, so an anonymous caller polling it cannot multiply
+into the backends. The gateway's own healthcheck calls it, and it must never
+answer 503, because a 503 caused by a cold `tts-long` would have the
+orchestrator restart the one container that has to stay up to report the
+outage.
 
 ### 6.5 The traps
 
-**Setting `GATEWAY_API_KEYS` takes the page offline.** Reproduced against the
-real app with two keys set: the startup line prints `authentication enabled,
-2 key(s); unauthenticated: /health`, and then `GET /`, `/ui`, `/ui/health`,
-`/ui/config`, `/ui/clips` and `/ui/api/v1/models` all answer 401 with
-`WWW-Authenticate: Bearer`. Enforcement is middleware over the whole
-application, so a route added later is protected by default and `/health` is its
-only exemption. There is nowhere in a browser to present a key: Bearer raises no
-browser prompt, and the page's key box was deliberately removed. `UI_GATEWAY_API_KEY`
-signs the `voice-ui` → gateway hop, never the browser → gateway hop that is
-refused first — and setting it makes **anyone who can open the page
-authenticated by it**, which is why the page logs a WARNING at startup whenever
-it is set. If `GATEWAY_API_KEYS` is set and that one is not, the key probe turns
-the failure into a 503 `misconfigured_api_key` naming the variable rather than
-passing "Incorrect API key provided" through to a page with nowhere to type one.
-Until the gateway can mint a browser credential of its own, keys and the page
-are mutually exclusive. If you only use the API and never the page, setting it
-is safe and correct.
+**Sign-in needs a host name of its own.** `CALLIOPE_PUBLIC_ORIGIN` is
+required, `https://`, on a host name that serves nothing but Calliope on any
+port. A browser keeps one set of cookies per host name and ignores the port,
+so a sibling HTTPS service under the same name (MeTube, Gitea, the NAS's own
+pages) could hand a reader's browser a session of its choosing. The gateway
+honours a session only on that host; the NAS's own address on 30080 still
+answers API keys. Unset, the gateway starts locked and says so.
 
-**Unset means open, for every service.** `GATEWAY_API_KEYS` ships unset, and the
-gateway is the only process here that checks a token: `stt`, `tts` and
-`tts-long` all run with authentication off behind it. It says so at WARNING on
-every start. A degenerate value — empty, `,`, or `,,  ,` — exits at startup with
-a sentence rather than being treated as off, because `-e GATEWAY_API_KEYS=$SECRET`
-with `SECRET` unset is a real accident and here it opens three services at once.
-The client's `Authorization` header is stripped before forwarding and is not
-replaced: relaying a key to three services whose own key lists are unset
-achieves nothing except copying the secret into three more log streams.
+**A configuration fault locks the gateway; it does not stop it.** A missing
+origin, a weak first password, an unreadable secret-store key or a variable
+of the old key scheme (`GATEWAY_API_KEYS`, `UI_GATEWAY_API_KEY`,
+`STT_API_KEYS`, `TTS_API_KEYS`, `SATELLITES_API_KEYS`, `RUNLOG_KEY`) each put
+it in locked mode: the satellites stay connected, `/health` and `:8081` keep
+working, and every other route answers 503 naming the reason and the
+variable. A service that still sees one of those variables logs an ERROR
+every minute and lists it in `health:detail` as `ignored_variables`. The
+[gateway README](../services/gateway/README.md#locked-mode) has every reason
+and its fix.
+
+**`CALLIOPE_TRUSTED_PROXIES` must never include the Docker bridge's subnet.**
+Every LAN client reaches the container through the bridge, so each could
+then name its own address in `X-Forwarded-For`, dodge the per-address sign-in
+limit and write a false address into the audit.
+
+**Losing `gateway-data` and `calliope-keys` together re-arms the first
+password.** `docker compose down -v`, or reinstalling the app, removes both,
+and a `CALLIOPE_ADMIN_PASSWORD` left set then signs in whoever tries it
+first. Remove the variable once the first admin has a password. Losing
+`gateway-data` alone locks the gateway until
+`docker exec -u 1000:1000 voice-gateway python -m app.admin reset-password admin`
+is run. Every command of the gateway's command line runs as uid 1000, never
+as root ([gateway README](../services/gateway/README.md#the-command-line)).
+
+**The MQTT broker is a way in that does not pass the gateway.** The hub takes
+commands from its broker with no Calliope credential, and they can switch a
+satellite's microphone on. Mosquitto as Home Assistant's add-on lets every
+broker user publish to every topic until an ACL is added; the hub's README
+has one.
 
 **MeTube has no authentication of any kind.** Its configuration has no `auth`,
 `user`, `password` or `token` key; `/add`, `/start`, `/delete`, `/retry` and
@@ -1288,6 +1345,20 @@ on `feat/nodes` on 28 Sep 2026, run locally:
 | `services/stt` | 168, 2 skipped | The same, with `STT_MODELS` | yes |
 | `docs/tests` | 70 | The same, with the satellite hub's settings and notices | yes |
 
+Sign-in grew every suite. Counted on `feat/nodes` on 2 Oct 2026, run locally:
+
+| Suite | Tests | What sign-in added |
+|---|---|---|
+| `packages/common` | 312, 2 skipped | The assertion's round trip and every way it fails, the scope rules, the audit line, the removed variables, and the conformance suite every service now runs |
+| `services/gateway` | 648, of which 8 are the live smoke test | Every route has a requirement on both listeners and is checked with and without its scope; sign-in, throttling, Fetch Metadata, keys, step-up, locked mode, forwarded addresses and PROXY protocol over real sockets, the audit, the secret store |
+| `services/stt` | 208, 2 skipped | Vocabulary namespaces, the reserved `home-assistant`, whose run a record is |
+| `services/tts` | 103 | Whose run a record is |
+| `services/tts-long` | 401, 2 deselected | Jobs and voices by owner, the per-person cap, the runner key from the store |
+| `services/ui` | 962, 2 skipped | Clip namespaces, link ownership, the delegation, the probe's destination check, and the page's session layer in Node |
+| `services/satellites` | 868, 2 skipped | The relay assertion, the secret client and the one-time import, button webhooks as secrets, the split between control and admin |
+| `clients/home-assistant` | 153 | A key is required; a missing scope is a repair issue |
+| `docs/tests` | 78 | The sign-in settings in `compose.yaml` against the code |
+
 The live smoke test against the running stack **skips itself** when the host is
 unreachable, which from a CI runner it should be, and is deselected by name
 anyway: a CI job must not depend on somebody's NAS being awake, and must not
@@ -1328,6 +1399,14 @@ sentence those two justified stopped being true the day a second engine was
 reachable over the API. An engine on the API and absent from the README is an
 undocumented API, and it is how somebody finds out about `chatterbox-turbo` by
 reading a 400.
+
+Sign-in added a third kind: a line of `compose.yaml` the code depends on and
+cannot see. A service that mounts its key volume read-write, or another
+service's; a run log pointed at tts-long directly, which the run log answers by
+switching itself off; a volume the gateway must write that arrives owned by
+root; the internal listener published; the page's container on the backends'
+network; a removed key variable left in a comment as a suggestion. Each fails
+quietly at run time, so each is checked here instead.
 
 ---
 
@@ -1444,7 +1523,7 @@ skips the extension if OpenClip is absent.
 ## 10. Decision records
 
 `docs/adr/` holds the decisions, dated, each with what it cost. The sequence
-runs 0001–0010 and 0012–0021; there is no 0011.
+runs 0001–0010 and 0012–0023; there is no 0011.
 
 | | Status |
 |---|---|
@@ -1461,13 +1540,15 @@ runs 0001–0010 and 0012–0021; there is no 0011.
 | [0012 — One branch: `main` is the branch, a `v*` tag is a release](adr/0012-one-branch.md) | accepted |
 | [0013 — Satellites come in through the one door, and their socket is not behind a key](adr/0013-satellites-one-door.md) | accepted |
 | [0014 — The Korvo is a voice satellite, not a music speaker](adr/0014-voice-satellite-not-a-music-speaker.md) | accepted |
-| [0015 — The satellite hub may hold an API key, by name, and never shows it](adr/0015-the-hub-may-hold-a-key.md) | accepted |
+| [0015 — The satellite hub may hold an API key, by name, and never shows it](adr/0015-the-hub-may-hold-a-key.md) | superseded by 0023 |
 | [0016 — Several speech-to-text engines side by side, picked by `model`](adr/0016-several-stt-engines.md) | accepted |
 | [0017 — Home Assistant's names are one glossary profile, written by the integration and named by the hub](adr/0017-home-assistant-vocabulary.md) | accepted |
 | [0018 — A language model word may call two tools, and the date is not one of them](adr/0018-language-model-tools.md) | accepted |
 | [0019 — The wake word is the unit of configuration, and it has one of three modes](adr/0019-the-wake-word-is-the-unit.md) | accepted |
 | [0020 — A Home Assistant integration beside MQTT discovery, and both are optional](adr/0020-home-assistant-integration-beside-mqtt.md) | accepted |
 | [0021 — Satellites install only firmware signed on the developer's machine, and the hub cannot waive it](adr/0021-signed-firmware.md) | accepted |
+| [0022 — Everything is behind a login, and the gateway is the only place that checks one](adr/0022-everything-behind-a-login.md) | accepted |
+| [0023 — Every secret the stack holds is in one encrypted store in the gateway](adr/0023-one-secret-store.md) | accepted |
 
 Smaller decisions from the satellites work are recorded where they apply
 rather than in records of their own:
@@ -1500,10 +1581,7 @@ side is right.
 
 | Where | What it says | What is true |
 |---|---|---|
-| `services/ui/README.md`, header block and *The short version* | The page is at `:30081`, and `:30081` is the trust boundary | There is no 30081. It was closed when the page moved behind the gateway; the boundary is 30080. Correct both the next time that file is touched |
-| `services/stt`, `tts`, `tts-long`, `gateway` READMEs, *Status* | Work happens on `prerelease`, which publishes `:pre` | ADR 0012 deleted the branch and the workflow publishes no `:pre` tag. `main` is the branch, a `v*` tag is a release |
-| `services/gateway/README.md` | "Not deployed yet" | It is deployed. `/health` answers on the published port |
-| `services/gateway/README.md` | 63 tests | 157 at this commit |
+| `services/stt`, `tts`, `tts-long` READMEs, *Status* | Work happens on `prerelease`, which publishes `:pre` | ADR 0012 deleted the branch and the workflow publishes no `:pre` tag. `main` is the branch, a `v*` tag is a release |
 | `services/stt/README.md`, *Glossary profiles* | "+28% on Whisper and 28% on Whisper" | A typo. `services/ui/README.md` has the pair: **+12% on Parakeet, +28% on Whisper** |
 | `services/stt/README.md` headline vs `gateway/app/main.py` | 47–63× vs 8.5–10.4× | Different machines. See §4.2, and re-measure before quoting either as "the" rate |
 

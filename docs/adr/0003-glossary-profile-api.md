@@ -122,3 +122,24 @@ compiled regexes; the cost is in the regex compilation, not the read.
 A profile that a program writes and other programs name, rather than one a
 person writes, came with the Home Assistant integration:
 [ADR 0017](0017-home-assistant-vocabulary.md).
+
+**2026-10-02: profiles have owners, and the write API is behind a login**
+([ADR 0022](0022-everything-behind-a-login.md)). The two warnings above about
+unset keys no longer apply: stt-stack refuses any request the gateway did not
+sign, and `STT_API_KEYS` is a removed variable that is logged and ignored.
+The volume is now namespaced, with no file moved:
+
+| | path | who reads and writes it |
+|---|---|---|
+| built-in | `/etc/calliope/glossaries/` (in the image) | everyone reads; nobody writes |
+| system | `/glossaries/*.txt`, every profile written before this release | services, and people holding `glossaries:read:all` or `glossaries:write:all` |
+| a person's | `/glossaries/users/<user id>/*.txt` | that person, and `:all` holders by naming `?owner=<user id>` |
+
+A person resolves names among their own and the built-ins; another person's
+profile is a 404, and "unknown profile" lists only the names the caller can
+use. A built-in name still cannot be shadowed in any namespace. The compiled
+cache is keyed by owner and name, so one person's profile is never applied to
+another's request. `home-assistant` stays in the system namespace and is
+reserved (ADR 0017). `/health` lists only system and built-in profiles, and no
+response names a path any more. One person may keep at most 50 profiles, and
+one request may select at most 16 distinct ones.

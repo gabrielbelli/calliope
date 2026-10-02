@@ -44,6 +44,14 @@ holding.** Re-read this section first.
 | websockets | 17.1 | BSD-3-Clause |
 | numpy | 2.3.4 | BSD-3-Clause |
 | python-multipart | 0.0.20 | Apache-2.0 |
+| cryptography | 50.0.1 | Apache-2.0 OR BSD-3-Clause |
+| idna | 3.x (through httpx) | BSD-3-Clause |
+
+cryptography is the sign-in release's identity contract: the gateway signs
+each request's assertion with Ed25519 and hashes passwords with Argon2id, and
+every backend verifies the assertion (`packages/common`). idna spells a host
+name the way httpx connects to it, so a secret's allowed hosts match the
+place the value is actually sent (`voice_common.origins`).
 
 yt-dlp is used **as a metadata probe only** — `extract_info(download=False)`,
 to resolve a pasted link to a title, duration and size so the user can confirm
@@ -67,7 +75,7 @@ asks for tflite-runtime, which has no wheel for Python 3.13).
 | webrtcvad-wheels | 2.0.14 | MIT (the wrapper); compiles in WebRTC's VAD, BSD-3-Clause, Copyright The WebRTC project authors | the endpointer |
 | aiomqtt | 2.5.1 | BSD-3-Clause | Home Assistant over MQTT |
 | paho-mqtt | 2.1.0 | EPL-2.0 OR BSD-3-Clause, taken as BSD-3-Clause | under aiomqtt |
-| cryptography | 50.0.1 | Apache-2.0 OR BSD-3-Clause | firmware signatures |
+| cryptography | 50.0.1 | Apache-2.0 OR BSD-3-Clause | firmware signatures, and the identity contract above |
 | py3langid | 0.4.0 | BSD-3-Clause, its model included | the language of a transcript |
 | websockets | 17.1 | BSD-3-Clause | Home Assistant's Assist pipelines (`ha_assist`) |
 
@@ -198,6 +206,38 @@ that is the file the code is actually in.
 MIT License
 
 Copyright (c) 2026 Hasib
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
+### `danielmiessler/SecLists` — MIT — Copyright (c) 2018 Daniel Miessler
+
+`services/gateway/app/common_passwords.txt` is SecLists'
+`Passwords/Common-Credentials/10k-most-common.txt`, unchanged apart from a
+comment header. The gateway refuses a password on that list (D18).
+
+```text
+MIT License
+
+Copyright (c) 2018 Daniel Miessler
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

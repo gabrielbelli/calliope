@@ -9,6 +9,8 @@ reachable over the API.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 TTS_LONG_README = "services/tts-long/README.md"
@@ -109,7 +111,6 @@ def test_every_link_to_an_adr_resolves(root):
     it without fixing them would leave four dead ends at the exact question
     somebody has when they see 1.5426x.
     """
-    import re
     broken = []
     for path in [root / "compose.yaml", *(root / "services").glob("*/README.md"),
                  *(root / "docs" / "adr").glob("*.md"), root / "README.md"]:
@@ -357,7 +358,6 @@ def test_a_superseded_decision_record_says_so_and_its_successor_agrees(root):
     a Status line pointing at a successor that never claims it, or a successor
     claiming a record that still reads accepted.
     """
-    import re
     adrs = sorted((root / "docs" / "adr").glob("*.md"))
     texts = {p.name: p.read_text(encoding="utf-8") for p in adrs}
     status = re.compile(
@@ -426,3 +426,44 @@ def test_the_retirement_record_carries_the_measurements_that_decided_it(
     flat = " ".join(_read(root, ADR_RETIRED).split())
     assert evidence in flat, (
         f"{ADR_RETIRED} does not mention {evidence!r}.")
+
+
+# -- the gateway's command line ------------------------------------------------
+
+# Every document an operator copies a command from. Explicit depths rather than
+# a recursive glob, which would walk every virtualenv and PlatformIO checkout
+# under services/ and clients/.
+def _operator_documents(root):
+    return [root / "compose.yaml", *root.glob("*.md"), *(root / "docs").rglob("*.md"),
+            *root.glob("services/*/README.md"), *root.glob("services/*/*/README.md"),
+            *root.glob("clients/*/README.md"), *root.glob("clients/*/*/README.md"),
+            *root.glob("packages/*/README.md")]
+
+
+# One command: `docker exec`, its options and the container, then the module.
+# A token never holds a backtick or a pipe and is never `docker`, so a match
+# cannot run on past the end of a code span, a table cell or the next command.
+ADMIN_EXEC = re.compile(r"docker exec((?:\s+(?!docker\b)[^\s`|]+)*?)\s+python -m app\.admin\b")
+
+
+def test_every_documented_admin_command_runs_as_the_gateways_own_uid(root):
+    """A `docker exec` without `-u` is root, because the image has no USER line.
+
+    `rotate-identity-key` run as root writes /keys/identity.json as root:root
+    0400. The gateway runs as uid 1000 and cannot read it: it goes on signing
+    with the old key, and at its next restart it cannot load any key and stops,
+    taking the device relay, and so every satellite, with it. A command printed
+    in a README is the command an operator pastes, so every one carries
+    `-u 1000:1000`.
+    """
+    as_root, seen = [], 0
+    for path in _operator_documents(root):
+        # Flattened, and with compose's comment markers gone, so a command
+        # wrapped across two lines is still one command.
+        text = " ".join(re.sub(r"(?m)^\s*#", " ", path.read_text(encoding="utf-8")).split())
+        for match in ADMIN_EXEC.finditer(text):
+            seen += 1
+            if "-u 1000:1000" not in match.group(1):
+                as_root.append(f"{path.relative_to(root)}: {match.group(0)}")
+    assert seen, "no document shows the admin command line; this test reads nothing"
+    assert not as_root, f"admin commands that would run as root: {as_root}"

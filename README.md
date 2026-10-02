@@ -17,7 +17,7 @@ nothing to install on the host.
 ```bash
 git clone https://github.com/gabrielbelli/calliope
 cd calliope
-$EDITOR compose.yaml      # six things to decide first: see Run it
+$EDITOR compose.yaml      # a host name, a first password, and a few more: see Run it
 docker compose up -d
 ```
 
@@ -27,11 +27,15 @@ up unedited; [Run it](#run-it) names every line.
 
 One port is published, **30080**, and it is both the API and the page: `/`
 redirects to `/ui`, `/v1/…` is the API, and the other five services stay on the
-internal network. Satellites connect through the same port.
+internal network. **Everything behind it needs a sign-in or an API key**:
+people sign in at `/login`, and clients use keys a person creates on the
+Account tab. Satellites connect through the same port, with their own
+adoption tokens.
 
 ## The page
 
-Five tabs, one HTML file, no build step.
+Seven tabs, one HTML file, no build step. A speech user sees the first five
+below; an admin sees all seven.
 
 **Speak.** Type, choose one of 54 voices, listen. Kokoro answers immediately
 and returns `mp3`, `opus`, `aac`, `flac`, `wav` or headerless `pcm`.
@@ -45,8 +49,11 @@ playable and downloadable from the row.
 
 **Transcribe** takes a dropped file, the microphone, or a pasted link.
 **Vocabulary** edits the profiles that bias the recogniser; `dictation` and
-`tech` ship built in. **Satellites** adopts satellites and sets up their wake
-words ([Around the house](#around-the-house)).
+`tech` ship built in. Each person's jobs, profiles and cloned voices are
+their own. **Account** changes the password, lists the sessions and creates
+API keys. **Satellites** adopts satellites and sets up their wake words
+([Around the house](#around-the-house)), and **Admin** holds the users, every
+key, the secret store and the audit.
 
 ## On your Mac
 
@@ -114,7 +121,8 @@ Point any OpenAI client at `/v1`.
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://your-host:30080/v1", api_key="unused")
+client = OpenAI(base_url="https://calliope.example/v1",
+                api_key="calliope_…")   # Account › API keys › New key
 
 text = client.audio.transcriptions.create(
     model="parakeet", file=open("meeting.m4a", "rb"))
@@ -142,7 +150,9 @@ request carrying audio is transcribed, and one without gets a fixed reply.
 /glossaries`, and `GET`, `PUT`, `DELETE` on `/glossaries/{name}`; `POST` and
 `GET /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/audio`, `DELETE` on both.
 
-`GET /health` is the only route that never needs a key.
+Every route needs a key with the right scope; a preset such as `speech`,
+`transcribe-only` or `speak-only` gives a key exactly what one client needs.
+`GET /health` answers without one, with `ok` or `degraded` and nothing more.
 
 > [!NOTE]
 > On the transcription side, `model` picks an engine only when it names one
@@ -162,7 +172,7 @@ README.
 flowchart LR
   C["OpenAI SDK, curl,<br/>anything else"] --> G
   B["Browser"] --> G
-  G["gateway :30080<br/>the only published port"]
+  G["gateway :30080<br/>the only published port,<br/>sign-in and keys"]
   subgraph closed ["internal network, nothing published"]
     direction TB
     U["ui :8090<br/>the page"]
@@ -177,16 +187,23 @@ flowchart LR
   G --> T
   G --> L
   G --> H
-  H --> S
-  H --> T
+  H -->|"service key, :8081"| G
+  U -->|"service key, :8081"| G
 ```
+
+Every request is checked at the gateway, which forwards it with a signed
+assertion of who is asking; each service verifies that assertion and refuses
+anything without one. The services reach each other only through the
+gateway's internal listener, `:8081`, which is never published and takes
+only their own keys
+([ADR 0022](docs/adr/0022-everything-behind-a-login.md)).
 
 | | Image | Runs | Resident |
 |---|---|---|---|
 | [`services/stt`](services/stt/README.md) | `calliope-stt` | Parakeet TDT 0.6B v3, or Whisper large-v3 with `STT_MODEL=whisper`, or several side by side with `STT_MODELS` | 1.4 GB |
 | [`services/tts`](services/tts/README.md) | `calliope-tts` | Kokoro-82M, 54 voices, six output formats | 0.33 GB |
 | [`services/tts-long`](services/tts-long/README.md) | `calliope-tts-long` | Chatterbox and Chatterbox Turbo, as jobs | 6.6 GB |
-| [`services/gateway`](services/gateway/README.md) | `calliope-gateway` | Auth, routing, one health answer | — |
+| [`services/gateway`](services/gateway/README.md) | `calliope-gateway` | Sign-in, API keys, routing, the secret store, one health answer | — |
 | [`services/ui`](services/ui/README.md) | `calliope-ui` | The page, and link ingestion through MeTube | — |
 | [`services/satellites`](services/satellites/README.md) | `calliope-satellites` | The satellite hub: adoption, wake words, echo cancellation, what each word does. Optional | 228 to 326 MiB, measured with 0 to 6 satellites |
 
@@ -251,13 +268,17 @@ engines, both jobs: see
 
 ## Run it
 
-Six things in `compose.yaml` belong to the machine it came from, or are
-optional.
+These lines in `compose.yaml` belong to the machine it came from, are yours to
+choose, or are optional.
 
 | In `compose.yaml` | What it is | What to do |
 |---|---|---|
-| `GATEWAY_TLS_CERT`, `GATEWAY_TLS_KEY`, the `/etc/certificates` mount | a certificate nobody else has | Point them at your own, or delete all three and serve plain HTTP, which satellites on release firmware cannot use unless a proxy in front adds TLS. TLS is opt-in, and half-configured is a refusal to start rather than a quiet fallback |
-| the gateway `healthcheck` and `UI_GATEWAY_URL` | both dial the gateway over `https` | Change both to `http` if you dropped TLS |
+| `CALLIOPE_PUBLIC_ORIGIN` | the address people type, `https://<host name>` | **Required.** A host name that serves Calliope and nothing else, on any port: a browser keeps one set of cookies per host name. Unset, the gateway starts locked and says so |
+| `CALLIOPE_ADMIN_PASSWORD` | the first admin's first password | Set it for the first start only, in the app's secret settings: at least 15 characters. Sign in as `admin` with it, choose your own, then remove it |
+| `CALLIOPE_MASTER_KEY_FILE` and its mount | the key the secret store is encrypted with | Optional. A host file is better than the key the gateway otherwise generates on its own volume; either way, back it up apart from the database ([gateway: Backups](services/gateway/README.md#backups)) |
+| `GATEWAY_TLS_CERT`, `GATEWAY_TLS_KEY`, the `/etc/certificates` mount | a certificate nobody else has | Point them at your own. Delete all three only if a reverse proxy in front terminates TLS: the public origin is `https://` either way, and satellites on release firmware connect only to `wss://`. Half-configured is a refusal to start rather than a quiet fallback |
+| `CALLIOPE_TRUSTED_PROXIES`, `CALLIOPE_PROXY_PROTOCOL` | a reverse proxy in front | Its address, so sign-in limits and the audit see real client addresses. Never the Docker bridge's subnet ([gateway: Behind a reverse proxy](services/gateway/README.md#behind-a-reverse-proxy)) |
+| the gateway `healthcheck` | dials the gateway over `https` | Change it to `http` if the gateway serves plain HTTP behind a proxy |
 | `TTS_RUNNER_*` and the `runner-key` bind mount | an optional GPU box on another LAN | Delete both. `tts-long` runs everything locally without it |
 | `UI_METUBE_URL` | a MeTube instance on that LAN | Delete it and the link box is not rendered. MeTube has no authentication of its own, so firewall it if you do configure one |
 | `AIV_HOST_LABEL`, `cpus:`, `mem_limit:` | a label stamped into every job record, and the size of the original box | Your own name, and limits that fit your machine |
@@ -270,28 +291,24 @@ a quarter of an hour before the stack reports healthy is normal. Chatterbox
 pulls about 3 GB on the first job rather than at boot. Later starts are
 immediate.
 
-> [!WARNING]
-> **Setting `GATEWAY_API_KEYS` takes the web page offline.** The check is
-> middleware over the whole application and `/health` is its only exemption, so
-> a browser navigating to `/` or `/ui` is answered 401, and the page has no
-> box to type a key into. `UI_GATEWAY_API_KEY` signs the page container's own
-> calls back to the gateway; it cannot sign the browser's navigation, and
-> setting it makes anyone who can open the page authenticated by it. Either run
-> keyless on a network you trust, or put a reverse proxy in front that supplies
-> the header.
+Then open the public origin, sign in as `admin`, choose a password, and create
+an API key for each client on the Account tab. A stack upgraded from a release
+without sign-in has a sequence to follow so that Home Assistant and the
+satellites are not left without a key:
+[Upgrading to sign-in](services/gateway/README.md#upgrading-to-sign-in).
 
-> [!CAUTION]
-> **Unset means open, for every service.** `GATEWAY_API_KEYS` ships unset, and
-> the gateway is the only process here that checks a token. `stt`, `tts` and
-> `tts-long` run with authentication off behind it. It says so at WARNING on
-> every start. A degenerate value, empty or only commas, exits at startup
-> rather than being treated as off.
+> [!IMPORTANT]
+> **A configuration fault never stops the gateway; it locks it.** A missing
+> public origin, a weak first password or a variable this release removed
+> (`GATEWAY_API_KEYS` among them) puts it in locked mode: the satellites stay
+> connected and `/health` answers, and every other route answers 503 naming
+> the reason and the variable to fix. `/login` shows the same.
 
-`/health` needs no key and says a great deal: every backend's internal URL, the
-loaded recogniser and its glossary names, voice and queue counts, per-engine
-realtime factors and the GPU runner's state. It always answers 200, even when a
-backend is down, so read `status` rather than the status code. Do not
-publish 30080 to the internet.
+`/health` without a key says `ok` or `degraded` and nothing else. A key with
+`health:read` adds each service's state, engines and queue; `health:detail`
+adds the internal addresses, the GPU runner and the satellites' topology. It
+always answers 200, even when a backend is down, so read `status` rather than
+the status code.
 
 ## Build and test
 
@@ -325,10 +342,10 @@ configuration table.
 | [`services/stt`](services/stt/README.md) | Transcription, the model comparison, vocabulary profiles |
 | [`services/tts`](services/tts/README.md) | Kokoro, the voices, the formats, the SSE stream |
 | [`services/tts-long`](services/tts-long/README.md) | The queue, both engines, cloning, the optional GPU runner |
-| [`services/gateway`](services/gateway/README.md) | Routing, authentication, `/health` |
+| [`services/gateway`](services/gateway/README.md) | Sign-in, API keys and scopes, routing, `/health`, the secret store, upgrading |
 | [`services/ui`](services/ui/README.md) | The page and the routes behind it |
 | [`services/satellites`](services/satellites/README.md) | The satellite hub: deploy and upgrade, adoption, the device protocol, OTA, wake words, what each word does, MQTT |
-| [`packages/common`](packages/common/README.md) | Auth, the error envelope, `/health`, the entrypoint |
+| [`packages/common`](packages/common/README.md) | The identity assertion, the scopes, the error envelope, `/health`, the entrypoint |
 | [`clients/macos-player`](clients/macos-player/README.md) | The capsule, the reader, the OpenClip action |
 | [`clients/korvo-satellite`](clients/korvo-satellite/README.md) | Satellite firmware: first flash, Wi-Fi setup, buttons, updates |
 | [`clients/home-assistant`](clients/home-assistant/README.md) | The Home Assistant integration: satellites as devices, triggers, actions, Calliope in Assist |

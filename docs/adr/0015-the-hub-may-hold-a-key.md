@@ -1,7 +1,13 @@
 # ADR 0015 — The satellite hub may hold an API key, by name, and never shows it
 
-**Status:** accepted
+**Status:** superseded by [ADR 0023](0023-one-secret-store.md)
 **Date:** 2026-09-28
+**Superseded on 2026-10-02.** Every key now lives in the gateway's encrypted
+secret store, which wins over the environment, and only the hub reads the
+hub's keys. `secrets.json` and `PUT /satellites/secrets` are gone. What stands
+from this record: an action names its key and never holds it, no route
+answers a value, and a 422 never echoes one. The text below is the record of
+what was decided on 2026-09-28.
 
 ## Context
 

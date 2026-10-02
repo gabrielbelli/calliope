@@ -1,13 +1,36 @@
 # The voice stack as one TrueNAS app, behind one published port.
 #
-#   host:30080  ->  voice-gateway  ->  stt-stack:8000
-#                                     tts-stack:8001
-#                                     tts-long:8002
+#   host:30080  ->  voice-gateway:8080  ->  stt-stack:8000
+#                   TLS, sign-in, keys      tts-stack:8001
+#                                           tts-long:8002
+#                                           voice-satellites:8003
+#                                           voice-ui:8090
 #
-# ONE published port. voice-ui is behind the gateway now: the page is at
-# http://host:30080/ and the gateway forwards `/`, `/ui/*` and `/ui/api/*` to
-# it. voice-ui still talks to the gateway for the actual work, and to MeTube by
-# host address for links.
+# ONE PUBLISHED PORT, AND ONE PROCESS THAT DECIDES WHO IS ASKING. Every request
+# to 30080 needs a session (a person signed in at /login) or an API key
+# (Account > API keys), except GET /health, the sign-in page and the
+# satellites' device socket. The gateway checks the credential and the route's
+# scope, then forwards the request with a signed identity assertion that each
+# service verifies before it answers anything. The page is at
+# https://<host>/ui and calls the gateway's own paths with its session cookie;
+# voice-ui serves the page and talks to MeTube by host address for links.
+# docs/adr/0022-everything-behind-a-login.md is the whole design.
+#
+# A SECOND LISTENER, voice-gateway:8081, IS NEVER PUBLISHED. It takes the
+# services' own keys and nothing else: the hub reaching stt and tts, stt and
+# tts recording their runs on tts-long, voice-ui transcribing a download for
+# the person who asked, the hub and tts-long reading the secret store. The
+# gateway writes each service's key onto that service's own volume,
+# calliope-svc-<name>, which the service mounts read-only at /run/calliope. A
+# service key is refused on 30080, so one that leaks from a container is no use
+# from outside.
+#
+# TWO NETWORKS. `edge` holds the gateway and voice-ui; `core` holds the
+# gateway and the other four. voice-ui runs yt-dlp on addresses people paste,
+# so it shares no network with a backend: the gateway is the only Calliope
+# service it can reach. Neither network is `internal: true`, because the hub
+# calls Home Assistant and language models, tts-long its GPU runner and
+# voice-ui MeTube.
 #
 # WHAT CHANGED WHEN THE FIVE REPOSITORIES BECAME ONE. The image names, and
 # nothing else:
@@ -61,7 +84,9 @@
 # voice-integration suite, the gateway's own tests/test_live.py, and any Open
 # WebUI or script configured with a backend port. They move to :30080, which
 # serves the same paths (/transcribe, /speak, /voices, /jobs, /v1/...) with no
-# rewriting.
+# rewriting, and each needs an API key of its own. Upgrading a running stack
+# without locking anyone out is a sequence, not one edit:
+# services/gateway/README.md, "Upgrading to sign-in".
 
 services:
 
@@ -93,6 +118,10 @@ services:
       # follows -- rackula 30323, metube 30097, gitea 30008, unifi 30072-75,
       # convertx 30154. The CONTAINER port stays 8080: nothing inside the image
       # or in the healthcheck below needs to know about the host mapping.
+      #
+      # 8081 IS NEVER LISTED HERE. It is the internal listener: plain HTTP,
+      # service keys only, and published it would put every service's key one
+      # sniffed request away (docs/tests/test_deployment.py checks).
       - "30080:8080"
     environment:
       # Service names, not 127.0.0.1 and not the host address: these resolve on
@@ -134,8 +163,11 @@ services:
       # HTTPS, with the certificate TrueNAS already manages for this host. Not
       # self-signed: a self-signed certificate is one every client is taught to
       # skip verification for, and a client taught to skip it keeps skipping it
-      # against the real one too. This is the wildcard already on the box, so
-      # https://orko.gabrielbelli.com:30080 validates with no flag anywhere.
+      # against the real one too. It is the wildcard already on the box, so it
+      # also covers Calliope's own host name (CALLIOPE_PUBLIC_ORIGIN below),
+      # the one address where people sign in, with no flag anywhere. The NAS's
+      # own name validates as well, and is for API keys only: every app on the
+      # box answers under it, so the gateway honours no session there.
       #
       # The key is 0400 root:root and stays that way -- loosening it would
       # weaken a file every service on this host shares. voice-entrypoint.sh
@@ -144,35 +176,116 @@ services:
       # restart rather than going stale in a copy someone made by hand.
       GATEWAY_TLS_CERT: /certs/cert-gabrielbelli_com.crt
       GATEWAY_TLS_KEY: /certs/cert-gabrielbelli_com.key
-      # GATEWAY_API_KEYS is deliberately NOT set here, because inventing a key
-      # in a file that gets deployed is how a placeholder becomes production
-      # credentials. Unset means authentication is OFF and every request is
-      # accepted — for all three backends, since this is now the only process
-      # that could check a token. Closing the ports without setting this buys
-      # one door and no lock: it removes the bypass, not the anonymity.
+
+      # --------------------------------------------------- who may come in --
       #
-      # SET. Two keys, so they can be rotated independently: the first is for
-      # clients (an OpenAI-compatible tool, curl, a script), the second is the
-      # one voice-ui presents on the reader's behalf. Revoking the first does
-      # not lock anyone out of the page, and revoking the second does not break
-      # a client mid-run.
+      # NO KEY IS WRITTEN IN THIS FILE, AND NONE NEEDS TO BE. People sign in
+      # with a password at /login; clients use API keys a person creates on
+      # the Account tab; the services use keys the gateway mints onto their own
+      # volumes below. Nothing here is a credential.
       #
-      # THESE ARE LIVE CREDENTIALS IN A TRACKED FILE. That is the trade this
-      # comment used to warn against, made deliberately and with the reason
-      # written down: this deployment ships compose content to TrueNAS, so a
-      # ${VAR} here resolves to nothing at the far end and load_keys() treats
-      # an empty value as a refusal to start. Before this repository is
-      # published, these two lines are what has to be rotated and moved out.
-      # GATEWAY_API_KEYS: sk-first,sk-second   # see GAB-632 before setting
+      # A CONFIGURATION FAULT NEVER STOPS THIS CONTAINER. It starts LOCKED
+      # instead: /health answers `degraded`, the satellites stay connected,
+      # :8081 serves the services as normal, and every other route on 30080
+      # answers 503 `locked` with the reason and the name of the variable to
+      # fix (services/gateway/README.md, "Locked mode"). Stopping would take
+      # the device relay and :8081 with it, and every satellite in the house
+      # would go quiet over one line in this file.
+      #
+      # THE PUBLIC ORIGIN, AND IT IS REQUIRED: scheme://host[:port], the address
+      # people type, on a host name that serves Calliope and nothing else on
+      # ANY port. A browser ties a cookie to a host name, not to a port, so
+      # another HTTPS service under the same name (MeTube, Gitea, the NAS's own
+      # pages) could hand a reader's browser a session of its choosing. A
+      # session is honoured on this host only, so the NAS's own address on
+      # 30080 still serves API keys and never a cookie.
+      #
+      # UNSET HERE, like every address in this file that belongs to one
+      # machine. Unset, or not https://, the gateway starts locked with
+      # `public_origin_required`.
+      # CALLIOPE_PUBLIC_ORIGIN: "https://calliope.example"
+      #
+      # THE FIRST ADMIN'S FIRST PASSWORD, and nothing after it. With an empty
+      # database the gateway creates the user `admin`, who signs in with this
+      # value to a restricted session and must choose a password of their own.
+      # Until they do, the value keeps signing in, so a tab closed before then
+      # leaves it working. From then on it is ignored, and each start logs a
+      # WARNING until it is removed. 15 to 128 characters and not a common
+      # password, or the gateway starts locked with `admin_password_weak`. A
+      # secret: it goes in the app's secret settings for the first start, never
+      # in this file.
+      # CALLIOPE_ADMIN_PASSWORD: "<15 or more characters, first start only>"
+      #
+      # THE KEY THE SECRET STORE IS ENCRYPTED WITH. Unset, the gateway
+      # generates one on calliope-keys and says so on Admin > Secrets: that
+      # volume then needs a backup of its own, kept apart from gateway-data's.
+      # Better, a host file outside every app dataset, one Fernet key per line,
+      # the first one in use, mounted read-only below. Once a file has been
+      # used the gateway never generates a key again, so a file that goes
+      # missing locks the gateway (`keyring_unreadable`) rather than encrypting
+      # new secrets under a key nobody holds. Leave the line out rather than
+      # set it empty: an empty value locks the gateway too.
+      # CALLIOPE_MASTER_KEY_FILE: "/run/secrets/calliope-master"
+      #
+      # A REVERSE PROXY IN FRONT. Its address, as CIDRs, is the only way a
+      # forwarded client address is believed; without this the peer is the
+      # client, whatever the headers say. NEVER the Docker bridge's subnet:
+      # every LAN client reaches the container through it, and each could
+      # then name its own address, dodge the per-address sign-in limit and
+      # write a false address into the audit.
+      # CALLIOPE_TRUSTED_PROXIES: "192.0.2.10/32"
+      # With the proxy in TCP passthrough (this container terminates TLS),
+      # every client arrives from the proxy's address. "1" makes 30080 read a
+      # PROXY protocol header, v1 or v2, from a trusted proxy before TLS
+      # (HAProxy's `send-proxy-v2`). Leave it unset when the proxy terminates
+      # TLS and sends X-Forwarded-For.
+      # CALLIOPE_PROXY_PROTOCOL: "1"
+      #
+      # THE FIVE SERVICE-KEY VOLUMES, BY NAME, for the entrypoint to take
+      # ownership of before it drops to uid 1000. The image's own list is
+      # "/data /keys /svc", and the entrypoint looks only at the top of each
+      # path: /svc is the image's own directory and already uid 1000's, while
+      # each volume mounted under it arrives owned by root, so the gateway
+      # could not write a service's key into it.
+      VOICE_CHOWN_DIRS: "/data /keys /svc/satellites /svc/ui /svc/stt /svc/tts /svc/tts-long"
     # 2 CPUs and 512 MB against the backends' 26 and 18 GB, because this
     # process moves bytes between two sockets and never holds them: uploads and
     # audio responses stream through, and the single buffered body is
     # /v1/audio/speech's JSON, which is kilobytes. The image itself is 283 MB
-    # with no model and no torch in it.
+    # with no model and no torch in it. Password hashing is the one burst:
+    # Argon2id at 64 MiB, at most two at once, so about 128 MiB while two
+    # people sign in together.
     volumes:
       # Read-only, and the whole directory rather than two file mounts so a
       # renewal that replaces the files is seen. TrueNAS owns this path.
       - /etc/certificates:/certs:ro
+      # Users, sessions (hashes only), API keys (hashes only), the encrypted
+      # secrets and the audit, in one SQLite file. Losing it signs everybody
+      # out and loses every key, but never reopens the first-access password:
+      # the marker on calliope-keys says it was used.
+      - gateway-data:/data
+      # What must never be in the same backup as gateway-data: the identity
+      # signing key, a generated secret-store key and that marker. Only this
+      # container mounts it.
+      - calliope-keys:/keys
+      # One per service, written here and read there: each holds that
+      # service's key and the public key it verifies the gateway with. The
+      # same volumes are mounted read-only in the services below.
+      - calliope-svc-satellites:/svc/satellites
+      - calliope-svc-ui:/svc/ui
+      - calliope-svc-stt:/svc/stt
+      - calliope-svc-tts:/svc/tts
+      - calliope-svc-tts-long:/svc/tts-long
+      # The secret store's key file, with CALLIOPE_MASTER_KEY_FILE above:
+      # created on the host with `umask 077`, then `chown 1000:1000` (mode stays
+      # 0600), outside every app dataset, and backed up on its own. The chown
+      # matters because the gateway reads it as uid 1000 and, unlike the TLS
+      # key, the entrypoint does not copy it: a root-owned file locks the
+      # gateway with `keyring_unreadable`.
+      # - <host path>/calliope-master:/run/secrets/calliope-master:ro
+    networks:
+      - edge
+      - core
     cpus: 2
     mem_limit: 512m
     healthcheck:
@@ -180,7 +293,13 @@ services:
       # 200 even when a backend is down, on purpose — it reports `degraded` in
       # the body instead. A 503 here because tts-long is still loading would
       # have the orchestrator restart the gateway, which is the one container
-      # that must stay up to report the outage.
+      # that must stay up to report the outage. A LOCKED gateway answers 200
+      # too, and is healthy: it is still relaying every satellite.
+      #
+      # It asks without a credential, so it gets liveness and nothing else.
+      # With CALLIOPE_PROXY_PROTOCOL set, 127.0.0.1 must stay out of
+      # CALLIOPE_TRUSTED_PROXIES, or this probe would be expected to send a
+      # PROXY header.
       # https now, and verification is deliberately off for THIS probe only:
       # it dials 127.0.0.1, which no certificate for a hostname can match. The
       # check is "is this process answering", not "is the certificate right".
@@ -238,7 +357,13 @@ services:
       # above is stronger here: a log must never be a startup dependency of
       # the thing it logs. Unset the variable and the whole feature is a None
       # check on a hot path.
-      RUNLOG_URL: http://tts-long:8002
+      #
+      # THE GATEWAY'S INTERNAL LISTENER, NOT tts-long. The record goes there
+      # with this service's own key, and the gateway passes it to tts-long's
+      # /runs with an assertion saying which service sent it. Any other
+      # address turns the log off with an ERROR, so the key is never sent
+      # anywhere else.
+      RUNLOG_URL: http://voice-gateway:8081
       # THE LABEL EVERY RECORD CARRIES. Without it the default is
       # platform.node(), which inside a container is a random hex id that
       # changes on every recreate -- so the listing would show a new machine
@@ -246,7 +371,12 @@ services:
       AIV_HOST_LABEL: orko
     cpus: 10
     mem_limit: 6g
+    networks:
+      - core
     volumes:
+      # This service's key and the gateway's public key, written by the
+      # gateway. Read-only here: a service verifies, it never mints.
+      - calliope-svc-stt:/run/calliope:ro
       - stt-models:/models
       # WRITABLE GLOSSARY PROFILES, and until this line existed the four
       # /glossaries routes were complete and unusable. STT_GLOSSARY_DIR is
@@ -278,13 +408,13 @@ services:
       # take one of their names: the write routes answer 409 and the registry
       # refuses the shadow. This volume holds only what somebody wrote.
       #
-      # READ THE SECURITY NOTE BEFORE THIS IS REACHABLE FROM ANYWHERE
-      # UNTRUSTED. GATEWAY_API_KEYS above is unset on this deployment, and the
-      # backends run with STT_API_KEYS unset because the gateway is the only
-      # process that checks a token. Unset plus this volume means an
-      # unauthenticated write API on the LAN: anyone who can reach :30080 can
-      # create, replace and delete profiles, and a profile changes what other
-      # people's transcripts say. Set GATEWAY_API_KEYS.
+      # WHOSE PROFILE IS WHOSE. The top level is the system's, where every
+      # profile written before sign-in still is; each person's own are under
+      # users/<user id>/, which the entrypoint also takes ownership of. A person
+      # sees and writes only their own and the built-ins. `home-assistant` is
+      # reserved to the system and written only with glossaries:ha or
+      # glossaries:write:all, because it changes what every Assist command is
+      # heard as (docs/adr/0017-home-assistant-vocabulary.md).
       - stt-glossaries:/glossaries
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')"]
@@ -310,15 +440,10 @@ services:
       # starved.
       TTS_THREADS: "8"
       TTS_VOICE: bm_george
-      # WHERE A FINISHED RUN IS RECORDED, and the reason there is no
-      # depends_on beside it. tts-long keeps the store; this service posts one
-      # record per finished run and forgets it, on a daemon thread with a
-      # bounded queue, so a tts-long that is down or slow costs a record and
-      # never a reply. The argument compose already makes for the gateway
-      # above is stronger here: a log must never be a startup dependency of
-      # the thing it logs. Unset the variable and the whole feature is a None
-      # check on a hot path.
-      RUNLOG_URL: http://tts-long:8002
+      # WHERE A FINISHED RUN IS RECORDED, as on stt-stack above: the
+      # gateway's internal listener, with this service's own key, and nowhere
+      # else.
+      RUNLOG_URL: http://voice-gateway:8081
       # THE LABEL EVERY RECORD CARRIES. Without it the default is
       # platform.node(), which inside a container is a random hex id that
       # changes on every recreate -- so the listing would show a new machine
@@ -331,7 +456,10 @@ services:
     # services/tts/README.md, "Limiting CPU use".
     cpus: 8
     mem_limit: 2g
+    networks:
+      - core
     volumes:
+      - calliope-svc-tts:/run/calliope:ro
       - tts-models:/models
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8001/health')"]
@@ -358,7 +486,19 @@ services:
       # Where a voice is a file. The registry resolves `voice: "gabriel"` to
       # /voices/gabriel.wav and hands it to Chatterbox as audio_prompt_path;
       # there is no per-request reference field on the wire at any layer.
+      #
+      # A voice is personal. The top level is the system's; a person's clips
+      # are under users/<user id>/, and a request resolves `voice` among the
+      # caller's own clips and the built-ins only. Nobody speaks in another
+      # person's voice, an admin included.
       TTS_VOICE_DIR: /voices
+      # WHAT ONE PERSON MAY HOLD OF THE SHARED QUEUE. Both are the defaults,
+      # written out because together they are the fairness policy: at most 4
+      # of one person's jobs queued or running at once (a 429 past it; the
+      # services' own work is exempt), and at most 100000 characters in one
+      # POST /jobs (a 413). "0" switches either off.
+      # TTS_LONG_MAX_LIVE_JOBS_PER_USER: "4"
+      # TTS_LONG_MAX_TEXT: "100000"
 
       # --------------------------------------------------- two engines --
       #
@@ -531,6 +671,14 @@ services:
       # A FILE, NOT A VALUE. This file is committed and published; the key is
       # not in it. Mounted read-only below, mode 0400, owned by the uid this
       # container runs as.
+      #
+      # THE KEY NOW LIVES IN THE GATEWAY'S SECRET STORE, as
+      # TTS_RUNNER_API_KEY. At its first start with the store, tts-long imports
+      # this file's key once, bound to the runner's address, and from then on
+      # asks the store for it (cached for a minute; a cleared secret stops at
+      # once). The file is read again only while the store has no copy and
+      # the gateway cannot be reached. It stays for this release as that
+      # fallback, and goes in the next.
       TTS_RUNNER_API_KEY_FILE: /run/secrets/runner-key
       # THE offpeak SERVICE ID PER ENGINE. TTS_RUNNER_SERVICE is the legacy
       # spelling and now means "the id for the `chatterbox` engine" and nothing
@@ -693,13 +841,20 @@ services:
       # bigger card starts from that list and not from the wrapper's defaults.
     cpus: 10
     mem_limit: 10g
+    networks:
+      - core
     volumes:
+      # This service's key, for the gateway's internal listener only (the
+      # secret store), and the public key every request it serves is
+      # verified with.
+      - calliope-svc-tts-long:/run/calliope:ro
       - tts-long-models:/models
       - tts-long-out:/output
       # THE RUNNER'S KEY, read-only, from a host path outside this repository.
       # TTS_RUNNER_API_KEY_FILE points here. The key is never in this file
       # because this file is published; the path is not a secret and the file
-      # is 0400 owned by the uid this container runs as.
+      # is 0400 owned by the uid this container runs as. Since the secret
+      # store, only the one-time import and the fallback read it.
       - /mnt/tank/apps/stt-stack/runner-key:/run/secrets/runner-key:ro
       # READ-ONLY, and shared with voice-ui, which is the only writer. One
       # writer means there is no case where two processes race on the same
@@ -722,81 +877,41 @@ services:
 
   # ---------------------------------------------------------- the page --
   #
-  # THE SECOND `ports` ENTRY IN THIS FILE, and the comment at the top of the
-  # gateway block says one appearing means this file has stopped doing its job.
-  # That sentence was written about 8000, 8001 and 8002 — three backends that
-  # could be reached DIRECTLY, skipping the only process in the stack that
-  # checks a token. Those three are still closed and still have no `ports`.
+  # The page, the reference-clip store and link ingestion. The gateway
+  # forwards /ui/* here with the signed-in person's identity, and the page
+  # itself calls the gateway's own paths, same origin, with its session cookie.
   #
-  # This is a browser origin, not a bypass. voice-ui reaches voice-gateway and
-  # nothing else; it holds no key LIST and compares no token; it asks the
-  # gateway itself whether the credential in play is good; and it can answer
-  # nothing the gateway would not have answered. If a future edit gives this
-  # container a URL for stt-stack, tts-stack or tts-long, that is the moment
-  # this paragraph stops being true.
-  #
-  # WHAT IS NO LONGER TRUE: "the boundary is exactly where it was". The page
-  # used to carry the user's own key and this service forwarded it. With
-  # UI_GATEWAY_API_KEY set below, this container holds the key and signs
-  # requests with it, so THIS PORT is the trust boundary. Unset, it is the
-  # passthrough it always was.
+  # THIS CONTAINER HOLDS NOTHING THAT ACTS AS A PERSON. Its one key, on
+  # calliope-svc-ui, opens only the gateway's internal listener, and there only
+  # one thing: transcribing a download for the person who asked, with the
+  # short-lived delegation token the gateway gave for that request beside it.
+  # That matters because this is the container that runs yt-dlp on addresses
+  # people paste.
   voice-ui:
     container_name: voice-ui
     image: ghcr.io/gabrielbelli/calliope-ui:v0.1.2
     pull_policy: always
     restart: unless-stopped
-    # NO PORTS. The gateway reaches this service on the app-internal network
-    # and forwards `/`, `/ui/*` and `/ui/api/*` to it, so 30081 published
-    # nothing that 30080 does not now serve -- and while it existed the
-    # sentence at the top of this file about one door was only true of the
-    # backends. Closing it is the same move as closing 8000/8001/8002, for the
-    # same reason: a second door is a way round the process that checks tokens.
+    # NO PORTS. The gateway reaches this service on `edge` and forwards
+    # `/ui/*` to it. A port of its own would be a second door, and every
+    # request through it would arrive with no identity: this service refuses
+    # any request the gateway did not sign.
     expose:
       - "8090"
+    # `edge` ONLY. The gateway is the one Calliope service this container can
+    # reach; stt-stack, tts-stack, tts-long and the hub are on `core`.
+    networks:
+      - edge
     environment:
-      # A service name, on the app-internal network. The three backends are NOT
-      # named here and must not be: this container talks to the gateway.
-      # https, because the gateway serves only that now. See
-      # config.GATEWAY_VERIFY for why verification is off on THIS hop and
-      # nowhere else: the name `voice-gateway` is a compose service on this
-      # app's bridge network, and no certificate for a public hostname can
-      # match it. The published port still presents the real certificate.
-      UI_GATEWAY_URL: https://voice-gateway:8080
-      UI_GATEWAY_VERIFY: "0"
-
-      # THE KEY THIS CONTAINER PRESENTS TO THE GATEWAY. Set it to one of the
-      # values in GATEWAY_API_KEYS above.
-      #
-      # The page used to have an API key box: the browser held the key and this
-      # service forwarded it. It does not any more — this is not a
-      # bring-your-own-key tool — so if GATEWAY_API_KEYS is set and this is
-      # not, the UI is 401 on every route and there is nowhere to type a key to
-      # fix it.
-      #
-      # READ THIS BEFORE SETTING IT. It moves the trust boundary from 30080 to
-      # 30081. Anyone who can open the page is authenticated BY the page,
-      # because this process signs their requests for them, so publishing
-      # 30081 somewhere 30080 is not already reachable from grants MORE access
-      # rather than less. That is a fine trade for a tool on a LAN behind a
-      # firewall and it is not one anywhere else. voice-ui logs a WARNING at
-      # startup whenever this is set, saying exactly that.
-      #
-      # SET, and it MUST be set now that GATEWAY_API_KEYS is. The page has no
-      # key box any more, so a gateway that requires a token and a UI that
-      # presents none is 401 on every route with nowhere to type a fix.
-      #
-      # This is the SECOND key in GATEWAY_API_KEYS above, never the first: the
-      # one a client holds and the one this container holds are different
-      # secrets so that either can be rotated alone.
-      # UI_GATEWAY_API_KEY: sk-second          # the SECOND key above, never the first
       # MeTube, by HOST ADDRESS. It is a separate TrueNAS app
       # (ix-metube-metube-1) with host_network:false and its web port published
       # on 30097, so it shares no DNS with this app — there is no `metube` name
       # to resolve, and `host.docker.internal` is absent without an explicit
       # extra_hosts entry. Put the NAS's LAN IP here.
       #
-      # DELIBERATELY LEFT UNSET, like GATEWAY_API_KEYS above and for the same
-      # reason: an address invented in a file that gets deployed is how a
+      # DELIBERATELY LEFT UNSET in a fresh copy, like CALLIOPE_PUBLIC_ORIGIN
+      # above and for the same reason: an address invented in a file that
+      # gets deployed is how a
       # placeholder becomes production configuration. Unset means the link box
       # is not rendered at all and the page says "link ingestion not
       # configured". File upload and both TTS paths never depend on it.
@@ -804,10 +919,11 @@ services:
       # BEFORE SETTING THIS, READ services/ui/README.md's security section.
       # MeTube has NO authentication of any kind — no auth, user, password or
       # token key exists in its configuration, and an unauthenticated GET
-      # /history from off-NAS answers 200. Our path sits behind
-      # GATEWAY_API_KEYS so this does not widen that hole, but it does make it
-      # load-bearing, and the fix is a deployment one: unpublish 30097 or
-      # firewall it to the NAS and reach it by LAN IP.
+      # /history from off-NAS answers 200. Our path sits behind a sign-in, and
+      # a link answers only the person who pasted it, so this does not widen
+      # that hole, but it does make it load-bearing, and the fix is a
+      # deployment one: unpublish 30097 or firewall it to the NAS and reach it
+      # by LAN IP.
       #
       # SET, and by LAN IP rather than through the reverse proxy. This call
       # never leaves the NAS: sending it to ytdl.gabrielbelli.com would go out
@@ -837,17 +953,21 @@ services:
     cpus: 1
     mem_limit: 384m
     volumes:
+      # This service's key and the gateway's public key, read-only.
+      - calliope-svc-ui:/run/calliope:ro
       # The reference-clip store, and it is NOT optional. Without a named
       # volume every cloned voice survives until the next restart and no
       # further, which is worse than not shipping the feature. voice-ui is the
-      # only writer; tts-long mounts the same volume read-only below.
+      # only writer; tts-long mounts the same volume read-only above. Each
+      # person's clips are under users/<user id>/; the top level is the
+      # system's.
       - voices:/voices
     healthcheck:
-      # Its OWN localhost, like every service here. This endpoint answers 200
-      # even when the gateway is down — it reports that in the body instead. A
-      # UI killed by the orchestrator because tts-long was restarting would be
-      # gone at exactly the moment someone wanted to open the page and find out
-      # why.
+      # Its OWN localhost, like every service here. This endpoint answers from
+      # this process alone and asks nothing of the gateway or a backend: a UI
+      # killed by the orchestrator because tts-long was restarting would be
+      # gone at exactly the moment someone wanted to open the page and find
+      # out why.
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8090/health')"]
       interval: 60s
       timeout: 30s
@@ -889,13 +1009,16 @@ services:
       - "8003"
     environment:
       # Where "say" and every spoken reply get their voice: tts-stack's OpenAI
-      # route, asked for pcm.
-      SATELLITES_TTS_URL: http://tts-stack:8001
+      # route, asked for pcm, THROUGH THE GATEWAY'S INTERNAL LISTENER with the
+      # hub's own key. The gateway checks the hub's scopes and forwards to
+      # tts-stack with an assertion; the hub's key is sent nowhere else.
+      SATELLITES_TTS_URL: http://voice-gateway:8081
       SATELLITES_TTS_VOICE: bm_george
       # Where the command after a wake word is transcribed: stt-stack's OpenAI
-      # route. Unset, wake words are still heard and published, and every
-      # conversation ends with routing saying there is no STT.
-      SATELLITES_STT_URL: http://stt-stack:8000
+      # route, through the same listener. Unset, wake words are still heard and
+      # published, and every conversation ends with routing saying there is no
+      # STT.
+      SATELLITES_STT_URL: http://voice-gateway:8081
       # The household's languages, most spoken first, as BCP 47 tags: what a
       # new conversation is expected to be in, and the region each language
       # is sent to Home Assistant in ("pt-PT" rather than the default "pt-BR").
@@ -924,23 +1047,28 @@ services:
       # Home Assistant over MQTT: every adopted satellite as one device, with
       # its switches, volume, buttons and wake words
       # (services/satellites/README.md). Unset, there is no MQTT at all. The
-      # password is in the URL, so this belongs in the app's secret settings
-      # rather than in this file.
-      # SATELLITES_MQTT_URL: "mqtt://calliope:password@homeassistant.local:1883"
-      # The token of a wake word whose action is Home Assistant (ha_conversation
-      # or ha_assist). The action names this variable rather than holding the
-      # token: wake_words.json is returned by GET /satellites/wake-words, and a
-      # secret in it would be one request away from anyone with an API key.
-      # The weather tool's home lookup uses the first such action's token too.
-      # A long-lived access token from your Home Assistant profile page; like
-      # the MQTT password, a secret setting.
-      # SATELLITES_HA_TOKEN: "<long-lived access token>"
-      # The key for a language model word (any OpenAI-compatible provider),
-      # which names this variable, or another, rather than holding the key.
-      # A key can also be stored from the Satellites tab, into
-      # /data/secrets.json (mode 0600, and in this volume's backups); one set
-      # here wins over it. A secret setting, like the two above.
-      # SATELLITES_LLM_API_KEY: "<key>"
+      # URL names the user and not the password: the password is the secret
+      # SATELLITES_MQTT_PASSWORD in Admin > Secrets. One still written in the
+      # URL is imported into the store once and ignored from then on.
+      #
+      # THE BROKER IS A WAY IN THAT DOES NOT PASS THE GATEWAY. Whoever may
+      # publish to the hub's command topics can switch a satellite's
+      # microphone on with no Calliope credential at all, and Mosquitto as
+      # Home Assistant's add-on sets it up lets every broker user publish to
+      # every topic. Give the broker an ACL (services/satellites/README.md,
+      # "Home Assistant over MQTT").
+      # SATELLITES_MQTT_URL: "mqtts://calliope@homeassistant.local:8883"
+      #
+      # SECRETS ARE NOT SETTINGS ANY MORE. The Home Assistant token
+      # (SATELLITES_HA_TOKEN), a language model's key (SATELLITES_LLM_API_KEY,
+      # or whatever name a word's action gives), webhook tokens and the MQTT
+      # password all live in the gateway's secret store, set in Admin >
+      # Secrets or from a key box on the Satellites tab, and the hub asks for
+      # each by name. An action still names its secret and never holds it.
+      # A value still set in this environment is imported into the store once,
+      # at the hub's first start with it, and ignored from then on with a
+      # WARNING that names it: remove it from the app config once Admin >
+      # Secrets lists it as set, and confirm each imported row there.
       # A SearXNG you run, with JSON output on, for a language model word's
       # web_search tool. The model's query goes there and on to its engines.
       # Unset, the tool says search is not set up (docs/adr/0018).
@@ -973,12 +1101,29 @@ services:
     # with the script that played them counted in; six still dropped nothing.
     cpus: 1
     mem_limit: 512m
+    # AFTER THE GATEWAY IS HEALTHY, and that is safe because a gateway never
+    # stops over its configuration: a LOCKED one is still healthy, relays
+    # every satellite's socket and serves :8081, so a fault there costs people
+    # their sign-in and the house none of its satellites. The hub reaches stt,
+    # tts and its secrets only through :8081, so starting before it would only
+    # mean failed first calls. The cost is the gateway's first healthcheck: up
+    # to its 60 s interval after the stack comes up, when compose starts the
+    # whole app at once.
+    depends_on:
+      voice-gateway:
+        condition: service_healthy
+    networks:
+      - core
     volumes:
+      # This service's key and the gateway's public key, read-only. The relay
+      # assertion on the device socket is checked with it.
+      - calliope-svc-satellites:/run/calliope:ro
       # Adopted satellites (tokens only as hashes), the wake words with what
-      # each does and which satellites hear it, API keys stored from the page
-      # (secrets.json, in plain text, so in this volume's backups too),
-      # uploaded firmware images and fetched wake word models. Named, because
-      # losing it un-adopts every satellite in the house.
+      # each does and which satellites hear it, uploaded firmware images and
+      # fetched wake word models. No key: an older hub's secrets.json is
+      # imported into the gateway's store at start, then overwritten with
+      # zeros and removed. Named, because losing it un-adopts every satellite
+      # in the house.
       #
       # STILL nodes-data, AFTER THE RENAME TO SATELLITES (2026-09-25), AND ON
       # PURPOSE. Compose keys a named volume on the project and this key and on
@@ -1017,9 +1162,43 @@ volumes:
   tts-long-models:
   tts-long-out:
   voices:
-  # The satellite hub's adoptions, wake words, stored keys, firmware store and
-  # wake word models.
+  # The satellite hub's adoptions, wake words, firmware store and wake word
+  # models.
   # Named for the feature's old name, which is also what the deployed volume is
   # called: renaming the key here would hand the hub an empty one (see the
   # voice-satellites block).
   nodes-data:
+  # THE GATEWAY'S, NEW WITH SIGN-IN. gateway-data holds the database; losing
+  # it signs everybody out and loses every account and key.
+  # calliope-keys holds what must never share a backup with it: the identity
+  # signing key, a generated secret-store key, and the marker that says the
+  # first-access password was used. Back the two up separately.
+  #
+  # LOSING BOTH AT ONCE RE-ARMS THE FIRST-ACCESS PASSWORD. `docker compose down
+  # -v`, or reinstalling the app, removes both, and a CALLIOPE_ADMIN_PASSWORD
+  # still set then works again for whoever tries it first. Remove that
+  # variable once the first admin has chosen a password; until then it still
+  # signs in. Losing gateway-data alone does not re-arm it: the gateway starts
+  # locked (`bootstrap_data_lost`) until this is run, as uid 1000 like every
+  # command in services/gateway/README.md, "The command line":
+  #   docker exec -u 1000:1000 voice-gateway python -m app.admin reset-password admin
+  gateway-data:
+  calliope-keys:
+  # One per service: its key and the gateway's public key, written by the
+  # gateway at /svc/<name> and mounted read-only in the service at
+  # /run/calliope. A missing key is minted at the next start, so losing one of
+  # these costs nothing but a restart.
+  calliope-svc-satellites:
+  calliope-svc-ui:
+  calliope-svc-stt:
+  calliope-svc-tts:
+  calliope-svc-tts-long:
+
+# `edge` is the side people reach: the gateway and the page. `core` is the
+# side only the gateway reaches: the four services that do the work. voice-ui
+# is on `edge` alone, so the container that runs yt-dlp on pasted addresses
+# can reach no backend directly. Neither is `internal: true`; each service
+# still needs the way out it always had.
+networks:
+  edge:
+  core:
