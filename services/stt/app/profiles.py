@@ -46,6 +46,34 @@ than implied:
               vocabulary — but it is a profile now like any other, opted into
               per request rather than applied to everything.
 
+WHOSE PROFILE IT IS
+-------------------
+Every custom profile has an owner, and a request sees only some of them (D33).
+
+    system    the top level of STT_GLOSSARY_DIR, and the env file. Every
+              profile written before ownership existed is here, so nothing
+              moved on upgrade.
+    a user    STT_GLOSSARY_DIR/users/<user id>/, created on that user's first
+              write.
+
+A user names their own profiles and the built-ins. A service, or a holder of
+`glossaries:read:all`, names the system's and the built-ins. Nobody names
+another user's: it is not there, so it is the same "unknown profile" as a
+typo, and the error lists only what the caller could have named. That is
+decided from the assertion's `kind` and its `:all` scopes and never from a
+role (M1), so an admin's narrowed key sees what any user's would.
+
+`home-assistant` is reserved (D34). It always lives in the system namespace,
+and only a caller holding `glossaries:ha` or a glossaries `:all` scope can
+name it, a service included: being a service is not a scope. The Home
+Assistant integration transcribes with it, and its key holds `glossaries:ha`
+without being an admin; a speech user never sees it.
+
+Compiled rules are cached by (owner, name), so two users' `mine` are compiled
+separately and one is never served to the other. A request selects at most
+MAX_SELECTED profiles, each counted once, so no request can make one cached
+selection as large as its own body.
+
 RELOADING WITHOUT A RESTART
 ---------------------------
 Per-request selection is meaningless while the set is frozen at boot, so the
@@ -54,8 +82,10 @@ deliberate difference: that file stamps only the DIRECTORY (st_mtime_ns and
 st_ino), because a voice clip arrives as a whole new file and a directory's
 mtime changes when an entry is created, renamed or removed. A glossary is a
 text file somebody edits IN PLACE with an editor, which does not touch the
-directory's mtime at all, so each known file is stat()ed too. That is a couple
-of extra stat() calls against a request that spends seconds in a recogniser.
+directory's mtime at all, so each known file is stat()ed too. That is one
+stat() per directory and per profile, every user's included, so it grows with
+the household; the async routes run it on the thread pool for that reason,
+where a slow volume holds up one request rather than the event loop.
 
 st_ino is in the stamp for `voices.py`'s reason: a volume can be swapped under a
 running container — remounted, or replaced by a deploy — and the new
@@ -69,9 +99,13 @@ import logging
 import os
 import re
 import tempfile
-from collections.abc import Iterable, Sequence
+import threading
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from voice_common.identity import Claims, has
+from voice_common.scopes import USER_ID
 
 from . import glossary
 
@@ -80,6 +114,52 @@ log = logging.getLogger("stt-stack.profiles")
 BUILTIN = "builtin"
 CUSTOM = "custom"
 ENV = "env"
+
+# The owner of every profile that is not a user's: the top level of the custom
+# directory, the env file and the built-ins.
+SYSTEM = "system"
+# Where users' profiles live, under the custom directory.
+USERS = "users"
+# Always the system's, and named only by a caller allowed near it (D34).
+RESERVED = "home-assistant"
+
+
+@dataclass(frozen=True)
+class View:
+    """The profiles one caller can name.
+
+    namespace  SYSTEM or a user ID: where a name resolves and a write lands
+    reserved   whether `home-assistant` is among them
+    The built-ins are always among them.
+    """
+
+    namespace: str
+    reserved: bool = False
+
+
+# What the deployment itself selects with (STT_GLOSSARY_DEFAULT).
+DEPLOYMENT = View(SYSTEM, reserved=True)
+
+
+# Any one of these lets a caller name the reserved profile (D34).
+RESERVED_SCOPES = ("glossaries:ha", "glossaries:read:all", "glossaries:write:all")
+
+
+def view_of(claims: Claims) -> View:
+    """The profiles a request may name, from its assertion alone (D33).
+
+    The namespace follows `kind` and the `:all` scope, never a role (M1): an
+    admin's home-assistant key resolves in the admin's own namespace, plus the
+    reserved profile its `glossaries:ha` adds, like anyone else's key would.
+
+    The reserved profile follows a scope alone, for a service too. Granting it
+    by kind would hand it, unasked, to the next service given transcription.
+    """
+    reserved = any(has(claims, scope) for scope in RESERVED_SCOPES)
+    if claims.kind == "service" or has(claims, "glossaries:read:all"):
+        return View(SYSTEM, reserved=reserved)
+    return View(claims.sub, reserved=reserved)
+
 
 # Defaults, not the values in use: load_registry() reads the environment when
 # it is CALLED, not when this module is imported. Import-time capture is what
@@ -103,6 +183,24 @@ MAX_BYTES = 64 * 1024
 MAX_ENTRIES = 500
 MAX_LINE = 200
 
+# How many profiles one user may keep. Every profile is read into memory at
+# each rescan, and every user can write: without a ceiling one account could
+# grow this container without limit. The system namespace has none, because
+# only an `:all` holder writes it.
+MAX_PER_USER = 50
+
+# Profiles one request may select, counted after repeats are dropped. Without
+# it a 1 MiB `glossary=tech,tech,...` field was a 209k-name cache key, about
+# 27 MB a selection (recheck M-4). Several at once is already discouraged for
+# the measured reason above, so a request near this is a mistake.
+MAX_SELECTED = 16
+
+# Compiled selections kept at once, oldest dropped first. The key is the
+# request's own choice in its order, so an uncapped cache is memory any caller
+# can grow one request at a time (recheck M-4). MAX_SELECTED bounds each entry
+# and this bounds how many there are.
+MAX_COMPILED = 256
+
 
 class UnknownProfile(LookupError):
     """A request named a profile that does not exist.
@@ -116,6 +214,15 @@ class UnknownProfile(LookupError):
         super().__init__(name)
         self.name = name
         self.known = list(known)
+
+
+class TooManyProfiles(ValueError):
+    """A request selected more than MAX_SELECTED profiles. A 400, naming the limit."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__(f"{count} glossary profiles selected; at most "
+                         f"{MAX_SELECTED} may be selected at once")
+        self.count = count
 
 
 @dataclass(frozen=True)
@@ -152,14 +259,18 @@ class Profile:
     path: Path
     parsed: Parsed
     text: str
+    owner: str = SYSTEM
 
     @property
     def writable(self) -> bool:
         return self.source == CUSTOM
 
     def summary(self) -> dict[str, object]:
+        # No path: it names the volume's layout and, for a user's profile, the
+        # directory their ID is in. Nothing a client does needs either.
         return {
             "name": self.name,
+            "owner": self.owner,
             "source": self.source,
             "terms": self.parsed.terms,
             "replacements": len(self.parsed.replacements),
@@ -341,7 +452,7 @@ def _stamp(path: Path) -> tuple[int, int, int] | None:
 
 
 class Registry:
-    """Every profile this process can see, and the rules compiled from them."""
+    """Every profile this process can see, by owner, and the rules compiled from them."""
 
     def __init__(self, builtin_dir: Path | None = None,
                  custom_dir: Path | None = None,
@@ -349,27 +460,50 @@ class Registry:
         self.builtin_dir = Path(builtin_dir) if builtin_dir else None
         self.custom_dir = Path(custom_dir) if custom_dir else None
         self.env_file = Path(env_file) if env_file else None
-        self.profiles: dict[str, Profile] = {}
+        self.builtins: dict[str, Profile] = {}
+        # SYSTEM and each user ID with at least one profile, to that owner's
+        # profiles by name. Never holds a built-in's name, and never holds
+        # RESERVED outside SYSTEM: the scan refuses both.
+        self.namespaces: dict[str, dict[str, Profile]] = {}
+        self._user_dirs: list[Path] = []
         self._stamps: dict[Path, tuple[int, int, int] | None] = {}
-        # Compiled rules, keyed by the exact selection that produced them. The
-        # cost of a profile is the regex compilation, not the read, so this is
-        # the thing worth keeping. Cleared wholesale on any rescan or write —
-        # a half-invalidated cache is how a deployment ends up serving a rule
-        # that no file on disk contains.
-        self._compiled: dict[tuple[str, ...], Selection] = {}
+        # Compiled rules, keyed by the (owner, name) of every profile in the
+        # selection. The cost of a profile is the regex compilation, not the
+        # read, so this is the thing worth keeping. The owner is in the key so
+        # two users' `mine` can never be served to each other. Cleared
+        # wholesale on any rescan or write — a half-invalidated cache is how a
+        # deployment ends up serving a rule that no file on disk contains.
+        self._compiled: dict[tuple[tuple[str, str], ...], Selection] = {}
+        # /transcribe selects on the thread pool and so do the /v1 routes, so
+        # two can find the cache full at once. Unlocked, both evicted the same
+        # oldest entry and the second raised: a 500 on a transcription.
+        self._lock = threading.Lock()
+        # Bumped by every rescan, so a selection compiled from the profiles as
+        # they were before a write is never cached after it.
+        self._generation = 0
         self.reload()
 
     # -- scanning --
 
+    @property
+    def users_dir(self) -> Path | None:
+        return self.custom_dir / USERS if self.custom_dir is not None else None
+
     def _watched(self) -> list[Path]:
-        """Directories and files whose stat() decides whether to rescan."""
+        """Directories and files whose stat() decides whether to rescan.
+
+        users/ and each users/<id>/ as well as the top level: a user's first
+        profile creates their directory, which changes users/, and their next
+        one changes only their own.
+        """
         paths: list[Path] = []
-        for directory in (self.builtin_dir, self.custom_dir):
+        for directory in (self.builtin_dir, self.custom_dir, self.users_dir):
             if directory is not None:
                 paths.append(directory)
         if self.env_file is not None:
             paths.append(self.env_file)
-        paths.extend(profile.path for profile in self.profiles.values())
+        paths.extend(self._user_dirs)
+        paths.extend(profile.path for profile in self.every())
         return paths
 
     def refresh(self) -> None:
@@ -380,38 +514,64 @@ class Registry:
         self.reload()
 
     def reload(self) -> None:
-        profiles: dict[str, Profile] = {}
-        # Order matters and is deliberate: the env file cannot shadow a
-        # built-in and a custom file cannot either. The write routes answer 409
-        # on a built-in name for the same reason — a profile whose contents
-        # depend on which directory won is a profile nobody can reason about.
+        # Built-ins first, because nothing may shadow one: not the env file, not
+        # a custom file, not a user's. The write routes answer 409 on a built-in
+        # name for the same reason — a profile whose contents depend on which
+        # directory won is a profile nobody can reason about.
+        builtins = {name: self._read(name, BUILTIN, SYSTEM, path)
+                    for name, path in self._scan(self.builtin_dir)}
+
+        system: dict[str, Profile] = {}
         for name, path in self._scan(self.custom_dir):
-            profiles[name] = self._read(name, CUSTOM, path)
+            if self._shadows(name, path, builtins):
+                continue
+            system[name] = self._read(name, CUSTOM, SYSTEM, path)
         if self.env_file is not None and self.env_file.is_file():
             name = _normalise(self.env_file.stem)
-            if name and NAME_PATTERN.match(name):
-                if name in profiles:
-                    log.warning(
-                        "STT_GLOSSARY=%s would shadow the custom profile %r; "
-                        "the file in %s wins and the env file is ignored",
-                        self.env_file, name, self.custom_dir)
-                else:
-                    profiles[name] = self._read(name, ENV, self.env_file)
-            else:
+            if not (name and NAME_PATTERN.match(name)):
                 log.warning(
                     "STT_GLOSSARY=%s has no usable profile name in its "
                     "filename; expected something matching %s",
                     self.env_file, NAME_PATTERN.pattern)
-        for name, path in self._scan(self.builtin_dir):
-            if name in profiles:
+            elif name in system:
                 log.warning(
-                    "%s would shadow the built-in profile %r and is ignored; "
-                    "built-ins are read-only", path, name)
-            profiles[name] = self._read(name, BUILTIN, path)
+                    "STT_GLOSSARY=%s would shadow the custom profile %r; "
+                    "the file in %s wins and the env file is ignored",
+                    self.env_file, name, self.custom_dir)
+            elif not self._shadows(name, self.env_file, builtins):
+                system[name] = self._read(name, ENV, SYSTEM, self.env_file)
 
-        self.profiles = profiles
-        self._compiled.clear()
+        namespaces = {SYSTEM: system}
+        user_dirs: list[Path] = []
+        for owner, directory in self._scan_users():
+            user_dirs.append(directory)
+            mine: dict[str, Profile] = {}
+            for name, path in self._scan(directory):
+                if name == RESERVED:
+                    log.warning("%s is ignored: %r is reserved to the system "
+                                "namespace", path, RESERVED)
+                    continue
+                if self._shadows(name, path, builtins):
+                    continue
+                mine[name] = self._read(name, CUSTOM, owner, path)
+            if mine:
+                namespaces[owner] = mine
+
+        with self._lock:
+            self.builtins = builtins
+            self.namespaces = namespaces
+            self._user_dirs = user_dirs
+            self._compiled.clear()
+            self._generation += 1
         self._stamps = {path: _stamp(path) for path in self._watched()}
+
+    @staticmethod
+    def _shadows(name: str, path: Path, builtins: dict[str, Profile]) -> bool:
+        if name in builtins:
+            log.warning("%s would shadow the built-in profile %r and is "
+                        "ignored; built-ins are read-only", path, name)
+            return True
+        return False
 
     def _scan(self, directory: Path | None) -> list[tuple[str, Path]]:
         if directory is None or not directory.is_dir():
@@ -428,7 +588,25 @@ class Registry:
             found.append((name, entry))
         return found
 
-    def _read(self, name: str, source: str, path: Path) -> Profile:
+    def _scan_users(self) -> list[tuple[str, Path]]:
+        """Each users/<id>/ directory whose name is a user ID, with that ID.
+
+        Anything else there is ignored and named in the log. A symlink is
+        ignored too: it would make one owner's profiles another's, or read a
+        directory outside the volume.
+        """
+        root = self.users_dir
+        if root is None or not root.is_dir():
+            return []
+        found: list[tuple[str, Path]] = []
+        for entry in sorted(root.iterdir()):
+            if entry.is_symlink() or not entry.is_dir() or not USER_ID.fullmatch(entry.name):
+                log.warning("ignoring %s: not a directory named by a user ID", entry)
+                continue
+            found.append((entry.name, entry))
+        return found
+
+    def _read(self, name: str, source: str, owner: str, path: Path) -> Profile:
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
@@ -444,38 +622,86 @@ class Registry:
             log.warning("%s line %d rejected: %s — %s", path, rejection.line,
                         rejection.text, rejection.reason)
         return Profile(name=name, source=source, path=path, parsed=parsed,
-                       text=text)
+                       text=text, owner=owner)
 
     # -- reading --
 
-    @property
-    def names(self) -> list[str]:
-        return sorted(self.profiles)
+    def visible(self, view: View) -> dict[str, Profile]:
+        """Every profile `view` can name, by name: its namespace and the built-ins.
 
-    def get(self, name: str) -> Profile:
-        profile = self.profiles.get(_normalise(name))
+        Plus `home-assistant` from the system namespace when the view may see
+        it, and never otherwise, wherever it was found.
+        """
+        found = dict(self.namespaces.get(view.namespace, {}))
+        system = self.namespaces.get(SYSTEM, {})
+        if view.reserved and RESERVED in system:
+            found[RESERVED] = system[RESERVED]
+        found.update(self.builtins)
+        if not view.reserved:
+            found.pop(RESERVED, None)
+        return found
+
+    def names(self, view: View) -> list[str]:
+        return sorted(self.visible(view))
+
+    def namespace(self, owner: str) -> dict[str, Profile]:
+        """The profiles one owner holds, without the built-ins."""
+        return dict(self.namespaces.get(owner, {}))
+
+    def every(self) -> Iterator[Profile]:
+        """Every profile, built-ins first, then the system's, then each user's."""
+        yield from self.builtins.values()
+        for owner in sorted(self.namespaces, key=lambda o: (o != SYSTEM, o)):
+            yield from self.namespaces[owner].values()
+
+    def shared_names(self) -> list[str]:
+        """The system's names and the built-ins: what /health may say exists.
+
+        Never a user's. Read from memory with no stat(), because /health runs on
+        the event loop.
+        """
+        return sorted({*self.builtins, *self.namespaces.get(SYSTEM, {})})
+
+    def get(self, name: str, view: View) -> Profile:
+        profile = self.visible(view).get(_normalise(name))
         if profile is None:
-            raise UnknownProfile(name, self.names)
+            raise UnknownProfile(name, self.names(view))
         return profile
 
-    def select(self, names: Iterable[str]) -> Selection:
-        """Compile the rules for one request's choice of profiles.
+    def select(self, names: Iterable[str], view: View) -> Selection:
+        """Compile the rules for one request's choice of profiles, as `view` sees them.
 
         Merged in the order given, so a later profile's rule for the same heard
         term wins. Selecting several at once is discouraged in the README for
         the measured reason above; this is what happens when it is done anyway.
+
+        A repeated name counts once, at its LAST position: later profiles win
+        the merge, so `a,b,a` gives every conflict the winner `b,a` gives it.
+        Raises TooManyProfiles past MAX_SELECTED, before any name is resolved.
         """
-        wanted = tuple(_normalise(name) for name in names if _normalise(name))
+        normalised = [name for name in map(_normalise, names) if name]
+        wanted = tuple(reversed(dict.fromkeys(reversed(normalised))))
         if not wanted:
             return Selection()
-        cached = self._compiled.get(wanted)
+        if len(wanted) > MAX_SELECTED:
+            raise TooManyProfiles(len(wanted))
+        with self._lock:
+            visible = self.visible(view)
+            generation = self._generation
+        chosen: list[Profile] = []
+        for name in wanted:
+            if name not in visible:
+                raise UnknownProfile(name, sorted(visible))
+            chosen.append(visible[name])
+        key = tuple((profile.owner, profile.name) for profile in chosen)
+        with self._lock:
+            cached = self._compiled.get(key)
         if cached is not None:
             return cached
 
         replacements: dict[str, str] = {}
         hotwords: list[str] = []
-        for name in wanted:
-            profile = self.get(name)
+        for profile in chosen:
             replacements.update(profile.parsed.replacements)
             hotwords.extend(profile.parsed.hotwords)
 
@@ -488,7 +714,11 @@ class Registry:
             hotwords=", ".join(vocabulary) or None,
             terms=tuple(vocabulary),
         )
-        self._compiled[wanted] = selection
+        with self._lock:
+            if generation == self._generation:
+                if len(self._compiled) >= MAX_COMPILED:
+                    self._compiled.pop(next(iter(self._compiled)))
+                self._compiled[key] = selection
         return selection
 
     # -- writing --
@@ -497,36 +727,56 @@ class Registry:
         """Whether custom profiles can be written, and why not when they cannot.
 
         This is not a permission system and calling it one would be dishonest.
-        It reports whether a deployment mounted somewhere to persist.
+        It reports whether a deployment mounted somewhere to persist; who may
+        write which namespace is the routes' question.
+
+        The reason names the variable, not the path: it reaches every caller
+        of GET /glossaries, and the container's layout is the operator's
+        business, who knows where STT_GLOSSARY_DIR points.
         """
         directory = self.custom_dir
         if directory is None:
             return False, "this process has no custom glossary directory"
         if not directory.exists():
             return False, (
-                f"nothing is mounted at {directory}: this deployment has no "
+                "nothing is mounted at STT_GLOSSARY_DIR: this deployment has no "
                 "writable glossary volume, so a profile written here would be "
                 "gone on the next restart. Mount a volume there and restart")
         if not directory.is_dir():
-            return False, f"{directory} exists but is not a directory"
+            return False, "STT_GLOSSARY_DIR exists but is not a directory"
         if not os.access(directory, os.W_OK | os.X_OK):
             return False, (
-                f"{directory} is not writable by uid {os.getuid()}: a bind "
+                f"STT_GLOSSARY_DIR is not writable by uid {os.getuid()}: a bind "
                 "mount arrives with the host directory's ownership. Either "
                 "chown it to 1000, or set `user:` in compose to a uid that "
                 "owns it")
         return True, ""
 
-    def write(self, name: str, text: str) -> Path:
-        """Replace a custom profile's file, atomically, and invalidate.
+    def directory_of(self, owner: str) -> Path:
+        """Where `owner`'s profiles are written. The ID is checked before the join."""
+        if self.custom_dir is None:
+            raise ValueError("this process has no custom glossary directory")
+        if owner == SYSTEM:
+            return self.custom_dir
+        if not USER_ID.fullmatch(owner):
+            raise ValueError(f"{owner!r} is not a user ID")
+        return self.custom_dir / USERS / owner
+
+    def write(self, name: str, text: str, owner: str) -> Profile:
+        """Replace one of `owner`'s profiles, atomically, and invalidate.
 
         os.replace rather than a plain open-and-write: a request arriving while
         a half-written file is on disk would compile a truncated glossary and
         cache it, and nothing about the resulting transcript would look wrong.
         """
-        directory = self.custom_dir
-        assert directory is not None  # the route checks writability first
-        path = directory / f"{_normalise(name)}{SUFFIX}"
+        key = _normalise(name)
+        if key == RESERVED and owner != SYSTEM:
+            raise ValueError(f"{RESERVED!r} is reserved to the system namespace")
+        directory = self.directory_of(owner)
+        # A user's first profile creates their directory; the route checked
+        # the volume is writable first.
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{key}{SUFFIX}"
         handle, temporary = tempfile.mkstemp(dir=str(directory), suffix=".tmp")
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as out:
@@ -537,10 +787,9 @@ class Registry:
                 os.unlink(temporary)
             raise
         self.reload()
-        return path
+        return self.namespaces[owner][key]
 
-    def remove(self, name: str) -> None:
-        profile = self.get(name)
+    def remove(self, profile: Profile) -> None:
         profile.path.unlink()
         self.reload()
 
@@ -558,6 +807,16 @@ def _normalise(name: str) -> str:
 
 def valid_name(name: str) -> bool:
     return bool(NAME_PATTERN.match(_normalise(name)))
+
+
+def is_reserved(name: str) -> bool:
+    """Is this `home-assistant`, however it was spelled?
+
+    Asked of the normalised name, because the gateway's own rule for the
+    reserved profile matches the path segment exactly: `/glossaries/Home-Assistant`
+    passes it as an ordinary name and arrives here meaning the same file.
+    """
+    return _normalise(name) == RESERVED
 
 
 def split_selection(raw: str | None) -> list[str]:

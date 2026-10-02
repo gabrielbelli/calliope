@@ -30,12 +30,12 @@ service's.
 from __future__ import annotations
 
 import io
-import struct
 import wave
 
 import numpy as np
 import pytest
 from starlette.testclient import TestClient
+from voice_common.conformance import FakeGateway
 
 from app import asr, glossary, pipeline, vad
 from app.main import app
@@ -182,7 +182,7 @@ def engine() -> WindowedParakeet:
 
 
 @pytest.fixture
-def client(engine: WindowedParakeet) -> TestClient:
+def client(gateway: FakeGateway, engine: WindowedParakeet) -> TestClient:
     """The app with a fake engine and NO VAD, so the spans are the whole clip.
 
     TestClient without its context manager, for test_parity's reason: entering
@@ -192,7 +192,7 @@ def client(engine: WindowedParakeet) -> TestClient:
     pipeline.state.clear()
     pipeline.state["asr"] = engine
     pipeline.state["rules"] = glossary.compile_rules({})
-    yield TestClient(app)
+    yield TestClient(app, headers=gateway.headers("stt"))
     pipeline.state.clear()
 
 

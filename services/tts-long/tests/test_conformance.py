@@ -1,11 +1,11 @@
 """The suite voice-common ships, run against the app this service builds.
 
-Sharing auth.py stops three copies of auth.py drifting. It does nothing about
-the parts this service still writes itself — the queue, the /v1 route, the
-health body — and those are where the same class of defect reappears. So the
-package ships the assertions as well, and they run here against the real
-`app.main:app`, which makes a bad voice-common bump fail at this build rather
-than on orko.
+Sharing identity.py stops each backend writing its own verifier. It does
+nothing about the parts this service still writes itself — the queue, the /v1
+route, the health body — and those are where the same class of defect
+reappears. So the package ships the assertions as well, and they run here
+against the real `app.main:app`, which makes a bad voice-common bump fail at
+this build rather than in production.
 
 The star import is how the package intends this to be used: it puts the test
 functions in this repo's own tree, so this conftest, this rootdir and these
@@ -28,11 +28,11 @@ from voice_common.conformance import Service, module_app
 def voice_service() -> Service:
     """What the shared suite needs to know about this service.
 
-    `module_app` rebuilds `app.main` from scratch for each case, because keys
-    are read once at import: rotating one is a restart here, and that is also
-    the only moment the startup announcement can be trusted to describe what
-    is actually being enforced.
+    `module_app` rebuilds `app.main` from scratch for each case, because the
+    environment is read once at import: a removed variable the suite sets has
+    to be there when the app is built, or the check that it is reported would
+    pass against an app that never saw it.
     """
-    return Service(env_var="TTS_API_KEYS",
+    return Service(audience="tts-long",
                    build=module_app("app.main"),
                    v1_path="/v1/audio/speech")

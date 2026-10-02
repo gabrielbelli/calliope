@@ -28,7 +28,7 @@ from voice_common import errors
 from app import audio
 from app.destinations import Echo
 from app import router as router_module
-from app.router import Rule, Rules, RuleSet, Router, current, quiet_validation, routes
+from app.router import Rule, Rules, RuleSet, Router, current, routes
 
 NID = "020000000001"
 MAC = "02:00:00:00:00:01"
@@ -40,6 +40,9 @@ ONE_SECOND = b"\x00\x00" * 16000
 HA = {"type": "ha_conversation", "url": "http://ha.test:8123"}
 LLM = {"type": "llm", "base_url": "http://llm.test/v1", "model": "tiny", "system": "Be brief."}
 HOOK = {"type": "webhook", "url": "http://hook.test/voice"}
+# Where each secret may go (D41): what Admin › Secrets would hold for them.
+HA_HOSTS = ["http://ha.test:8123", "https://ha.test:8123"]
+LLM_HOSTS = ["http://llm.test"]
 
 
 def ha_answer(speech: str) -> httpx.Response:
@@ -119,7 +122,6 @@ def api(make):
     router = make()
     app = FastAPI()
     errors.install_errors(app)
-    quiet_validation(app)
     app.include_router(routes)
     app.dependency_overrides[current] = lambda: router
     with TestClient(app) as client:
@@ -219,8 +221,8 @@ async def test_no_matching_rule_is_logged_and_nothing_is_sent_anywhere(make, fak
 # ---- destinations ---------------------------------------------------------------
 
 
-async def test_ha_is_sent_the_bearer_from_its_env_var_and_its_plain_speech_is_spoken(make, fake, monkeypatch):
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+async def test_ha_is_sent_the_bearer_from_its_env_var_and_its_plain_speech_is_spoken(store, make, fake, monkeypatch):
+    store.put("SATELLITES_HA_TOKEN", SECRET, HA_HOSTS)
     fake.handlers["ha.test"] = lambda r: ha_answer("It is half past seven.")
     router = make(rule("ha", HA, language="pt-BR"))
 
@@ -240,8 +242,8 @@ async def test_ha_is_sent_the_bearer_from_its_env_var_and_its_plain_speech_is_sp
     assert tts["input"] == "It is half past seven." and tts["voice"] == "pf_dora"
 
 
-async def test_the_llm_gets_the_system_prompt_and_key_and_its_think_block_is_not_spoken(make, fake, monkeypatch):
-    monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+async def test_the_llm_gets_the_system_prompt_and_key_and_its_think_block_is_not_spoken(store, make, fake, monkeypatch):
+    store.put("SATELLITES_LLM_API_KEY", LLM_KEY, LLM_HOSTS)
     # The date and time go into every model's prompt (tools.now_line).
     monkeypatch.setattr("app.destinations.tooling.now_line", lambda: "Now it is noon.")
     fake.handlers["llm.test"] = lambda r: httpx.Response(200, json={"choices": [{"message": {
@@ -284,6 +286,65 @@ async def test_a_webhook_that_answers_without_a_reply_is_success_with_nothing_to
     assert "tts.test" not in fake.hosts()
 
 
+@pytest.mark.parametrize("answer, said", [
+    (lambda r: httpx.Response(200, json={"reply": "Done."}), None),
+    (lambda r: httpx.Response(404, text=f"no webhook {r.url}"),
+     "destination: the webhook in HOOK_URL answered 404"),
+    (_refuse := lambda r: (_ for _ in ()).throw(httpx.ConnectError(f"cannot reach {r.url}", request=r)),
+     "destination: the webhook in HOOK_URL failed: ConnectError"),
+], ids=["answers", "404", "refused"])
+async def test_a_webhook_whose_address_is_a_secret_never_shows_it(store, make, fake, caplog,
+                                                                  answer, said):
+    """A Home Assistant webhook's URL is its credential (D38): the action
+    names a secret_url secret, and no error, log line or GET shows the URL,
+    only the secret's name (recheck M-2)."""
+    store.put("HOOK_URL", "http://hook.test/api/webhook/s3cret-id", ["http://hook.test"],
+              kind="secret_url")
+    fake.handlers["hook.test"] = answer
+    router = make(rule("hook", {"type": "webhook", "url_secret": "HOOK_URL"}))
+    with caplog.at_level(logging.DEBUG):
+        out = await router.handle(NID, "kitchen", "hey_jarvis", ONE_SECOND)
+        router.log_outcome(NID, "hey_jarvis", out)
+    assert out.error == said
+    assert str(fake.sent("hook.test").url) == "http://hook.test/api/webhook/s3cret-id"
+    listed = json.dumps((await router.describe())["rules"])
+    for text in (json.dumps(out.as_json()), caplog.text, listed):
+        assert "s3cret" not in text
+    assert "HOOK_URL" in listed
+
+
+async def test_a_webhook_secret_is_sent_only_to_a_host_it_names(store, make, fake):
+    store.put("HOOK_URL", "http://elsewhere.test/collect", ["http://hook.test"], kind="secret_url")
+    out = await make(rule("hook", {"type": "webhook", "url_secret": "HOOK_URL"})).handle(
+        NID, "kitchen", "hey_jarvis", ONE_SECOND)
+    assert out.error == ("destination: HOOK_URL may not be sent to http://elsewhere.test:80: that "
+                         "host is not one of the secret's allowed hosts (Admin › Secrets)")
+    assert "elsewhere.test" not in fake.hosts()
+
+
+async def test_a_webhook_address_the_store_does_not_call_a_secret_url_is_not_used(
+        store, make, fake):
+    """recheck L5: a store that leaves out what a secret is has not said it
+    is an address, so it is not one (deny by default)."""
+    store.put("HOOK_URL", "http://hook.test/api/webhook/s3cret-id", ["http://hook.test"],
+              kind="secret_url")
+    store.kinds = False
+    out = await make(rule("hook", {"type": "webhook", "url_secret": "HOOK_URL"})).handle(
+        NID, "kitchen", "hey_jarvis", ONE_SECOND)
+    assert out.error == ("destination: HOOK_URL is a secret of no stated kind, not a "
+                         "secret_url, so it is no address")
+    assert "hook.test" not in fake.hosts()
+
+
+def test_a_webhook_has_exactly_one_address():
+    from pydantic import ValidationError
+
+    from app.destinations import Webhook
+    for both_or_none in ({"url": "http://hook.test"} | {"url_secret": "HOOK_URL"}, {}):
+        with pytest.raises(ValidationError, match="exactly one of url and url_secret"):
+            Webhook.model_validate({"type": "webhook"} | both_or_none)
+
+
 # ---- failures are outcomes, not exceptions ----------------------------------------
 
 
@@ -304,8 +365,8 @@ def _refuse(request):
     # MockTransport ignores httpx's timeout, so only the hard ceiling can end this.
     (_hang, "destination: no answer within 0.05 s"),
 ], ids=["500", "not-json", "401", "refused", "hangs"])
-async def test_a_failing_destination_becomes_an_error_and_never_an_exception(make, fake, monkeypatch, handler, expected):
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+async def test_a_failing_destination_becomes_an_error_and_never_an_exception(store, make, fake, monkeypatch, handler, expected):
+    store.put("SATELLITES_HA_TOKEN", SECRET, HA_HOSTS)
     fake.handlers["ha.test"] = handler
     out = await make(rule("ha", HA | {"timeout": 0.05})).handle(NID, "kitchen", "hey_jarvis", ONE_SECOND)
 
@@ -375,9 +436,10 @@ async def test_reply_to_another_satellite_is_resolved_to_its_id_through_the_look
     assert out.reply_to == "aabbccddeeff" and out.reply_pcm48k
 
 
-def test_reply_to_a_satellite_that_does_not_exist_is_reported(make):
+async def test_reply_to_a_satellite_that_does_not_exist_is_reported(make):
     router = make(rule("relay", reply_to="attic"), lookup={}.get)
-    assert "rule 'relay' replies to 'attic', which is not a known satellite" in router.describe()["warnings"]
+    assert ("rule 'relay' replies to 'attic', which is not a known satellite"
+            in (await router.describe())["warnings"])
 
 
 async def test_a_reply_longer_than_tts_accepts_is_cut_at_a_sentence_not_refused(make, fake):
@@ -428,9 +490,9 @@ def test_a_failed_save_leaves_the_previous_rules_file_whole(tmp_path, monkeypatc
 # ---- the API ----------------------------------------------------------------------
 
 
-def test_the_ha_token_never_appears_in_get_routing_or_rules_json(api, fake, tmp_path, monkeypatch):
+def test_the_ha_token_never_appears_in_get_routing_or_rules_json(store, api, fake, tmp_path, monkeypatch):
     client, _ = api
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+    store.put("SATELLITES_HA_TOKEN", SECRET, HA_HOSTS)
     fake.handlers["ha.test"] = lambda r: ha_answer("OK.")
 
     put = client.put("/satellites/routing", json={"rules": [{"id": "ha", "destination": HA}]})
@@ -445,9 +507,9 @@ def test_the_ha_token_never_appears_in_get_routing_or_rules_json(api, fake, tmp_
     assert fake.sent("ha.test").headers["authorization"] == f"Bearer {SECRET}"
 
 
-def test_get_routing_says_which_secrets_are_missing_without_values(api, monkeypatch):
+def test_get_routing_says_which_secrets_are_missing_without_values(store, api, monkeypatch):
     client, _ = api
-    monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+    store.put("SATELLITES_LLM_API_KEY", LLM_KEY, LLM_HOSTS)
     client.put("/satellites/routing", json={"rules": [
         {"id": "ha", "destination": HA},
         {"id": "llm", "destination": LLM},

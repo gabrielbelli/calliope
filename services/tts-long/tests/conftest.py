@@ -8,6 +8,13 @@ and everything here would still have caught the defects it guards.
 The fake is deterministic: the same text always produces the same samples, so
 "the streamed bytes are the buffered bytes" is a comparison of two encodes of
 identical audio rather than of two rolls of a sampler.
+
+THE GATEWAY IS FAKED TOO, and only its signature. Every request this service
+answers carries an identity assertion the gateway signed (D52), so the
+`gateway` fixture writes a key pair where the app reads it and makes every
+TestClient sign its requests as the gateway forwards them: `/runs` from stt
+through the internal listener, everything else from a signed-in admin. A test
+about WHO is asking sends its own `X-Calliope-Identity` and that one is kept.
 """
 
 from __future__ import annotations
@@ -18,8 +25,68 @@ import sys
 import threading
 import time
 
+import httpx
 import numpy as np
 import pytest
+from starlette.testclient import TestClient
+from voice_common import identity
+from voice_common.conformance import FakeGateway
+
+AUDIENCE = "tts-long"
+
+
+class AsGateway(httpx.Auth):
+    """Sign each request the way the gateway would forward it to this service.
+
+    Minted per request rather than once per client: an assertion lives sixty
+    seconds, and a client is often older than that by the end of a test.
+    """
+
+    def __init__(self, gateway: FakeGateway) -> None:
+        self.gateway = gateway
+
+    def auth_flow(self, request):  # noqa: ANN001, ANN201 - httpx's own types
+        if identity.ASSERTION_HEADER not in request.headers:
+            # POST /runs exists only on the internal listener, for a service
+            # key holding runs:write; nothing else reaches it (D6).
+            sender = ({"kind": "service", "sub": "svc:stt"}
+                      if request.url.path == "/runs" else {})
+            request.headers[identity.ASSERTION_HEADER] = self.gateway.assertion(
+                AUDIENCE, **sender)
+        yield request
+
+
+@pytest.fixture
+def gateway(tmp_path, monkeypatch) -> FakeGateway:
+    """The gateway's key pair where the app reads it, and every TestClient signing.
+
+    `FakeGateway.USER` with every scope a person can hold is who asks by
+    default, so the tests written before there were users keep meaning what
+    they meant: one person, who can see everything. Patched for this test
+    only, and never for the conformance suite, which brings its own gateway
+    and must be able to send nothing at all.
+    """
+    signer = FakeGateway(tmp_path / "run")
+    monkeypatch.setenv(identity.RUN_DIR_ENV, str(signer.directory))
+    unsigned = TestClient.__init__
+
+    def signed(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        unsigned(self, *args, **kwargs)
+        self.auth = AsGateway(signer)
+
+    monkeypatch.setattr(TestClient, "__init__", signed)
+    return signer
+
+
+@pytest.fixture
+def claims(gateway):
+    """Verified claims, for a test that calls what a route calls, without the route."""
+
+    def make(**who) -> identity.Claims:
+        return identity.verify(gateway.assertion(AUDIENCE, **who), AUDIENCE,
+                               {gateway.signer.kid: gateway.signer.public_key})
+
+    return make
 
 
 # ONE FREQUENCY BAND PER ENGINE, far enough apart that an FFT peak names the
@@ -70,7 +137,6 @@ def _build(tmp_path, monkeypatch):
 
     monkeypatch.setenv("TTS_OUTPUT_DIR", str(tmp_path))
     monkeypatch.setenv("TTS_VOICE_DIR", str(tmp_path / "voices"))
-    monkeypatch.delenv("TTS_API_KEYS", raising=False)
     # The model is faked, so it is never "loaded" and the synchronous budget
     # would otherwise be charged a cold start that is not happening.
     monkeypatch.setenv("TTS_COLD_LOAD_SECONDS", "0")
@@ -131,7 +197,7 @@ def _build(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def build(tmp_path, monkeypatch):
+def build(tmp_path, monkeypatch, gateway):
     """Build the app with extra environment set, for one test.
 
     The service reads its configuration once, at import, exactly as it behaves
@@ -173,16 +239,14 @@ def voice_dir(tmp_path):
 
 
 @pytest.fixture
-def speech(tmp_path, monkeypatch):
+def speech(tmp_path, monkeypatch, gateway):
     """A TestClient on that app. Everything but the model is real."""
-    from starlette.testclient import TestClient
-
     with TestClient(_build(tmp_path, monkeypatch)) as client:
         yield client
 
 
 @pytest.fixture
-def live(tmp_path, monkeypatch):
+def live(tmp_path, monkeypatch, gateway):
     """The same app behind a real uvicorn, on an ephemeral port.
 
     Needed for exactly one thing, and it is the important one: TestClient runs

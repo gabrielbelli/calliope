@@ -461,15 +461,21 @@ def test_a_runner_that_answers_slowly_never_delays_a_local_job(speech):
         main.state["runner"] = None
 
 
-def test_every_job_finishes_with_the_runner_refusing_every_call(speech):
+def test_every_job_finishes_with_the_runner_refusing_every_call(speech,
+                                                                monkeypatch):
     """A DEAD RUNNER MUST NOT TAX THE QUEUE.
 
     One offer per job per rung meant the cost of a runner that is off scaled
     with the amount of work, which is precisely backwards: the busier this
     service is, the more it should be getting on with. The probe asks on its
     own schedule, so twenty jobs cost at most a handful of calls.
+
+    Twenty at once is over one person's share of the queue, and this test is
+    about the runner, not about that share, so the per-user cap is lifted.
     """
     import app.main as main
+
+    monkeypatch.setattr(main, "MAX_LIVE_JOBS_PER_USER", 0)
 
     class Refuses(FakeClient):
         def __init__(self):

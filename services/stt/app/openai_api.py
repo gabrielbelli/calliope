@@ -125,6 +125,7 @@ from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFil
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from voice_common import identity
 from voice_common.errors import ApiError
 
 from . import asr, boosting, glossary, languages, pipeline, profiles
@@ -178,9 +179,11 @@ TRANSLATION_FIELDS = frozenset({
     "glossary",
 })
 
-# No auth dependency: the key check is voice_common's ASGI middleware, applied
-# to the whole app in main.py. A dependency has to be remembered on every
-# route added from here on; middleware cannot be forgotten.
+# No auth dependency: the assertion check is voice_common.identity's ASGI
+# middleware, applied to the whole app in main.py. A dependency has to be
+# remembered on every route added from here on; middleware cannot be
+# forgotten. What a route reads off the verified claims is whose run it is and
+# which glossary profiles it may name.
 router = APIRouter(prefix="/v1")
 
 
@@ -409,7 +412,7 @@ def _terms(form) -> tuple[str, ...]:  # noqa: ANN001
     return terms
 
 
-def _glossary(form) -> profiles.Selection:  # noqa: ANN001
+async def _glossary(form, view: profiles.View) -> profiles.Selection:  # noqa: ANN001
     """`glossary=tech,dictation` — named profiles, for this request only.
 
     The extension, per ADR 0001: a new axis that no specification field covers,
@@ -422,22 +425,33 @@ def _glossary(form) -> profiles.Selection:  # noqa: ANN001
     silence is indistinguishable from a working glossary right up until a
     transcript is wrong.
 
-    refresh() first, so a profile written a second ago is usable now. It is a
-    handful of stat() calls and it is the difference between per-request
-    selection and a set frozen at boot.
+    refresh() first, so a profile written a second ago is usable now. It is
+    the difference between per-request selection and a set frozen at boot.
+    Both it and the compile run on the thread pool: the rescan stats every
+    user's profiles, so it grows with the household, and on the event loop a
+    slow volume would hold up every request and /health with it.
+
+    More than profiles.MAX_SELECTED names is a 400 naming the limit, counted
+    after repeats are dropped (recheck M-4).
+
+    Names resolve as `view` sees them (D33): a user's own and the built-ins, or
+    the system's for a service. Another user's profile is as unknown as a typo,
+    and the message lists only what this caller could have named.
     """
     raw = _value(form, "glossary")
     names = profiles.split_selection(raw)
     if not names:
         return profiles.Selection(rules=pipeline.default_rules())
     registry = pipeline.registry()
-    registry.refresh()
+    await run_in_threadpool(registry.refresh)
     try:
-        return registry.select(names)
+        return await run_in_threadpool(registry.select, names, view)
+    except profiles.TooManyProfiles as exc:
+        raise _bad(f"{exc}. See GET /glossaries.", param="glossary") from exc
     except profiles.UnknownProfile as exc:
         raise _bad(
             f"Unknown glossary profile {exc.name!r}. "
-            f"This deployment has: {', '.join(exc.known) or 'none'}. "
+            f"You can use: {', '.join(exc.known) or 'none'}. "
             "See GET /glossaries.",
             param="glossary") from exc
 
@@ -1041,7 +1055,8 @@ async def transcriptions(request: Request,
     want_logprobs = _include(form, engine, response_format)
     tuning = _chunking(form)
 
-    selection = _glossary(form)
+    claims = identity.claims_of(request)
+    selection = await _glossary(form, profiles.view_of(claims))
     terms = _terms(form)
     rules = _repair_rules(selection, terms)
 
@@ -1072,7 +1087,9 @@ async def transcriptions(request: Request,
                       granularities, want_logprobs, rules,
                       origin=pipeline.Origin(route="/v1/audio/transcriptions",
                                              client="openai",
-                                             model_requested=model_requested))
+                                             model_requested=model_requested,
+                                             owner=claims.sub,
+                                             credential=claims.cred))
 
 
 @router.post("/audio/translations", openapi_extra=_TRANSLATION_SCHEMA)
@@ -1103,7 +1120,8 @@ async def translations(request: Request,
     model_requested = _model(form)
     response_format = _response_format(form, TRANSLATION_FORMATS)
     granularities = ("segment",) if response_format == "verbose_json" else ()
-    selection = _glossary(form)
+    claims = identity.claims_of(request)
+    selection = await _glossary(form, profiles.view_of(claims))
     terms = _terms(form)
 
     # Whisper is the only engine with a translate task, and _boost refuses the
@@ -1127,7 +1145,9 @@ async def translations(request: Request,
                       rules=_repair_rules(selection, terms),
                       origin=pipeline.Origin(route="/v1/audio/translations",
                                              client="openai",
-                                             model_requested=model_requested))
+                                             model_requested=model_requested,
+                                             owner=claims.sub,
+                                             credential=claims.cred))
 
 
 async def _run(data: bytes, opts: asr.Options, tuning: pipeline.Tuning,

@@ -173,15 +173,17 @@ async def prime(client: httpx.AsyncClient) -> None:
         return
     from .destinations import (  # noqa: PLC0415 - one place turns a name into a value
         DestinationError,
+        _bearer,
         _secret,
     )
     url, token_env = found
     try:
-        token = _secret(token_env)
+        # Held to the token's own hosts (D41), as the action's request is: a
+        # refusal is a DestinationError, and quiet like every other failure.
+        token = await _secret(token_env, url)
         if not token:
             return
-        r = await client.get(f"{url}/api/config", headers={"Authorization": f"Bearer {token}"},
-                             timeout=HOME_TIMEOUT_S)
+        r = await client.get(f"{url}/api/config", headers=_bearer(token), timeout=HOME_TIMEOUT_S)
         c = r.json() if r.status_code == 200 else {}
         units = c.get("unit_system") if isinstance(c.get("unit_system"), dict) else {}
         # A Home Assistant with no location set still knows its time zone.

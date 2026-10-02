@@ -29,14 +29,30 @@ name a 400 like any other.
 The schema's `VoiceIdsOrCustomVoice` also admits an object, `{"id": "voice_1234"}`,
 and openai-python's `Voice` alias includes it. It resolves through exactly the
 same table: the id is a name like any other.
+
+**A clip is personal data, so the directory has namespaces** (D35):
+
+    TTS_VOICE_DIR/*.wav               system: every clip from before users
+    TTS_VOICE_DIR/users/<id>/*.wav    one user's own clips
+
+A caller can name its own clips and the built-ins. The system namespace is
+visible only to a holder of `voices:write:all`, and nobody, an admin included,
+can name another user's clip: hearing somebody's voice say what you typed is
+the one thing a cloned voice must never be lent for. `Voices.visible_to`
+builds that caller's view, and the unknown-voice error lists only what is in
+it.
 """
 
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
-__all__ = ["BUILTIN", "OPENAI_VOICES", "Registry", "load_registry"]
+from voice_common.scopes import USER_ID
+
+__all__ = ["BUILTIN", "OPENAI_VOICES", "Registry", "Voices", "load_registry",
+           "load_voices"]
 
 # The model's own speaker, the one every request has been getting. Named so it
 # can be asked for deliberately.
@@ -157,6 +173,69 @@ class Registry:
         return None
 
 
+class Voices:
+    """Every namespace on the clip volume, each a Registry of its own.
+
+    ONE Registry PER DIRECTORY, so `refresh` keeps its one stat() per request:
+    a clip landing in `users/<id>/` changes that directory's mtime and not the
+    top level's, and a single stamp on the top level would never see it.
+    A user's Registry is built the first time that user asks, which is also
+    why the IDs here come from verified assertions and never from a request
+    body: the map grows only by people who exist.
+    """
+
+    def __init__(self, root: Path, strict: bool) -> None:
+        self.root = root
+        self.strict = strict
+        self.system = load_registry(root, strict)
+        self._users: dict[str, Registry] = {}
+        self._lock = threading.Lock()
+
+    def user(self, user_id: str) -> Registry:
+        """One user's own clips, rescanned if their directory changed."""
+        if not USER_ID.fullmatch(user_id):
+            # Checked before the path join: a sub is signed by the gateway,
+            # but `users/../` is not a namespace whoever signed it.
+            raise ValueError(f"{user_id!r} is not a user ID")
+        with self._lock:
+            found = self._users.get(user_id)
+            if found is None:
+                found = load_registry(self.root / "users" / user_id, self.strict)
+                self._users[user_id] = found
+                return found
+        found.refresh()
+        return found
+
+    def visible_to(self, *, user: str | None, system: bool) -> Registry:
+        """The clips one caller may name, as one Registry that never refreshes.
+
+        Their own clips win over a system clip of the same name, because the
+        one a person recorded is the one they mean.
+        """
+        sources: list[Registry] = []
+        if system:
+            self.system.refresh()
+            sources.append(self.system)
+        if user is not None:
+            sources.append(self.user(user))
+        clips: dict[str, Path] = {}
+        seconds: dict[str, float | None] = {}
+        for registry in sources:
+            clips.update(registry.clips)
+            seconds.update(registry.seconds)
+        return Registry(clips, strict=self.strict, seconds=seconds)
+
+
+def _strict_from_env() -> bool:
+    return os.getenv("TTS_VOICE_STRICT", "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+def load_voices() -> Voices:
+    """Every namespace under TTS_VOICE_DIR. The user ones load when first asked for."""
+    return Voices(Path(os.getenv("TTS_VOICE_DIR", "/voices")), _strict_from_env())
+
+
 def load_registry(directory: str | os.PathLike[str] | None = None,
                   strict: bool | None = None) -> Registry:
     """Scan the voice directory, and record what it looked like.
@@ -164,12 +243,14 @@ def load_registry(directory: str | os.PathLike[str] | None = None,
     Called once at startup and then only from Registry.refresh, which fires
     when the directory's stat() says something in it has changed. See that
     method for why "once, at startup" was narrowed rather than kept.
+
+    Files only, so the `users/` directory beside the system clips is never
+    read as a clip of the system namespace.
     """
     path = Path(directory if directory is not None
                 else os.getenv("TTS_VOICE_DIR", "/voices"))
     if strict is None:
-        strict = os.getenv("TTS_VOICE_STRICT", "").strip().lower() in {
-            "1", "true", "yes", "on"}
+        strict = _strict_from_env()
     clips: dict[str, Path] = {}
     stamp: tuple[float, int] | None = None
     if path.is_dir():

@@ -50,7 +50,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from voice_common import auth, logging as voice_logging
+from voice_common import identity, logging as voice_logging
 from voice_common.errors import error_response, install_errors
 from voice_common.health import install_health
 from voice_common.models import OpenAISpeechRequest, Segment as BaseSegment
@@ -375,11 +375,12 @@ app = FastAPI(title="tts-stack",
               description="Kokoro text-to-speech, CPU only.",
               lifespan=lifespan)
 
-# Installed on the app rather than route by route, so a route added later is
-# covered without anyone having to remember to ask for it. The variable name is
-# a parameter of the shared middleware precisely so that TTS_API_KEYS did not
-# have to be renamed for this service to stop keeping its own copy.
-auth.install(app, "TTS_API_KEYS")
+# Every request but /health needs the gateway's signed assertion for this
+# service (D52). Installed on the app rather than route by route, so a route
+# added later is covered without anyone having to remember to ask for it, and
+# placed outermost whatever is added after it. /docs, /redoc and /openapi.json
+# are removed rather than guarded: a schema dump is a free map of the service.
+identity.install(app, "tts")
 
 # The /v1 error envelope — all four fields, and the 404, 405 and 500 handlers
 # that used to escape it. This repo carried app/errors.py to add `param` and
@@ -486,11 +487,11 @@ class SpeechRequest(OpenAISpeechRequest):
 
 
 def _health() -> dict[str, object]:
-    """The body, unchanged. The route and its auth exemption are shared.
+    """The body, unchanged. The route and its exemption are shared.
 
-    install_health registers `/health` AND exempts exactly that string from
-    authentication, so a rename cannot lock a container healthcheck out — the
-    two used to be independent literals in two modules. It also makes the route
+    install_health registers `/health` at the one path voice_common.identity
+    leaves open, so a rename cannot lock a container healthcheck out — the two
+    used to be independent literals in two modules. It also makes the route
     a coroutine: a sync one shares AnyIO's forty-thread pool with /speak, and
     enough concurrent synthesis requests took the pool and stopped /health
     answering while the service was merely busy. Nothing here blocks.
@@ -555,7 +556,8 @@ def _headers(duration: float, compute: float) -> dict[str, str]:
             "X-Realtime-Factor": f"{duration / compute:.1f}" if compute else "0"}
 
 
-def _record(*, route: str, client: str | None, status: str, text: str,
+def _record(*, route: str, client: str | None, owner: str, credential: str,
+            status: str, text: str,
             voice: str, language: str, fmt: str, duration: float,
             compute: float, at: float, speed: float | None = None,
             model_requested: str | None = None,
@@ -575,11 +577,17 @@ def _record(*, route: str, client: str | None, status: str, text: str,
     for a clone job on a GPU across the LAN. packages/common/tests/fixtures/
     run_records.json is the authority; if this disagrees with it, this is
     wrong.
+
+    `owner` and `credential` are REQUIRED, not defaulted: they come from the
+    assertion the request carried (D31), and a call site that forgot them
+    would file a person's speech as a system record, out of their own list.
     """
     runlog.record(
         kind="speech",
         route=route,
         client=client,
+        owner=owner,
+        credential=credential,
         status=status,
         error=error,
         # Started and created are the same instant on a route that runs the
@@ -722,7 +730,8 @@ class ClosingStreamingResponse(StreamingResponse):
 # Deliberately `def`, not `async def`: synthesis is blocking CPU work, and on
 # the event loop it would starve /health during any sustained load.
 @app.post("/speak")
-def speak(req: SpeakRequest) -> Response:
+def speak(req: SpeakRequest, request: Request) -> Response:
+    claims = identity.claims_of(request)
     synth = state.get("synth")
     if not synth:
         raise HTTPException(503, "model still loading")
@@ -788,6 +797,7 @@ def speak(req: SpeakRequest) -> Response:
             # would put a guess in a store that is read as a fact. `client` is
             # nullable for exactly this.
             client=None,
+            owner=claims.sub, credential=claims.cred,
             status="done",
             text=req.text or " ".join(s.text for s in req.segments or ()),
             voice=voice, language=language, fmt=req.format,
@@ -836,6 +846,7 @@ def _usage(input_tokens: int, samples: int) -> dict[str, int]:
 
 def _sse_body(synth: Synth, chunks: list[str], voice: str, language: str,
               speed: float, fmt: str, input_tokens: int, *,
+              owner: str, credential: str,
               text: str = "", model_requested: str | None = None,
               ) -> Iterator[bytes]:
     """The event stream: a delta per encoded piece, then done.
@@ -937,6 +948,7 @@ def _sse_body(synth: Synth, chunks: list[str], voice: str, language: str,
         # rounding them away to nothing would say the run never happened.
         duration = samples / SAMPLE_RATE
         _record(route="/v1/audio/speech", client="openai",
+                owner=owner, credential=credential,
                 status="done" if finished else "failed",
                 error=failure or (None if finished else
                                   "the client closed the stream before it "
@@ -952,6 +964,7 @@ def _sse_body(synth: Synth, chunks: list[str], voice: str, language: str,
 # same pool, so the SSE path does not put synthesis on the loop either.
 @app.post("/v1/audio/speech")
 def openai_speech(req: SpeechRequest, request: Request) -> Response:
+    claims = identity.claims_of(request)
     synth = state.get("synth")
     if not synth:
         return error_response(503, "model still loading",
@@ -1013,6 +1026,7 @@ def openai_speech(req: SpeechRequest, request: Request) -> Response:
         return ClosingStreamingResponse(
             _sse_body(synth, chunks, voice, language, speed,  # type: ignore[arg-type]
                       req.response_format, input_tokens,
+                      owner=claims.sub, credential=claims.cred,
                       text=req.input, model_requested=req.model),
             media_type="text/event-stream",
             headers={**headers,
@@ -1059,7 +1073,8 @@ def openai_speech(req: SpeechRequest, request: Request) -> Response:
     # three of them — /speak, this, and the stream — and recording only the
     # first would leave every OpenAI client's run out of the listing while a
     # log line above says it happened.
-    _record(route="/v1/audio/speech", client="openai", status="done",
+    _record(route="/v1/audio/speech", client="openai",
+            owner=claims.sub, credential=claims.cred, status="done",
             text=req.input, voice=voice, language=language,
             fmt=req.response_format, duration=duration, compute=compute,
             at=at, speed=speed, model_requested=req.model)

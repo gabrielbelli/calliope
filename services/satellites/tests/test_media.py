@@ -40,7 +40,6 @@ PI_CAPS = {"speaker": {"rate": 44100, "channels": 1, "format": "s16le"},
 @pytest.fixture
 def app(tmp_path, monkeypatch):
     monkeypatch.setenv("SATELLITES_DATA_DIR", str(tmp_path))
-    monkeypatch.delenv("SATELLITES_API_KEYS", raising=False)
     monkeypatch.delenv("SATELLITES_TTS_URL", raising=False)
     return importlib.reload(importlib.import_module("app.main"))
 
@@ -389,10 +388,11 @@ def test_the_privacy_mute_ends_the_stream_as_muted(client):
         assert upload.result().json()["reason"] == "muted"
 
 
-def test_an_upload_whose_client_goes_away_ends_as_cancelled_and_flushes_the_pi(client, app, published):
+def test_an_upload_whose_client_goes_away_ends_as_cancelled_and_flushes_the_pi(
+        client, app, published, gateway):
     """Home Assistant stopping its ffmpeg, or going away itself, mid-body.
     Driven as raw ASGI on the hub's own loop: TestClient cannot hang up in
-    the middle of a body."""
+    the middle of a body. Signed by hand, as the gateway would."""
     first = wav(pcm(0.1, 44100, 2), 44100, 2, size=0)
     pieces = iter([{"type": "http.request", "body": first, "more_body": True}])
     answer = bytearray()
@@ -407,7 +407,9 @@ def test_an_upload_whose_client_goes_away_ends_as_cancelled_and_flushes_the_pi(c
     path = f"/satellites/{PI}/media"
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
              "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"announce=0",
-             "root_path": "", "headers": [(b"host", b"hub.test"), (b"content-type", b"audio/wav")],
+             "root_path": "", "headers": [(b"host", b"hub.test"), (b"content-type", b"audio/wav"),
+                                          (b"x-calliope-identity",
+                                           gateway.assertion("satellites").encode())],
              "client": ("127.0.0.1", 50000), "server": ("hub.test", 80)}
     with client.websocket_connect("/satellites/ws") as ws:
         adopt_pi(client, ws)

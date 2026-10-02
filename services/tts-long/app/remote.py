@@ -89,7 +89,9 @@ import numpy as np
 
 from voice_common.audio import check_rate, splice
 from voice_common.engines import WIRE_CONTROLS
+from voice_common.identity import outbound_headers
 
+from .runner_key import RunnerKey
 from .synth import SAMPLE_RATE, Spoken
 
 log = logging.getLogger("tts-long.remote")
@@ -162,7 +164,9 @@ class RunnerConfig:
     fingerprint: str = ""
     # A private CA bundle instead, for anyone who does have an internal PKI.
     ca_file: str = ""
-    api_key: str = ""
+    # NO KEY FIELD. The bearer key is a secret in the gateway's store and can
+    # be rotated while this process runs, so it is not configuration fixed at
+    # start: app/runner_key.py hands RunnerClient the current one per request.
     service: str = "chatterbox"
     # THERE IS NO `cpu_service` FIELD ANY MORE, AND ITS ABSENCE IS THE POINT.
     #
@@ -225,6 +229,12 @@ class RunnerConfig:
             return self
         return replace(self, service=service)
 
+    @property
+    def origin(self) -> str:
+        """Where requests to this runner go, as a secret's `allowed_hosts` names it."""
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"https://{host}:{self.port}"
+
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "RunnerConfig | None":
         """Build from TTS_RUNNER_*, or return None for local-only.
@@ -236,21 +246,11 @@ class RunnerConfig:
         host = (e.get("TTS_RUNNER_HOST") or "").strip()
         if not host:
             return None
-        key = (e.get("TTS_RUNNER_API_KEY") or "").strip()
-        key_file = (e.get("TTS_RUNNER_API_KEY_FILE") or "").strip()
-        if not key and key_file:
-            try:
-                key = Path(key_file).read_text(encoding="utf-8").strip()
-            except OSError as exc:
-                # Named, not swallowed. A misconfigured key file means every
-                # request is a 401 and the fallback quietly hides it.
-                log.warning("cannot read TTS_RUNNER_API_KEY_FILE: %s", exc)
         return cls(
             host=host,
             port=int(e.get("TTS_RUNNER_PORT") or 47600),
             fingerprint=(e.get("TTS_RUNNER_FINGERPRINT") or "").replace(":", "").lower().strip(),
             ca_file=(e.get("TTS_RUNNER_CA_FILE") or "").strip(),
-            api_key=key,
             service=(e.get("TTS_RUNNER_SERVICE") or "chatterbox").strip(),
             timeout=float(e.get("TTS_RUNNER_TIMEOUT") or 30.0),
             offer_timeout=float(e.get("TTS_RUNNER_OFFER_TIMEOUT") or 3.0),
@@ -391,10 +391,17 @@ def _services_of(status_doc: dict, services_doc: dict) -> list[dict]:
 
 
 class RunnerClient:
-    """The HTTP client. Small on purpose: seven calls and no dependencies."""
+    """The HTTP client. Small on purpose: seven calls and no dependencies.
 
-    def __init__(self, cfg: RunnerConfig) -> None:
+    `key` is where the bearer key comes from (app/runner_key.py), asked on
+    every request so a rotation in the secret store reaches the runner within
+    its cache lifetime. None sends no key, which is what every test that
+    builds a client by hand wants.
+    """
+
+    def __init__(self, cfg: RunnerConfig, key: RunnerKey | None = None) -> None:
         self.cfg = cfg
+        self.key = key
         self._ctx = _pinned_context(cfg)
         self._lock = threading.Lock()
         self._assets: set[str] = set()
@@ -453,12 +460,30 @@ class RunnerClient:
                  content_type: str = "application/json",
                  extra: dict[str, str] | None = None,
                  timeout: float | None = None) -> tuple[int, dict, bytes]:
-        headers = {"Accept": "application/json", "Connection": "close"}
-        if self.cfg.api_key:
-            headers["Authorization"] = f"Bearer {self.cfg.api_key}"
-        if body is not None:
-            headers["Content-Type"] = content_type
-            headers["Content-Length"] = str(len(body))
+        key = self.key.get() if self.key is not None else None
+        answer = self._exchange(method, path, body, content_type, extra,
+                                timeout, key)
+        if answer[0] == 401 and key is not None:
+            # The secret may have been rotated in the store since it was
+            # cached. Asked once (D42); the same key again is not a retry.
+            fresh = self.key.refused(key)
+            if fresh is not None:
+                answer = self._exchange(method, path, body, content_type, extra,
+                                        timeout, fresh)
+        return answer
+
+    def _exchange(self, method: str, path: str, body: bytes | None,
+                  content_type: str, extra: dict[str, str] | None,
+                  timeout: float | None, key: str | None) -> tuple[int, dict, bytes]:
+        # EVERY HEADER BY NAME (D65). Nothing this service received is in
+        # scope here, and building the set from named values keeps it that
+        # way: the identity assertion a request arrived with must never reach
+        # a desktop on the LAN.
+        headers = outbound_headers(
+            accept="application/json", connection="close",
+            authorization=f"Bearer {key}" if key else None,
+            content_type=content_type if body is not None else None,
+            content_length=str(len(body)) if body is not None else None)
         if extra:
             headers.update(extra)
         # LOSING THE MACHINE IS ONE CLASS, AND THIS IS WHERE IT BECOMES ONE.
@@ -746,11 +771,11 @@ class RunnerClient:
                     # somebody is using that machine" sends people looking for one.
                     # Absent on a runner that predates the split, and absent is
                     # not the same as zero, so these stay None rather than 0.
-                    "machine_state": doc.get("machine_state"),
-                    # Out for the same reason as `reason` above: runner prose,
-                    # on a world-readable path. Today it says "cannot see
-                    # whether anybody is at this machine", which is harmless;
-                    # what it says in some other state is not ours to bound.
+                    # `machine_state_reason` is out for the same reason as
+                    # `reason` above: runner prose, on a world-readable path.
+                    # Today it says "cannot see whether anybody is at this
+                    # machine", which is harmless; what it says in some other
+                    # state is not ours to bound.
                     "limits": doc.get("limits"),
                     "cpu": {k: cpu.get(k) for k in
                             ("machine_pct", "own_pct", "foreign_pct", "logical_processors")

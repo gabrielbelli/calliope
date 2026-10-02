@@ -110,22 +110,29 @@ one starts the download again. `/health` itself is answered on the event loop
 and never waits on the queue, so a service that is merely busy still reports
 healthy.
 
+Every request goes through the gateway, with an API key from Account › API
+keys (see [Authentication](#authentication)). The port itself answers 401 to
+anything but `/health`.
+
 ```bash
+CALLIOPE=https://calliope.example
+AUTH="authorization: Bearer $CALLIOPE_KEY"
+
 # submit
-curl -s -X POST localhost:8002/jobs -H 'content-type: application/json' \
+curl -s -X POST "$CALLIOPE/jobs" -H "$AUTH" -H 'content-type: application/json' \
   -d '{"segments":[
         {"text":"Three steps.","pause_after":0.75},
         {"text":"One. Open your config file.","pause_after":0.75}]}'
 # {"id":"...","status":"queued","chunks":2,"estimated_seconds":38}
 
 # poll
-curl -s localhost:8002/jobs/<id>
+curl -s -H "$AUTH" "$CALLIOPE/jobs/<id>"
 
 # collect
-curl -s localhost:8002/jobs/<id>/audio --output out.wav
+curl -s -H "$AUTH" "$CALLIOPE/jobs/<id>/audio" --output out.wav
 
 # cancel a queued job, or discard a finished one and its file
-curl -s -X DELETE localhost:8002/jobs/<id>
+curl -s -X DELETE -H "$AUTH" "$CALLIOPE/jobs/<id>"
 ```
 
 A queued job stops immediately; a running one stops at its next chunk
@@ -180,9 +187,17 @@ too — one request, no retry, dropped on a full queue, never on the caller's
 clock. This is the only service in the stack that keeps a record of anything,
 so it is the only place the three kinds can be listed together.
 
-`POST /runs` is **service to service and is deliberately absent from the page's
-proxy table and from the gateway.** A mutable log with the browser as a writer
-is not a log.
+`POST /runs` is **service to service.** The gateway serves it only on its
+internal listener (`:8081`, never published), only to a service key holding
+`runs:write`, and this service requires that scope again. A mutable log with
+the browser as a writer is not a log.
+
+**The record says whose run it was.** stt and tts send the `owner` and
+`credential` of the request they answered, so a transcription lands in its
+user's list. `owner` must be a user ID or `svc:<name>`, and anything else is a
+400 naming the field. A record that names no owner belongs to its sender,
+which makes it a system record. The rate limit is per sender as the gateway
+signed it, not per the `service` field the body claims.
 
 Two rules make the two halves shippable in either order:
 
@@ -198,8 +213,34 @@ both sides read. If the code and the fixture disagree, the fixture is right.
 ### Filtering the listing
 
 `GET /jobs` takes `limit` (50, max 200), `kind`, `audio` and `status`, all
-comma-separable, and returns `counts` computed over **every** record before any
-filter — so a client can label `Everything (412)` without asking twice.
+comma-separable, and returns `counts` computed over **every record the caller
+may see** before any other filter — so a client can label `Everything (412)`
+without asking twice.
+
+**Whose rows comes first.** Every job and record has an `owner`, taken from
+the gateway's assertion and never from a body.
+
+| `?owner=` | Rows | Needs |
+|---|---|---|
+| absent, or `me` | the caller's own | nothing more |
+| `all` | everybody's, system included | `jobs:read:all` |
+| `system` | no owner, or a service's (`svc:*`) | `jobs:read:all` |
+| a user ID | that user's | `jobs:read:all` |
+
+Absent means `me` for an admin too: somebody else's rows are always a
+deliberate request, and the gateway audits them as one. Anything that is not
+one of these is a **400** before it is used anywhere. Without the scope it is a
+**403 `insufficient_scope`**. Every record written before there were users has
+no owner and is therefore a system record; nothing is rewritten to say so.
+
+`GET`, `DELETE` and `/audio` on one job follow the same rule: a job is
+reachable exactly when `GET /jobs` with the same `?owner=` would list it. So
+somebody else's job needs `?owner=all`, `system` or their ID, and
+`jobs:read:all` to read it or `jobs:delete:all` to delete it. Without an
+`?owner=` that covers it, the answer is **404**, exactly as for a job that does
+not exist, admins included. The scope alone is not enough, because the
+gateway records an `:all` access by its `?owner=`, and this service records
+nothing.
 
 Filtering happens here rather than in the browser because the listing is capped:
 a morning of Kokoro presses would push last night's clone off the end of the
@@ -244,10 +285,12 @@ answers in one of three ways.
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:8002/v1", api_key="sk-your-key")
+# Through the gateway, with an API key holding speech:long. `tts-long` (or an
+# engine name) is what sends the request to this service rather than to Kokoro.
+client = OpenAI(base_url="https://calliope.example/v1", api_key=calliope_key)
 
 with client.audio.speech.with_streaming_response.create(
-        model="gpt-4o-mini-tts", voice="alloy", response_format="mp3",
+        model="tts-long", voice="alloy", response_format="mp3",
         stream_format="sse", input=long_text) as response:
     for line in response.iter_lines():
         ...  # data: {"type":"speech.audio.delta","audio":"<base64>"}
@@ -284,16 +327,15 @@ is a **429 with `Retry-After`**.
 
 ```bash
 # short: returns the audio
-curl -s localhost:8002/v1/audio/speech \
-  -H 'authorization: Bearer sk-your-key' \
+curl -s "$CALLIOPE/v1/audio/speech" -H "$AUTH" \
   -H 'content-type: application/json' \
-  -d '{"model":"tts-1","voice":"alloy","input":"Open your config file."}' \
+  -d '{"model":"tts-long","voice":"alloy","input":"Open your config file."}' \
   --output out.mp3
 
 # long: returns a job
-curl -si localhost:8002/v1/audio/speech \
+curl -si "$CALLIOPE/v1/audio/speech" -H "$AUTH" \
   -H 'content-type: application/json' \
-  -d '{"model":"tts-1","voice":"alloy","input":"<two thousand words>"}'
+  -d '{"model":"tts-long","voice":"alloy","input":"<two thousand words>"}'
 # HTTP/1.1 202 Accepted
 # location: /jobs/6f0c...
 # retry-after: 412
@@ -777,6 +819,21 @@ docker run -v /srv/voices:/voices ... ghcr.io/gabrielbelli/calliope-tts-long:pre
 `GET /voices` lists what is available; `default` is the model's own speaker and
 is always there. A name that is neither a clip nor an alias is a **400**.
 
+**A clip belongs to somebody.** The directory has namespaces:
+
+```text
+/voices/*.wav               system: every clip from before there were users
+/voices/users/<id>/*.wav    one user's own clips, written by the page
+```
+
+A caller names its own clips and the built-ins, and `GET /voices` lists only
+those. The system clips go with `voices:write:all`. **Nobody can speak in
+another user's voice, an admin included**: a scope that can delete somebody's
+clip is not a licence to make it say things. The unknown-voice 400 lists only
+the names the caller could have used. Each namespace is rescanned on its own
+directory's change, so a clip added through the page is usable on the next
+request.
+
 > **Deviation.** With no clips installed there is exactly one voice, and
 > OpenAI's thirteen documented names all resolve to it. Refusing `alloy`
 > outright would break every unmodified client, so instead the substitution is
@@ -798,7 +855,7 @@ Nothing here is hidden and nothing here is faked.
 | Streamed `wav` and `flac` differ from the buffered file in their header | Both state the total length, which is not known until the last sentence is generated | Diffed byte for byte: `wav` differs at offsets 4 and 40 only and is identical from byte 44; `flac` differs inside STREAMINFO only (offsets 8–41). `pcm`, `mp3` and `aac` are exact |
 | Streamed `opus` is not byte-comparable between requests | The Ogg serial number is random per stream, so two encodes of the same samples differ anyway | Within one request the deltas are a partition of a single encode |
 | `sse` is accepted for every `model` value | OpenAI restricts `stream_format` to `gpt-4o-mini-tts`. Both engines here can stream, so refusing the field on the strength of a name would be theatre. A slow engine holds the socket longer, which is a difference of degree and not of kind — `X-Job-Id` is on the response, so a caller that gives up can poll | — |
-| `tts-1`, `tts-1-hd` and `gpt-4o-mini-tts` resolve to `TTS_DEFAULT_ENGINE` | They are documented **aliases**, not fields accepted and dropped. That is what they have always meant here, and it preserves every direct caller that reaches this service without the gateway | `x-tts-engine` on every response names the engine that actually ran |
+| `tts-1`, `tts-1-hd` and `gpt-4o-mini-tts` resolve to `TTS_DEFAULT_ENGINE` | They are documented **aliases**, not fields accepted and dropped. That is what they have always meant here, and a client that sends one keeps working | `x-tts-engine` on every response names the engine that actually ran |
 | Unknown fields are **400**, not ignored | OpenAI's schema sets `additionalProperties: false` and its API answers the same way | The cost: a genuinely new OpenAI field is refused here until it is added |
 | `audio/pcm` as the content type for `response_format: "pcm"` | The schema names no per-format MIME. This is an **estate-wide decision**, written down so tts-stack, tts-long and stt-stack cannot drift: `pcm` → `audio/pcm`, `opus` → `audio/ogg`, `mp3` → `audio/mpeg`, `aac` → `audio/aac` | — |
 
@@ -807,51 +864,48 @@ Things that are **not** deviations any more: `param` in the error envelope, the
 absence of `Content-Disposition` on `/v1`, and mp3 as the default format.
 ## Authentication
 
-Set `TTS_API_KEYS` to a comma-separated list of accepted keys. Send one as
-`Authorization: Bearer <key>` — what OpenAI clients already do.
+**This service checks no credential itself.** The gateway does: it turns a
+session cookie or an API key into a signed identity assertion,
+`X-Calliope-Identity`, valid for 60 seconds and addressed to `tts-long`. This
+service verifies it with the gateway's public key and nothing else
+(`voice_common.identity`). Every request without a valid assertion for this
+audience gets **401**, so the port is useless to anything on the network that
+is not the gateway.
 
-```bash
-docker run -p 8002:8002 -e TTS_API_KEYS='sk-alpha,sk-beta' ... tts-long
-```
+| What the assertion decides | How |
+|---|---|
+| Whose job a new job is | `owner` and `credential` on the row, from the assertion |
+| Which rows a listing shows, and which job an ID reaches | the caller's own; `?owner=` wider only with the `:all` scope |
+| Which clips `voice` resolves in | the caller's namespace; the system one with `voices:write:all` |
+| Who may post a run record | a service holding `runs:write` |
 
-**Unset means authentication is disabled**, and the startup log says so at
-WARNING:
+The gateway writes its public key and this service's own key into
+`/run/calliope` (`identity.pub`, `service.key`), on a read-only volume of this
+service's own. `CALLIOPE_RUN_DIR` moves that directory, for tests. Until both
+files exist `/health` says `not_ready`. A rotated signing key is picked up on
+the first assertion that names it.
 
-```text
-WARNING TTS_API_KEYS is unset: authentication is DISABLED and every request is accepted, including /v1. Set TTS_API_KEYS to a comma-separated list of keys to require Authorization: Bearer.
-```
+`/health` stays open, because the container healthcheck calls it and has no
+credential and no way to be given one — that probe lives in `compose.yaml`
+rather than in the image, for the reason under [Run](#run) — and so does
+`/health/`, with the trailing slash. `/docs`, `/redoc` and `/openapi.json` do
+not exist: a schema is a free map of the service.
 
-That is deliberate. This already runs on a LAN with callers that have no key,
-and an upgrade that started refusing them would turn a feature into an outage.
-Refusing to boot is the tidier position and the worse one.
+**`TTS_API_KEYS` is removed.** If it is still set, the service starts and
+serves as normal, logs an ERROR naming it once a minute, and lists it under
+`ignored_variables` in `/health`. It never refuses to start over it: the
+satellites must not go down over a line nobody deleted. Remove it.
 
-A `TTS_API_KEYS` that is *set* but names no key — `''`, `','`, `'  '`, `',,'`
-— **refuses to start**. All four are reached by ordinary accident: `-e
-TTS_API_KEYS=$SECRET` with `SECRET` unset hands the container an empty value.
-Unset means "I am not using this"; a value that is present and yields nothing
-means someone meant to configure keys, and reading that as "off" turns an
-operator's intent to require keys into a service open to anyone. *(The empty
-string used to disable authentication silently. It now exits with the sentence
-above.)*
+### Limits per person
 
-Keys are compared with `hmac.compare_digest`, and every configured key is
-compared even after one matches — short-circuiting would leak which key was
-presented through the response time. A LAN is not a threat-free network.
-
-A key with non-ASCII characters in it authenticates. It is compared against
-the bytes the client actually put on the wire, because Starlette decodes a
-header as latin-1 and re-encoding that as UTF-8 produced different bytes for
-every accented key — so the *correct* key came back as "Incorrect API key
-provided". Startup warns about such a key anyway: it works only with clients
-that send the header as UTF-8, which HTTP does not guarantee.
-
-`/health` stays open, because the container healthcheck calls it and has no key
-and no way to be given one — that probe lives in `compose.yaml` rather than in
-the image, for the reason under [Run](#run) — and so does `/health/`, with the
-trailing slash. The check runs before routing, so FastAPI's 307 to `/health`
-never happens and a probe written that way used to go permanently 401 the day
-keys were configured. Everything else needs a key, `/docs` and `/openapi.json`
-included.
+The queue of `TTS_MAX_QUEUE` jobs is the household's. One person may hold at
+most `TTS_LONG_MAX_LIVE_JOBS_PER_USER` of them (4), queued and running
+together; the next one is a **429** with `Retry-After`, on both routes.
+Concurrent requests cannot get past it together: the check and the insertion
+are one step. A queued job that has been cancelled stops counting at once.
+Services are exempt, because their work is somebody's request that already
+passed this check. `POST /jobs` text, `segments` included, is capped at
+`TTS_LONG_MAX_TEXT` characters (100 000); a longer body is a **413**.
 
 ## TLS
 
@@ -872,7 +926,6 @@ docker run -p 8002:8002 \
   -v /etc/ssl/tts:/certs:ro \
   -e TTS_TLS_CERT=/certs/fullchain.pem \
   -e TTS_TLS_KEY=/certs/privkey.pem \
-  -e TTS_API_KEYS='sk-alpha' \
   ghcr.io/gabrielbelli/calliope-tts-long:pre
 ```
 
@@ -917,7 +970,6 @@ sentence.
 | `TTS_RUNNER_SERVICE_<ENGINE>` | the engine id | The `offpeak` service id per engine. `TTS_RUNNER_SERVICE` is the legacy spelling and now means the `chatterbox` engine only. For an engine with no local lane an uninstalled service is a 503 rather than a slow local job, because there is no local job |
 | `TTS_REALTIME_FACTOR_<LANE>_<ENGINE>` | the catalogue seed | Rate seed per (lane, engine) pair. Falls back pair → lane → global |
 | `TTS_COLD_LOAD_SECONDS_<ENGINE>` | the catalogue seed | Cold load per engine; `chatterbox-turbo` seeds 68 from the 67.5 s measured on spring |
-| `TTS_API_KEYS` | *(unset)* | Comma-separated accepted keys. Unset means **no auth**; set but naming no key (`''`, `','`) refuses to start |
 | `TTS_LOG_LEVEL` | `INFO` | Root log level. An unrecognised name warns and falls back to `INFO` rather than refusing to start |
 | `TTS_TLS_CERT` | *(unset)* | PEM certificate. Both this and the key are needed for HTTPS; half a pair refuses to start |
 | `TTS_TLS_KEY` | *(unset)* | PEM private key. Only applied to the `uvicorn` command; overriding `CMD` with TLS set refuses to start |
@@ -931,6 +983,8 @@ sentence.
 | `TTS_CHUNK_MAX_CHARS` | `280` | Hard ceiling per `generate()` call; must stay under 40 s of speech |
 | `TTS_CHUNK_TARGET_CHARS` | `160` | Short sentences merge up to this. Lower means sooner first audio and choppier prosody |
 | `TTS_MAX_QUEUE` | `32` | Queue depth past which both routes answer **429** with `Retry-After` |
+| `TTS_LONG_MAX_LIVE_JOBS_PER_USER` | `4` | Queued and running jobs one person may hold; the next is a **429**. Services are exempt. `0` disables it |
+| `TTS_LONG_MAX_TEXT` | `100000` | Characters one `POST /jobs` may carry, `segments` included; more is a **413**. `0` disables it |
 | `TTS_AUDIO_TTL` | `86400` | Seconds the AUDIO survives. The record stays and says `expired`. `TTS_JOB_TTL` is still read and means this |
 | `TTS_RECORD_TTL` | `2592000` | Seconds the RECORD survives. Thirty days. `0` on either disables that half |
 | `TTS_BACKEND_ORDER` | `runner,local` | Which lanes exist. A membership test, not an order: leaving a name out switches that lane off, and `local` alone is local-only |
@@ -944,7 +998,7 @@ sentence.
 | `TTS_SHUTDOWN_GRACE_S` | `20` | How long shutdown waits for the lanes before marking what is left `cancelled` |
 | `TTS_RUNLOG_ACCEPT` | `1` | Whether `POST /runs` accepts records from `tts` and `stt`. `0` answers 404 |
 | `TTS_RUNLOG_MAX_RECORDS` | `5000` | Ceiling on stored records, counted against a cache refreshed every 60 s |
-| `TTS_RUNLOG_RATE` | `120` | Accepted records per minute, per sending service |
+| `TTS_RUNLOG_RATE` | `120` | Accepted records per minute, per sending service as the gateway signed it |
 | `TTS_RUNLOG_TEXT` | `1` | `0` stores the length of what was said and not the words |
 | `AIV_HOST_LABEL` | `platform.node()` | What this machine is called, on every record it writes |
 | `TTS_SSE_KEEPALIVE` | `10` | Seconds between `:` comment lines on a waiting stream |
@@ -1017,8 +1071,26 @@ broker and no cluster. This service talks to that machine directly over TLS.
 ```yaml
 TTS_RUNNER_HOST: "192.0.2.11"      # example only
 TTS_RUNNER_FINGERPRINT: ""         # `offpeak fingerprint` on that machine
-TTS_RUNNER_API_KEY_FILE: /run/secrets/runner-key
 ```
+
+**The runner's key is a secret in the gateway's store**, `TTS_RUNNER_API_KEY`
+in Admin › Secrets. This service reads it from the gateway's internal listener
+with its own service key, keeps it in memory for at most a minute, and sends
+it only to `https://<TTS_RUNNER_HOST>:<TTS_RUNNER_PORT>`, which must be in the
+secret's allowed hosts. A rotation is picked up within that minute, with no
+restart. If the gateway cannot be reached, the last value it gave is kept. A
+cleared secret (404) stops being sent at once. When the runner answers 401,
+the key is fetched again at most once every 10 seconds, so a runner that
+refuses every key does not turn each probe and poll into an audited secret
+read.
+
+`TTS_RUNNER_API_KEY_FILE`, and `TTS_RUNNER_API_KEY` before it, are how the key
+used to be given. At start the value either one names is imported into the
+store once, with the runner's host as its only allowed host, and the store
+never overwrites a value an admin has set. After that the setting is a
+fallback for this release only: it is used while the gateway cannot be reached
+and has given nothing better, with a WARNING. An admin confirms the imported
+row in Admin › Secrets. Remove the setting after the next release.
 
 ### What it buys, measured
 
@@ -1259,14 +1331,14 @@ leaves here finishes early against the number its caller was given, never late.
 
 ## Shared code
 
-Authentication, the OpenAI error envelope, the `/health` contract, `Segment`,
-the PCM byte cast and the entrypoint all live in
+The identity assertion's verifier, the OpenAI error envelope, the `/health`
+contract, `Segment`, the PCM byte cast and the entrypoint all live in
 [packages/common](../../packages/common/README.md), installed as a path
 dependency in `requirements.txt` and shared with `services/tts` and
-`services/stt`. Three hand-vendored copies of that code had drifted by 170 to
-197 lines and carried three *different* bugs, two of which were this service's:
-a key with an accent in it could never authenticate, and `GET /health/`
-answered 401.
+`services/stt`. Three hand-vendored copies of the old key check had drifted by
+170 to 197 lines and carried three *different* bugs, two of which were this
+service's: a key with an accent in it could never authenticate, and
+`GET /health/` answered 401.
 
 `tests/test_conformance.py` is four lines and runs the suite the package ships
 against this service's own `app.main:app`, so a change to the shared code fails

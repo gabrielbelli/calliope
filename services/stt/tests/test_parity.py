@@ -24,6 +24,8 @@ import wave
 import numpy as np
 import pytest
 from starlette.testclient import TestClient
+from voice_common.conformance import FakeGateway
+from voice_common.identity import RUN_DIR_ENV
 
 from app import asr, glossary, pipeline
 from app.main import app
@@ -135,16 +137,16 @@ class FakeParakeet:
 
 
 @pytest.fixture
-def whisper() -> TestClient:
-    yield from _serve(FakeWhisper())
+def whisper(gateway: FakeGateway) -> TestClient:
+    yield from _serve(gateway, FakeWhisper())
 
 
 @pytest.fixture
-def parakeet() -> TestClient:
-    yield from _serve(FakeParakeet())
+def parakeet(gateway: FakeGateway) -> TestClient:
+    yield from _serve(gateway, FakeParakeet())
 
 
-def _serve(engine):  # noqa: ANN001, ANN201
+def _serve(gateway: FakeGateway, engine):  # noqa: ANN001, ANN201
     pipeline.state.clear()
     pipeline.state["asr"] = engine
     pipeline.state["rules"] = glossary.compile_rules({"pece": "piece"})
@@ -152,8 +154,8 @@ def _serve(engine):  # noqa: ANN001, ANN201
     # from running: `with TestClient(app)` starts it, and the lifespan loads a
     # real 460 MB model and then overwrites the fake installed above. Nothing
     # here needs a model, and a parity suite that downloads one does not run in
-    # CI.
-    client = TestClient(app)
+    # CI. Every request carries the assertion the gateway would forward.
+    client = TestClient(app, headers=gateway.headers("stt"))
     client.engine = engine  # type: ignore[attr-defined]
     yield client
     pipeline.state.clear()
@@ -573,12 +575,12 @@ def test_the_vad_timeline_maps_back_to_the_original_clip() -> None:
 # ── several engines in one process (STT_MODELS) ───────────────────────────────
 
 @pytest.fixture
-def both() -> TestClient:
+def both(gateway: FakeGateway) -> TestClient:
     """Parakeet the default, Whisper beside it, as STT_MODELS=parakeet,whisper."""
     default, other = FakeParakeet(), FakeWhisper()
     default.id, other.id = "parakeet", "whisper"
     default.languages, other.languages = ("en", "pt"), ("en", "ja", "pt")
-    client = next(_serve(default))
+    client = next(_serve(gateway, default))
     pipeline.state["engines"] = {"parakeet": default, "whisper": other}
     client.other = other  # type: ignore[attr-defined]
     yield client
@@ -607,6 +609,20 @@ def test_health_lists_every_engine_default_first(both: TestClient) -> None:
          "accepts_language": True, "accepts_boost": False, "can_translate": True,
          "can_stream": True},
     ]
+
+
+def test_health_is_not_ready_until_the_gateway_has_written_the_credentials(
+        both: TestClient, tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    """With the model loaded and no identity.pub, every other request is a 401.
+
+    `ok` would tell the orchestrator and the hub a service is serving that is
+    refusing everything; the gateway writes the files at its own start (§2.4).
+    """
+    assert both.get("/health").json()["status"] == "ok"
+    empty = tmp_path / "not-yet"
+    empty.mkdir()
+    monkeypatch.setenv(RUN_DIR_ENV, str(empty))
+    assert both.get("/health").json()["status"] == "not_ready"
 
 
 def test_with_several_engines_a_refusal_names_the_one_that_can(both: TestClient) -> None:

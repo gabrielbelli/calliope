@@ -15,15 +15,15 @@ compatible shape has to drop, and for the one rule that surface is built
 around: every field is honoured or refused by name, never accepted and
 dropped.
 
-The wire contract around those routes — the API keys, the 401, OpenAI's error
-envelope, the health route and the log configuration — comes from voice_common,
-which this service shares with tts-stack and tts-long. Three hand-vendored
-copies of that code had drifted into three different defects; the package
-docstrings carry the detail. app/errors.py is gone with them: it completed the
-envelope with `param` and the 404/405 handlers while voice-common was pinned by
-tarball SHA and could not be changed from here, and all of it now lives in
-voice_common.errors. Everything below this line is what is genuinely particular
-to speech-to-text.
+The wire contract around those routes — the gateway's identity assertion and
+the 401 without one, OpenAI's error envelope, the health route and the log
+configuration — comes from voice_common, which this service shares with
+tts-stack and tts-long. Three hand-vendored copies of that code had drifted
+into three different defects; the package docstrings carry the detail.
+app/errors.py is gone with them: it completed the envelope with `param` and
+the 404/405 handlers while voice-common was pinned by tarball SHA and could
+not be changed from here, and all of it now lives in voice_common.errors.
+Everything below this line is what is genuinely particular to speech-to-text.
 """
 
 from __future__ import annotations
@@ -37,8 +37,10 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, Response, Uploa
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
-from voice_common import auth, errors, health
+from voice_common import errors, health, identity
 from voice_common import logging as voice_logging
+from voice_common.identity import has
+from voice_common.scopes import check_owner_filter
 
 from . import asr, openai_api, pipeline, profiles
 
@@ -112,8 +114,12 @@ def _health_details() -> dict[str, object]:
         "translations": any_engine("can_translate"),
         "streaming": any_engine("can_stream"),
         "hotwords": pipeline.HOTWORDS_ENABLED,
-        # Which profiles this process has loaded, so a client can see the set
-        # without spending a request on a 400 for a name that is not there.
+        # The system's profiles and the built-ins, so a client can see the
+        # shared set without spending a request on a 400 for a name that is
+        # not there. NEVER A USER'S (D50): this body is open inside the
+        # network and reaches every health:read holder through the gateway,
+        # and a profile name is somebody's vocabulary. The hub reads
+        # `home-assistant` here before it names it.
         #
         # Read straight out of the pipeline's state rather than through
         # pipeline.registry(), and NOT refreshed: both of those stat() the
@@ -121,8 +127,7 @@ def _health_details() -> dict[str, object]:
         # against a hung NFS mount would block every request including the
         # container's own healthcheck. Whether writes are possible is a
         # question for GET /glossaries, which is allowed to touch the disk.
-        "glossaries": sorted(getattr(pipeline.state.get("glossaries"),
-                                     "profiles", {})),
+        "glossaries": _shared_glossaries(),
         "vad": pipeline.VAD_ENABLED,
         "threads": pipeline.THREADS,
         "max_concurrent": pipeline.MAX_CONCURRENT,
@@ -139,19 +144,23 @@ def _health_details() -> dict[str, object]:
     }
 
 
-# Registers GET /health AND exempts exactly that path from the key check, so
+def _shared_glossaries() -> list[str]:
+    registry = pipeline.state.get("glossaries")
+    return registry.shared_names() if isinstance(registry, profiles.Registry) else []
+
+
+# Registers GET /health at the one path voice_common.identity leaves open, so
 # the route and the exemption can never come to name different strings.
-# Container healthchecks call it and have no key; requiring one would turn a
-# working service into a restart loop.
+# Container healthchecks call it and have no assertion; requiring one would
+# turn a working service into a restart loop.
 health.install_health(app, details=_health_details)
 
-# Everything else needs the key, /openapi.json, /docs and /redoc included: a
-# schema dump is a free map of the service. This is middleware rather than a
-# per-route dependency, which is what lets FastAPI's own three pages be used
-# again — they are plain Starlette routes that no router dependency reaches,
-# so this file used to re-register all three by hand just to get the check in
-# front of them. Middleware also cannot be forgotten on a route added later.
-auth.install(app, "STT_API_KEYS")
+# Every other request needs the gateway's signed assertion for this service
+# (D52). Middleware rather than a per-route dependency, so a route added later
+# cannot be forgotten, and installed outermost whatever is added after it.
+# /docs, /redoc and /openapi.json are removed rather than guarded: a schema
+# dump is a free map of the service, and nobody here reads it.
+identity.install(app, "stt")
 
 app.include_router(openai_api.router)
 
@@ -173,6 +182,7 @@ class Transcript(BaseModel):
 # the orchestrator restarts a service that is working correctly.
 @app.post("/transcribe", response_model=Transcript)
 def transcribe(
+    request: Request,
     file: UploadFile = File(...),
     language: str | None = Form(default=None),
     # The same selector /v1 takes, spelled the same way. The native route is
@@ -186,10 +196,11 @@ def transcribe(
     # also carries segments, words and logprobs for the /v1 shapes, and this
     # body is a contract that already has clients. Widening it because another
     # route needed the data would be the same mistake as narrowing it.
+    claims = identity.claims_of(request)
     result = pipeline.run(
         file.file.read(),
         asr.Options(language=language),
-        rules=_select(glossary).rules,
+        rules=_select(glossary, profiles.view_of(claims)).rules,
         # 16 kHz only, still. See pipeline.decode: /v1 resamples because no
         # OpenAI client expects otherwise, and this route does not because
         # telling a client its audio is the wrong rate is the documented
@@ -199,7 +210,8 @@ def transcribe(
         # client is left null on purpose: the page, a script and a shell all
         # send the same multipart body here, and a guess made from a user agent
         # would be stored as a fact.
-        origin=pipeline.Origin(route="/transcribe"),
+        origin=pipeline.Origin(route="/transcribe", owner=claims.sub,
+                               credential=claims.cred),
     )
     return Transcript(
         text=result.text,
@@ -222,11 +234,20 @@ def transcribe(
 # routes are explicitly out of that ADR's scope, so these keep FastAPI's
 # {"detail": ...} bodies like /transcribe does.
 #
-# AUTHENTICATION IS STT_API_KEYS, unchanged, and it is worth saying plainly
-# what that means rather than leaving it in a comment nobody reads: with the
-# keys unset — which is how this stack is deployed today — a write API is an
-# UNAUTHENTICATED write API. Set them before mounting the volume. The README
-# says so where an operator will actually meet it.
+# WHO MAY CALL THEM is the gateway's decision (D5): glossaries:read:own to
+# read, glossaries:write:own to write, glossaries:ha for home-assistant. What
+# is decided here is what the gateway cannot see:
+#
+#   * whose profiles a request acts on. A user's own by default, the system's
+#     for a holder of the `:all` form, or the namespace ?owner= names, which
+#     needs the `:all` form of the route's scope (D33);
+#   * whether a name, spelled any way at all, is the reserved home-assistant.
+#     The gateway matches that path segment exactly, and profile names are
+#     case-insensitive, so `/glossaries/Home-Assistant` reaches this file as an
+#     ordinary name meaning the same profile (D34).
+#
+# Another user's profile is not refused, it is absent: a 404, and an "unknown
+# profile" that lists only what the caller could have named.
 #
 # Writability follows the volume. This is not a permission system and calling
 # it one would be dishonest: a deployment that mounted nowhere to persist has
@@ -235,11 +256,11 @@ def transcribe(
 # reasoning as the UI's clips.writable().
 
 
-def _select(names: str | None) -> profiles.Selection:
-    """Resolve a native request's `glossary=` into compiled rules.
+def _select(names: str | None, view: profiles.View) -> profiles.Selection:
+    """Resolve a native request's `glossary=` into compiled rules, as `view` sees them.
 
-    Mirrors openai_api._glossary, including the 400 on an unknown name, but
-    raises HTTPException so the native body stays {"detail": ...}. An unknown
+    Mirrors openai_api._glossary, including the 400 on an unknown name or too
+    many, but raises HTTPException so the native body stays {"detail": ...}. An unknown
     profile is named, never ignored: a caller who believes their vocabulary was
     applied when it was not has no way to discover the difference.
     """
@@ -249,11 +270,13 @@ def _select(names: str | None) -> profiles.Selection:
     registry = pipeline.registry()
     registry.refresh()
     try:
-        return registry.select(wanted)
+        return registry.select(wanted, view)
+    except profiles.TooManyProfiles as exc:
+        raise HTTPException(400, str(exc)) from exc
     except profiles.UnknownProfile as exc:
         raise HTTPException(
             400,
-            f"unknown glossary profile {exc.name!r}; this deployment has: "
+            f"unknown glossary profile {exc.name!r}; you can use: "
             f"{', '.join(exc.known) or 'none'}",
         ) from exc
 
@@ -264,14 +287,73 @@ def _registry() -> profiles.Registry:
     return registry
 
 
-def _profile(registry: profiles.Registry, name: str) -> profiles.Profile:
+def _owner(request: Request) -> str | None:
+    """?owner=, checked before it is used anywhere, a path join included (D32)."""
+    raw = request.query_params.get("owner")
+    if raw is None:
+        return None
+    try:
+        return check_owner_filter(raw)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def _view(request: Request, name: str | None, *, write: bool) -> profiles.View:
+    """The profiles one glossary route acts on, for the caller that sent it.
+
+    `name` is the path's profile name, or None on the listing. A service has
+    no namespace of its own, so every namespace needs the `:all` form for one.
+    """
+    claims = identity.claims_of(request)
+    owner = _owner(request)
+    wide = "glossaries:write:all" if write else "glossaries:read:all"
+
+    if name is not None and profiles.is_reserved(name):
+        # The hub holds glossaries:ha to select this profile for Assist; only a
+        # person (the Home Assistant integration's key) may change it with it.
+        accepted = [wide] if write and claims.kind != "user" else ["glossaries:ha", wide]
+        if not any(has(claims, scope) for scope in accepted):
+            raise errors.insufficient_scope(accepted)
+        if owner not in (None, "system"):
+            raise HTTPException(
+                400, f"{profiles.RESERVED!r} is reserved and always the "
+                     "system's profile; send no owner")
+        return profiles.DEPLOYMENT
+
+    own = claims.sub if claims.kind == "user" else None
+    default = profiles.view_of(claims)
+    if owner is None:
+        namespace = default.namespace
+    elif owner == "me":
+        if own is None:
+            raise HTTPException(400, "owner=me names a user's profiles, and "
+                                     "this caller is a service")
+        namespace = own
+    elif owner == "system":
+        namespace = profiles.SYSTEM
+    elif owner == "all":
+        raise HTTPException(400, "owner=all lists every profile; it names no "
+                                 "single one")
+    else:
+        namespace = owner
+    if namespace != own and not has(claims, wide):
+        raise errors.insufficient_scope([wide])
+    # The reserved profile is the system's, so it belongs only in a listing of
+    # the system's or of the caller's own resolution. An admin listing a user
+    # would otherwise find it filed under that user, where a GET of it is a 400.
+    return profiles.View(namespace, reserved=default.reserved
+                         and namespace in (profiles.SYSTEM, own))
+
+
+def _profile(registry: profiles.Registry, name: str,
+             view: profiles.View) -> profiles.Profile:
     if not profiles.valid_name(name):
         raise HTTPException(
             400,
             f"{name!r} is not a usable profile name; it becomes a filename, so "
             f"it must match {profiles.NAME_PATTERN.pattern}")
     try:
-        return registry.get(name)
+        return registry.get(name, view)
     except profiles.UnknownProfile as exc:
         raise HTTPException(404, f"no glossary profile named {exc.name!r}") from exc
 
@@ -297,27 +379,37 @@ def _refuse_shadowing(profile: profiles.Profile) -> None:
         raise HTTPException(
             409,
             f"{profile.name!r} is a {profile.source} profile and is read-only. "
-            f"It ships in the image at {profile.path}. Copy it to a new name "
-            "and edit that: GET /glossaries/"
+            "Copy it to a new name and edit that: GET /glossaries/"
             f"{profile.name} gives you its text.")
 
 
 @app.get("/glossaries")
-def list_glossaries() -> dict[str, object]:
-    """Every profile, where it came from, and how many terms it carries."""
-    registry = _registry()
+def list_glossaries(request: Request) -> dict[str, object]:
+    """Every profile the caller can name, whose it is, and how many terms it carries.
+
+    `?owner=all`, for a holder of glossaries:read:all, lists every namespace at
+    once: the built-ins, the system's, then each user's, each entry naming its
+    owner.
+    """
+    if _owner(request) == "all":
+        if not has(identity.claims_of(request), "glossaries:read:all"):
+            raise errors.insufficient_scope(["glossaries:read:all"])
+        registry = _registry()
+        listed = list(registry.every())
+    else:
+        view = _view(request, None, write=False)
+        registry = _registry()
+        visible = registry.visible(view)
+        listed = [visible[name] for name in sorted(visible)]
     writable, reason = registry.writability()
     body: dict[str, object] = {
-        "glossaries": [registry.profiles[name].summary()
-                       for name in registry.names],
+        "glossaries": [profile.summary() for profile in listed],
         "writable": writable,
         # The profiles a request gets when it selects none. Empty on a default
         # deployment, and that is the point: an irrelevant glossary raised WER
         # by 28% on Whisper, and nothing measurable on Parakeet across 25 cells, so
         # always-on is opted into by name rather than inherited.
         "default": profiles.split_selection(pipeline.DEFAULT_PROFILES),
-        "builtin_dir": str(registry.builtin_dir),
-        "custom_dir": str(registry.custom_dir),
     }
     if not writable:
         body["reason"] = reason
@@ -325,7 +417,7 @@ def list_glossaries() -> dict[str, object]:
 
 
 @app.get("/glossaries/{name}")
-def get_glossary(name: str) -> dict[str, object]:
+def get_glossary(name: str, request: Request) -> dict[str, object]:
     """One profile's terms, and the file text they were parsed from.
 
     `text` is returned as well as the parsed halves so that editing a profile
@@ -334,20 +426,19 @@ def get_glossary(name: str) -> dict[str, object]:
     comments are where a glossary explains why a rule is a hotword rather than
     a replacement, which is exactly the knowledge worth not losing.
     """
-    registry = _registry()
-    profile = _profile(registry, name)
+    view = _view(request, name, write=False)
+    profile = _profile(_registry(), name, view)
     return {
         **profile.summary(),
         "replacements": profile.parsed.replacements,
         "hotwords": list(profile.parsed.hotwords),
         "text": profile.text,
-        "path": str(profile.path),
     }
 
 
 @app.put("/glossaries/{name}")
 async def put_glossary(name: str, request: Request) -> Response:
-    """Create or replace a custom profile.
+    """Create or replace a custom profile, in the caller's namespace or ?owner='s.
 
     Two body shapes, because both callers are real: `application/json` with
     {"text": ..., "force": ...}, and a raw `text/plain` body for
@@ -358,13 +449,15 @@ async def put_glossary(name: str, request: Request) -> Response:
     stat()s and writes a mounted volume, which is exactly the work that must
     not happen on the event loop — a hung NFS mount would otherwise take
     /health down with it and have the orchestrator restart a service that is
-    working — so it runs in a worker thread.
+    working — so it runs in a worker thread. Whose namespace it lands in is
+    settled before the body is read.
     """
+    view = _view(request, name, write=True)
     text, force = await _body(request)
-    return await run_in_threadpool(_write_profile, name, text, force)
+    return await run_in_threadpool(_write_profile, name, text, force, view.namespace)
 
 
-def _write_profile(name: str, text: str, force: bool) -> Response:
+def _write_profile(name: str, text: str, force: bool, owner: str) -> Response:
     """The blocking half of PUT. See put_glossary for why it is split off.
 
     NOTHING IS WRITTEN IF ANYTHING WAS REJECTED. The rejected lines come back
@@ -387,10 +480,19 @@ def _write_profile(name: str, text: str, force: bool) -> Response:
 
     # A name already taken by a built-in is a 409 BEFORE the writability check,
     # so an operator on an unmounted box is not told to mount a volume and then
-    # told, one deploy later, that the name was never available anyway.
-    existing = registry.profiles.get(name.strip().lower())
+    # told, one deploy later, that the name was never available anyway. In a
+    # user's namespace too: a built-in is everyone's, so nobody's own `tech`
+    # may hide it.
+    key = name.strip().lower()
+    held = registry.namespace(owner)
+    existing = registry.builtins.get(key) or held.get(key)
     if existing is not None:
         _refuse_shadowing(existing)
+    if (existing is None and owner != profiles.SYSTEM
+            and len(held) >= profiles.MAX_PER_USER):
+        raise HTTPException(
+            409, f"this namespace already holds {len(held)} profiles, the most "
+                 "one user may keep; delete one first")
     _require_writable(registry)
 
     try:
@@ -409,25 +511,26 @@ def _write_profile(name: str, text: str, force: bool) -> Response:
             "rejected": [r.as_dict() for r in parsed.rejected],
         })
 
-    path = registry.write(name, text)
-    profile = registry.get(name)
-    log.info("glossary profile %r written: %d terms (%s)", profile.name,
-             profile.parsed.terms, "forced" if force else "validated")
+    profile = registry.write(name, text, owner)
+    log.info("glossary profile %r of %s written: %d terms (%s)", profile.name,
+             profile.owner, profile.parsed.terms,
+             "forced" if force else "validated")
     return JSONResponse(
         status_code=200 if existing is not None else 201,
-        content={**profile.summary(), "path": str(path), "forced": force,
+        content={**profile.summary(), "forced": force,
                  "created": existing is None},
     )
 
 
 @app.delete("/glossaries/{name}")
-def delete_glossary(name: str) -> dict[str, object]:
+def delete_glossary(name: str, request: Request) -> dict[str, object]:
+    view = _view(request, name, write=True)
     registry = _registry()
-    profile = _profile(registry, name)
+    profile = _profile(registry, name, view)
     _refuse_shadowing(profile)
     _require_writable(registry)
-    registry.remove(profile.name)
-    log.info("glossary profile %r deleted", profile.name)
+    registry.remove(profile)
+    log.info("glossary profile %r of %s deleted", profile.name, profile.owner)
     return {"name": profile.name, "deleted": True}
 
 

@@ -17,9 +17,11 @@ What these prevent:
     thinking;
   * reasoning read aloud;
   * a base URL pasted as the whole endpoint, which answered 404 on every turn;
-  * a key in the environment with a CR or a newline on the end, which h11
-    refused in a sentence that quoted it whole, past the scrub, into the
-    turn's error, the log and the page.
+  * a key with a CR or a newline on the end (imported from a .env saved on
+    Windows), which h11 refused in a sentence that quoted it whole, past the
+    scrub, into the turn's error, the log and the page;
+  * a key sent to a host its secret does not name (D41), from a picker, the
+    Test or a saved word.
 """
 
 from __future__ import annotations
@@ -37,11 +39,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from voice_common import errors
 
-from app import destinations, secret_store
+from app import destinations
 from app import router as router_module
 from app.destinations import Llm, Request
-from app.router import Rules, RuleSet, Router, current, quiet_validation, routes
-from test_router import Fake, rule
+from app.router import Rules, RuleSet, Router, current, routes
+from test_router import LLM_HOSTS, Fake, rule
 
 NID = "020000000001"
 # Ends in WXYZ, which is what a provider's masked echo of it would end in.
@@ -198,9 +200,9 @@ async def test_the_body_is_model_messages_and_one_limit_and_nothing_else(fake, c
     (httpx.Response(502, text="<html>\n  Bad gateway\n</html>"),
      "destination: the LLM answered 502: <html> Bad gateway </html>"),
 ], ids=["openai-401", "deepseek-401", "proxy-403", "streamed", "not-json"])
-async def test_the_providers_own_sentence_is_the_error_and_a_masked_key_is_hidden(
+async def test_the_providers_own_sentence_is_the_error_and_a_masked_key_is_hidden(store,
         make, fake, monkeypatch, caplog, answer, expected):
-    monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+    store.put("SATELLITES_LLM_API_KEY", LLM_KEY, LLM_HOSTS)
     fake.handlers["llm.test"] = lambda r: answer
     router = make(LLM)
     with caplog.at_level(logging.INFO, logger="voice-satellites.router"):
@@ -228,17 +230,17 @@ async def test_a_server_that_wants_a_key_when_none_was_sent_says_which_variable(
     assert "authorization" not in fake.sent("llm.test").headers
 
 
-# ---- a key the environment holds with something a header cannot carry --------------------------
+# ---- a key with something a header cannot carry --------------------------------------------
 
 # What a .env saved with Windows line endings, a secret made from a file, or a
-# careless paste leaves in a key. h11 refuses each in a header, in a sentence
-# that quotes it whole with the control character escaped past _scrub.
+# careless paste leaves in a key, and the import carries into the store. h11
+# refuses each in a header, in a sentence that quotes it whole with the control
+# character escaped past _scrub.
 UNSENDABLE = {"cr": LLM_KEY + "\r", "lf": LLM_KEY + "\n", "crlf": LLM_KEY + "\r\n",
               "tab": "\t" + LLM_KEY, "escape": LLM_KEY + "\x1b", "space": LLM_KEY.replace("-", " ", 1),
               "non-ascii": LLM_KEY + "é"}
-REFUSED = ("SATELLITES_LLM_API_KEY is set in the hub's environment with a line break, a space or "
-           "a character outside printable ASCII in it, which no request header can carry, so it "
-           "is not sent")
+REFUSED = ("SATELLITES_LLM_API_KEY holds a line break, a space or a character outside printable "
+           "ASCII, which no request header can carry, so it is not sent")
 
 
 def h11_refusal(value: str) -> httpx.LocalProtocolError:
@@ -261,30 +263,31 @@ def nowhere(text: str, value: str = LLM_KEY) -> None:
 
 
 @pytest.mark.parametrize("value", UNSENDABLE.values(), ids=UNSENDABLE.keys())
-async def test_a_key_in_the_environment_no_header_can_carry_is_named_and_not_sent(
+async def test_a_key_no_header_can_carry_is_named_and_not_sent(store,
         make, fake, monkeypatch, caplog, value):
     """Measured before the fix: a CR on the end reached h11, whose refusal
     quoted the key, and _scrub's exact match missed it because the CR was
     written as an escape. It was the turn's error, its INFO line and its
     event."""
-    monkeypatch.setenv("SATELLITES_LLM_API_KEY", value)
+    store.put("SATELLITES_LLM_API_KEY", value, LLM_HOSTS)
     fake.handlers["llm.test"] = lambda r: sse(delta(content="Hi."))
     router = make(LLM)
     with caplog.at_level(logging.INFO, logger="voice-satellites.router"):
         out = await router.handle_text(NID, "hey_jarvis", "hi")
         router.log_outcome(NID, "hey_jarvis", out)
 
-    assert out.error.startswith(f"destination: {REFUSED}; set it again without one"), out.error
+    assert out.error.startswith(f"destination: {REFUSED}; store it again without one"), out.error
     for text in (out.error, json.dumps(out.as_json()), caplog.text):
         nowhere(text, value)
     assert "llm.test" not in fake.hosts(), "the key went anyway"
     # It is set, and says so; what is wrong with it is the turn's to say.
-    assert router_module.env_status([Llm.model_validate(LLM)]) == {"SATELLITES_LLM_API_KEY": True}
+    assert await router_module.env_status(["SATELLITES_LLM_API_KEY"]) == {
+        "SATELLITES_LLM_API_KEY": True}
 
 
 @pytest.mark.parametrize("value", UNSENDABLE.values(), ids=UNSENDABLE.keys())
-def test_the_picker_and_the_test_name_such_a_key_and_send_nothing(api, fake, monkeypatch, value):
-    monkeypatch.setenv("SATELLITES_LLM_API_KEY", value)
+def test_the_picker_and_the_test_name_such_a_key_and_send_nothing(store, api, fake, monkeypatch, value):
+    store.put("SATELLITES_LLM_API_KEY", value, LLM_HOSTS)
     fake.handlers["llm.test"] = lambda r: httpx.Response(200, json=LISTED)
     for path, body in (("/satellites/llm/models", {"base_url": "http://llm.test/v1"}),
                        ("/satellites/llm/test", LLM)):
@@ -295,13 +298,13 @@ def test_the_picker_and_the_test_name_such_a_key_and_send_nothing(api, fake, mon
     assert fake.seen == []
 
 
-async def test_a_transport_error_that_quotes_a_header_is_shown_by_its_type_alone(
+async def test_a_transport_error_that_quotes_a_header_is_shown_by_its_type_alone(store,
         api, make, fake, monkeypatch, caplog):
     """Whatever h11 refuses, its words are never shown: the destination's
     stage, a stage that runs through Router.stage (speech here; Home
     Assistant's text-to-speech sends its token there), and both routes. Made
     with a valid key, so what is proved is the transport path on its own."""
-    monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+    store.put("SATELLITES_LLM_API_KEY", LLM_KEY, LLM_HOSTS)
 
     def refuse(request):
         raise h11_refusal(LLM_KEY + "\r")
@@ -430,7 +433,6 @@ def api(fake, tmp_path):
                     client=httpx.AsyncClient(transport=httpx.MockTransport(fake)))
     app = FastAPI()
     errors.install_errors(app)
-    quiet_validation(app)
     app.include_router(routes)
     app.dependency_overrides[current] = lambda: router
     with TestClient(app) as client:
@@ -443,12 +445,8 @@ LISTED = {"object": "list", "data": [
     {"id": "beta"}, {"id": "beta"}, {"id": "x" * 121}, {"id": 7}, {"name": "no id"}, "gamma"]}
 
 
-@pytest.mark.parametrize("where", ["environment", "hub"])
-def test_the_model_list_is_the_servers_ids_sorted_and_asked_with_the_key(api, fake, monkeypatch, where):
-    if where == "environment":
-        monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
-    else:
-        secret_store.current().set("SATELLITES_LLM_API_KEY", LLM_KEY)
+def test_the_model_list_is_the_servers_ids_sorted_and_asked_with_the_key(store, api, fake):
+    store.put("SATELLITES_LLM_API_KEY", LLM_KEY, LLM_HOSTS)
     fake.handlers["llm.test"] = lambda r: httpx.Response(200, json=LISTED)
     r = api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1/chat/completions",
                                                  "api_key_env": "SATELLITES_LLM_API_KEY"})
@@ -468,20 +466,13 @@ def test_a_local_server_is_asked_for_its_models_without_a_key(api, fake):
     assert all("authorization" not in q.headers for q in fake.seen)
 
 
-HUB_SETTINGS = {"SATELLITES_MQTT_URL": "mqtt://user:broker-password@broker.test:1883",
-                "SATELLITES_API_KEYS": "hub-key-one,hub-key-two",
-                "NODES_MQTT_URL": "mqtt://user:old-password@broker.test:1883"}
-
-
-@pytest.mark.parametrize("name", sorted(HUB_SETTINGS))
-def test_the_hubs_own_settings_are_never_sent_as_a_key(api, fake, monkeypatch, name):
-    """Any variable's value went out as a bearer token to an address the
-    caller chose, on one request and without saving anything: the broker's
-    URL with its password, the hub's own API keys. A name under the hub's
-    prefix that does not end in _TOKEN or _KEY is its configuration, refused
-    wherever a key's name is taken and never resolved."""
-    for var, value in HUB_SETTINGS.items():
-        monkeypatch.setenv(var, value)
+@pytest.mark.parametrize("name", ["SATELLITES_LLM_API_KEY", "SATELLITES_HA_TOKEN"])
+def test_a_picker_or_the_test_never_sends_a_key_to_a_host_it_does_not_name(store, api, fake, name):
+    """Any key went out as a bearer token to an address the caller chose, on
+    one request and without saving anything. Now each secret names where it
+    may go (D41), and anywhere else is 403 host_not_allowed, naming the host
+    and the secret so the page can link to it."""
+    store.put(name, LLM_KEY, ["http://llm.test", "https://ha.test:8123"])
     fake.handlers["attacker.test"] = lambda r: httpx.Response(200, json={"data": []})
     asked = [api.post("/satellites/llm/models", json={"base_url": "https://attacker.test/v1",
                                                       "api_key_env": name}),
@@ -490,22 +481,42 @@ def test_the_hubs_own_settings_are_never_sent_as_a_key(api, fake, monkeypatch, n
              api.post("/satellites/ha/pipelines", json={"url": "https://attacker.test",
                                                         "token_env": name})]
     for r in asked:
-        assert r.status_code == 422, r.text
-        assert "one of the hub's own settings" in r.text and HUB_SETTINGS[name] not in r.text
+        assert r.status_code == 403, r.text
+        body = r.json()
+        assert body["error"]["code"] == "host_not_allowed"
+        assert (body["secret"], body["host"]) == (name, "https://attacker.test:443")
+        assert LLM_KEY not in r.text
     assert fake.seen == []
-    assert destinations._held(name) is None
-    with pytest.raises(ValueError, match="hub's own settings"):
-        Llm.model_validate(LLM | {"api_key_env": name})
 
 
-def test_a_credential_under_the_hubs_prefix_is_still_a_key():
-    for name in ("SATELLITES_HA_TOKEN", "SATELLITES_LLM_API_KEY", "SATELLITES_WEBHOOK_TOKEN",
-                 "SATELLITES_HA_TOKEN_KITCHEN", "SATELLITES_TOKEN", "NODES_HA_TOKEN",
-                 "OPENROUTER_API_KEY", "MY_SERVER"):
-        assert not destinations.hub_setting(name), name
-    for name in ("SATELLITES_MQTT_URL", "SATELLITES_API_KEYS", "SATELLITES_DATA_DIR",
-                 "SATELLITES_FIRMWARE_PUBKEY", "NODES_API_KEYS", "SATELLITES_KEYSTONE"):
-        assert destinations.hub_setting(name), name
+def test_a_secret_is_asked_of_the_store_afresh_by_a_picker(store, api, fake):
+    """Pickers and Test bypass the minute a value is kept (D42): a key stored
+    a moment ago in Admin › Secrets is the one the picker sends."""
+    store.put("SATELLITES_LLM_API_KEY", "sk-test-old-key", LLM_HOSTS)
+    fake.handlers["llm.test"] = lambda r: httpx.Response(200, json=LISTED)
+    api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1"})
+    store.put("SATELLITES_LLM_API_KEY", LLM_KEY, LLM_HOSTS)
+    api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1"})
+    assert [q.headers["authorization"] for q in fake.seen] == [
+        "Bearer sk-test-old-key", f"Bearer {LLM_KEY}"]
+
+
+async def test_a_key_the_provider_refuses_is_asked_of_the_store_again_once(store, make, fake):
+    """A key rotated in the store a moment ago is still the old one in the
+    hub's cache. A 401 asks the store again, and tries once more with a key
+    that has changed; one that has not is the provider's refusal."""
+    store.put("SATELLITES_LLM_API_KEY", "sk-test-rotated-away", LLM_HOSTS)
+    router = make(LLM)
+    fake.handlers["llm.test"] = lambda r: sse(delta(content="Hi."))
+    assert (await router.handle_text(NID, "hey_jarvis", "hi")).error is None
+    store.put("SATELLITES_LLM_API_KEY", LLM_KEY, LLM_HOSTS)
+    fake.handlers["llm.test"] = lambda r: (
+        sse(delta(content="Hi again.")) if r.headers["authorization"] == f"Bearer {LLM_KEY}"
+        else httpx.Response(401, json={"error": {"message": "Incorrect API key provided."}}))
+    out = await router.handle_text(NID, "hey_jarvis", "hi")
+    assert out.error is None and out.reply_text == "Hi again."
+    assert [q.headers["authorization"] for q in fake.seen if q.url.host == "llm.test"][-2:] == [
+        "Bearer sk-test-rotated-away", f"Bearer {LLM_KEY}"]
 
 
 def paged(ids: list[str], size: int = 20):
@@ -522,10 +533,10 @@ def paged(ids: list[str], size: int = 20):
     return answer
 
 
-def test_a_model_list_that_pages_is_read_to_its_end(api, fake, monkeypatch):
+def test_a_model_list_that_pages_is_read_to_its_end(store, api, fake, monkeypatch):
     """Read as one page, 45 models were 20, and the page said "20 models to
     pick from" as if that were all."""
-    monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+    store.put("SATELLITES_LLM_API_KEY", LLM_KEY, LLM_HOSTS)
     ids = [f"model-{n:02}" for n in range(45)]
     fake.handlers["llm.test"] = paged(ids)
     r = api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1"})
@@ -553,8 +564,8 @@ def test_a_server_that_ignores_after_id_or_never_ends_is_asked_a_bounded_number_
     assert r.status_code == 200 and len(r.json()["models"]) == 4 and len(fake.seen) == 4
 
 
-def test_a_model_list_the_server_refuses_is_a_502_in_its_own_words(api, fake, monkeypatch):
-    monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+def test_a_model_list_the_server_refuses_is_a_502_in_its_own_words(store, api, fake, monkeypatch):
+    store.put("SATELLITES_LLM_API_KEY", LLM_KEY, LLM_HOSTS)
     fake.handlers["llm.test"] = lambda r: httpx.Response(401, json={"error": {
         "message": "Incorrect API key provided: sk-proj-****WXYZ.", "code": "invalid_api_key"}})
     r = api.post("/satellites/llm/models", json={"base_url": "http://llm.test/v1"})
@@ -640,8 +651,8 @@ def test_the_test_learns_max_completion_tokens_like_a_turn(api, fake, make):
     assert "max_completion_tokens" in sent(fake)[-1] and len(sent(fake)) == 3
 
 
-def test_a_test_the_provider_refuses_is_a_502_without_the_key(api, fake, monkeypatch):
-    monkeypatch.setenv("SATELLITES_LLM_API_KEY", LLM_KEY)
+def test_a_test_the_provider_refuses_is_a_502_without_the_key(store, api, fake, monkeypatch):
+    store.put("SATELLITES_LLM_API_KEY", LLM_KEY, LLM_HOSTS)
     fake.handlers["llm.test"] = lambda r: httpx.Response(401, json={"error": {
         "message": "Authentication Fails, Your api key: ****WXYZ is invalid",
         "type": "authentication_error"}})
@@ -653,11 +664,11 @@ def test_a_test_the_provider_refuses_is_a_502_without_the_key(api, fake, monkeyp
     assert fake.sent("llm.test").headers["authorization"] == f"Bearer {LLM_KEY}"
 
 
-def test_a_test_that_hangs_ends_at_the_ceiling_before_the_proxy_does(api, fake, monkeypatch):
-    """voice-ui gives up on the hub after 30 s with a bare 504 of its own; the
-    hub's sentence has to arrive first."""
-    ui = (Path(__file__).resolve().parents[2] / "ui" / "app" / "main.py").read_text()
-    proxy_read_s = float(re.search(r"timeout=httpx\.Timeout\(([\d.]+), connect=", ui).group(1))
+def test_a_test_that_hangs_ends_at_the_ceiling_before_the_gateway_does(api, fake, monkeypatch):
+    """The gateway gives up on the hub after its read timeout with a bare 504
+    of its own; the hub's sentence has to arrive first."""
+    gw = (Path(__file__).resolve().parents[2] / "gateway" / "app" / "main.py").read_text()
+    proxy_read_s = float(re.search(r'"GATEWAY_SATELLITES_TIMEOUT", "([\d.]+)"', gw).group(1))
     assert router_module.LLM_TEST_CEILING_S < proxy_read_s
 
     async def hang(request):

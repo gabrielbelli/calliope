@@ -162,14 +162,14 @@ class Tuning:
 
 @dataclass(frozen=True)
 class Origin:
-    """Which route a run arrived on. Carried, never read, by the pipeline.
+    """Which route a run arrived on, and whose it was. Carried, never read, by the pipeline.
 
     THE PIPELINE MUST NOT LEARN WHAT A ROUTE IS beyond passing this along.
     Three routes share `run` exactly so the compatibility layer cannot quietly
     become a second pipeline, and a branch on the route in here would be the
-    first crack in that. These three values reach the run record and nothing
-    else: a listing that also holds clone jobs from another service needs to
-    say which door a run came in by, and only the caller knows.
+    first crack in that. These values reach the run record and nothing else: a
+    listing that also holds clone jobs from another service needs to say which
+    door a run came in by and whose run it was, and only the caller knows.
     """
 
     # NO DEFAULT ROUTE. Three routes reach run() and defaulting to one of
@@ -180,6 +180,13 @@ class Origin:
     route: str
     client: str | None = None
     model_requested: str | None = None
+    # WHOSE RUN IT WAS, from the assertion the request carried: the user's ID
+    # or `svc:<name>`, and the session, key ID or service it came in with
+    # (D31). The record without them is a system record, which only a holder
+    # of jobs:read:all can see, so a route that forgot them hides a run from
+    # its user rather than showing it to anybody else.
+    owner: str | None = None
+    credential: str | None = None
 
 
 @dataclass(frozen=True)
@@ -213,13 +220,14 @@ def start() -> None:
     registry = profiles.load_registry()
     state["glossaries"] = registry
     log.info("glossary profiles: %s", ", ".join(
-        f"{name} ({registry.profiles[name].source})" for name in registry.names)
-        or "none")
+        f"{profile.name} ({profile.source}, {profile.owner})"
+        for profile in registry.every()) or "none")
 
     # The default selection, which is EMPTY unless STT_GLOSSARY_DEFAULT names
     # profiles. state["rules"] is what a request that selects nothing gets;
     # everything else is compiled per selection and cached in the registry.
-    default = registry.select(profiles.split_selection(DEFAULT_PROFILES))
+    default = registry.select(profiles.split_selection(DEFAULT_PROFILES),
+                              profiles.DEPLOYMENT)
     state["rules"] = default.rules
 
     # Whisper takes the glossary at decode time, which beats repairing the text
@@ -725,6 +733,8 @@ def run(data: bytes, opts: asr.Options | None = None, *,
         route=origin.route or None,
         client=origin.client,
         model_requested=origin.model_requested,
+        owner=origin.owner,
+        credential=origin.credential,
         status="done",
         created_at=started_at,
         started_at=started_at,

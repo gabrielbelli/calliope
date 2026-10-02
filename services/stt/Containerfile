@@ -91,15 +91,21 @@ COPY services/stt/glossaries/ /etc/calliope/glossaries/
 # entrypoint skips a directory that is not there, so listing it costs nothing
 # on a deployment that mounts none.
 #
+# And /glossaries/users, where each user's profiles live (D33). The entrypoint
+# looks only at the top of each directory it is given, so a users/ that
+# arrived root-owned inside an otherwise correct volume, from a restored backup
+# or a `docker exec` as root, would refuse every user's first write while the
+# system's profiles kept working.
+#
 # VOICE_* configure voice-common's entrypoint, which pip installed to
-# /usr/local/bin alongside the Python code, so the TLS logic and the auth
-# logic can never be at different versions inside one image. The prefix keeps
+# /usr/local/bin alongside the Python code, so the TLS logic and the identity
+# check can never be at different versions inside one image. The prefix keeps
 # every operator-visible variable — STT_TLS_CERT, STT_TLS_KEY — spelled
 # exactly as before. They are image settings, not knobs: an operator has no
 # reason to touch either.
 ENV HF_HOME=/models \
     VOICE_TLS_PREFIX=STT \
-    VOICE_CHOWN_DIRS="/models /glossaries" \
+    VOICE_CHOWN_DIRS="/models /glossaries /glossaries/users" \
     STT_MODEL=parakeet \
     STT_QUANTISATION=int8 \
     STT_GLOSSARY_BUILTIN=/etc/calliope/glossaries \
@@ -130,7 +136,8 @@ EXPOSE 8000
 #   docker run --health-cmd "python -c \
 #     \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')\"" ...
 #
-# /health is exempt from STT_API_KEYS, so the probe needs no key. Under
-# STT_TLS_CERT it needs the https:// URL and a certificate it can verify.
+# /health is the one path that needs no identity assertion, so the probe needs
+# nothing. Under STT_TLS_CERT it needs the https:// URL and a certificate it
+# can verify.
 ENTRYPOINT ["voice-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

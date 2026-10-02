@@ -114,7 +114,8 @@ def test_the_deltas_are_the_buffered_body(speech):
 
 @pytest.mark.skipif(os.getenv("TTS_SKIP_TIMING") == "1",
                     reason="timing test disabled")
-def test_the_first_delta_leaves_before_generation_finishes(live, monkeypatch):
+def test_the_first_delta_leaves_before_generation_finishes(live, gateway,
+                                                         monkeypatch):
     """The claim the feature rests on, measured rather than asserted.
 
     Through a real socket, because TestClient runs the application to
@@ -142,7 +143,8 @@ def test_the_first_delta_leaves_before_generation_finishes(live, monkeypatch):
     with httpx.Client(timeout=60) as client:
         with client.stream("POST", f"{live}/v1/audio/speech",
                            json={"input": LONG, "response_format": "pcm",
-                                 "stream_format": "sse"}) as response:
+                                 "stream_format": "sse"},
+                           headers=gateway.headers("tts-long")) as response:
             assert response.status_code == 200
             for line in response.iter_lines():
                 if ("speech.audio.delta" in line and line.startswith("data:")

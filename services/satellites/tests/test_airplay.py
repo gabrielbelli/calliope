@@ -27,7 +27,6 @@ SHA = hashlib.sha256(JPEG).hexdigest()
 @pytest.fixture
 def app(tmp_path, monkeypatch):
     monkeypatch.setenv("SATELLITES_DATA_DIR", str(tmp_path))
-    monkeypatch.delenv("SATELLITES_API_KEYS", raising=False)
     return importlib.reload(importlib.import_module("app.main"))
 
 

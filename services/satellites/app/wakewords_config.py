@@ -86,6 +86,7 @@ from pydantic import ValidationError
 
 from . import router as routing
 from . import wakeword
+from .destinations import Target
 from .listening import PTT, parse_wake_words
 from .store import write_atomic
 
@@ -496,8 +497,13 @@ class WordActions:
                 out.append(f"{name!r} replies to {reply_to!r}, which is not a known satellite")
         return out
 
-    def env_vars(self) -> dict[str, bool]:
-        return routing.env_status(b.action.destination for _, b in self._all() if b.action)
+    def env_vars(self) -> list[str]:
+        return routing.secret_names(b.action.destination for _, b in self._all() if b.action)
+
+    def targets(self) -> list[Target]:
+        """Every secret the words and push-to-talk name, and where it goes,
+        for the import (secret_import.py)."""
+        return [t for _, b in self._all() if b.action for t in b.action.destination.targets()]
 
     def listing(self) -> list[dict]:
         return [{"wake_word": name, **b.model_dump(mode="json")} for name, b in self._all()]

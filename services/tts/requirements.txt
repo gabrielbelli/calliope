@@ -16,7 +16,7 @@ numpy==2.3.4
 # the app and encoding all six formats with `soundfile` blocked at the import
 # hook — so the library leaves with it.
 
-# The auth middleware, the OpenAI error envelope, the health route and the TLS
+# The identity check, the OpenAI error envelope, the health route and the TLS
 # entrypoint, shared with services/stt and services/tts-long instead of
 # hand-copied into each. Three copies of app/auth.py drifted into three
 # DIFFERENT defects, one per repo; that is what this dependency exists to stop

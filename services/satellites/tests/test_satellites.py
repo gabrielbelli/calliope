@@ -41,7 +41,6 @@ def mic_frame(seq: int, frames: int = 320, value: int = 0) -> bytes:
 @pytest.fixture
 def app(tmp_path, monkeypatch):
     monkeypatch.setenv("SATELLITES_DATA_DIR", str(tmp_path))
-    monkeypatch.delenv("SATELLITES_API_KEYS", raising=False)
     monkeypatch.delenv("SATELLITES_TTS_URL", raising=False)
     return importlib.reload(importlib.import_module("app.main"))
 
@@ -71,7 +70,7 @@ def test_a_new_satellite_waits_and_its_microphone_is_not_listened_to(client):
         ws.send_bytes(mic_frame(0))
         listed = client.get("/satellites").json()["satellites"]
         assert [(n["id"], n["adopted"], n["online"]) for n in listed] == [(NID, False, True)]
-        r = client.get(f"/satellites/{NID}/listen", params={"seconds": 1})
+        r = client.post(f"/satellites/{NID}/listen", params={"seconds": 1})
         assert r.status_code == 409
         assert_four_field_envelope(r)
 
@@ -115,7 +114,7 @@ def test_listen_returns_the_channels_the_satellite_sent(client):
 
         t = threading.Thread(target=feed)
         t.start()
-        r = client.get(f"/satellites/{NID}/listen", params={"seconds": 1, "channel": 1})
+        r = client.post(f"/satellites/{NID}/listen", params={"seconds": 1, "channel": 1})
         t.join()
     assert r.status_code == 200 and r.headers["content-type"] == "audio/wav"
     assert len(r.content) == 44 + 16000 * 2
@@ -907,10 +906,10 @@ def test_settings_for_hardware_a_remembered_satellite_lacks_are_refused_while_it
 
 
 def test_a_patch_publishes_the_names_of_what_changed_and_never_the_values(client, app):
-    """Home Assistant reads the values back; a webhook's address in a button
-    mapping is not for everything that listens to the event stream."""
+    """Home Assistant reads the values back, and a button mapping is not for
+    everything that listens to the event stream."""
     events = published_by(app)
-    hook = "webhook:https://ha.test/api/webhook/s3cret-hook"
+    hook = "webhook:secret:SATELLITES_BUTTON_S3CRET"
     with client.websocket_connect("/satellites/ws") as ws:
         adopt(client, ws)
         r = client.patch(f"/satellites/{NID}", json={"volume": 30, "buttons": {
@@ -918,7 +917,7 @@ def test_a_patch_publishes_the_names_of_what_changed_and_never_the_values(client
         assert r.status_code == 200
     assert [e for e in events if e["type"] == "config"] == [
         {"type": "config", "satellite": NID, "changed": ["buttons", "volume"]}]
-    assert "s3cret" not in json.dumps(events)
+    assert "S3CRET" not in json.dumps(events)
 
 
 def test_a_setting_the_satellite_reported_is_published_as_config(client, app):

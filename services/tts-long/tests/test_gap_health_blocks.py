@@ -72,7 +72,7 @@ class _SlowRunner:
 
 
 @pytest.fixture
-def blocked(tmp_path, monkeypatch):
+def blocked(tmp_path, monkeypatch, gateway):
     """A client on the real app, plus an event that fires when `/jobs` lands.
 
     The marker is an ASGI wrapper rather than a route, because the question is

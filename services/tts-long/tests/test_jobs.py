@@ -375,7 +375,8 @@ def test_a_job_that_has_not_finished_cannot_have_its_audio_deleted(speech):
                               "cancelled": False, "created_at": 0.0,
                               "segments": [], "text": ""}
     try:
-        r = speech.delete("/jobs/pending-1/audio")
+        # No owner, so a system row, which the admin reaches by naming it.
+        r = speech.delete("/jobs/pending-1/audio", params={"owner": "system"})
         assert r.status_code == 409, r.text
     finally:
         main.jobs.pop("pending-1", None)

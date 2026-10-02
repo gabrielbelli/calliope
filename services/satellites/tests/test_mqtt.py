@@ -224,6 +224,40 @@ async def test_mqtts_connects_with_tls_and_leaves_a_last_will(hub, broker):
     assert broker.retained["calliope/satellites/bridge/availability"] == b"offline"
 
 
+async def test_the_password_comes_from_its_source_and_a_change_reconnects(hub, broker, monkeypatch):
+    """SATELLITES_MQTT_PASSWORD in the secret store (D46): asked at every
+    connect and once a minute, and a changed one is in use at once."""
+    monkeypatch.setattr(mqtt, "PASSWORD_CHECK_S", 0.01)
+    current = {"password": "first-password"}
+
+    async def password() -> str | None:
+        return current["password"]
+    b = mqtt.MqttBridge("mqtt://hub@broker.test:1883", client_factory=broker.factory,
+                        password=password)
+    await b.start(hub)
+    await until(lambda: b.connected)
+    assert broker.client.kwargs["password"] == "first-password"
+    current["password"] = "rotated-password"
+    await until(lambda: len(broker.clients) == 2 and b.connected)
+    assert broker.client.kwargs["password"] == "rotated-password"
+    await asyncio.sleep(0.05)
+    assert len(broker.clients) == 2, "reconnected without a change"
+    await b.stop()
+
+
+async def test_no_button_mapping_ever_reaches_the_broker(hub, broker, bridge):
+    """Home Assistant builds its button entities from caps.buttons; the
+    mapping, whose webhooks name secrets, is the hub's alone (D62)."""
+    hub.store.adopt(NID, "kitchen", MODEL)
+    hub.store.satellites[NID].config["buttons"]["mode"] = {
+        "press": "webhook:secret:SATELLITES_BUTTON_MODE"}
+    connect(hub)
+    await bridge.start(hub)
+    await until(lambda: f"{ROOT}/state" in broker.retained)
+    assert "buttons" not in hub.describe(NID)["config"]
+    assert not [t for t, p, _, _ in broker.log if b"webhook" in p or b"SATELLITES_BUTTON" in p]
+
+
 # ---- discovery -------------------------------------------------------------------
 
 

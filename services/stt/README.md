@@ -75,8 +75,16 @@ docker run -p 8000:8000 -v stt-models:/models \
 First start downloads each engine it loads into the volume. Later starts are
 immediate.
 
+**It answers the Calliope gateway and nobody else.** Every route but `/health`
+needs the gateway's signed identity assertion ([Identity](#identity)), so the
+examples in this file go to the gateway, with an API key, and it forwards them
+by the same path:
+
 ```bash
-curl -F file=@clip.wav http://localhost:8000/transcribe
+export CALLIOPE_URL=https://calliope.example   # the gateway, not this port
+export CALLIOPE_KEY=calliope_…                  # Account › API keys, preset transcribe-only
+
+curl -H "Authorization: Bearer $CALLIOPE_KEY" -F file=@clip.wav "$CALLIOPE_URL/transcribe"
 ```
 
 ```json
@@ -97,7 +105,7 @@ because this request selected no profile — see [Glossary profiles](#glossary-p
 Select one and the repair happens:
 
 ```bash
-curl -F file=@clip.wav -F glossary=dictation http://localhost:8000/transcribe
+curl -H "Authorization: Bearer $CALLIOPE_KEY" -F file=@clip.wav -F glossary=dictation "$CALLIOPE_URL/transcribe"
 ```
 
 ```json
@@ -126,9 +134,9 @@ POST /v1/audio/translations
 ```
 
 ```bash
-curl -H "Authorization: Bearer $STT_API_KEY" \
+curl -H "Authorization: Bearer $CALLIOPE_KEY" \
      -F file=@clip.wav -F model=whisper-1 \
-     http://localhost:8000/v1/audio/transcriptions
+     "$CALLIOPE_URL/v1/audio/transcriptions"
 ```
 
 ```json
@@ -139,7 +147,7 @@ curl -H "Authorization: Bearer $STT_API_KEY" \
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="...")
+client = OpenAI(base_url="https://calliope.example/v1", api_key="calliope_…")
 
 with open("clip.wav", "rb") as clip:
     print(client.audio.transcriptions.create(model="whisper-1", file=clip).text)
@@ -407,69 +415,50 @@ the stream: nothing authoritative says the real API emits one, and both SDK
 decoders tolerate its absence.
 
 
-## Authentication
+## Identity
 
-`STT_API_KEYS` is a comma-separated list of accepted keys. Clients send
-`Authorization: Bearer <key>`, which is what OpenAI clients already do.
-
-```bash
-docker run -p 8000:8000 -v stt-models:/models \
-  -e STT_API_KEYS="$(openssl rand -hex 32)" \
-  ghcr.io/gabrielbelli/calliope-stt:pre
-```
-
-**Unset means no authentication**, and the service says so at every startup:
-
-```text
-WARNING STT_API_KEYS is unset: authentication is DISABLED and every request is
-accepted, including /v1. Set STT_API_KEYS to a comma-separated list of keys to
-require Authorization: Bearer.
-```
-
-That is deliberate. This already runs on a LAN, and an upgrade that refused to
-start, or refused every request, would break a working deployment in order to
-protect it. Open is allowed; quietly open is not.
-
-**Set to nothing, or to separators alone, is a different thing and refuses to
-start.** `STT_API_KEYS=" , , "` and `STT_API_KEYS=""` parse to no keys at all,
-and announcing either as "unset" would report a typo as a decision — whoever
-wrote it wanted authentication and would have got none. `-e
-STT_API_KEYS=$SECRET` with `SECRET` unset reaches this by ordinary accident:
-
-```text
-STT_API_KEYS=' , , ' is set but names no key: it is empty, or only commas and
-whitespace. Set it to a comma-separated list of keys, or unset it entirely to
-run without authentication.
-```
-
-`/health` is the only unauthenticated route. Container healthchecks call it and
-have no key, and requiring one turns a working service into a restart loop.
-
-`/openapi.json`, `/docs` and `/redoc` need the key like everything else — an
-unauthenticated schema is a free map of the service — and so does any path that
-does not exist, because the check runs ahead of routing. In a browser the two
-pages then render empty, because the browser sends no bearer token when it
-fetches the schema; read the schema with `curl` and a key.
-
-Rejections are 401 in OpenAI's envelope, which is the shape openai-python
-reads — with FastAPI's default `{"detail": ...}` it reports "unknown error":
+**This service answers the Calliope gateway and nobody else.** Every request
+but `GET /health` must carry `X-Calliope-Identity`: an assertion the gateway
+signs with Ed25519 for this service alone (`aud=stt`), which lives 60 seconds.
+The service checks it with the gateway's public key, which the gateway writes
+to `identity.pub` on this service's own credential volume, mounted read-only at
+`/run/calliope`. Nothing here holds anything that could sign one. Without a
+valid assertion the answer is 401, in OpenAI's envelope on every route:
 
 ```json
-{"error": {"message": "Incorrect API key provided. Send it as 'Authorization: Bearer <key>'.", "type": "invalid_request_error", "code": "invalid_api_key"}}
+{"error": {"message": "No valid identity assertion. This service answers only requests the Calliope gateway forwards.", "type": "invalid_request_error", "param": null, "code": "unauthenticated"}}
 ```
 
-Keys are compared with `hmac.compare_digest`, and every configured key is
-compared rather than stopping at the first match, so neither a key's value nor
-its position in the list leaks through the response time. The comparison is
-done on the bytes the client put on the wire, so a key containing an accent
-authenticates — provided the client sends the header as UTF-8, which HTTP does
-not guarantee and the service warns about at startup. ASCII keys avoid the
-question.
+So a client never talks to this port. It talks to the gateway, with an API key
+or a signed-in session, and the gateway forwards `/transcribe`, `/v1/audio/*`
+and `/glossaries*` by the same path when the credential holds the route's scope
+(`speech:transcribe`, `glossaries:read:own`, `glossaries:write:own`). Keys are
+made on the web page under Account › API keys; `transcribe-only` is the narrow
+preset, and `home-assistant` is the one the integration uses.
 
-The list is read once, at startup: rotating a key is a restart.
+- **`/health` is open**, `/health/` included: a container healthcheck has no
+  way to be given an assertion. Its status is `not_ready` until the gateway has
+  written `identity.pub` and `service.key`, because until then every other
+  request would be refused. It lists only the system's glossary profiles and
+  the built-ins, never a user's.
+- **`/docs`, `/redoc` and `/openapi.json` do not exist.** A schema is a free
+  map of the service.
+- **`STT_API_KEYS` is gone.** Left set, it is ignored: the service keeps
+  serving, logs an ERROR naming it once a minute, and lists it in `/health` as
+  `ignored_variables`. The value is never logged. Remove it.
+- **No handler sees an `X-Calliope-*` header.** They are removed from the
+  request once checked, so nothing here can pass one on.
+- **Every run record says whose run it was**: the user's ID, or
+  `svc:satellites` for a satellite's command, and the session, API key or
+  service it came in with. A person's transcripts appear in their own Jobs
+  list and household speech in nobody's. Records go to the gateway's internal
+  listener, as `RUNLOG_URL=http://voice-gateway:8081`, carrying this service's
+  key from `/run/calliope/service.key`.
+- **Glossary profiles belong to someone.** Which ones a request can name is
+  decided from the same assertion; see [Whose profile it is](#whose-profile-it-is).
 
-The benchmark in `bench/` is a client like any other. Export `STT_API_KEY` for
-it when the service it points at has keys configured.
+The benchmark in `bench/` is a client like any other: point it at the gateway
+and export `CALLIOPE_KEY`.
 
 ## TLS
 
@@ -572,7 +561,8 @@ transcript is the product.
 | `STT_GLOSSARY_DIR` | `/glossaries` | Writable profiles. Mount a volume here or the write routes answer 503 |
 | `STT_GLOSSARY_DEFAULT` | unset | Profiles applied when a request selects none. **Leave it unset.** See below |
 | `STT_GLOSSARY` | unset | One extra file, loaded as a profile named after it. The pre-profile variable |
-| `STT_API_KEYS` | unset | Comma-separated accepted keys. Unset means no auth |
+| `CALLIOPE_RUN_DIR` | `/run/calliope` | Where the gateway's `identity.pub` and this service's `service.key` are mounted, read-only |
+| `RUNLOG_URL` | unset | `http://voice-gateway:8081` sends each finished run's record there. Any other value turns the records off with an ERROR, since each carries this service's key |
 | `STT_LOG_LEVEL` | `INFO` | `DEBUG`, `WARNING`, … An unrecognised value falls back to `INFO` |
 | `STT_TLS_CERT` | unset | PEM certificate. With `STT_TLS_KEY`, serves HTTPS |
 | `STT_TLS_KEY` | unset | PEM private key, readable by uid 1000 |
@@ -651,11 +641,11 @@ profile worse for everybody else. Your own names go in a profile you supply;
 
 ```bash
 # native route
-curl -F file=@clip.wav -F glossary=tech http://localhost:8000/transcribe
+curl -H "Authorization: Bearer $CALLIOPE_KEY" -F file=@clip.wav -F glossary=tech "$CALLIOPE_URL/transcribe"
 
 # OpenAI-compatible route
-curl -F file=@clip.wav -F model=whisper-1 -F glossary=tech \
-     http://localhost:8000/v1/audio/transcriptions
+curl -H "Authorization: Bearer $CALLIOPE_KEY" -F file=@clip.wav -F model=whisper-1 -F glossary=tech \
+     "$CALLIOPE_URL/v1/audio/transcriptions"
 ```
 
 ```python
@@ -670,20 +660,22 @@ client.audio.transcriptions.create(
 model, and it is what a one-off should use — it needs no extension. `glossary`
 is the extension, allowlisted beside `keywords[]` and `languages[]`. **A
 request naming a profile that does not exist is a 400 naming it**, never a
-silent no-op.
+silent no-op, and listing the names this caller could have used. **A request
+may select at most 16 profiles**, a repeated name counting once; more is a 400
+naming the limit.
 
 #### Managing them
 
 ```text
-GET    /glossaries            every profile: name, source, term count
+GET    /glossaries            every profile you can name: owner, source, term count
 GET    /glossaries/{name}     its terms, and the file text they came from
-PUT    /glossaries/{name}     create or replace a custom profile
+PUT    /glossaries/{name}     create or replace a custom profile of yours
 DELETE /glossaries/{name}     remove one
 ```
 
 ```bash
-curl -X PUT --data-binary @mine.txt http://localhost:8000/glossaries/mine
-curl http://localhost:8000/glossaries
+curl -H "Authorization: Bearer $CALLIOPE_KEY" -X PUT --data-binary @mine.txt "$CALLIOPE_URL/glossaries/mine"
+curl -H "Authorization: Bearer $CALLIOPE_KEY" "$CALLIOPE_URL/glossaries"
 ```
 
 These are **native routes, not `/v1`**: OpenAI has no concept of a glossary
@@ -697,6 +689,41 @@ is a profile nobody can reason about. Custom profiles live in `/glossaries`,
 and if nothing is mounted there the write routes answer **503 naming the
 reason** while the built-ins carry on serving. A `PUT` that evaporated on the
 next restart would be worse than a refusal.
+
+No response names a path: not the volume's, and not a user's directory, which
+is named by their ID.
+
+#### Whose profile it is
+
+Every custom profile has an owner, and a request sees only some of them.
+
+| Namespace | On disk | Who names it |
+|---|---|---|
+| system | the top level of `/glossaries`, and `STT_GLOSSARY` | a service such as the satellite hub, and a holder of `glossaries:read:all` (an admin's session) |
+| a user's | `/glossaries/users/<user id>/` | that user |
+| built-in | the image | everyone, read-only |
+
+- A user names their own profiles and the built-ins; their `PUT` lands in their
+  own directory, created on their first one. **Another user's profile is
+  absent, not refused**: a 404 on the routes above, and the same "unknown
+  profile" as a typo on a transcription, listing only what the caller could
+  have named.
+- `?owner=me|system|<user id>` names another namespace, and needs the `:all`
+  form of the route's scope: `glossaries:read:all` to read,
+  `glossaries:write:all` to write. `GET /glossaries?owner=all` lists every
+  namespace at once, each entry naming its owner. Anything else in `?owner=`
+  is a 400 before it reaches a path.
+- **`home-assistant` is reserved.** It is always the system's, whatever
+  spelling a request uses, and is named only with `glossaries:ha` (the
+  `home-assistant` key preset and the satellite hub hold it) or a glossaries
+  `:all` scope. Being a service is not enough. The Home Assistant integration
+  and the hub transcribe with `glossary=home-assistant`; a speech user never
+  sees it.
+- Existing profiles stay where they are and become the system's, so nothing
+  moves on upgrade.
+- Compiled rules are cached by owner and name, so two users' `mine` never mix.
+- A user keeps at most 50 profiles, because every profile is read into memory
+  and every user can write; a 51st is a 409. The system's have no ceiling.
 
 #### Turning the write routes on
 
@@ -730,8 +757,8 @@ and `GET /glossaries` reports `writable: true` once the volume is there.
 **A named volume rather than a host directory**, because nothing on the host
 needs to read these files. They are written over the API, read by this
 container, and capped at 64 KB each. Use a bind mount if you would rather edit
-them with an editor over SMB; the entrypoint chowns `/glossaries` to uid 1000
-on every start, which is what makes either kind writable by a process that
+them with an editor over SMB; the entrypoint chowns `/glossaries` and
+`/glossaries/users` to uid 1000 on every start, which is what makes either kind writable by a process that
 never runs as root. If you set `user:` in compose instead, own the directory
 yourself: the 503 then names the uid it could not write as.
 
@@ -740,16 +767,11 @@ restart. Editing a file in the mounted directory by hand works the same way:
 the registry stats the directory and its files and rescans only when one
 changes.
 
-> **These write routes are open on this deployment, today.** `STT_API_KEYS` is
-> unset here and so is `GATEWAY_API_KEYS`, because a key invented in a file
-> that gets deployed is how a placeholder becomes a production credential. The
-> backends are reachable only through the gateway, and the gateway with no keys
-> configured accepts every request. So anyone who can reach the published port
-> can create, replace and delete glossary profiles, and a profile changes what
-> other people's transcripts say. A rule added by someone else is a silent
-> rewrite of everyone's text, discovered weeks later if at all. Mounting the
-> volume is what makes that reachable rather than merely refused. Set `GATEWAY_API_KEYS` before this port is
-> reachable from anywhere you do not control.
+> **A profile changes what other people's transcripts say**, and a rule added
+> by someone else is a silent rewrite discovered weeks later if at all. That is
+> why a user's profiles apply only to that user's requests, why only an `:all`
+> holder writes the system's, and why `home-assistant`, which every satellite
+> command uses, needs its own scope.
 
 #### Two line forms, because they are two different jobs
 
@@ -782,7 +804,7 @@ hotword-only line finally does something on the engine this service actually
 deploys.
 
 ```bash
-curl -s http://localhost:8000/v1/audio/transcriptions \
+curl -s -H "Authorization: Bearer $CALLIOPE_KEY" "$CALLIOPE_URL/v1/audio/transcriptions" \
   -F file=@clip.wav -F model=whisper-1 \
   -F glossary=tech -F boost=true
 ```
@@ -880,10 +902,10 @@ list already shaped as a list. Both are read as terms, split on commas and
 newlines.
 
 ```bash
-curl -H "Authorization: Bearer $STT_API_KEY" \
+curl -H "Authorization: Bearer $CALLIOPE_KEY" \
   -F file=@clip.wav -F model=whisper-1 \
   -F 'prompt=Theoria, Ghost Pepper, Catallaxy' \
-  http://localhost:8000/v1/audio/transcriptions
+  "$CALLIOPE_URL/v1/audio/transcriptions"
 ```
 
 | | Parakeet | Whisper |
@@ -1022,7 +1044,7 @@ steered it — a field the request set, reported as a property of the output.
 Override per request when you do know:
 
 ```bash
-curl -F file=@clip.wav -F language=en http://localhost:8000/transcribe
+curl -H "Authorization: Bearer $CALLIOPE_KEY" -F file=@clip.wav -F language=en "$CALLIOPE_URL/transcribe"
 ```
 
 ## Volume ownership
@@ -1118,8 +1140,8 @@ accuracy, and costs an order of magnitude in latency.
 
 ## Shared code
 
-The API keys and the 401, OpenAI's error envelope, the `/health` route, the log
-level switch and the container entrypoint all come from
+The identity check and the 401, OpenAI's error envelope, the `/health` route,
+the log level switch and the container entrypoint all come from
 [packages/common](../../packages/common/README.md), which this service shares
 with `services/tts` and `services/tts-long`. Each of those used to be a
 hand-vendored copy in every repo; the three copies of `auth.py` alone differed

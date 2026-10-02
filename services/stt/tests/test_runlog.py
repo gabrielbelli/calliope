@@ -17,10 +17,14 @@ exception: /transcribe and both /v1 routes end up in pipeline.run on a worker
 thread, and a POST made inline would be added to the reply of somebody waiting
 for their words back.
 
-No socket is bound anywhere here. urllib.request.urlopen is replaced with a
-receiver that records what it was handed, which is honest about what is under
-test: the body, the threading and the failure handling are this repo's, and
-HTTP itself is not.
+No socket is bound anywhere here. voice_common.runlog.urlopen is replaced with
+a receiver that records what it was handed, which is honest about what is
+under test: the body, the threading and the failure handling are this repo's,
+and HTTP itself is not.
+
+WHOSE RUN IT WAS goes with every record, taken from the assertion the request
+carried (D31): a user's transcript is theirs, and a satellite's is the hub's,
+which keeps household speech out of every user's list.
 """
 
 from __future__ import annotations
@@ -31,16 +35,20 @@ import pathlib
 import threading
 import time
 import urllib.error
-import urllib.request
 
 import pytest
 from starlette.testclient import TestClient
+from voice_common import runlog as sender_module
+from voice_common.conformance import FakeGateway
+from voice_common.identity import GATEWAY_INTERNAL
 from voice_common.runlog import MAX_QUEUED, SERVER_ONLY, RunLog
 
 from app import asr, pipeline
 from app.main import app
-from test_glossaries import FakeEngine
+from test_glossaries import AUDIENCE, FakeEngine
 from test_windowing import wav
+
+RUNS = f"{GATEWAY_INTERNAL}/runs"
 
 # THE ONE THING BOTH HALVES MAY TREAT AS AUTHORITATIVE. tts-long codes its
 # POST /runs against this file and so does this service; if the two disagree,
@@ -73,10 +81,12 @@ class Receiver:
         self.error = error
         self.bodies: list[dict[str, object]] = []
         self.urls: list[str] = []
+        self.headers: list[dict[str, str]] = []
         self.entered = threading.Event()
 
     def __call__(self, request, timeout: float | None = None):  # noqa: ANN001
         self.urls.append(request.full_url)
+        self.headers.append({k.lower(): v for k, v in request.headers.items()})
         self.bodies.append(json.loads(request.data.decode("utf-8")))
         self.entered.set()
         if self.delay:
@@ -123,19 +133,24 @@ def drained(log: RunLog, expected: int = 1, timeout: float = 5.0) -> dict:
 
 
 def sender(**kwargs: object) -> RunLog:
-    return RunLog(url="http://tts-long:8002", host="orko", service="stt",
+    """A sender as RUNLOG_URL configures it: the gateway's internal listener.
+
+    Its key is the service.key the `gateway` fixture wrote, read when a record
+    is sent.
+    """
+    return RunLog(url=GATEWAY_INTERNAL, host="nas", service="stt",
                   engine="parakeet", **kwargs)  # type: ignore[arg-type]
 
 
 @pytest.fixture
 def receiver(monkeypatch: pytest.MonkeyPatch) -> Receiver:
     fake = Receiver()
-    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    monkeypatch.setattr(sender_module, "urlopen", fake)
     return fake
 
 
 @pytest.fixture
-def log(monkeypatch: pytest.MonkeyPatch) -> RunLog:
+def log(gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch) -> RunLog:
     """A sender pointed at the fake receiver, in place of the module's own.
 
     Rebound rather than reconfigured, which is why pipeline.run reads the
@@ -147,8 +162,8 @@ def log(monkeypatch: pytest.MonkeyPatch) -> RunLog:
 
 
 @pytest.fixture
-def client(engine: FakeEngine) -> TestClient:
-    """The app with a fake engine and no VAD.
+def client(gateway: FakeGateway, engine: FakeEngine) -> TestClient:
+    """The app with a fake engine and no VAD, every request signed for an admin.
 
     TestClient WITHOUT its context manager, for the reason every other file
     here gives: entering it runs the lifespan, and the lifespan loads a real
@@ -157,7 +172,7 @@ def client(engine: FakeEngine) -> TestClient:
     pipeline.state.clear()
     pipeline.state["asr"] = engine
     pipeline.state["rules"] = []
-    yield TestClient(app)
+    yield TestClient(app, headers=gateway.headers(AUDIENCE))
     pipeline.state.clear()
 
 
@@ -166,9 +181,10 @@ def engine() -> FakeEngine:
     return FakeEngine(TRANSCRIPT)
 
 
-def openai(client: TestClient, seconds: float = 4.0, **fields):  # noqa: ANN003, ANN201
+def openai(client: TestClient, seconds: float = 4.0,
+           headers: dict[str, str] | None = None, **fields):  # noqa: ANN003, ANN201
     return client.post(
-        "/v1/audio/transcriptions",
+        "/v1/audio/transcriptions", headers=headers,
         files={"file": ("clip.wav", wav(seconds), "audio/wav")},
         data={"model": "whisper-1", **fields})
 
@@ -197,13 +213,13 @@ def test_a_run_is_recorded_with_the_fields_the_contract_names(
     drained(log)
 
     body = receiver.only()
-    assert receiver.urls == ["http://tts-long:8002/runs"]
+    assert receiver.urls == [RUNS]
     assert set(body) == set(contract("transcribe"))
 
     assert body["kind"] == "transcribe"
     assert body["service"] == "stt"
     assert body["engine"] == "parakeet"
-    assert body["host"] == "orko"
+    assert body["host"] == "nas"
     assert body["route"] == "/v1/audio/transcriptions"
     assert body["client"] == "openai"
     # What the client ASKED for, beside what actually ran. This service has one
@@ -306,7 +322,7 @@ def test_the_window_count_reaches_the_record(
 
 
 def test_a_detected_language_reaches_the_record(
-        receiver: Receiver, log: RunLog) -> None:
+        gateway: FakeGateway, receiver: Receiver, log: RunLog) -> None:
     """Whisper reports one and Parakeet does not, so the field is optional.
 
     Absent means "this engine reports none", which is a real answer; a default
@@ -316,7 +332,7 @@ def test_a_detected_language_reaches_the_record(
     pipeline.state["asr"] = SpeaksDutch()
     pipeline.state["rules"] = []
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=gateway.headers(AUDIENCE))
         assert openai(client).status_code == 200
         drained(log)
         assert receiver.only()["language"] == "nl"
@@ -336,7 +352,7 @@ def test_the_response_does_not_wait_on_the_log(
     well and is invisible until tts-long is slow.
     """
     slow = Receiver(delay=5.0)
-    monkeypatch.setattr(urllib.request, "urlopen", slow)
+    monkeypatch.setattr(sender_module, "urlopen", slow)
     monkeypatch.setattr(pipeline, "runlog", sender())
 
     started = time.monotonic()
@@ -358,8 +374,8 @@ def test_a_receiver_that_refuses_never_reaches_the_caller(
     the only shape of failure a log is allowed to have.
     """
     refusing = Receiver(error=urllib.error.HTTPError(
-        "http://tts-long:8002/runs", 404, "Not Found", {}, None))  # type: ignore[arg-type]
-    monkeypatch.setattr(urllib.request, "urlopen", refusing)
+        RUNS, 404, "Not Found", {}, None))  # type: ignore[arg-type]
+    monkeypatch.setattr(sender_module, "urlopen", refusing)
     replacement = sender()
     monkeypatch.setattr(pipeline, "runlog", replacement)
 
@@ -385,7 +401,7 @@ def test_an_unset_url_records_nothing_and_raises_nothing(
     connection refused once a request, which is the shape this would have if
     the URL had a default.
     """
-    silent = RunLog(url=None, host="orko", service="stt", engine="parakeet")
+    silent = RunLog(url=None, host="nas", service="stt", engine="parakeet")
     monkeypatch.setattr(pipeline, "runlog", silent)
 
     assert openai(client).status_code == 200
@@ -400,7 +416,7 @@ def test_an_unset_url_records_nothing_and_raises_nothing(
     body = health(client)
     assert body["runlog"]["url"] is None
     assert body["runlog"]["sent"] == 0
-    assert body["host_label"] == "orko"
+    assert body["host_label"] == "nas"
 
 
 def test_a_full_queue_drops_and_says_so_in_health(
@@ -417,7 +433,7 @@ def test_a_full_queue_drops_and_says_so_in_health(
         blocked.wait(10.0)
         return contextlib.nullcontext()
 
-    monkeypatch.setattr(urllib.request, "urlopen", stuck)
+    monkeypatch.setattr(sender_module, "urlopen", stuck)
     replacement = sender()
     monkeypatch.setattr(pipeline, "runlog", replacement)
     try:
@@ -450,3 +466,58 @@ def test_the_transcript_can_be_left_behind_without_losing_the_record(
     body = receiver.only()
     assert "text" not in body
     assert body["chars"] == len(TRANSCRIPT)
+
+
+# --- whose run it was --------------------------------------------------------
+
+ALICE = "u_bbbbbbbbbbbbbbbb"
+
+
+def test_a_users_run_is_recorded_as_theirs(
+        client: TestClient, receiver: Receiver, log: RunLog,
+        gateway: FakeGateway) -> None:
+    """Owner and credential come from the assertion, on every route (D31).
+
+    The key's ID rather than "session" is what tells the owner, in their own
+    list, which of their keys spent the time.
+    """
+    key = gateway.headers(AUDIENCE, sub=ALICE, cred="k_bbbbbbbbbbbb",
+                          scopes={"speech:transcribe"})
+    assert openai(client, headers=key).status_code == 200
+    assert client.post("/transcribe", headers=key, files={
+        "file": ("clip.wav", wav(4.0), "audio/wav")}).status_code == 200
+    drained(log, expected=2)
+
+    assert [(body["owner"], body["credential"]) for body in receiver.bodies] == [
+        (ALICE, "k_bbbbbbbbbbbb")] * 2
+
+
+def test_a_satellites_run_is_recorded_as_the_hubs(
+        client: TestClient, receiver: Receiver, log: RunLog,
+        gateway: FakeGateway) -> None:
+    """Household speech from a satellite is a system record, in no user's list."""
+    hub = gateway.headers(AUDIENCE, kind="service", sub="svc:satellites")
+    assert openai(client, headers=hub).status_code == 200
+    drained(log)
+
+    body = receiver.only()
+    assert (body["owner"], body["credential"]) == ("svc:satellites", "svc:satellites")
+    assert (body["owner"], body["credential"]) == (
+        contract("transcribe")["owner"], contract("transcribe")["credential"])
+
+
+def test_the_record_carries_this_services_key_and_nothing_it_was_sent(
+        client: TestClient, receiver: Receiver, log: RunLog,
+        gateway: FakeGateway) -> None:
+    """The record goes to the gateway's internal listener as svc:stt (D6).
+
+    And with an explicit header set (D65): the assertion this request arrived
+    with is never what the record leaves with.
+    """
+    assert openai(client).status_code == 200
+    drained(log)
+
+    assert receiver.urls == [RUNS]
+    headers = receiver.headers[0]
+    assert headers["authorization"] == f"Bearer {gateway.service_key}"
+    assert not [name for name in headers if name.startswith("x-calliope-")]

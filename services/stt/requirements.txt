@@ -21,9 +21,10 @@ python-multipart==0.0.20
 # decoding. Pinned rather than inherited, because this service now imports it.
 av==18.1.0
 
-# The wire contract shared with services/tts and services/tts-long: API keys
-# and the 401, OpenAI's error envelope, the /health route, the log level
-# switch, and the entrypoint that installs to /usr/local/bin. No `[audio]`
+# The wire contract shared with services/tts and services/tts-long: the
+# gateway's identity assertion and the 401 without one, OpenAI's error
+# envelope, the /health route, the log level switch, and the entrypoint that
+# installs to /usr/local/bin. No `[audio]`
 # extra here — that one pulls numpy for the two TTS services, and nothing in
 # this image imports voice_common.audio.
 #

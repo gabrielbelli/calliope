@@ -14,7 +14,6 @@ configures a runner unless it is testing what happens when one is there.
 
 from __future__ import annotations
 
-import re
 import time
 from pathlib import Path
 
@@ -645,7 +644,7 @@ def test_a_turbo_job_on_the_runner_asks_for_the_turbo_service(build, voice_dir):
 
         base._request = transport
 
-        with runner(base) as main:
+        with runner(base):
             posted = client.post("/jobs", json={"model": TURBO,
                                                 "voice": "gabriel",
                                                 "text": "One short line."})
@@ -963,7 +962,7 @@ def test_a_clip_cannot_become_a_voice_on_a_checkpoint_with_no_encoder(
 
 
 def test_the_language_comes_off_the_voice_and_never_off_a_deployment_default(
-        build, voice_dir):
+        build, voice_dir, claims):
     """THE BUG NOBODY CAUGHT, AND IT IS ONE LINE.
 
     `_defaults_from_env` wrote `out["language"]` unconditionally, so
@@ -973,7 +972,7 @@ def test_the_language_comes_off_the_voice_and_never_off_a_deployment_default(
     deployment-wide default to mean.
     """
     voice_dir("gabriel", 61.0)
-    with _three(build, voice_dir, TTS_LANGUAGE="en") as client:
+    with _three(build, voice_dir, TTS_LANGUAGE="en"):
         from app.engines import ENGINES
         assert "language" not in ENGINES[VOXTRAL].defaults, \
             "a deployment default was resolved for a language nobody can set"
@@ -983,19 +982,19 @@ def test_the_language_comes_off_the_voice_and_never_off_a_deployment_default(
         import app.main as main
         _runner_is_up(main, VOXTRAL)
         chosen = main._choose(model=VOXTRAL, voice="pt_male", language=None,
-                              controls={})
+                              controls={}, claims=claims())
         assert chosen.params["language"] == "pt", \
             "the record would carry no language beside a Portuguese voice"
 
         german = main._choose(model=VOXTRAL, voice="de_female", language=None,
-                              controls={})
+                              controls={}, claims=claims())
         assert german.params["language"] == "de", \
             "the language was derived from the name rather than from the tensor"
 
         # And the two that carry no language prefix at all, which is the whole
         # argument for the language being ON the voice rather than parsed off it.
         casual = main._choose(model=VOXTRAL, voice="cheerful_female",
-                              language=None, controls={})
+                              language=None, controls={}, claims=claims())
         assert casual.params["language"] == "en"
 
 
@@ -1025,7 +1024,7 @@ def test_the_quality_settings_are_config_keys_with_documented_defaults(
     """
     voice_dir("gabriel", 61.0)
     with _three(build, voice_dir, TTS_VOXTRAL_FLOW_STEPS="16",
-                TTS_VOXTRAL_CFG_ALPHA="1.4") as client:
+                TTS_VOXTRAL_CFG_ALPHA="1.4"):
         from app.engines import ENGINES
         assert ENGINES[VOXTRAL].defaults["flow_steps"] == 16
         assert ENGINES[VOXTRAL].defaults["cfg_alpha"] == 1.4
@@ -1149,7 +1148,7 @@ def test_the_voice_list_says_a_preset_engine_cannot_read_a_clip_at_all(
 
 
 def test_the_record_carries_the_exact_settings_that_produced_the_sound(
-        build, voice_dir):
+        build, voice_dir, claims):
     """"I WILL TUNE IT LATER" MEANS THE ROWS HAVE TO BE COMPARABLE.
 
     A tuning log whose rows cannot say which flow_steps made which audio is
@@ -1159,12 +1158,13 @@ def test_the_record_carries_the_exact_settings_that_produced_the_sound(
     are not.
     """
     voice_dir("gabriel", 61.0)
-    with _three(build, voice_dir, TTS_VOXTRAL_FLOW_STEPS="16") as client:
+    with _three(build, voice_dir, TTS_VOXTRAL_FLOW_STEPS="16"):
         import app.main as main
         _runner_is_up(main, VOXTRAL)
         chosen = main._choose(model=VOXTRAL, voice="pt_female", language=None,
-                              controls={"cfg_alpha": 1.5})
-        job_id = main._enqueue(segments=[("olá", 0.0)], language=chosen.params.get("language"),
+                              controls={"cfg_alpha": 1.5}, claims=claims())
+        job_id = main._enqueue(claims=claims(), segments=[("olá", 0.0)],
+                               language=chosen.params.get("language"),
                                controls=chosen.params, voice=chosen.voice,
                                reference=None, spec=chosen.spec,
                                model_requested=VOXTRAL,
@@ -1181,7 +1181,7 @@ def test_the_record_carries_the_exact_settings_that_produced_the_sound(
         assert "runner_settings" in main.RECORD_KEYS
 
 
-def test_a_preset_job_is_speech_and_not_a_fourth_kind(build, voice_dir):
+def test_a_preset_job_is_speech_and_not_a_fourth_kind(build, voice_dir, claims):
     """`kind` IS ONE EXPRESSION OFF THE CATALOGUE AND NOT A FOURTH VALUE.
 
     `KINDS` is wire-visible and three services post to /runs, so a fourth
@@ -1190,26 +1190,26 @@ def test_a_preset_job_is_speech_and_not_a_fourth_kind(build, voice_dir):
     cloning anything, which is the same word Kokoro's rows already use.
     """
     voice_dir("gabriel", 61.0)
-    with _three(build, voice_dir) as client:
+    with _three(build, voice_dir):
         import app.main as main
         _runner_is_up(main, VOXTRAL)
         chosen = main._choose(model=VOXTRAL, voice="pt_male", language=None,
-                              controls={})
-        job_id = main._enqueue(segments=[("olá", 0.0)], language="pt",
+                              controls={}, claims=claims())
+        job_id = main._enqueue(claims=claims(), segments=[("olá", 0.0)], language="pt",
                                controls=chosen.params, voice=chosen.voice,
                                reference=None, spec=chosen.spec)
         assert main.jobs[job_id]["kind"] == "speech"
         assert main.KINDS == ("clone", "speech", "transcribe"), \
             "a fourth kind arrived and three services have to agree about it"
 
-        clip = main._enqueue(segments=[("hi", 0.0)], language="en", controls={},
+        clip = main._enqueue(claims=claims(), segments=[("hi", 0.0)], language="en", controls={},
                              voice="gabriel", reference=None,
                              spec=main.ENGINES["chatterbox"])
         assert main.jobs[clip]["kind"] == "clone"
 
 
 def test_a_clip_that_shadows_a_preset_name_is_a_warning_and_never_fatal(
-        build, voice_dir, caplog):
+        build, voice_dir, caplog, claims):
     """A SERVICE THAT WOULD NOT START OVER A FILENAME IS WORSE THAN THE
     COLLISION IT IS REFUSING.
 
@@ -1220,18 +1220,18 @@ def test_a_clip_that_shadows_a_preset_name_is_a_warning_and_never_fatal(
     """
     voice_dir("pt_male", 61.0)
     with caplog.at_level("WARNING"):
-        with _three(build, voice_dir) as client:
+        with _three(build, voice_dir):
             said = " ".join(r.getMessage() for r in caplog.records)
             assert "pt_male" in said and VOXTRAL in said
 
             import app.main as main
             _runner_is_up(main, VOXTRAL)
             preset = main._choose(model=VOXTRAL, voice="pt_male",
-                                  language=None, controls={})
+                                  language=None, controls={}, claims=claims())
             assert preset.reference is None, \
                 "the clip shadowed the checkpoint's own embedding"
             clip = main._choose(model="chatterbox", voice="pt_male",
-                                language=None, controls={})
+                                language=None, controls={}, claims=claims())
             assert clip.reference is not None, \
                 "the preset name shadowed a real file in TTS_VOICE_DIR"
 
@@ -1245,7 +1245,7 @@ def test_the_estimate_for_a_runner_only_engine_is_never_this_hosts_rate(
     engine it cannot load.
     """
     voice_dir("gabriel", 61.0)
-    with _three(build, voice_dir) as client:
+    with _three(build, voice_dir):
         import app.main as main
         _runner_is_up(main, VOXTRAL, "chatterbox")
         lane, _ = main.dispatch.estimate_for(60.0, VOXTRAL)
@@ -1318,7 +1318,7 @@ def test_a_stranded_job_ends_terminally_and_never_says_it_fell_back(
     would be a story that did not happen.
     """
     voice_dir("gabriel", 61.0)
-    with _three(build, voice_dir) as client:
+    with _three(build, voice_dir):
         import app.main as main
         # THE JOB IS BUILT RATHER THAN SUBMITTED, and deliberately: the unit
         # here is what `_expire_stranded` LEAVES BEHIND, and putting a real job

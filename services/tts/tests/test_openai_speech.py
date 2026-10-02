@@ -23,7 +23,8 @@ import numpy as np
 import pytest
 from starlette.requests import Request
 from starlette.testclient import TestClient
-from voice_common.conformance import module_app
+from voice_common import identity
+from voice_common.conformance import FakeGateway, module_app
 
 import app.main as main
 from app.audio_out import FORMATS, encode, encode_stream
@@ -115,12 +116,13 @@ class FakeSynth:
 
 
 @pytest.fixture
-def client() -> TestClient:
+def client(gateway: FakeGateway) -> TestClient:
     app = module_app("app.main")()
     import app.main as main
     synth = FakeSynth()
     main.state["synth"] = synth
-    test_client = TestClient(app)
+    # Every request carries the assertion the gateway forwards (D52).
+    test_client = TestClient(app, headers=gateway.headers("tts"))
     # Hung off the client so a test can read back what the model was asked for
     # and when, without a second fixture threaded through every signature.
     test_client.synth = synth  # type: ignore[attr-defined]
@@ -491,7 +493,8 @@ def test_the_first_delta_leaves_before_the_last_chunk_is_synthesised() -> None:
     chunks = synth.plan(MULTI_CHUNK, "en-us")
     assert len(chunks) > 2, "a one-chunk stream cannot show incrementality"
 
-    stream = main._sse_body(synth, chunks, "bm_fable", "en-gb", 1.0, "pcm", 0)
+    stream = main._sse_body(synth, chunks, "bm_fable", "en-gb", 1.0, "pcm", 0,
+                            owner=FakeGateway.USER, credential="session")
     first = next(stream)
     assert first.startswith(b'data: {"type":"speech.audio.delta"')
     assert len(synth.calls) == 1, (
@@ -576,7 +579,8 @@ def test_closing_a_half_read_stream_kills_the_encoder() -> None:
     assert all(_gone(pid) for pid in running)
 
 
-def test_the_response_closes_its_generator_when_the_client_hangs_up() -> None:
+def test_the_response_closes_its_generator_when_the_client_hangs_up(
+        gateway: FakeGateway) -> None:
     """The fix for a leak that had no upper bound on it.
 
     Starlette stops iterating a generator on disconnect but never closes it, so
@@ -598,9 +602,13 @@ def test_the_response_closes_its_generator_when_the_client_hangs_up() -> None:
                                         voice="fable", response_format="pcm",
                                         stream_format="sse")
     # The bare scope a Request needs. The route reads one header off it, and
-    # nothing here sends that header, so the careful schedule is what runs.
+    # nothing here sends that header, so the careful schedule is what runs; and
+    # the verified claims, where voice_common.identity leaves them.
+    claims = identity.verify(gateway.assertion("tts"), "tts",
+                             {"1": gateway.signer.public_key})
     http = Request({"type": "http", "method": "POST", "headers": [],
-                    "path": "/v1/audio/speech"})
+                    "path": "/v1/audio/speech",
+                    "state": {identity.STATE_CLAIMS: claims}})
     response = main_module.openai_speech(request, http)
     assert isinstance(response, main_module.ClosingStreamingResponse)
 

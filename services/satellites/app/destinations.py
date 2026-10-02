@@ -33,46 +33,41 @@ spoken as before; NotUnderstood carries it so that a wake word with a
 `fallback` can hand the same transcript to a conversation instead.
 
 SECRETS ARE NAMED IN AN ACTION, AND NEVER HELD IN ONE. A destination that
-needs a credential carries the NAME of a secret (token_env, api_key_env) and
-reads the value at call time (_secret): from the process environment, or else
-from the keys the hub holds in secrets.json (secret_store.py), which the page
-can store a key into and never read one back from. Never from wake_words.json:
-it is written by an API that answers GET with every action, so a token stored
-in it would be one GET away from anyone with an API key. No route answers a
-value. Two things keep a value out of an action rather than hope for it:
+needs a credential carries the NAME of a secret (token_env, api_key_env,
+url_secret; the field names are older than the store and kept, D38) and asks
+for the value at call time (_secret) from the gateway's secret store
+(secret_client.py). The process environment is not read here: it was imported
+into the store once, at start (secret_import.py). Never from wake_words.json:
+it is answered whole by GET, so a token stored in it would be one GET away from
+anyone who may read the wake words. No route answers a value. Two things keep a
+value out of an action rather than hope for it:
 
   * every model forbids unknown fields, so {"token": "..."} pasted into an
     action is a validation error rather than a secret quietly saved;
-  * an env var name must look like one (upper case, digits, underscore). A
+  * a secret's name must look like one (upper case, digits, underscore). A
     Home Assistant long-lived token is a JWT and an OpenAI key starts "sk-";
     neither fits, so pasting the value where the name belongs is refused too.
 
 URLs with a user:password part are refused for the same reason.
 
-THE HUB'S OWN CONFIGURATION IS NEVER A DESTINATION'S SECRET (hub_setting).
-A name under the hub's prefix (SATELLITES_, or NODES_ from before the rename)
-with no TOKEN, KEY, SECRET or PASSWORD in it as a word of its own is the hub's
-own setting: its broker URL,
-which carries the broker's password, its API keys, its data directory. Such a
-name is refused where an action or a picker names it, and resolves to nothing
-anywhere else. Without that, one request to a picker (POST /satellites/llm/models
-with api_key_env SATELLITES_MQTT_URL and an address of the caller's choosing)
-sent the broker's password there as a bearer token, and no action had to be
-saved for it.
+A SECRET GOES ONLY TO THE HOSTS IT NAMES (D41). Every lookup says where the
+value is about to be sent, and a host outside the secret's allowed_hosts gets
+nothing: HostRefused, which says the host and the secret's name. That is what
+stops a picker (POST /satellites/llm/models with an address of the caller's
+choosing) or a saved action from sending the Home Assistant token anywhere but
+Home Assistant. A webhook whose URL is itself the secret (Home Assistant's
+/api/webhook/<id>) names it as url_secret, and is held to the hosts that
+secret names; its URL is never logged or returned.
 
-NO SSRF FILTERING, AND THAT IS DELIBERATE. Every URL here comes from the
-operator's own configuration, set through PUT /satellites/wake-words, which
-sits behind the same API keys (or the gateway) as adopting satellites and
-uploading firmware. The legitimate targets are exactly the addresses an SSRF
-filter would block: Home Assistant on the LAN, an LLM on localhost, Node-RED in
-the next container. A filter would break the main use. The trust boundary is
-who may write the configuration, not what it says: a caller with a key can
-send the credentials the actions name (a destination's token or key) to an
-address of its choosing, and nothing else. Behind the gateway that is every
-client key (GATEWAY_API_KEYS has one tier), so give the gateway only keys you
-would trust with those credentials. Redirects are not followed, so a
-destination cannot bounce a request, and its bearer token, to a host the
-action never named.
+NO SSRF FILTERING OF THE ADDRESSES THEMSELVES, AND THAT IS DELIBERATE. The
+legitimate targets are exactly the addresses an SSRF filter would block: Home
+Assistant on the LAN, an LLM on localhost, Node-RED in the next container. The
+boundary is who may write the configuration (satellites:admin at the gateway)
+and where each secret may go (allowed_hosts), not what an address looks like.
+Redirects are not followed, so a destination cannot bounce a request, and its
+bearer token, to a host the action never named. Every request is made with an
+explicit header set (identity.outbound_headers), never one copied from a
+request the hub received (D65).
 """
 
 from __future__ import annotations
@@ -81,57 +76,59 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import re
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from typing import Annotated, AsyncIterator, ClassVar, Literal
+from typing import Annotated, AsyncIterator, ClassVar, Literal, NamedTuple
 
 import httpx
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from voice_common.identity import outbound_headers
+from voice_common.scopes import SECRET_NAME
 
 from . import audio
 from . import language as lang
-from . import secret_store, telemetry
+from . import secret_client, telemetry
 from . import tools as tooling
 
 log = logging.getLogger("voice-satellites.destinations")
+# httpx logs every request's whole URL at INFO. A button's webhook and a wake
+# word's url_secret are URLs that are secrets (D38, D62), so that line would put
+# a Home Assistant webhook id in the hub's log (recheck M-2). Set where those
+# requests are made, so no way into the hub misses it; its warnings still show.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# Upper case only, on purpose: see the module docstring. Real env var names
-# may be lower case, but refusing that costs nothing here and turns "pasted
-# the token into token_env" into a 422 instead of a secret in the file.
-ENV_NAME = r"^[A-Z][A-Z0-9_]{0,63}$"
 HTTP_URL = r"^https?://[^/\s?#]+(/[^\s]*)?$"
 
-# The hub's own prefixes, and the words that name a credential under them.
-HUB_PREFIXES = ("SATELLITES_", "NODES_")
-CREDENTIAL_WORDS = ("TOKEN", "KEY", "SECRET", "PASSWORD")
+# The name of a secret, as an action or a picker holds it: the store's own
+# pattern (D38). Upper case only, on purpose: see the module docstring.
+SecretName = Annotated[str, Field(pattern=SECRET_NAME.pattern)]
 
 
-def hub_setting(name: str | None) -> bool:
-    """Whether `name` is the hub's own configuration, which no destination
-    may send (the module docstring): under the hub's prefix, with no word of
-    it naming a credential. SATELLITES_HA_TOKEN, SATELLITES_HA_TOKEN_KITCHEN
-    and SATELLITES_LLM_API_KEY are credentials; SATELLITES_MQTT_URL and
-    SATELLITES_API_KEYS (KEYS, the hub's own) are not."""
-    prefix = next((p for p in HUB_PREFIXES if (name or "").startswith(p)), None)
-    return prefix is not None and not set(name[len(prefix):].split("_")) & set(CREDENTIAL_WORDS)
+class Target(NamedTuple):
+    """A secret an action reads, and where it goes. `url` is None when the
+    action's configuration does not say: a token sent to the address a
+    url_secret holds. `holds_url` marks the url_secret itself, whose value is
+    the address. Two flags, not one None: a webhook's bearer token beside a
+    url_secret has no known URL either, and is a bearer all the same."""
 
-
-def _not_hub_setting(name: str | None) -> str | None:
-    if hub_setting(name):
-        raise ValueError(f"{name} is one of the hub's own settings, not a secret a destination "
-                         "may send; name a variable with TOKEN or KEY in it, such as "
-                         "SATELLITES_HA_TOKEN")
-    return name
-
-
-# The name of a secret, as an action or a picker holds it.
-EnvName = Annotated[str, Field(pattern=ENV_NAME), AfterValidator(_not_hub_setting)]
+    name: str
+    url: str | None
+    holds_url: bool = False
 
 
 class DestinationError(Exception):
     """A destination failed in a way worth one sentence to the operator."""
+
+
+class HostRefused(DestinationError):
+    """A secret asked for on behalf of a host it does not name (D41). The
+    routes answer it 403 host_not_allowed, with the host and the name."""
+
+    def __init__(self, refused: secret_client.HostNotAllowed):
+        super().__init__(str(refused))
+        self.name, self.origin = refused.name, refused.origin
 
 
 class NotUnderstood(DestinationError):
@@ -185,45 +182,89 @@ def _check_url(url: str) -> str:
 Url = Annotated[str, Field(pattern=HTTP_URL, max_length=500), AfterValidator(_check_url)]
 
 
-def _held(name: str | None) -> str | None:
-    """The value a named secret has, as it was found, or None: the process
-    environment first, then a key the hub holds (secret_store.py). Read on
-    every request, so a key stored or cleared from the page applies to the
-    next one. An empty variable is treated as unset because `FOO=` in a
-    compose file is how people blank a variable, and "Bearer " with nothing
-    after it is never right. This is the one place a name becomes a value:
-    router.env_status reads it too, so "set" means "the action will find a
-    value". What is sent is _secret's, which checks it first. The hub's own
-    settings (hub_setting) hold nothing here, whatever path asks."""
-    if not name or hub_setting(name):
-        return None
-    return os.environ.get(name) or secret_store.current().get(name) or None
-
-
-def _secret(name: str | None) -> str | None:
-    """The value to send for a named secret, or None when it has none.
-
-    A VALUE NO HEADER CAN CARRY IS REFUSED, NOT SENT. A key the hub holds was
-    checked against SECRET_VALUE when it was stored and again when the file
-    loaded; one in the environment was checked by nobody. A .env saved with
-    Windows line endings leaves a CR on the end, and a Kubernetes secret made
+def _sendable(name: str, value: str | None) -> str | None:
+    """A VALUE NO HEADER CAN CARRY IS REFUSED, NOT SENT. A key imported from a
+    .env saved with Windows line endings has a CR on the end, and one made
     from a file keeps the file's final newline. httpx then refuses the
     Authorization header with h11's "Illegal header value b'Bearer sk-...\\r'",
     which quotes the key whole and writes the CR as an escape, so _scrub's
     exact match never finds it, and the sentence reached Outcome.error, the
     INFO log, the event stream and the page. So such a value is a
-    DestinationError that names the variable and says nothing of the value,
-    not its length, not where the bad character sits. Refused rather than
-    trimmed, as a pasted key is (secret_store.py): the hub never guesses at a
-    secret, and the fix is one line where the variable is set."""
-    value = _held(name)
-    if value is not None and not re.fullmatch(secret_store.SECRET_VALUE, value):
+    DestinationError that names the secret and says nothing of the value, not
+    its length, not where the bad character sits. Refused rather than trimmed:
+    the hub never guesses at a secret, and the fix is to store it again."""
+    if value is not None and not secret_client.SENDABLE.fullmatch(value):
         raise DestinationError(
-            f"{name} is set in the hub's environment with a line break, a space or a character "
-            "outside printable ASCII in it, which no request header can carry, so it is not "
-            "sent; set it again without one (a .env saved with Windows line endings, or a "
-            "secret made from a file that ends in a newline, does this)")
+            f"{name} holds a line break, a space or a character outside printable ASCII, which "
+            "no request header can carry, so it is not sent; store it again without one (a "
+            ".env saved with Windows line endings, or a secret made from a file that ends in a "
+            "newline, does this)")
     return value
+
+
+async def _secret(name: str | None, url: str) -> str | None:
+    """The value to send for a named secret to `url`, or None when it has
+    none. HostRefused when `url` is not one of the secret's hosts."""
+    if not name:
+        return None
+    try:
+        return _sendable(name, await secret_client.current().value_for(name, url))
+    except secret_client.HostNotAllowed as e:
+        raise HostRefused(e) from None
+
+
+async def _again(name: str | None, used: str | None, url: str) -> str | None:
+    """After a provider's 401: the store's value now, when it is another one
+    (rotated a moment ago), to try once more with; else None."""
+    try:
+        return _sendable(name or "", await secret_client.current().again(name, used, url))
+    except secret_client.HostNotAllowed as e:
+        raise HostRefused(e) from None
+
+
+def _bearer(value: str | None) -> dict[str, str]:
+    return outbound_headers(authorization=f"Bearer {value}" if value else None)
+
+
+async def secret_url(name: str) -> str:
+    """The address a secret_url secret holds (a wake word's url_secret, a
+    button's webhook:secret:<NAME>), checked like a URL typed into an action
+    and held to the hosts the secret names (D41, D62). Every sentence names
+    the secret, never the address: the address is the secret."""
+    held = await secret_client.current().held(name)
+    if held is None:
+        raise DestinationError(f"{name} is not set, so there is no address to send to")
+    if held.kind != "secret_url":
+        raise DestinationError(f"{name} is {_kind(held.kind)}, not a secret_url, so it is no "
+                               "address")
+    url = held.value.strip().rstrip("/")
+    if not re.fullmatch(HTTP_URL, url) or "@" in url.split("://", 1)[1].split("/", 1)[0]:
+        raise DestinationError(f"{name} does not hold an http(s) address without a user and password")
+    if not held.allows(url):
+        raise HostRefused(secret_client.HostNotAllowed(name, url))
+    return url
+
+
+def _kind(kind: str | None) -> str:
+    # Without a kind the store has not said the value is an address, and
+    # "not said" is "no" (deny by default).
+    return f"a {kind}" if kind else "a secret of no stated kind"
+
+
+async def not_an_address(name: str) -> str | None:
+    """Why the secret `name` cannot be a webhook's address, when the store
+    holds it as something else: for a mapping or a wake word that is about
+    to name it (recheck L5). None when it is a secret_url, or when the hub
+    cannot see it at all, because a name may be saved before its value."""
+    held = await secret_client.current().held(name)
+    if held is None or held.kind == "secret_url":
+        return None
+    return f"{name} is {_kind(held.kind)}, not a secret_url: a webhook's address is kept as one"
+
+
+def _known(names: Iterable[str | None]) -> list[str]:
+    """The values these names have in memory, to scrub from an error's text."""
+    return secret_client.current().known(names)
 
 
 def transport_error(e: httpx.HTTPError, *keys: str | None) -> str:
@@ -236,10 +277,7 @@ def transport_error(e: httpx.HTTPError, *keys: str | None) -> str:
     if isinstance(e, httpx.LocalProtocolError):
         return (f"{type(e).__name__}: the hub could not write the request, and h11's reason is "
                 "not shown because it can quote a header that holds a key")
-    text = f"{type(e).__name__}: {e}"
-    for key in keys:
-        text = _scrub(text, key)
-    return text
+    return _scrub(f"{type(e).__name__}: {e}", *keys)
 
 
 def _json(r: httpx.Response, who: str) -> dict:
@@ -261,7 +299,12 @@ class _Base(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     def env_vars(self) -> list[str]:
-        """Names of the environment variables this destination reads."""
+        """Names of the secrets this destination reads."""
+        return [t.name for t in self.targets()]
+
+    def targets(self) -> list[Target]:
+        """Each secret it reads and where it is sent: what the import takes a
+        secret's kind and allowed hosts from (secret_import.py)."""
         return []
 
     async def call(self, client: httpx.AsyncClient, req: Request) -> str | None:
@@ -286,20 +329,20 @@ class HaConversation(_Base):
 
     type: Literal["ha_conversation"]
     url: Url
-    token_env: EnvName = "SATELLITES_HA_TOKEN"
+    token_env: SecretName = "SATELLITES_HA_TOKEN"
     # Which conversation agent to use, e.g. "conversation.openai". Unset, HA
     # uses its default (Assist), which is what HA's own satellites do.
     agent_id: str | None = Field(default=None, max_length=120)
     timeout: float = Field(default=15.0, gt=0, le=120)
 
-    def env_vars(self) -> list[str]:
-        return [self.token_env]
+    def targets(self) -> list[Target]:
+        return [Target(self.token_env, self.url)]
 
     async def call(self, client: httpx.AsyncClient, req: Request) -> str | None:
-        token = _secret(self.token_env)
+        token = await _secret(self.token_env, self.url)
         if token is None:
             # Checked before the request: HA would only answer 401, and "401"
-            # does not tell the operator which variable to set.
+            # does not tell the operator which secret to set.
             raise DestinationError(f"{self.token_env} is not set, so there is no token for Home Assistant")
         body: dict = {"text": req.text}
         if req.language:
@@ -312,8 +355,10 @@ class HaConversation(_Base):
             body["conversation_id"] = req.state["ha_conversation_id"]
         t0 = time.monotonic()
         r = await client.post(f"{self.url}/api/conversation/process", json=body,
-                              headers={"Authorization": f"Bearer {token}"},
-                              timeout=self.timeout)
+                              headers=_bearer(token), timeout=self.timeout)
+        if r.status_code == 401 and (fresh := await _again(self.token_env, token, self.url)):
+            r = await client.post(f"{self.url}/api/conversation/process", json=body,
+                                  headers=_bearer(fresh), timeout=self.timeout)
         telemetry.note("ha", "conversation", agent=self.agent_id, status=r.status_code,
                        ms=telemetry.since(t0))
         if r.status_code == 401:
@@ -448,15 +493,16 @@ def _text(content: object) -> str:
     return ""
 
 
-def _scrub(text: str, key: str | None) -> str:
-    """`text` with the key taken out. OpenAI's 401 says "Incorrect API key
+def _scrub(text: str, *keys: str | None) -> str:
+    """`text` with the keys taken out. OpenAI's 401 says "Incorrect API key
     provided: sk-proj-****...WXYZ" and DeepSeek's "Your api key: ****WXYZ is
-    invalid": masked, but ending in the key's real last characters, and
-    env_status rules out even a prefix. So the exact value goes, and so does
+    invalid": masked, but ending in the key's real last characters, and the
+    store never shows even a prefix. So each exact value goes, and so does
     any word with three or more asterisks in it, which is how every provider
     seen so far writes a masked key."""
-    if key:
-        text = text.replace(key, "[key hidden]")
+    for key in keys:
+        if key:
+            text = text.replace(key, "[key hidden]")
     return re.sub(r"\S+", lambda m: "[key hidden]" if m.group().count("*") >= 3 else m.group(),
                   text)
 
@@ -474,11 +520,11 @@ def _said(value: object) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def _provider_message(raw: str | dict, key: str | None) -> str:
+def _provider_message(raw: str | dict, *keys: str | None) -> str:
     """The provider's own sentence out of an error body, or out of an error
     chunk of a stream: error.message, else error.code or error.type, else
     error as a string, else message, else detail as a string, else the body
-    as it came. One line, at most 300 characters, and scrubbed of the key."""
+    as it came. One line, at most 300 characters, and scrubbed of the keys."""
     body = raw if isinstance(raw, dict) else _parsed(raw)
     text = None
     if isinstance(body, dict):
@@ -492,7 +538,7 @@ def _provider_message(raw: str | dict, key: str | None) -> str:
             text = _said(body["detail"])
     if text is None:
         text = raw if isinstance(raw, str) else json.dumps(raw)
-    return " ".join(_scrub(text, key).split())[:300] or "no reason given"
+    return " ".join(_scrub(text, *keys).split())[:300] or "no reason given"
 
 
 def _refusal(status: int, raw: str, key: str | None, key_env: str | None,
@@ -584,10 +630,10 @@ class Llm(_Base):
     base_url: LlmUrl  # e.g. https://api.openai.com/v1
     model: str = Field(min_length=1, max_length=MODEL_ID_MAX)
     system: str | None = Field(default=None, max_length=8000)
-    # A local server usually needs no key, so an unset variable means "send no
-    # Authorization" rather than an error. A server that does need one answers
-    # 401, and GET /satellites/wake-words shows the variable as unset.
-    api_key_env: EnvName | None = "SATELLITES_LLM_API_KEY"
+    # A local server usually needs no key, so a secret with no value means
+    # "send no Authorization" rather than an error. A server that does need
+    # one answers 401, and GET /satellites/wake-words shows the secret unset.
+    api_key_env: SecretName | None = "SATELLITES_LLM_API_KEY"
     max_tokens: int = Field(default=400, ge=1, le=8192)
     timeout: float = Field(default=30.0, gt=0, le=120)
     stream: bool = True
@@ -604,8 +650,8 @@ class Llm(_Base):
     # max_tokens for that model. Per process and learned, like HaAssist.devices.
     limit_names: ClassVar[dict] = {}
 
-    def env_vars(self) -> list[str]:
-        return [self.api_key_env] if self.api_key_env else []
+    def targets(self) -> list[Target]:
+        return [Target(self.api_key_env, self.base_url)] if self.api_key_env else []
 
     def messages(self, req: Request) -> list[dict]:
         """The system prompt (with the date and time, what the tools are for
@@ -646,13 +692,14 @@ class Llm(_Base):
     async def _open(self, client: httpx.AsyncClient, req: Request, stream: bool,
                     messages: list[dict] | None = None, tool_choice: str | None = None):
         """POST /chat/completions, as a response under 400. The one retry with
-        max_completion_tokens happens here, before the caller reads anything;
-        any other refusal is raised in the provider's words."""
-        key = _secret(self.api_key_env)
-        headers = {"Authorization": f"Bearer {key}"} if key else {}
-        limit = self.limit()
+        max_completion_tokens happens here, before the caller reads anything,
+        and so does the one retry with a key the store has rotated since this
+        one was read (a 401); any other refusal is raised in the provider's
+        words."""
+        key = await _secret(self.api_key_env, self.base_url)
+        limit, rotated = self.limit(), False
         while True:
-            async with client.stream("POST", f"{self.base_url}/chat/completions", headers=headers,
+            async with client.stream("POST", f"{self.base_url}/chat/completions", headers=_bearer(key),
                                      timeout=self.timeout,
                                      json=self._body(req, limit, stream, messages, tool_choice)) as r:
                 if r.status_code >= 400:
@@ -661,6 +708,10 @@ class Llm(_Base):
                         telemetry.note("llm", "retry", status=r.status_code, reason="max_completion_tokens")
                         limit = "max_completion_tokens"
                         self.limit_names[(self.base_url, self.model)] = limit
+                        continue
+                    if r.status_code == 401 and not rotated and (
+                            fresh := await _again(self.api_key_env, key, self.base_url)):
+                        key, rotated = fresh, True
                         continue
                     raise DestinationError(_refusal(r.status_code, raw, key, self.api_key_env))
                 yield r
@@ -803,7 +854,7 @@ class Llm(_Base):
                     raise DestinationError("the LLM streamed a chunk that is not JSON") from None
                 if isinstance(chunk, dict) and chunk.get("error"):
                     raise DestinationError("the LLM streamed an error: "
-                                           + _provider_message(chunk, _held(self.api_key_env)))
+                                           + _provider_message(chunk, *_known([self.api_key_env])))
                 if isinstance(chunk, dict) and isinstance(chunk.get("usage"), dict):
                     meta["usage"] = chunk["usage"]
                 try:
@@ -851,8 +902,8 @@ class Llm(_Base):
         server that answers the same last_id again, having ignored after_id,
         is not asked a third time. MODELS_MAX_BYTES is for the whole listing,
         and the router's ceiling for the whole of it too."""
-        key = _secret(api_key_env)
-        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        key = await _secret(api_key_env, base_url)
+        headers = _bearer(key)
         items: list = []
         params: dict | None = None
         read = 0
@@ -888,34 +939,53 @@ class Webhook(_Base):
     automation needs no special reply."""
 
     type: Literal["webhook"]
-    url: Url
-    # Optional bearer for receivers that check one. Note that a URL which is
-    # itself the secret (HA's /api/webhook/<id>) is shown by GET
-    # /satellites/wake-words like any other URL; prefer a token here when the
-    # receiver allows it.
-    token_env: EnvName | None = None
+    # The address, or the name of a secret_url secret that holds it: one of
+    # the two. A URL that is itself the secret (Home Assistant's
+    # /api/webhook/<id>) goes in the store, because GET /satellites/wake-words
+    # answers `url` like any other field (D38).
+    url: Url | None = None
+    url_secret: SecretName | None = None
+    # Optional bearer for receivers that check one.
+    token_env: SecretName | None = None
     timeout: float = Field(default=15.0, gt=0, le=120)
 
-    def env_vars(self) -> list[str]:
-        return [self.token_env] if self.token_env else []
+    @model_validator(mode="after")
+    def _one_address(self) -> Webhook:
+        if (self.url is None) == (self.url_secret is None):
+            raise ValueError("a webhook needs exactly one of url and url_secret (the name of a "
+                             "secret that holds the address)")
+        return self
+
+    def targets(self) -> list[Target]:
+        named = [Target(self.url_secret, None, holds_url=True)] if self.url_secret else []
+        return named + ([Target(self.token_env, self.url)] if self.token_env else [])
 
     async def call(self, client: httpx.AsyncClient, req: Request) -> str | None:
-        headers = {}
+        url = self.url or await secret_url(self.url_secret)
+        # What names the receiver in a sentence: never a URL that is a secret.
+        who = f"the webhook in {self.url_secret}" if self.url_secret else "the webhook"
+        token = None
         if self.token_env:
-            token = _secret(self.token_env)
+            token = await _secret(self.token_env, url)
             if token is None:
                 raise DestinationError(f"{self.token_env} is not set, so there is no token for the webhook")
-            headers["Authorization"] = f"Bearer {token}"
         t0 = time.monotonic()
-        r = await client.post(self.url, headers=headers, timeout=self.timeout, json={
-            "satellite": req.satellite_name or req.satellite_id,
-            "satellite_id": req.satellite_id,
-            "wake_word": req.wake_word, "mode": req.mode, "text": req.text,
-            "language": req.language, "audio_seconds": round(req.audio_seconds, 3),
-            "history": [{"user": t.user, "assistant": t.assistant} for t in req.history]})
+        try:
+            r = await client.post(url, headers=_bearer(token), timeout=self.timeout, json={
+                "satellite": req.satellite_name or req.satellite_id,
+                "satellite_id": req.satellite_id,
+                "wake_word": req.wake_word, "mode": req.mode, "text": req.text,
+                "language": req.language, "audio_seconds": round(req.audio_seconds, 3),
+                "history": [{"user": t.user, "assistant": t.assistant} for t in req.history]})
+        except httpx.HTTPError as e:
+            if not self.url_secret:
+                raise
+            # httpx's own words can quote the URL; its type is enough (M-2).
+            raise DestinationError(f"{who} failed: {type(e).__name__}") from None
         telemetry.note("webhook", "call", status=r.status_code, ms=telemetry.since(t0))
         if r.status_code >= 400:
-            raise DestinationError(f"the webhook answered {r.status_code}: {r.text[:200].strip()}")
+            said = "" if self.url_secret else f": {r.text[:200].strip()}"
+            raise DestinationError(f"{who} answered {r.status_code}{said}")
         try:
             body = r.json()
         except ValueError:
@@ -1059,7 +1129,7 @@ class HaAssist(_Base):
 
     type: Literal["ha_assist"]
     url: Url
-    token_env: EnvName = "SATELLITES_HA_TOKEN"
+    token_env: SecretName = "SATELLITES_HA_TOKEN"
     pipeline: str | None = Field(default=None, max_length=120)
     timeout: float = Field(default=15.0, gt=0, le=120)
 
@@ -1073,11 +1143,13 @@ class HaAssist(_Base):
     devices: ClassVar[dict] = {}
     DEVICE_TTL_S: ClassVar[float] = 600.0
 
-    def env_vars(self) -> list[str]:
-        return [self.token_env]
+    def targets(self) -> list[Target]:
+        # The websocket is ws(s):// on the same host and port, so the token's
+        # host is checked as the action's http(s):// address.
+        return [Target(self.token_env, self.url)]
 
-    def _token(self) -> str:
-        token = _secret(self.token_env)
+    async def _token(self) -> str:
+        token = await _secret(self.token_env, self.url)
         if token is None:
             raise DestinationError(f"{self.token_env} is not set, so there is no token for Home Assistant")
         return token
@@ -1086,22 +1158,29 @@ class HaAssist(_Base):
     async def _session(self):
         """A connection to HA's websocket API, authenticated. Whatever goes
         wrong on it, here or in the caller's block, comes out as a
-        DestinationError that names the host at most, never the token."""
-        token = self._token()
+        DestinationError that names the host at most, never the token. A
+        token HA refuses is asked of the store once more, in case it was
+        rotated since it was read, and tried again on a new connection."""
+        token = await self._token()
         from websockets.exceptions import WebSocketException
 
         try:
-            async with await type(self).connect(self.url, self.timeout) as ws:
-                hello = await self._receive(ws)
-                if hello.get("type") != "auth_required":
-                    raise DestinationError("Home Assistant's websocket did not ask for authentication")
-                await ws.send(json.dumps({"type": "auth", "access_token": token}))
-                auth = await self._receive(ws)
-                if auth.get("type") != "auth_ok":
+            for attempt in range(2):
+                async with await type(self).connect(self.url, self.timeout) as ws:
+                    hello = await self._receive(ws)
+                    if hello.get("type") != "auth_required":
+                        raise DestinationError("Home Assistant's websocket did not ask for authentication")
+                    await ws.send(json.dumps({"type": "auth", "access_token": token}))
+                    auth = await self._receive(ws)
+                    if auth.get("type") == "auth_ok":
+                        yield ws
+                        return
+                    if attempt == 0 and (fresh := await _again(self.token_env, token, self.url)):
+                        token = fresh
+                        continue
                     # HA's own message, which names no token.
                     raise DestinationError(f"Home Assistant refused the token in {self.token_env} "
                                            f"({str(auth.get('message') or auth.get('type'))[:100]})")
-                yield ws
         except DestinationError:
             raise
         # Refused, reset, a failed handshake (a redirect included), or a frame
@@ -1166,7 +1245,7 @@ class HaAssist(_Base):
             body["language"] = pipeline.tts_language
         t0 = time.monotonic()
         r = await client.post(f"{self.url}/api/tts_get_url", json=body, timeout=self.timeout,
-                              headers={"Authorization": f"Bearer {self._token()}"})
+                              headers=_bearer(await self._token()))
         path = _json(r, "Home Assistant's text-to-speech").get("path")
         # Only ever a path on the same Home Assistant, so the audio is never
         # fetched from a host the action did not name.

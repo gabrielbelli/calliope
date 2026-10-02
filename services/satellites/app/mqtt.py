@@ -9,6 +9,21 @@ object with nothing behind it, so the hub calls it the same way either way.
     SATELLITES_MQTT_PREFIX   Home Assistant's discovery prefix (homeassistant)
     SATELLITES_MQTT_BASE     where the hub's own topics live (calliope/satellites)
 
+THE BROKER'S PASSWORD IS A SECRET IN THE STORE, SATELLITES_MQTT_PASSWORD (D46).
+A password still written in SATELLITES_MQTT_URL is imported there once
+(secret_import.py) and ignored after. The bridge asks for it at every connect
+and once a minute while connected, and reconnects when it has changed, so a
+password rotated in Admin › Secrets is in use within a minute. It is sent only
+to the broker the secret names (D41).
+
+THE BROKER IS AN AUTHENTICATION BOUNDARY OF ITS OWN (D70). A command topic
+below changes a satellite's microphone, speaker, lights and volume with no
+Calliope credential at all: whoever may publish to <base>/+/set/+ may switch a
+muted microphone back on. So the broker's ACL must let only Home Assistant's
+user, which sends the switches' commands, publish there. Mosquitto as Home
+Assistant's add-on sets it up lets every broker user publish to every topic;
+give it an ACL (README, "Home Assistant over MQTT").
+
 The hub's topics, for a satellite <id> (its MAC without colons):
 
     <base>/bridge/availability   online | offline, retained; also the last will
@@ -83,6 +98,8 @@ from urllib.parse import unquote, urlsplit
 log = logging.getLogger("voice-satellites.mqtt")
 
 OnCommand = Callable[[str, dict], Awaitable[Any]]
+# The broker's password as the bridge should send it now, or None for none.
+Password = Callable[[], Awaitable[str | None]]
 
 QOS = 1
 ORIGIN = {"name": "calliope voice-satellites"}
@@ -108,6 +125,13 @@ BACKOFF_MAX_S = 60.0
 # failure starts the backoff again from the bottom.
 STABLE_S = 60.0
 COMMAND_TIMEOUT_S = 10.0
+# How often a connected bridge asks whether the password has changed: the
+# secret store's own cache is a minute (secret_client.MAX_AGE_S).
+PASSWORD_CHECK_S = 60.0
+
+
+class PasswordChanged(Exception):
+    """The password the bridge connected with is not the one to use now."""
 
 
 def parse_url(url: str) -> dict:
@@ -275,7 +299,8 @@ class MqttBridge:
 
     def __init__(self, url: str | None, prefix: str = "homeassistant",
                  base: str = "calliope/satellites", *, on_command: OnCommand | None = None,
-                 client_factory: Callable[..., Any] | None = None) -> None:
+                 client_factory: Callable[..., Any] | None = None,
+                 password: Password | None = None) -> None:
         self.prefix = prefix.strip("/")
         self.base = base.strip("/")
         self.on_command = on_command
@@ -295,6 +320,8 @@ class MqttBridge:
                 self.error = str(e)
                 log.error("MQTT is off: %s", e)
         self.enabled = self._broker is not None
+        # Without a source, the password written in the URL.
+        self._password = password or self._url_password
         self._factory = client_factory
         self._hub: Any = None
         self._task: asyncio.Task | None = None
@@ -309,11 +336,15 @@ class MqttBridge:
         self._last_wake: dict[str, str] = {}
 
     @classmethod
-    def from_env(cls, on_command: OnCommand | None = None) -> MqttBridge:
+    def from_env(cls, on_command: OnCommand | None = None,
+                 password: Password | None = None) -> MqttBridge:
         return cls(os.environ.get("SATELLITES_MQTT_URL") or None,
                    os.environ.get("SATELLITES_MQTT_PREFIX") or "homeassistant",
                    os.environ.get("SATELLITES_MQTT_BASE") or "calliope/satellites",
-                   on_command=on_command)
+                   on_command=on_command, password=password)
+
+    async def _url_password(self) -> str | None:
+        return self._broker["password"] if self._broker else None
 
     def health(self) -> dict:
         b = self._broker
@@ -432,9 +463,10 @@ class MqttBridge:
         while True:
             began = time.monotonic()
             try:
+                password = await self._password()
                 client = factory(
                     hostname=b["hostname"], port=b["port"],
-                    username=b["username"], password=b["password"],
+                    username=b["username"], password=password,
                     will=aiomqtt.Will(self._bridge_topic, b"offline", qos=QOS, retain=True),
                     # The system CA store; SSL_CERT_FILE points it at a
                     # private CA without a code change.
@@ -442,9 +474,14 @@ class MqttBridge:
                     keepalive=30, timeout=10)
                 async with client:
                     self._client = client
-                    await self._session(client)
+                    await self._session(client, password)
             except asyncio.CancelledError:
                 raise
+            except PasswordChanged:
+                # Not a fault: straight back, with the new one.
+                log.info("MQTT: the broker's password changed in the secret store; reconnecting")
+                delay = BACKOFF_MIN_S
+                continue
             except (aiomqtt.MqttError, OSError) as e:
                 self.error = str(e) or type(e).__name__
             except Exception as e:
@@ -463,7 +500,7 @@ class MqttBridge:
             await asyncio.sleep(delay)
             delay = min(delay * 2, BACKOFF_MAX_S)
 
-    async def _session(self, client: Any) -> None:
+    async def _session(self, client: Any, password: str | None) -> None:
         await client.subscribe(f"{self.base}/+/set/+", qos=QOS)
         await client.subscribe(f"{self.prefix}/status", qos=QOS)
         await client.publish(self._bridge_topic, b"online", qos=QOS, retain=True)
@@ -471,7 +508,8 @@ class MqttBridge:
         self.connected, self.error = True, None
         log.info("MQTT connected to %s:%d", self._broker["hostname"], self._broker["port"])
         self._resync()
-        tasks = [asyncio.create_task(self._pump(client)), asyncio.create_task(self._listen(client))]
+        tasks = [asyncio.create_task(self._pump(client)), asyncio.create_task(self._listen(client)),
+                 asyncio.create_task(self._watch_password(password))]
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
@@ -482,6 +520,12 @@ class MqttBridge:
             if t.exception() is not None:
                 raise t.exception()
         raise ConnectionError("the broker's message stream ended")
+
+    async def _watch_password(self, connected_with: str | None) -> None:
+        while True:
+            await asyncio.sleep(PASSWORD_CHECK_S)
+            if await self._password() != connected_with:
+                raise PasswordChanged
 
     def _resync(self) -> None:
         """Everything again: after a reconnect, or when Home Assistant restarts."""

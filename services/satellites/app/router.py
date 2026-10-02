@@ -38,14 +38,16 @@ give each wake word that has no action yet the one its rule would have run
 (wakewords_config.migrate), and routes by the wake word entries from then on;
 PUT /satellites/routing answers 409 there, naming the route that replaced it.
 
-    GET  /satellites/routing       what each wake word does, which secret env
-                                   vars are set (never their values), the STT
-                                   and TTS URLs and engine, warnings
+    GET  /satellites/routing       what each wake word does, which of the secrets
+                                   it names have a value (never the value), the
+                                   STT and TTS URLs and engine, warnings
     PUT  /satellites/routing       409 behind the hub: see PUT /satellites/wake-words
     POST /satellites/ha/pipelines  {"url","token_env"}: Home Assistant's Assist
                                    pipelines, for the page's picker
     POST /satellites/llm/models    {"base_url","api_key_env"}: the ids a language
                                    model server lists, for the page's picker
+    (a picker and the Test ask the secret store afresh, and answer 403
+    host_not_allowed for an address the secret does not name, D41)
     POST /satellites/llm/test      an llm destination, saved or not: one short
                                    question, the reply and how long it took;
                                    no TTS, nothing played
@@ -58,7 +60,14 @@ FastAPI matches in registration order and GET /satellites/{nid} would otherwise
 take "routing" for a satellite id and answer 404.
 
 Where the URLs in an action may point is not filtered; destinations.py explains
-why the trust boundary is who may write the configuration, not what it holds.
+why the boundary is who may write the configuration and where each secret may
+go, not what an address looks like.
+
+STT AND TTS ARE ASKED THROUGH THE GATEWAY (D6). SATELLITES_STT_URL and
+SATELLITES_TTS_URL name http://voice-gateway:8081, its internal listener, which
+takes the hub's service key and forwards the call to stt-stack or tts-stack as
+svc:satellites (gateway.py). Its /health answers in tiers, and the hub reads
+stt-stack's part of it (backends.stt.health) for the engines it runs.
 """
 
 from __future__ import annotations
@@ -74,20 +83,16 @@ from pathlib import Path
 from typing import Annotated, Callable, Literal, Protocol
 
 import httpx
-from fastapi import APIRouter, Depends, FastAPI
-from fastapi import Request as HttpRequest
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends
 from pydantic import (AliasChoices, BaseModel, ConfigDict, Field, StringConstraints,
                       field_validator, model_validator)
-from voice_common import errors
 from voice_common.errors import ApiError
 
-from . import audio
+from . import audio, gateway, secret_client, telemetry
 from . import language as lang
-from . import secret_store, telemetry
-from .destinations import (MODELS_TIMEOUT_S, Destination, DestinationError, Echo, EnvName,
-                           HaAssist, Llm, LlmUrl, Url, _held, transport_error)
+from .destinations import (MODELS_TIMEOUT_S, Destination, DestinationError, Echo, HaAssist,
+                           HostRefused, Llm, LlmUrl, SecretName, Url, _known, _secret,
+                           transport_error)
 from .destinations import Request as Asked
 
 log = logging.getLogger("voice-satellites.router")
@@ -342,35 +347,23 @@ class Actions(Protocol):
 
     def warnings(self, lookup: Lookup | None = None) -> list[str]: ...
 
-    def env_vars(self) -> dict[str, bool]: ...
+    def env_vars(self) -> list[str]: ...
 
     def listing(self) -> list[dict]: ...
 
 
-def env_status(destinations) -> dict[str, bool]:
-    """Each secret the destinations name, and whether it has a value, in the
-    environment or held by the hub (destinations._held). Only ever a
-    boolean: this goes out over GET, and a value, a prefix or even a length
-    would be a start on the secret. A value the action would refuse to
-    send (destinations._secret) is still "set": it is, and the turn's error
-    names what is wrong with it."""
-    names = sorted({n for d in destinations for n in d.env_vars()})
-    return {n: _held(n) is not None for n in names}
+def secret_names(destinations) -> list[str]:
+    """Every secret the destinations name, sorted."""
+    return sorted({n for d in destinations for n in d.env_vars()})
 
 
-def secret_sources(names) -> dict[str, str]:
-    """Where each of `names` that has a value gets it: "environment" or "hub"
-    (secret_store.py). A name with no value is left out. Names and a word,
-    never a value, for the same reason as env_status. The environment is
-    named first because it wins."""
-    held = secret_store.current()
-    out = {}
-    for name in sorted(set(names)):
-        if os.environ.get(name):
-            out[name] = "environment"
-        elif held.get(name):
-            out[name] = "hub"
-    return out
+async def env_status(names) -> dict[str, bool]:
+    """Whether each named secret has a value the hub can use (secret_client).
+    Only ever a boolean: this goes out over GET, and a value, a prefix or
+    even a length would be a start on the secret. A value the action would
+    refuse to send (destinations._sendable) is still "set": it is, and the
+    turn's error names what is wrong with it."""
+    return await secret_client.current().status(names)
 
 
 # ---- rules.json: the routing before wake words said what they do ------------------
@@ -538,8 +531,8 @@ class Rules:
                            "which is not a known satellite")
         return out
 
-    def env_vars(self) -> dict[str, bool]:
-        return env_status(r.destination for r in self.rules)
+    def env_vars(self) -> list[str]:
+        return secret_names(r.destination for r in self.rules)
 
     def listing(self) -> list[dict]:
         return [r.model_dump(mode="json") for r in self.rules]
@@ -599,6 +592,16 @@ def clip(text: str, limit: int = MAX_TTS_CHARS) -> str:
     cut = text[:limit]
     end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "), cut.rfind("\n"))
     return cut[:end + 1] if end > limit // 2 else cut
+
+
+def _stt_part(body: object) -> object:
+    """stt-stack's own /health body: as it is when SATELLITES_STT_URL names
+    stt-stack, or its part of the gateway's (backends.stt.health, the
+    health:read tier svc:satellites holds) when it names the gateway."""
+    if isinstance(body, dict) and isinstance(body.get("backends"), dict):
+        stt = body["backends"].get("stt")
+        return stt.get("health") if isinstance(stt, dict) else None
+    return body
 
 
 def _refuses_boost(r: httpx.Response) -> bool:
@@ -686,9 +689,9 @@ class Router:
                                        satellite_name=satellite_name, wake_word=wake_word,
                                        text=text, sink=dialogue.Collect())
 
-    def describe(self) -> dict:
+    async def describe(self) -> dict:
         return {"rules": self.rules.listing(),
-                "env": self.rules.env_vars(),
+                "env": await env_status(self.rules.env_vars()),
                 "services": {"stt": self.stt_url or None, "tts": self.tts_url or None,
                              "voice": self.voice, "stt_engine": self.stt_engine},
                 "editable": self.rules.editable,
@@ -753,9 +756,10 @@ class Router:
         if not self.stt_url:
             return self._stt
         try:
-            r = await self.client.get(f"{self.stt_url}/health", timeout=ENGINE_PROBE_S)
-            body = r.json() if r.status_code == 200 else None
-        except (httpx.HTTPError, ValueError) as e:
+            r = await gateway.request(self.client, "GET", f"{self.stt_url}/health",
+                                      timeout=ENGINE_PROBE_S)
+            body = _stt_part(r.json()) if r.status_code == 200 else None
+        except (httpx.HTTPError, ValueError, gateway.NotReady) as e:
             log.info("routing: could not ask stt-stack which engines it runs (%s); commands go "
                      "to its default engine until it is asked again in %.0f s",
                      type(e).__name__, ENGINE_RETRY_S)
@@ -930,10 +934,13 @@ class Router:
     async def _post_stt(self, data: dict, wav: bytes, *, retry: str | None = None,
                         hint: str | None = None, timeout: float | None = None) -> httpx.Response:
         t0 = time.monotonic()
-        r = await self.client.post(
-            f"{self.stt_url}/v1/audio/transcriptions", data=data,
-            timeout=self.stt_timeout if timeout is None else timeout,
-            files={"file": ("utterance.wav", wav, "audio/wav")})
+        try:
+            r = await gateway.request(
+                self.client, "POST", f"{self.stt_url}/v1/audio/transcriptions", data=data,
+                timeout=self.stt_timeout if timeout is None else timeout,
+                files={"file": ("utterance.wav", wav, "audio/wav")})
+        except gateway.NotReady as e:
+            raise DestinationError(f"STT: {e}") from None
         telemetry.note("stt", "request", engine=(r.headers.get("x-stt-engine") or "").lower()
                        or data.get("model"), model=data.get("model"), glossary=data.get("glossary"),
                        boost=bool(data.get("boost")), language=data.get("language"), hint=hint,
@@ -945,9 +952,13 @@ class Router:
         if not self.tts_url:
             raise DestinationError("SATELLITES_TTS_URL is not set, so the reply cannot be spoken")
         t0 = time.monotonic()
-        r = await self.client.post(f"{self.tts_url}/v1/audio/speech", timeout=self.tts_timeout,
-                                   json={"model": "kokoro", "voice": voice,
-                                         "input": clip(text), "response_format": "pcm"})
+        try:
+            r = await gateway.request(self.client, "POST", f"{self.tts_url}/v1/audio/speech",
+                                      timeout=self.tts_timeout,
+                                      json={"model": "kokoro", "voice": voice,
+                                            "input": clip(text), "response_format": "pcm"})
+        except gateway.NotReady as e:
+            raise DestinationError(f"TTS: {e}") from None
         pcm = r.content[:len(r.content) & ~1] if r.status_code == 200 else b""
         telemetry.note("tts", "synth", engine="kokoro", voice=voice, chars=len(clip(text)),
                        status=r.status_code, ms=telemetry.since(t0),
@@ -996,36 +1007,6 @@ def current() -> Router:
     return _current
 
 
-def quiet_validation(app: FastAPI) -> None:
-    """A refused body is answered with what was wrong, never with what was sent.
-
-    FastAPI's own 422 carries pydantic's `input` for every error, which is the
-    rejected value itself, and `ctx` and `url` beside it. Under /satellites
-    that is the handler voice_common.errors leaves in place (it reshapes /v1
-    only), so the answer repeated whatever the caller sent. Measured through
-    TestClient before this existed: POST /satellites/ha/pipelines with a Home
-    Assistant token pasted as `token_env` answered 422 with the token in the
-    body, and PUT /satellites/routing did the same through RuleSet. A secret
-    sent to the wrong field would then sit in the page's error line, the
-    browser's network log and any proxy that keeps response bodies.
-
-    So every error is reduced to {type, loc, msg}. pydantic v2's `msg` says
-    what was expected ("String should match pattern ..."), not what arrived;
-    the one kind that quotes the caller is a discriminator's unknown tag, and
-    that is a destination's `type`, never a secret. The page's reason() reads
-    only `loc` and `msg`. /v1 paths keep the OpenAI envelope, which already
-    names the field and not its value. Call it after errors.install_errors,
-    whose handler for the same exception it replaces."""
-
-    @app.exception_handler(RequestValidationError)
-    async def _refused(request: HttpRequest, exc: RequestValidationError) -> JSONResponse:
-        if errors.v1_path(request.url.path):
-            return errors.validation_error_response(exc)
-        return JSONResponse(status_code=422, content={"detail": [
-            {"type": e.get("type"), "loc": list(e.get("loc") or ()), "msg": e.get("msg")}
-            for e in exc.errors()]})
-
-
 class TryBody(BaseModel):
     satellite: str = Field(min_length=1, max_length=64)
     wake_word: str = Field(min_length=1, max_length=64)
@@ -1038,9 +1019,15 @@ routes = APIRouter()
 CurrentRouter = Annotated[Router, Depends(current)]
 
 
+def _host_refused(e: HostRefused) -> ApiError:
+    """403 host_not_allowed, naming the host and the secret (D41), so the
+    page can link to the secret's row in Admin › Secrets."""
+    return ApiError(403, str(e), code="host_not_allowed", extra={"secret": e.name, "host": e.origin})
+
+
 @routes.get("/satellites/routing")
 async def get_routing(router: CurrentRouter) -> dict:
-    return router.describe()
+    return await router.describe()
 
 
 @routes.put("/satellites/routing")
@@ -1055,27 +1042,30 @@ async def put_routing(body: RuleSet, router: CurrentRouter) -> dict:
         raise ApiError(500, f"could not write {router.rules.path.name}: {e}",
                        type_="server_error") from None
     log.info("routing: %d rules saved", len(body.rules))
-    return router.describe()
+    return await router.describe()
 
 
 class PipelinesBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     url: Url
-    token_env: EnvName = "SATELLITES_HA_TOKEN"
+    token_env: SecretName = "SATELLITES_HA_TOKEN"
 
 
 @routes.post("/satellites/ha/pipelines")
 async def ha_pipelines(body: PipelinesBody) -> dict:
     """Home Assistant's Assist pipelines and its preferred one, asked with
     the token in `token_env`: what an ha_assist word's picker offers. The
-    token goes where a saved word would send it, so this is no more than
-    saving one allows (destinations.py)."""
-    if _held(body.token_env) is None:
-        raise ApiError(409, f"{body.token_env} is not set on the hub, so Home Assistant cannot "
-                            "be asked", code="token_missing", param="token_env")
+    token is asked of the store afresh and goes only to a host it names
+    (D41), so this sends nothing a saved word could not."""
+    secret_client.current().invalidate(body.token_env)
     try:
+        if await _secret(body.token_env, body.url) is None:
+            raise ApiError(409, f"{body.token_env} is not set in the secret store, so Home "
+                                "Assistant cannot be asked", code="token_missing", param="token_env")
         return await HaAssist(type="ha_assist", url=body.url, token_env=body.token_env).pipelines()
+    except HostRefused as e:
+        raise _host_refused(e) from None
     except DestinationError as e:
         raise ApiError(502, str(e), type_="server_error", code="home_assistant") from None
 
@@ -1097,7 +1087,7 @@ class LlmModelsBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     base_url: LlmUrl
-    api_key_env: EnvName | None = "SATELLITES_LLM_API_KEY"
+    api_key_env: SecretName | None = "SATELLITES_LLM_API_KEY"
 
 
 def _llm_failed(e: Exception, key_env: str | None, what: str, ceiling: float) -> ApiError:
@@ -1108,9 +1098,11 @@ def _llm_failed(e: Exception, key_env: str | None, what: str, ceiling: float) ->
     if isinstance(e, (TimeoutError, httpx.TimeoutException)):
         return ApiError(504, f"{what} within {ceiling:g} s", type_="server_error",
                         code="llm_timeout")
+    if isinstance(e, HostRefused):
+        return _host_refused(e)
     if isinstance(e, DestinationError):
         return ApiError(502, str(e), type_="server_error", code="llm")
-    return ApiError(502, transport_error(e, _held(key_env))[:300], type_="server_error",
+    return ApiError(502, transport_error(e, *_known([key_env]))[:300], type_="server_error",
                     code="llm")
 
 
@@ -1121,7 +1113,9 @@ async def llm_models(body: LlmModelsBody, router: CurrentRouter) -> dict:
     [...]}. The page asks once the address is committed, never while it is
     being typed, so a key is not sent to a half-typed host that happens to
     resolve. The key goes where a saved word would send it, so this is no
-    more than saving one allows (destinations.py)."""
+    more than saving one allows (destinations.py). The key is asked of the
+    store afresh."""
+    secret_client.current().invalidate(body.api_key_env)
     try:
         async with asyncio.timeout(MODELS_TIMEOUT_S):
             models = await Llm.list_models(router.client, body.base_url, body.api_key_env)
@@ -1134,8 +1128,9 @@ async def llm_models(body: LlmModelsBody, router: CurrentRouter) -> dict:
 # The question a Test asks: short, so the answer's time is mostly the time to
 # the first word, which is what a satellite waits for.
 LLM_TEST_TEXT = "Say hello in five words or fewer."
-# Under voice-ui's 30 s read timeout, so the hub's own sentence reaches the
-# page before the proxy gives up with a bare 504.
+# Well under the gateway's read timeout for the hub (GATEWAY_SATELLITES_TIMEOUT),
+# so the hub's own sentence reaches the page before the gateway gives up with a
+# bare 504, and short enough that a Test never holds the page for long.
 LLM_TEST_CEILING_S = 25.0
 
 
@@ -1147,7 +1142,9 @@ async def llm_test(body: Llm, router: CurrentRouter) -> dict:
     first_token_ms, total_ms, token_limit}: how long the hub waited for the
     first words and for all of them, which is the latency a satellite adds
     on top of speech-to-text and speech. Nothing is saved, and nothing is
-    sent that saving the action and pressing Try a word would not send."""
+    sent that saving the action and pressing Try a word would not send. The
+    key is asked of the store afresh."""
+    secret_client.current().invalidate(body.api_key_env)
     ceiling = min(body.timeout, LLM_TEST_CEILING_S)
     asked = Asked(satellite_id="test", satellite_name="test", wake_word="test",
                   text=LLM_TEST_TEXT, audio_seconds=0.0)

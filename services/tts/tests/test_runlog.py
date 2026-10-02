@@ -21,10 +21,14 @@ around one of them:
   service could not account for, and a client that hangs up halfway is how it
   usually ends.
 
-No socket is bound anywhere here. urllib.request.urlopen is replaced with a
-receiver that records what it was handed, which is both faster and honest about
-what is under test: the body, the threading and the failure handling are this
-repo's, and HTTP itself is not.
+Every record also says whose run it was, taken from the assertion the request
+carried (D31), so a user's speech lands in their own list and in nobody
+else's.
+
+No socket is bound anywhere here. voice_common.runlog.urlopen is replaced with
+a receiver that records what it was handed, which is both faster and honest
+about what is under test: the body, the threading and the failure handling are
+this repo's, and HTTP itself is not.
 """
 
 from __future__ import annotations
@@ -35,14 +39,17 @@ import pathlib
 import threading
 import time
 import urllib.error
-import urllib.request
 
 import pytest
 from starlette.testclient import TestClient
-from voice_common.conformance import module_app
+from voice_common import runlog as sender_module
+from voice_common.conformance import FakeGateway, module_app
+from voice_common.identity import GATEWAY_INTERNAL
 from voice_common.runlog import MAX_QUEUED, SERVER_ONLY, RunLog
 
 from test_openai_speech import MULTI_CHUNK, FakeSynth
+
+RUNS = f"{GATEWAY_INTERNAL}/runs"
 
 # THE ONE THING BOTH HALVES MAY TREAT AS AUTHORITATIVE. tts-long codes its
 # POST /runs against this file and so does this service; if the two disagree,
@@ -112,12 +119,17 @@ def drained(log: RunLog, expected: int = 1, timeout: float = 5.0) -> dict:
 @pytest.fixture
 def receiver(monkeypatch: pytest.MonkeyPatch) -> Receiver:
     fake = Receiver()
-    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    monkeypatch.setattr(sender_module, "urlopen", fake)
     return fake
 
 
 def sender(**kwargs: object) -> RunLog:
-    return RunLog(url="http://tts-long:8002", host="orko", service="tts",
+    """A sender as RUNLOG_URL configures it: the gateway's internal listener.
+
+    Its key is the service.key the `gateway` fixture wrote, read when a record
+    is sent.
+    """
+    return RunLog(url=GATEWAY_INTERNAL, host="nas", service="tts",
                   engine="kokoro", **kwargs)  # type: ignore[arg-type]
 
 
@@ -130,7 +142,7 @@ class Service:
     test here reaches the live one through this.
     """
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch,
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, gateway: FakeGateway,
                  log: RunLog | None = None) -> None:
         app = module_app("app.main")()
         import app.main as fresh
@@ -140,7 +152,8 @@ class Service:
         self.synth = FakeSynth()
         fresh.state["synth"] = self.synth
         monkeypatch.setattr(fresh, "runlog", self.log)
-        self.client = TestClient(app)
+        # Every request signed as a signed-in admin, as the gateway forwards it.
+        self.client = TestClient(app, headers=gateway.headers("tts"))
 
     def speech(self, **body: object):
         body.setdefault("model", "tts-1")
@@ -153,7 +166,8 @@ class Service:
 
 
 @pytest.fixture
-def service(receiver: Receiver, monkeypatch: pytest.MonkeyPatch) -> Service:
+def service(receiver: Receiver, monkeypatch: pytest.MonkeyPatch,
+            gateway: FakeGateway) -> Service:
     """The app with a fake model and a sender pointed at the fake receiver.
 
     The lifespan is never entered, for the reason every other file here gives:
@@ -161,7 +175,7 @@ def service(receiver: Receiver, monkeypatch: pytest.MonkeyPatch) -> Service:
     a week. `runlog` is rebound rather than reconfigured, which is the whole
     reason every call site reads the module global at call time.
     """
-    return Service(monkeypatch)
+    return Service(monkeypatch, gateway)
 
 
 # --- the contract ----------------------------------------------------------
@@ -178,14 +192,14 @@ def test_a_run_is_recorded_with_the_fields_the_contract_names(
     drained(service.log)
 
     body = receiver.only()
-    assert receiver.urls == ["http://tts-long:8002/runs"]
+    assert receiver.urls == [RUNS]
     assert receiver.headers[0]["content-type"] == "application/json"
     assert set(body) == set(contract("speech"))
 
     assert body["kind"] == "speech"
     assert body["service"] == "tts"
     assert body["engine"] == "kokoro"
-    assert body["host"] == "orko"
+    assert body["host"] == "nas"
     assert body["route"] == "/v1/audio/speech"
     assert body["client"] == "openai"
     assert body["model_requested"] == "tts-1"
@@ -286,7 +300,7 @@ def test_the_segment_offsets_reach_the_record(service: Service,
 # --- it must not reach the caller ------------------------------------------
 
 def test_the_response_does_not_wait_on_the_log(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch: pytest.MonkeyPatch, gateway: FakeGateway) -> None:
     """The receiver takes five seconds. The reply must not.
 
     This is the whole reason for the thread and the queue. Written as a
@@ -295,8 +309,8 @@ def test_the_response_does_not_wait_on_the_log(
     well and is invisible until tts-long is slow.
     """
     slow = Receiver(delay=5.0)
-    monkeypatch.setattr(urllib.request, "urlopen", slow)
-    service = Service(monkeypatch)
+    monkeypatch.setattr(sender_module, "urlopen", slow)
+    service = Service(monkeypatch, gateway)
 
     started = time.monotonic()
     assert service.speech(input="Hello there.").status_code == 200
@@ -310,16 +324,16 @@ def test_the_response_does_not_wait_on_the_log(
 
 
 def test_a_receiver_that_refuses_never_reaches_the_caller(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch: pytest.MonkeyPatch, gateway: FakeGateway) -> None:
     """A 404 is what TTS_RUNLOG_ACCEPT=0 or an older tts-long answers.
 
     The audio is unaffected and the reason is visible in /health, which is the
     only shape of failure a log is allowed to have.
     """
     refusing = Receiver(error=urllib.error.HTTPError(
-        "http://tts-long:8002/runs", 404, "Not Found", {}, None))  # type: ignore[arg-type]
-    monkeypatch.setattr(urllib.request, "urlopen", refusing)
-    service = Service(monkeypatch)
+        RUNS, 404, "Not Found", {}, None))  # type: ignore[arg-type]
+    monkeypatch.setattr(sender_module, "urlopen", refusing)
+    service = Service(monkeypatch, gateway)
 
     response = service.speech(input="Hello there.")
     assert response.status_code == 200
@@ -334,7 +348,8 @@ def test_a_receiver_that_refuses_never_reaches_the_caller(
 
 
 def test_an_unset_url_records_nothing_and_raises_nothing(
-        receiver: Receiver, monkeypatch: pytest.MonkeyPatch) -> None:
+        receiver: Receiver, monkeypatch: pytest.MonkeyPatch,
+        gateway: FakeGateway) -> None:
     """The default, and the deployment rule it exists for.
 
     This stack has to work completely with tts-long stopped, unplugged or
@@ -342,8 +357,9 @@ def test_an_unset_url_records_nothing_and_raises_nothing(
     connection refused once a request, which is the shape this would have if
     the URL had a default.
     """
-    service = Service(monkeypatch, log=RunLog(url=None, host="orko",
-                                              service="tts", engine="kokoro"))
+    service = Service(monkeypatch, gateway, log=RunLog(url=None, host="nas",
+                                                       service="tts",
+                                                       engine="kokoro"))
 
     assert service.speech().status_code == 200
     assert service.client.post("/speak",
@@ -358,11 +374,11 @@ def test_an_unset_url_records_nothing_and_raises_nothing(
     health = service.health()
     assert health["runlog"]["url"] is None
     assert health["runlog"]["sent"] == 0
-    assert health["host_label"] == "orko"
+    assert health["host_label"] == "nas"
 
 
 def test_a_full_queue_drops_and_says_so_in_health(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch: pytest.MonkeyPatch, gateway: FakeGateway) -> None:
     """A dropped record must be visible as a gap, not invisible as an absence.
 
     Dropping is the right trade — the alternative is holding memory for a
@@ -375,8 +391,8 @@ def test_a_full_queue_drops_and_says_so_in_health(
         blocked.wait(10.0)
         return contextlib.nullcontext()
 
-    monkeypatch.setattr(urllib.request, "urlopen", stuck)
-    service = Service(monkeypatch)
+    monkeypatch.setattr(sender_module, "urlopen", stuck)
+    service = Service(monkeypatch, gateway)
     try:
         for index in range(MAX_QUEUED + 20):
             service.log.record(kind="speech", status="done", text=f"{index}")
@@ -390,14 +406,15 @@ def test_a_full_queue_drops_and_says_so_in_health(
 
 
 def test_the_text_can_be_left_behind_without_losing_the_record(
-        monkeypatch: pytest.MonkeyPatch, receiver: Receiver) -> None:
+        monkeypatch: pytest.MonkeyPatch, receiver: Receiver,
+        gateway: FakeGateway) -> None:
     """RUNLOG_TEXT=0 for a deployment that wants the timings and not the words.
 
     `chars` still goes, so the length survives the switch: the alternative is
     an operator choosing between sending every utterance to a store and having
     no history at all.
     """
-    service = Service(monkeypatch, log=sender(send_text=False))
+    service = Service(monkeypatch, gateway, log=sender(send_text=False))
 
     assert service.speech(input="Something private.").status_code == 200
     drained(service.log)
@@ -426,8 +443,9 @@ def test_a_streamed_run_is_recorded_when_the_client_hangs_up(
     assert len(chunks) > 2, "a one-chunk stream cannot be abandoned partway"
 
     stream = service.main._sse_body(synth, chunks, "bm_george", "en-gb", 1.0,
-                                    "pcm", len(MULTI_CHUNK), text=MULTI_CHUNK,
-                                    model_requested="tts-1")
+                                    "pcm", len(MULTI_CHUNK),
+                                    owner=FakeGateway.USER, credential="session",
+                                    text=MULTI_CHUNK, model_requested="tts-1")
     assert next(stream).startswith(b'data: {"type":"speech.audio.delta"')
     stream.close()
     drained(service.log)
@@ -480,3 +498,57 @@ def test_a_stream_that_fails_is_recorded_as_failed(
     body = receiver.only()
     assert body["status"] == "failed"
     assert "synthesis failed" in str(body["error"])
+
+
+# --- whose run it was --------------------------------------------------------
+
+ALICE = "u_bbbbbbbbbbbbbbbb"
+
+
+def test_every_route_records_whose_run_it_was(
+        service: Service, receiver: Receiver, gateway: FakeGateway) -> None:
+    """Owner and credential from the assertion, on all three record points (D31).
+
+    The key's ID rather than "session" is what tells the owner, in their own
+    list, which of their keys spent the time.
+    """
+    key = gateway.headers("tts", sub=ALICE, cred="k_bbbbbbbbbbbb",
+                          scopes={"speech:speak"})
+    body = {"model": "tts-1", "voice": "fable"}
+    assert service.client.post("/v1/audio/speech", headers=key,
+                               json={**body, "input": "Hello."}).status_code == 200
+    assert service.client.post("/v1/audio/speech", headers=key, json={
+        **body, "input": MULTI_CHUNK, "stream_format": "sse",
+        "response_format": "pcm"}).status_code == 200
+    assert service.client.post("/speak", headers=key,
+                               json={"text": "Hello."}).status_code == 200
+    drained(service.log, expected=3)
+
+    assert sorted(record["route"] for record in receiver.bodies) == [
+        "/speak", "/v1/audio/speech", "/v1/audio/speech"]
+    assert {(record["owner"], record["credential"])
+            for record in receiver.bodies} == {(ALICE, "k_bbbbbbbbbbbb")}
+
+
+def test_the_hubs_speech_is_recorded_as_the_hubs(
+        service: Service, receiver: Receiver, gateway: FakeGateway) -> None:
+    """A satellite's reply is a system record, in no user's list."""
+    hub = gateway.headers("tts", kind="service", sub="svc:satellites")
+    assert service.client.post("/v1/audio/speech", headers=hub, json={
+        "model": "tts-1", "voice": "fable", "input": "Hello."}).status_code == 200
+    drained(service.log)
+    body = receiver.only()
+    assert (body["owner"], body["credential"]) == ("svc:satellites", "svc:satellites")
+
+
+def test_the_record_carries_this_services_key_and_nothing_it_was_sent(
+        service: Service, receiver: Receiver, gateway: FakeGateway) -> None:
+    """The record goes to the gateway's internal listener as svc:tts (D6), with
+    an explicit header set: never the assertion the request arrived with (D65)."""
+    assert service.speech(input="Hello there.").status_code == 200
+    drained(service.log)
+
+    assert receiver.urls == [RUNS]
+    headers = receiver.headers[0]
+    assert headers["authorization"] == f"Bearer {gateway.service_key}"
+    assert not [name for name in headers if name.startswith("x-calliope-")]

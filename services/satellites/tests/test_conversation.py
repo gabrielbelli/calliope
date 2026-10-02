@@ -38,6 +38,7 @@ MARKS = {30000: "hey_jarvis", -30000: "lumos", 20000: "alexa"}
 SECRET = "eyJhbGciOiJIUzI1NiJ9.c2VjcmV0LWhhLXRva2Vu.do-not-leak"
 LLM = {"type": "llm", "base_url": "http://llm.test/v1", "model": "tiny"}
 HA = {"type": "ha_conversation", "url": "http://ha.test:8123"}
+HA_HOSTS = ["http://ha.test:8123"]
 
 
 class MarkerWords(FakeWakeWords):
@@ -430,9 +431,9 @@ def test_a_conversation_ends_when_the_satellite_stops_sending_audio(client, app,
     assert ended["reason"] == "no_audio" and ended["turns"] == 1
 
 
-def test_a_command_home_assistant_did_not_understand_becomes_a_conversation(
+def test_a_command_home_assistant_did_not_understand_becomes_a_conversation(store,
         client, app, events, services, plug, monkeypatch):
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+    store.put("SATELLITES_HA_TOKEN", SECRET, HA_HOSTS)
     services.ha_answer = {"response_type": "error", "data": {"code": "no_intent_match"},
                          "speech": {"plain": {"speech": "Sorry, I couldn't understand that"}}}
     services.transcripts.extend(["what is a black hole", "and a white one"])
@@ -459,13 +460,13 @@ def test_a_command_home_assistant_did_not_understand_becomes_a_conversation(
     assert of(events, "routed") == []
 
 
-def test_a_conversation_handed_over_to_home_assistant_keeps_its_conversation_id(
+def test_a_conversation_handed_over_to_home_assistant_keeps_its_conversation_id(store,
         client, app, events, services, plug, monkeypatch):
     """A command Home Assistant did not understand hands over to a
     conversation word on Home Assistant too. The handed-over turn used to
     write Home Assistant's conversation_id, and its language, into a memory
     nobody kept, so the second turn started a new conversation there."""
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+    store.put("SATELLITES_HA_TOKEN", SECRET, HA_HOSTS)
     answers = [
         {"conversation_id": "01CMD", "response": {"response_type": "error",
                                                   "data": {"code": "no_intent_match"},
@@ -783,8 +784,8 @@ def test_an_entry_saved_by_a_client_that_knows_only_models_keeps_its_action(clie
     assert (w["threshold"], w["mode"], w["action"]["destination"]["type"]) == (0.6, "conversation", "llm")
 
 
-def test_secrets_are_named_by_their_variable_and_never_returned(client, app, monkeypatch, tmp_path):
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+def test_secrets_are_named_by_their_variable_and_never_returned(store, client, app, monkeypatch, tmp_path):
+    store.put("SATELLITES_HA_TOKEN", SECRET, HA_HOSTS)
     save(client, {"name": "alexa", "action": {"destination": HA}},
          {"name": "hey_jarvis", "mode": "conversation",
           "action": {"destination": {"type": "ha_assist", "url": "http://ha.test:8123"}}})

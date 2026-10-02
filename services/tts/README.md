@@ -27,8 +27,17 @@ docker run -p 8001:8001 -v tts-models:/models \
 
 First start downloads ~340 MB into the volume. Later starts are immediate.
 
+**It answers the Calliope gateway and nobody else.** Every route but `/health`
+needs the gateway's signed identity assertion ([Identity](#identity)), so the
+examples in this file go to the gateway, with an API key, and it forwards them
+by the same path:
+
 ```bash
-curl -X POST localhost:8001/speak -H 'content-type: application/json' \
+export CALLIOPE_URL=https://calliope.example   # the gateway, not this port
+export CALLIOPE_KEY=calliope_…                  # Account › API keys, preset speak-only
+
+curl -X POST "$CALLIOPE_URL/speak" -H "authorization: Bearer $CALLIOPE_KEY" \
+  -H 'content-type: application/json' \
   -d '{"text":"Here is the change to make.","voice":"bm_george"}' \
   --output out.wav
 ```
@@ -92,7 +101,7 @@ switching costs nothing after load — you can use a different voice per
 request, or per segment.
 
 ```bash
-curl -s localhost:8001/voices | python3 -m json.tool
+curl -s -H "authorization: Bearer $CALLIOPE_KEY" "$CALLIOPE_URL/voices" | python3 -m json.tool
 ```
 
 | Prefix | Locale |
@@ -113,9 +122,9 @@ deliberate rather than performed.
 against `api.openai.com` reaches this service by changing a base URL.
 
 ```bash
-curl -X POST localhost:8001/v1/audio/speech \
+curl -X POST "$CALLIOPE_URL/v1/audio/speech" \
   -H 'content-type: application/json' \
-  -H 'authorization: Bearer sk-your-key' \
+  -H "authorization: Bearer $CALLIOPE_KEY" \
   -d '{"model":"tts-1","input":"Here is the change to make.","voice":"fable","response_format":"mp3"}' \
   --output out.mp3
 ```
@@ -123,7 +132,7 @@ curl -X POST localhost:8001/v1/audio/speech \
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:8001/v1", api_key="sk-your-key")
+client = OpenAI(base_url="https://calliope.example/v1", api_key="calliope_…")
 
 response = client.audio.speech.create(
     model="tts-1",
@@ -196,7 +205,8 @@ they are sent rather than sliced off a finished file.
 ```python
 import base64, json, httpx
 
-with httpx.stream("POST", "http://localhost:8001/v1/audio/speech", json={
+with httpx.stream("POST", "https://calliope.example/v1/audio/speech",
+                  headers={"authorization": f"Bearer {key}"}, json={
         "model": "tts-1", "voice": "fable", "input": text,
         "response_format": "mp3", "stream_format": "sse"}) as response:
     for line in response.iter_lines():
@@ -499,66 +509,48 @@ route exists for. It reaches nothing, though, so it is named in
 `X-Ignored-Parameters` like anything else that did not — a request answered by
 an 82M-parameter model it did not ask for used to be told nothing at all.
 
-## Authentication
+## Identity
 
-Off by default. Set `TTS_API_KEYS` to a comma-separated list to turn it on:
-
-```bash
-docker run -p 8001:8001 -v tts-models:/models \
-  -e TTS_API_KEYS=sk-workstation,sk-laptop \
-  ghcr.io/gabrielbelli/calliope-tts:pre
-```
-
-```bash
-curl -X POST localhost:8001/speak \
-  -H 'authorization: Bearer sk-workstation' \
-  -H 'content-type: application/json' \
-  -d '{"text":"Authenticated."}' --output out.wav
-```
-
-- **Unset means every request is accepted**, and the service says so at
-  `WARNING` on every start. It neither refuses to boot nor runs open in
-  silence. This service already runs on a LAN with no keys anywhere, and an
-  upgrade that starts rejecting every existing caller is a worse outage than a
-  warning nobody reads.
-- **Set but naming no key refuses to start.** `TTS_API_KEYS=`, `,` and `,,  ,`
-  all exit with a sentence saying so. Unset is a choice; set to nothing is an
-  accident — `-e TTS_API_KEYS=$SECRET` with `SECRET` unset hands the container
-  an empty value — and it used to leave the service open to anyone under a
-  warning that claimed the variable was unset.
-- One list, no per-key identity or scopes. Rotation is: add the new key, move
-  the callers, drop the old one.
-- Surrounding whitespace is trimmed from each key, so `k1, k2` works as
-  written. A key is therefore never surrounded by spaces, which is just as
-  well: HTTP strips a field value's trailing whitespace, so one could not be
-  presented even if it were configured.
-- Non-ASCII keys work — the comparison is done on the bytes that crossed the
-  wire, and the configured key is encoded as UTF-8 to match. HTTP does not
-  require a client to send UTF-8, though, so a start with one logs a warning
-  and an ASCII key avoids the question.
-- Keys are compared with `hmac.compare_digest` against every configured key,
-  with no early exit on a match. `==` returns at the first differing byte and
-  leaks the matching prefix; stopping at the match would leak how far down the
-  list a valid key sits.
-- **`/health` is never authenticated**, `/health/` included. Container
-  healthchecks have no key and no way to be given one, and a probe written
-  with the trailing slash must not go permanently unhealthy the moment keys
-  are set. Everything else needs one, `/docs` and `/openapi.json` included.
-- Enforcement is middleware, not a per-route dependency, so a route added later
-  is protected without anyone remembering to ask.
-
-A rejected request gets `401` in OpenAI's envelope:
+**This service answers the Calliope gateway and nobody else.** Every request
+but `GET /health` must carry `X-Calliope-Identity`: an assertion the gateway
+signs with Ed25519 for this service alone (`aud=tts`), which lives 60 seconds.
+The service checks it with the gateway's public key, which the gateway writes
+to `identity.pub` on this service's own credential volume, mounted read-only at
+`/run/calliope`. Nothing here holds anything that could sign one. Without a
+valid assertion the answer is 401, in OpenAI's envelope on every route:
 
 ```json
-{"error": {"message": "Incorrect API key provided. Send it as 'Authorization: Bearer <key>'.",
+{"error": {"message": "No valid identity assertion. This service answers only requests the Calliope gateway forwards.",
            "type": "invalid_request_error",
-           "code": "invalid_api_key"}}
+           "param": null,
+           "code": "unauthenticated"}}
 ```
 
-That envelope is used on the native routes too, unlike every other error. A
-rejection happens before routing, so there is no route yet whose conventions
-it could follow, and the client most likely to be turned away is the one that
-only reads `error.message`.
+So a client never talks to this port. It talks to the gateway, with an API key
+or a signed-in session, and the gateway forwards `/speak`, `/voices` and
+`/v1/audio/speech` by the same path when the credential holds `speech:speak`.
+Keys are made on the web page under Account › API keys; `speak-only` is the
+narrow preset.
+
+- **`/health` is open**, `/health/` included: a container healthcheck has no
+  way to be given an assertion. Its status is `not_ready` until the gateway has
+  written `identity.pub` and `service.key`, because until then every other
+  request would be refused.
+- **`/docs`, `/redoc` and `/openapi.json` do not exist.** A schema is a free
+  map of the service.
+- **`TTS_API_KEYS` is gone.** Left set, it is ignored: the service keeps
+  serving, logs an ERROR naming it once a minute, and lists it in `/health` as
+  `ignored_variables`. The value is never logged. Remove it.
+- **No handler sees an `X-Calliope-*` header.** They are removed from the
+  request once checked, so nothing here can pass one on.
+- **Every run record says whose run it was**: the user's ID, or
+  `svc:satellites` for a satellite's reply, and the session, API key or service
+  it came in with. A person's speech appears in their own Jobs list and a
+  satellite's in nobody's. Records go to the gateway's internal listener, as
+  `RUNLOG_URL=http://voice-gateway:8081`, carrying this service's key from
+  `/run/calliope/service.key`.
+- The check is middleware, outermost, so a route added later is covered
+  without anyone remembering to ask.
 
 ## TLS
 
@@ -570,7 +562,6 @@ docker run -p 8001:8001 -v tts-models:/models \
   -v /etc/letsencrypt/live/tts.example.net:/certs:ro \
   -e TTS_TLS_CERT=/certs/fullchain.pem \
   -e TTS_TLS_KEY=/certs/privkey.pem \
-  -e TTS_API_KEYS=sk-workstation \
   ghcr.io/gabrielbelli/calliope-tts:pre
 ```
 
@@ -611,7 +602,8 @@ start, so a renewed certificate needs a container restart.
 | `TTS_LANGUAGE` | `en-us` | `en-us`, `en-gb`, `pt-br`, … |
 | `TTS_THREADS` | `4` | Must match your CPU limit — see below |
 | `TTS_MODEL_DIR` | `/models` | Volume for weights |
-| `TTS_API_KEYS` | unset | Comma-separated accepted keys. Unset means no authentication; set but naming none refuses to start |
+| `CALLIOPE_RUN_DIR` | `/run/calliope` | Where the gateway's `identity.pub` and this service's `service.key` are mounted, read-only |
+| `RUNLOG_URL` | unset | `http://voice-gateway:8081` sends each finished run's record there. Any other value turns the records off with an ERROR, since each carries this service's key |
 | `TTS_TLS_CERT` | unset | PEM certificate chain. Both TLS variables or neither |
 | `TTS_TLS_KEY` | unset | PEM private key, readable by uid 1000 |
 | `TTS_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. An unrecognised value logs a warning and stays at `INFO` rather than refusing to start |
@@ -749,7 +741,7 @@ are excluded for their non-commercial licences.
 
 ## Shared code
 
-The API key middleware, the OpenAI error envelope, the `/health` route, the
+The identity check, the OpenAI error envelope, the `/health` route, the
 `Segment` and OpenAI request models, the PCM and splicing helpers, the logging
 setup and the TLS entrypoint are not written here. They come from
 [packages/common](../../packages/common/README.md), installed as a path
@@ -759,14 +751,13 @@ dependency in `requirements.txt` and shared with `services/stt` and
 That is not tidiness. The three services each carried their own copy of
 `app/auth.py`; the copies drifted by 170 to 197 lines, and one review round
 found three *different* defects, one per repo, because each had drifted
-separately. Two of the three were this repo's:
+separately. Two of the three were this repo's, and one of them outlived the
+key scheme it was found in: `GET /health/` came back `401` the moment keys were
+configured, so a probe written with the trailing slash went permanently
+unhealthy.
 
-- a non-ASCII `TTS_API_KEYS` value could never authenticate — the correct key
-  was rejected as the wrong one
-- `GET /health/` came back `401` the moment keys were configured, so a probe
-  written with the trailing slash went permanently unhealthy
-
-Both are fixed here and both are now assertions in a suite the package ships.
+It is an assertion in a suite the package ships, beside the identity checks
+every backend must pass.
 `tests/test_conformance.py` is four lines of fixture; the tests come from
 voice-common and run in CI against the app object this repo actually builds,
 so a bad bump of that pin fails at the build rather than on the box:

@@ -24,13 +24,11 @@ an assistant, and is the one place audio and firmware reach them from.
     GET   /satellites/wake-words       the wake words, which satellites hear each, and
                                        whether its model is ready
     PUT   /satellites/wake-words       replace them; live, no restart
-    PUT   /satellites/secrets          {"name", "value"}: store or clear an API key the
-                                       hub holds (secret_store.py); never read back
     GET   /satellites/{id}
     PATCH /satellites/{id}             name, config and the button mapping
     POST  /satellites/{id}/adopt | forget | identify | reboot | lights | tone | say
                         | flush | set-hub | ptt
-    GET   /satellites/{id}/listen?seconds=5   a WAV of the raw microphone channels
+    POST  /satellites/{id}/listen?seconds=5   a WAV of the raw microphone channels
     POST  /satellites/{id}/inject?play=0      a 16 kHz mono WAV through the wake
                                        word, endpoint and routing path, as if heard
     POST  /satellites/{id}/media?announce=0   a WAV in the satellite's own format
@@ -44,15 +42,30 @@ mounts backend paths flat and never rewrites them. The gateway relays
 /satellites/ws (and /nodes/ws) as a WebSocket and forwards the rest as
 ordinary routes.
 
-THE DEVICE SOCKET IS NOT BEHIND AN API KEY, AND THAT IS DELIBERATE. A
-satellite cannot hold a gateway key it was never given, and a key baked into
-firmware would be a key in every flash dump. The socket is answered for anyone;
-what a connection may DO is decided by the adoption token. An unadopted
-connection can say hello and receive "pending", nothing else: no microphone
-audio is accepted from it and nothing is sent to it but that one word, until
-someone with access to the API adopts it. Nor can it take the place of an
-adopted satellite that is connected: a satellite's id is its MAC, and only the
-token proves the rest.
+EVERY REQUEST CARRIES THE GATEWAY'S ASSERTION (D52). identity.install answers
+anything without a valid X-Calliope-Identity for the audience "satellites" with
+401, the socket included, and leaves /health alone. The gateway decides who may
+call what; the hub only shapes what it answers by the caller's scopes:
+`config.buttons` (button webhooks name secrets) and the wake words' actions go
+only to satellites:admin (D62), and a PATCH that changes anything but the
+controls Home Assistant drives needs satellites:admin too (CONTROL_FIELDS).
+
+THE DEVICE SOCKET HAS NO LOGIN, AND THAT IS DELIBERATE. A satellite cannot hold
+a credential it was never given, and one baked into firmware would be in every
+flash dump. So the gateway relays the socket for anyone and adds its relay
+assertion (svc:gateway-relay), which the hub requires on the upgrade, so only a
+connection the gateway relayed reaches it (D53), and refuses it on every
+HTTP route (RelayOnlyOnTheSocket). What a connection may DO is
+decided by the adoption token. An unadopted connection can say hello and
+receive "pending", nothing else: no microphone audio is accepted from it and
+nothing is sent to it but that one word, until someone with satellites:admin
+adopts it. Nor can it take the place of an adopted satellite that is connected:
+a satellite's id is its MAC, and only the token proves the rest. Because anyone
+on the internet can say hello, at most PENDING_MAX unadopted satellites are
+kept (the oldest goes), and hellos that prove no adoption are taken at most
+HELLOS_PER_MINUTE a minute from one address; a hello with a valid token is
+never held back, so forty satellites reconnecting together after a restart,
+all from the gateway's address, come straight back.
 
 THE LISTENING PATH, per adopted satellite. The socket loop hands microphone
 frames to a bounded queue (the oldest frame goes when it is full, and is
@@ -106,7 +119,7 @@ import time
 import uuid
 import wave
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -119,22 +132,26 @@ import hashlib
 import math
 from datetime import UTC, datetime, timedelta
 
+import ipaddress
+from collections import OrderedDict
+
 import numpy as np
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
-from starlette.requests import ClientDisconnect
-from voice_common import auth, errors, health
+from starlette.requests import ClientDisconnect, HTTPConnection
+from starlette.types import ASGIApp, Receive, Scope, Send
+from voice_common import errors, health, identity
 from voice_common import logging as voice_logging
 from voice_common.errors import ApiError
 
-from . import (audio, dialogue, earcons, listening, secret_store, signing, telemetry, verify, wakeword,
-               wakewords_config)
+from . import (audio, dialogue, earcons, gateway, listening, secret_client, secret_import, signing,
+               telemetry, verify, wakeword, wakewords_config)
 from . import output as outputs
 from . import language as lang
 from . import router as routing
 from . import tools as tooling
-from .destinations import EnvName
+from .destinations import DestinationError, not_an_address, secret_url
 from .mqtt import MqttBridge
 from .store import (AIRPLAY_SETTINGS, AUDIO_SETTINGS, DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions,
                     firmware_older, keeps_a_mute, reported_config, satellite_config)
@@ -247,12 +264,74 @@ TRIGGER_FLASH_S = 0.3
 # transcript of noise is cut.
 VERIFY_HEARD_CHARS = 120
 
+# Who relays the device socket: the gateway's own principal, in the assertion
+# it adds to the upgrade (D53). No other caller may open the socket.
+RELAY = "svc:gateway-relay"
+# Anyone on the internet can say hello on the socket, so what that costs is
+# bounded: at most PENDING_MAX unadopted satellites are kept, the newest, and
+# hellos that prove no adoption are taken at most HELLOS_PER_MINUTE a minute
+# from one address, counted for at most HELLO_ADDRESSES addresses (D53,
+# recheck L10 and M-4).
+PENDING_MAX = 32
+HELLOS_PER_MINUTE = 10
+HELLO_ADDRESSES = 4096
+# The close code for a hello refused for now, and for a pending satellite
+# evicted by a newer one: "try again later" (RFC 6455).
+CLOSE_TRY_LATER = 1013
+# What satellites:control may change with PATCH: the controls Home Assistant
+# drives. Anything else (the name, the button mapping, how the ring is
+# mounted) is the satellite's configuration and needs satellites:admin (§3.5).
+CONTROL_FIELDS = frozenset({
+    "volume", "mic_gain_db", "mic_enabled", "speaker_enabled", "lights_enabled", "brightness",
+    "audio_sink", "audio_source", "echo_reference", "output_satellite", "airplay_enabled",
+    "airplay_name"})
+
 FIRMWARE_KEY: Any | None = None
 EXECUTOR: ThreadPoolExecutor | None = None
 
 
 def satellite_id(mac: str) -> str:
     return re.sub(r"[^0-9a-f]", "", mac.lower())
+
+
+def client_address(conn: HTTPConnection) -> str | None:
+    """The device's address: the last X-Forwarded-For entry, which the gateway
+    writes from its own view of the client (D67), else the peer. Believed
+    because every connection that reaches a handler carries the gateway's
+    assertion (D53), and the gateway drops any X-Forwarded-For it was sent.
+    Only an IP address is taken; anything else is the peer."""
+    forwarded = conn.headers.get("x-forwarded-for")
+    if forwarded:
+        try:
+            return str(ipaddress.ip_address(forwarded.split(",")[-1].strip()))
+        except ValueError:
+            pass
+    return conn.client.host if conn.client else None
+
+
+def is_admin(request: HTTPConnection) -> bool:
+    """Does this request's assertion hold satellites:admin?"""
+    return identity.has(identity.claims_of(request), "satellites:admin")
+
+
+class RelayOnlyOnTheSocket:
+    """The relay's assertion opens the device socket and nothing else: 403 on
+    every HTTP request that carries it. It holds no scope, and the hub checks
+    none on most routes (the gateway does), so without this an assertion
+    minted for the relay, or replayed within its minute, would adopt, forget
+    and read telemetry like an admin's (deny by default)."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        claims = (scope.get("state") or {}).get(identity.STATE_CLAIMS)
+        if scope["type"] == "http" and getattr(claims, "sub", None) == RELAY:
+            refused = ApiError(403, "the gateway's relay may open the device socket and "
+                                    "nothing else", code="relay_only")
+            await errors.render(refused)(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
 # ---- live connections -------------------------------------------------------
@@ -353,9 +432,12 @@ class Session:
         self.id = satellite_id(hello.get("id", ""))
         self.connected_at = time.time()
         # Behind the gateway every peer is the gateway; it passes the device's
-        # own address along. Display only -- nothing is decided on it.
-        self.address = ws.headers.get("x-forwarded-for") or (ws.client.host if ws.client else None)
+        # own address along. Shown, and what tokenless hellos are counted by.
+        self.address = client_address(ws)
         self.adopted = False
+        # Closed to make room for a newer pending satellite: not remembered
+        # as seen when its socket ends (Hub.limit_pending).
+        self.evicted = False
         self.status: dict = {}
         self.taps: set[asyncio.Queue] = set()
         self.speaker: asyncio.Queue[bytes | Clip] = asyncio.Queue()
@@ -416,6 +498,12 @@ class Session:
     async def send_bytes(self, data: bytes) -> None:
         async with self.lock:
             await self.ws.send_bytes(data)
+
+    async def close(self, code: int) -> None:
+        """Close from outside the socket's own loop: under the lock, so it
+        never lands in the middle of another send."""
+        async with self.lock:
+            await self.ws.close(code=code)
 
     async def send_if(self, allowed: Callable[[], bool], obj: dict | None = None,
                       data: bytes | Callable[[], bytes] | None = None) -> bool:
@@ -667,24 +755,25 @@ class Voice:
             out.append(w.as_json() | {"state": state, "error": error})
         return out
 
-    def describe(self) -> dict:
+    async def describe(self, *, admin: bool) -> dict:
+        """GET /satellites/wake-words. Whole for satellites:admin; anyone else
+        gets redacted_words(): Home Assistant needs a word's name and mode,
+        and nothing of where its words go or which secret goes with them."""
+        if not admin:
+            return {"words": [redacted_word(v) for v in self.views()],
+                    "ptt": {"mode": self.assignment.ptt.mode}}
         actions = wakewords_config.WordActions(self.assignment)
-        env = actions.env_vars()
-        held = secret_store.current()
         return {"available": wakewords_config.available(self.model_dir), "words": self.views(),
                 "ptt": self.assignment.ptt.model_dump(mode="json"),
                 "custom": wakewords_config.custom(self.model_dir),
-                # Which secrets the actions name have a value: names and
-                # booleans only, never a value.
-                "env": env,
-                # And where each value lives, "environment" or "hub", for
-                # every name an action reads or the hub holds: what the page's
-                # key box says, and whether it offers Store or Clear.
-                "secrets": routing.secret_sources(set(env) | set(held.names())),
+                # Which secrets the actions name have a value in the secret
+                # store: names and booleans only, never a value. The page
+                # stores one through PUT /admin/secrets/{name}.
+                "env": await routing.env_status(actions.env_vars()),
                 # Which of a language model's tools work on this hub: web
                 # search only with SATELLITES_SEARXNG_URL.
                 "tools": tooling.available(),
-                "warnings": actions.warnings(lookup_satellite_safe) + secret_warnings(env),
+                "warnings": actions.warnings(lookup_satellite_safe),
                 "load_error": self.assignment.load_error}
 
     def health(self) -> dict:
@@ -824,6 +913,61 @@ class Voice:
 OTA_RESULT_S = 600
 
 
+def redacted_word(view: dict) -> dict:
+    """A wake word as satellites:read sees it (§3.5): its name, threshold,
+    satellites, mode and state, and its action by kind alone ("ha_assist",
+    "llm", ...). Nothing of where its words go or which secret goes with
+    them; named fields, so one added to a word tomorrow is not shown here."""
+    kind = ((view.get("action") or {}).get("destination") or {}).get("type")
+    return {k: view.get(k) for k in ("name", "threshold", "satellites", "mode", "state")} | {
+        "action": {"type": kind} if kind else None}
+
+
+def shown_buttons(nid: str, buttons: dict) -> dict:
+    """A button mapping as satellites:admin sees it. A raw webhook URL still
+    waiting to be imported (secret_import.py) is shown under the secret it is
+    being imported as, never as the URL: the URL is the secret (D62)."""
+    return {button: {edge: (f"webhook:secret:{secret_import.button_secret(nid, button, edge)}"
+                            if secret_import.RAW_WEBHOOK.match(str(action)) else action)
+                     for edge, action in (edges or {}).items()}
+            for button, edges in buttons.items()}
+
+
+def shown_config(nid: str, config: dict | None, *, admin: bool) -> dict | None:
+    """A satellite's config for a caller: `buttons` only with satellites:admin
+    (D62). Home Assistant builds its button entities from caps.buttons."""
+    if config is None:
+        return None
+    if not admin:
+        return {k: v for k, v in config.items() if k != "buttons"}
+    return config | {"buttons": shown_buttons(nid, config.get("buttons") or {})}
+
+
+class HelloThrottle:
+    """Hellos that prove no adoption, counted per address for a minute.
+
+    Bounded however many addresses come (recheck M-4): the least recently
+    heard is forgotten first, which costs it only its count."""
+
+    def __init__(self, per_minute: int = HELLOS_PER_MINUTE, addresses: int = HELLO_ADDRESSES,
+                 clock: Callable[[], float] = time.monotonic):
+        self.per_minute, self.addresses, self.clock = per_minute, addresses, clock
+        self._heard: OrderedDict[str, deque[float]] = OrderedDict()
+
+    def allow(self, address: str | None) -> bool:
+        now, key = self.clock(), address or "unknown"
+        heard = self._heard.pop(key, None) or deque()
+        while heard and now - heard[0] >= 60.0:
+            heard.popleft()
+        allowed = len(heard) < self.per_minute
+        if allowed:
+            heard.append(now)
+        self._heard[key] = heard
+        while len(self._heard) > self.addresses:
+            self._heard.popitem(last=False)
+        return allowed
+
+
 def _ota_view(s: "Session | None") -> dict | None:
     if s is None or not s.ota:
         return None
@@ -850,6 +994,7 @@ class Hub:
         self.cooldown: dict[tuple[str, str], float] = {}
         # Off until turned on (telemetry.py); None in a hub built without one.
         self.telemetry: telemetry.Recorder | None = None
+        self.hellos = HelloThrottle()
 
     def record(self, record: dict) -> None:
         """One telemetry record, when telemetry is on."""
@@ -911,7 +1056,10 @@ class Hub:
         Assistant, and the satellite stays offline."""
         return s is not None and (s.adopted or s.id not in self.store.satellites)
 
-    def describe(self, nid: str) -> dict:
+    def describe(self, nid: str, *, admin: bool = False) -> dict:
+        """One satellite, for the API (with `admin` from the caller's
+        assertion), for MQTT and for the events: without satellites:admin,
+        and by default, no `config.buttons` (D62)."""
         rec = self.store.satellites.get(nid)
         s = self.sessions.get(nid)
         if not self.speaks_for(s):
@@ -924,10 +1072,12 @@ class Hub:
             "online": s is not None,
             "model": s.model if s else (rec.model if rec else seen.get("model")),
             "firmware": s.fw if s else seen.get("fw"),
-            "address": s.address if s else None,
+            # Where a pending one said hello from, connected or not (recheck
+            # L10): the address a stranger's hellos come from is worth seeing.
+            "address": s.address if s else seen.get("address"),
             "connected_at": s.connected_at if s else None,
             "last_seen": seen.get("last_seen"),
-            "config": rec.config if rec else None,
+            "config": shown_config(nid, rec.config if rec else None, admin=admin),
             "status": s.status if s else {},
             # Offline, the caps it last proved its adoption with: what it is
             # does not change when it is switched off. {} is never seen.
@@ -1069,6 +1219,28 @@ class Hub:
         rec = self.store.satellites.get(s.id)
         return rec.config if rec else {}
 
+    def imported_buttons(self, imported: dict[tuple[str, str, str], str]) -> None:
+        """Button webhooks the secret store now holds: each mapping names its
+        secret instead of the URL (D62), and satellites.json holds no URL."""
+        changed = set()
+        for (nid, button, edge), name in imported.items():
+            rec = self.store.satellites.get(nid)
+            edges = (rec.config.get("buttons") or {}).get(button) if rec else None
+            if edges and secret_import.RAW_WEBHOOK.match(str(edges.get(edge, ""))):
+                edges[edge] = f"webhook:secret:{name}"
+                changed.add(nid)
+        if not changed:
+            return
+        try:
+            self.store.save_satellites()
+        except OSError as e:
+            log.error("could not save %s after importing button webhooks (%s); saved with the "
+                      "next change", "satellites.json", type(e).__name__)
+        for nid in sorted(changed):
+            self.publish({"type": "config", "satellite": nid, "changed": ["buttons"]})
+            _mqtt_satellite(nid)
+        log.info("button webhooks now name their secrets on %s", ", ".join(sorted(changed)))
+
     def proves_adoption(self, s: Session) -> bool:
         rec = self.store.satellites.get(s.id)
         return bool(rec and rec.accepts(s.hello.get("token") or None))
@@ -1164,9 +1336,32 @@ class Hub:
             if rec and token:
                 log.warning("satellite %s presented a token that does not match its adoption", s.id)
             if self.speaks_for(s):
-                self.seen[s.id] = {"model": s.model, "fw": s.fw, "last_seen": time.time()}
+                self.seen[s.id] = {"model": s.model, "fw": s.fw, "last_seen": time.time(),
+                                   "address": s.address}
             await s.send_json({"type": "pending"})
             self.publish({"type": "pending", "satellite": s.id, "address": s.address})
+            await self.limit_pending()
+
+    async def limit_pending(self) -> None:
+        """Keep at most PENDING_MAX unadopted satellites, the newest. Anyone on
+        the internet can say hello under any MAC, and refusing the newest
+        would let them keep a real satellite off the list (recheck L10); an
+        evicted one that is real says hello again and is back. A connected
+        one is closed, and not remembered as seen when its socket ends."""
+        when = {nid: info.get("last_seen", 0.0) for nid, info in self.seen.items()
+                if nid not in self.store.satellites}
+        for nid, s in self.sessions.items():
+            if not s.adopted and nid not in self.store.satellites:
+                when[nid] = max(when.get(nid, 0.0), s.connected_at)
+        for nid in sorted(when, key=when.get)[:max(0, len(when) - PENDING_MAX)]:
+            self.seen.pop(nid, None)
+            s = self.sessions.get(nid)
+            if s is not None and not s.adopted:
+                s.evicted = True
+                await _quietly(s.close(CLOSE_TRY_LATER))
+            # DEBUG: a stranger's flood of hellos would otherwise flood the log.
+            log.debug("satellite %s: pending for longest, forgotten to make room for a newer one",
+                      nid)
 
     # -- listening ----------------------------------------------------------
 
@@ -1749,21 +1944,34 @@ class Hub:
         elif act == "stop":
             await self.stop(s)
         elif act.startswith("webhook:"):
+            # webhook:secret:<NAME>, or a raw URL still waiting to be imported,
+            # which is sent only as the secret it is being imported as: a raw
+            # URL written into satellites.json by hand after the import window
+            # closed has no such secret, and goes nowhere (recheck L5).
+            named = secret_import.SECRET_WEBHOOK.match(act)
+            name = named.group(1) if named else secret_import.button_secret(s.id, button, action)
             rec = self.store.satellites.get(s.id)
-            self.spawn(self._button_webhook(act.removeprefix("webhook:"), {
+            self.spawn(self._button_webhook(name, {
                 "satellite": rec.name if rec else s.id, "satellite_id": s.id, "button": button,
                 "action": action, "held_ms": held_ms}), name=f"button-{s.id}")
 
-    async def _button_webhook(self, url: str, body: dict) -> None:
-        # Redirects are not followed (the client says so), and the whole call
-        # is bounded, as every call router.py makes is.
+    async def _button_webhook(self, name: str, body: dict) -> None:
+        """POST to the address the secret `name` holds, if its host is one the
+        secret names (D41, D62). Every line names the secret and never the
+        address: a Home Assistant webhook's id is a credential (recheck M-2).
+        Redirects are not followed (the client says so), and the whole call is
+        bounded, as every call router.py makes is."""
         try:
+            url = await secret_url(name)
             async with asyncio.timeout(10):
                 r = await self.http.post(url, json=body)
-            if r.status_code >= 400:
-                log.warning("button webhook %s answered %d", url, r.status_code)
+            # A redirect is not followed, so a 3xx delivered nothing either.
+            if r.status_code >= 300:
+                log.warning("button webhook %s answered %d", name, r.status_code)
+        except DestinationError as e:
+            log.warning("button webhook %s: nothing was sent: %s", name, e)
         except Exception as e:
-            log.warning("button webhook %s failed: %s", url, e or type(e).__name__)
+            log.warning("button webhook %s failed: %s", name, type(e).__name__)
 
 
 hub: Hub
@@ -2588,19 +2796,6 @@ def _named_actions() -> list:
             if b is not None and b.action is not None]
 
 
-def secret_warnings(read: dict[str, bool]) -> list[str]:
-    """A sentence for each key the hub holds that nothing reads, and for a
-    secrets.json that did not load. `read` is the names the actions read (a
-    WordActions.env_vars()). A stored key no action names is either left over
-    or waiting for a Save; either way the page should say so rather than
-    leave a key on the volume nobody knows is there."""
-    held = secret_store.current()
-    out = [held.load_error] if held.load_error else []
-    out += [f"a key is stored on the hub as {name}, and no action reads it"
-            for name in held.names() if name not in read]
-    return out
-
-
 def lookup_satellite_safe(ref: str) -> tuple[str, str] | None:
     """lookup_satellite for a Voice that may exist before the hub does."""
     try:
@@ -2631,15 +2826,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     hub.telemetry = telemetry.Recorder(DATA_DIR, os.environ.get("SATELLITES_TELEMETRY"))
     telemetry.install(hub.telemetry)
     log.info("telemetry %s", f"on ({hub.telemetry.level})" if hub.telemetry.enabled else "off")
-    # Before anything that could make a request with a key: the keys the hub
-    # holds, by name, beside the environment's (secret_store.py).
-    held = secret_store.configure(secret_store.SecretStore(DATA_DIR))
-    if held.names():
-        log.info("keys stored on the hub: %s", ", ".join(held.names()))
-    for name in held.names():
-        if os.environ.get(name):
-            log.warning("%s is set in the environment and stored on the hub; the environment's "
-                        "value is the one sent", name)
     # The page learns that a word finished downloading (or failed) from the
     # event stream, rather than by polling GET /satellites/wake-words.
     hub.voice = Voice(MODEL_DIR, FRONTEND, wakewords_config.Assignment.open(DATA_DIR, WAKE_WORDS),
@@ -2657,7 +2843,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # py3langid takes 0.4 s to load; paid now, off the event loop, rather than
     # by the first utterance.
     hub.spawn(asyncio.to_thread(lang.detector.load), name="language")
-    hub.bridge = MqttBridge.from_env()
+    # What the hub held itself (secrets.json, the environment, button URLs,
+    # the broker's password) goes into the secret store, and is used from
+    # there; until the gateway answers, from here (secret_import.py). Made
+    # before the MQTT bridge asks for the broker's password.
+    importing = secret_import.Import(
+        data_dir=DATA_DIR, targets=wakewords_config.WordActions(hub.voice.assignment).targets(),
+        satellites={nid: rec.config for nid, rec in hub.store.satellites.items()},
+        on_buttons=hub.imported_buttons)
+    hub.spawn(importing.run(), name="secret-import")
+    hub.bridge = MqttBridge.from_env(password=mqtt_password)
     await hub.bridge.start(hub, on_command=mqtt_command)
     hub.spawn(hub.voice.reconcile(), name="wake-words")
     log.info("%d adopted satellites, %d firmware images in %s",
@@ -2673,26 +2868,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await hub.bridge.stop()
         await routing.current().aclose()
         await hub.http.aclose()
+        await secret_client.current().aclose()
         EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
+def _health() -> dict:
+    """The hub's part of /health, once the lifespan has built the hub."""
+    h = globals().get("hub")
+    if h is None:
+        return {}
+    return {
+        "satellites": {"online": len(h.sessions), "adopted": len(h.store.satellites),
+                       "pending": sum(1 for s in h.sessions.values() if not s.adopted)},
+        "tts": TTS_URL or None,
+        "voice": h.voice.health(),
+        "routing": {"rules": sum(1 for w in h.voice.assignment.words if w.behaviour),
+                    "stt": routing.current().stt_url or None,
+                    "stt_engine": routing.current().stt_engine,
+                    "load_error": routing.current().rules.load_error},
+        "mqtt": h.bridge.health() if h.bridge else None,
+    }
+
+
 app = FastAPI(title="voice-satellites", lifespan=lifespan)
+# Its 422 on a native route says what was wrong and never repeats what was
+# sent: a token pasted into token_env stays out of the answer.
 errors.install_errors(app)
-# After install_errors, whose 422 under /satellites repeats what was sent
-# (router.quiet_validation says where that was measured).
-routing.quiet_validation(app)
-health.install_health(app, details=lambda: {
-    "satellites": {"online": len(hub.sessions), "adopted": len(hub.store.satellites),
-              "pending": sum(1 for s in hub.sessions.values() if not s.adopted)},
-    "tts": TTS_URL or None,
-    "voice": hub.voice.health(),
-    "routing": {"rules": sum(1 for w in hub.voice.assignment.words if w.behaviour),
-                "stt": routing.current().stt_url or None,
-                "stt_engine": routing.current().stt_engine,
-                "load_error": routing.current().rules.load_error},
-    "mqtt": hub.bridge.health() if hub.bridge else None,
-})
-auth.install(app, "SATELLITES_API_KEYS")
+health.install_health(app, details=_health)
+identity.install(app, "satellites", credentials=gateway.CREDENTIALS)
+# Inside identity's guard, which is always outermost and has put the claims
+# on the scope by then.
+app.add_middleware(RelayOnlyOnTheSocket)
 # Before every /satellites/{nid} route below: FastAPI matches in registration
 # order, and GET /satellites/{nid} would otherwise take "routing" for a
 # satellite id.
@@ -2714,17 +2920,29 @@ LEGACY_SOCKET = "/nodes/ws"
 @app.websocket(SOCKET)
 @app.websocket(LEGACY_SOCKET)
 async def satellite_socket(ws: WebSocket) -> None:
+    # The gateway's relay and nothing else (D53): identity.install has
+    # verified the assertion, and this says whose it must be. Closed before
+    # the upgrade is accepted, so the socket never opens.
+    if identity.claims_of(ws).sub != RELAY:
+        await ws.close(code=1008)
+        return
     await ws.accept()
     try:
         first = await asyncio.wait_for(ws.receive_json(), timeout=10)
     except Exception:
         await ws.close(code=1008)
         return
-    if first.get("type") != "hello" or not satellite_id(first.get("id", "")):
+    if (not isinstance(first, dict) or first.get("type") != "hello"
+            or not isinstance(first.get("id"), str) or not satellite_id(first["id"])):
         await ws.close(code=1008)
         return
 
     s = Session(ws, first)
+    if not hub.proves_adoption(s) and not hub.hellos.allow(s.address):
+        log.debug("satellite %s: a hello without its token from %s, over %d a minute; refused",
+                  s.id, s.address, HELLOS_PER_MINUTE)
+        await ws.close(code=CLOSE_TRY_LATER)
+        return
     old = hub.sessions.get(s.id)
     if old is not None and old.adopted and not hub.proves_adoption(s):
         # A satellite's id is its MAC, which is no secret. Only a connection
@@ -2807,8 +3025,9 @@ async def satellite_socket(ws: WebSocket) -> None:
             log.warning("satellite %s disconnected during an update", s.id)
         if hub.sessions.get(s.id) is s:
             del hub.sessions[s.id]
-        if hub.speaks_for(s):
-            hub.seen[s.id] = {"model": s.model, "fw": s.fw, "last_seen": time.time()}
+        if hub.speaks_for(s) and not s.evicted:
+            hub.seen[s.id] = {"model": s.model, "fw": s.fw, "last_seen": time.time(),
+                              "address": s.address}
         hub.publish({"type": "offline", "satellite": s.id})
         log.info("satellite %s disconnected", s.id)
 
@@ -2820,6 +3039,9 @@ async def on_message(s: Session, msg: dict) -> None:
     kind = msg.get("type")
     if kind == "hello":  # sent again after adoption, with the new token
         s.update(msg)
+        if not hub.proves_adoption(s) and not hub.hellos.allow(s.address):
+            await s.close(CLOSE_TRY_LATER)
+            return
         await hub.greet(s)
     elif kind == "status":
         was_muted = bool(s.status.get("muted"))
@@ -2900,12 +3122,14 @@ class AdoptBody(BaseModel):
 
 
 # A button as the satellite names it, and what the hub does when it is pressed
-# or released. A webhook URL may not carry a user and password: the mapping is
-# returned by GET /satellites, as a rule is by GET /satellites/routing.
+# or released. A webhook is webhook:secret:<NAME>, a secret_url secret in the
+# store (D62): its URL is a credential, and the mapping is answered by GET
+# /satellites. Any other webhook: action passes the pattern only so that
+# configure() can refuse it with the code the page acts on (use_secret).
 ButtonName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_-]{1,32}$")]
 ButtonAction = Annotated[str, StringConstraints(
-    pattern=r"^(ptt|stop|none|mute|volume_up|volume_down|lights|dimmer|brighter"
-            r"|webhook:https?://[^\s/?#@]+(/\S*)?)$", max_length=500)]
+    pattern=r"^(ptt|stop|none|mute|volume_up|volume_down|lights|dimmer|brighter|webhook:\S+)$",
+    max_length=500)]
 
 
 class ConfigBody(BaseModel):
@@ -3002,51 +3226,73 @@ class WakeWordsBody(BaseModel):
     ptt: dict | None = None
 
 
-class SecretBody(BaseModel):
-    """A key for the hub to hold, or None to clear it. Both in the body and
-    never in the path, because the gateway and voice-ui log paths. Refused
-    with a 422 that repeats neither (router.quiet_validation): a value with a
-    space or a control character in it, or over 4096 characters, a name that
-    is not a variable's, and any other field, so a key pasted as the name or
-    beside it is never stored under a name it is not."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: EnvName
-    # Required, so a body that leaves the value out is a 422 and not a clear.
-    value: Annotated[str, StringConstraints(min_length=1, max_length=4096,
-                                            pattern=secret_store.SECRET_VALUE)] | None
-
-
 def _mqtt_satellite(nid: str) -> None:
+    # describe() without satellites:admin: MQTT never carries `buttons` (D62).
     if hub.bridge is not None:
         hub.bridge.publish_satellite(hub.describe(nid))
 
 
+async def mqtt_password() -> str | None:
+    """The broker's password: the secret SATELLITES_MQTT_PASSWORD, sent only
+    to the broker its allowed hosts name (D41, D46)."""
+    broker = secret_client.origin(os.environ.get("SATELLITES_MQTT_URL")) or ""
+    try:
+        return await secret_client.current().value_for(secret_import.MQTT_PASSWORD, broker)
+    except secret_client.HostNotAllowed as e:
+        log.warning("MQTT: %s; connecting without a password", e)
+        return None
+
+
 async def mqtt_command(nid: str, change: dict) -> None:
     """A Home Assistant switch or slider: the same path as PATCH, so it is
-    validated, saved and sent to the satellite in exactly one place."""
-    await configure(nid, ConfigBody(**change))
+    validated, saved and sent to the satellite in exactly one place. Only
+    the controls (mqtt.parse_command), so not as satellites:admin."""
+    await update_satellite(nid, ConfigBody(**change), admin=False)
 
 
 @app.get("/satellites")
-async def list_satellites() -> dict:
+async def list_satellites(request: Request) -> dict:
     ids = set(hub.store.satellites) | set(hub.sessions) | set(hub.seen)
-    return {"satellites": sorted((hub.describe(n) for n in ids),
-                            key=lambda d: (not d["adopted"], d["name"], d["id"]))}
+    admin = is_admin(request)
+    return {"satellites": sorted((hub.describe(n, admin=admin) for n in ids),
+                                 key=lambda d: (not d["adopted"], d["name"], d["id"]))}
+
+
+# What was said in the house, and what was said back. The same speech in Jobs
+# is system-owned and needs jobs:read:all (D32), so a satellites:read key made
+# for firmware uploads or monitoring must not be a live feed of it.
+# `error` goes too, because an LLM's or a webhook's error can quote the command.
+SPOKEN = ("transcript", "reply_text", "spoken_text", "error", "heard")
+SPOKEN_IN = ("turn", "routed", "wake_rejected")
+
+
+def for_subscriber(event: dict, *, admin: bool, hears: bool) -> dict:
+    """An event as one subscriber of /satellites/events sees it. The wake
+    words' actions go only to satellites:admin, as GET /satellites/wake-words
+    gives them (§3.5); what a turn heard and said goes only to a subscriber
+    that `hears` (satellites:control or satellites:admin, which Home Assistant
+    holds). A `config` event names what changed, never a value."""
+    if not admin and event.get("type") == "wake_words":
+        return event | {"words": [redacted_word(w) for w in event.get("words") or ()]}
+    if not hears and event.get("type") in SPOKEN_IN:
+        return {k: v for k, v in event.items() if k not in SPOKEN}
+    return event
 
 
 @app.get("/satellites/events")
 async def events(request: Request) -> StreamingResponse:
     q: asyncio.Queue = asyncio.Queue()
     hub.listeners.add(q)
+    admin = is_admin(request)
+    hears = admin or identity.has(identity.claims_of(request), "satellites:control")
 
     async def stream() -> AsyncIterator[bytes]:
         try:
             yield b": connected\n\n"
             while not await request.is_disconnected():
                 try:
-                    ev = await asyncio.wait_for(q.get(), timeout=15)
+                    ev = for_subscriber(await asyncio.wait_for(q.get(), timeout=15),
+                                        admin=admin, hears=hears)
                     yield f"data: {json.dumps(ev)}\n\n".encode()
                 except asyncio.TimeoutError:
                     yield b": keepalive\n\n"
@@ -3060,12 +3306,12 @@ async def events(request: Request) -> StreamingResponse:
 # Above GET /satellites/{nid}, which would otherwise take "wake-words" for a
 # satellite id and answer 404.
 @app.get("/satellites/wake-words")
-async def get_wake_words() -> dict:
-    return hub.voice.describe()
+async def get_wake_words(request: Request) -> dict:
+    return await hub.voice.describe(admin=is_admin(request))
 
 
 @app.put("/satellites/wake-words")
-async def put_wake_words(body: WakeWordsBody) -> dict:
+async def put_wake_words(body: WakeWordsBody, request: Request) -> dict:
     """Replace every wake word: its model, threshold, satellites and what it
     does. Live at once: a threshold reaches every detector, a word taken off
     a satellite is no longer heard there, a word's action applies to the
@@ -3080,6 +3326,9 @@ async def put_wake_words(body: WakeWordsBody) -> dict:
             saved=hub.voice.assignment, ptt=body.ptt)
     except ValueError as e:
         raise ApiError(422, str(e), code="invalid_wake_words") from None
+    await refuse_non_addresses(
+        (t.name for b in [w.behaviour for w in words] + [ptt] if b is not None and b.action
+         for t in b.action.destination.targets() if t.holds_url), "words")
     try:
         hub.voice.replace(words, ptt)
     except OSError as e:
@@ -3090,30 +3339,7 @@ async def put_wake_words(body: WakeWordsBody) -> dict:
         f"{'every satellite' if w.satellites == ['*'] else w.satellites}"
         for w in words) or "none")
     hub.spawn(hub.voice.reconcile(), name="wake-words")
-    return hub.voice.describe()
-
-
-@app.put("/satellites/secrets")
-async def put_secret(body: SecretBody) -> dict:
-    """Store a key under a name the hub holds, or clear it (value null).
-    Answers the whole wake word view, as a Save does, so the page takes the
-    new `env` and `secrets` in the same turn as its other writes.
-
-    Refused with 409 when the environment already sets that name: the
-    environment wins (destinations._secret), and a stored value it shadows
-    would look stored and never be sent. Clearing is always allowed. The log
-    names the key, never its value."""
-    if body.value is not None and os.environ.get(body.name):
-        raise ApiError(409, f"{body.name} is set in the hub's environment, which wins over a key "
-                            "stored here: change it there, or name the key differently",
-                       code="set_in_environment", param="name")
-    try:
-        secret_store.current().set(body.name, body.value)
-    except OSError as e:
-        raise ApiError(500, f"could not write {secret_store.FILE}: {e.strerror or type(e).__name__}",
-                       type_="server_error") from None
-    log.info("secret %s %s", body.name, "cleared" if body.value is None else "stored on the hub")
-    return hub.voice.describe()
+    return await hub.voice.describe(admin=is_admin(request))
 
 
 class TelemetryBody(BaseModel):
@@ -3240,7 +3466,7 @@ async def upload_wake_word_model(request: Request,
     os.replace(tmp, d / f"{name}.onnx")
     log.info("custom wake word model %s stored (%d bytes)", name, len(data))
     hub.spawn(hub.voice.reconcile(), name="wake-words")
-    return hub.voice.describe()
+    return await hub.voice.describe(admin=is_admin(request))
 
 
 @app.delete("/satellites/wake-words/models/{name}")
@@ -3344,12 +3570,12 @@ async def start_ota(body: OtaBody) -> dict:
 
 
 @app.get("/satellites/{nid}")
-async def get_satellite(nid: str) -> dict:
-    return hub.describe(hub.resolve(nid))
+async def get_satellite(nid: str, request: Request) -> dict:
+    return hub.describe(hub.resolve(nid), admin=is_admin(request))
 
 
 @app.post("/satellites/{nid}/adopt")
-async def adopt(nid: str, body: AdoptBody) -> dict:
+async def adopt(nid: str, body: AdoptBody, request: Request) -> dict:
     s = hub.session(nid, adopted=False)
     name = body.name or f"satellite-{s.id[-4:]}"
     token = hub.store.adopt(s.id, name, s.model, reported=s.reported())
@@ -3357,7 +3583,7 @@ async def adopt(nid: str, body: AdoptBody) -> dict:
     await s.send_json({"type": "adopt", "token": token, "name": name})
     log.info("satellite %s adopted as %r", s.id, name)
     _mqtt_satellite(s.id)
-    return hub.describe(s.id)
+    return hub.describe(s.id, admin=is_admin(request))
 
 
 @app.post("/satellites/{nid}/forget")
@@ -3384,13 +3610,64 @@ async def forget(nid: str) -> Response:
     return Response(status_code=204)
 
 
+def checked_buttons(nid: str, buttons: dict, saved: dict) -> dict:
+    """A PATCH's button mapping, with every webhook naming a secret (D62).
+
+    A raw URL is refused with use_secret, and never repeated: it is a
+    credential, and the page opens its secret picker on that code. A raw URL
+    the hub still holds while its import is pending is shown under the
+    secret it is being imported as (shown_buttons); sent back as shown, it is
+    kept as it is, so a Save before the gateway confirms loses nothing."""
+    out: dict = {}
+    for button, edges in buttons.items():
+        out[button] = {}
+        for edge, action in edges.items():
+            if action.startswith("webhook:") and not secret_import.SECRET_WEBHOOK.match(action):
+                raise ApiError(422, "a button's webhook names a secret_url secret, as "
+                                    "webhook:secret:<NAME>: its address is a credential and is "
+                                    "kept in the secret store (Admin › Secrets), never in the "
+                                    "mapping", code="use_secret", param="buttons")
+            old = (saved.get(button) or {}).get(edge)
+            if (isinstance(old, str) and secret_import.RAW_WEBHOOK.match(old)
+                    and action == f"webhook:secret:{secret_import.button_secret(nid, button, edge)}"):
+                action = old
+            out[button][edge] = action
+    return out
+
+
+async def refuse_non_addresses(names: Iterable[str], param: str) -> None:
+    """422 not_a_secret_url when a webhook is about to name, as its address,
+    a secret the store holds as another kind (recheck L5). A name the store
+    does not hold yet passes: it may be stored after it is named, and the
+    press or the wake word is refused then if it is still no address."""
+    for name in sorted(set(names)):
+        problem = await not_an_address(name)
+        if problem is not None:
+            raise ApiError(422, problem, code="not_a_secret_url", param=param)
+
+
 @app.patch("/satellites/{nid}")
-async def configure(nid: str, body: ConfigBody) -> dict:
+async def configure(nid: str, body: ConfigBody, request: Request) -> dict:
+    admin = is_admin(request)
+    return hub.describe(await update_satellite(nid, body, admin=admin), admin=admin)
+
+
+async def update_satellite(nid: str, body: ConfigBody, *, admin: bool) -> str:
+    """PATCH /satellites/{id}, and Home Assistant's switches over MQTT. The
+    controls (CONTROL_FIELDS) need satellites:control, which the gateway
+    checked; anything else needs satellites:admin as well (§3.5). The id."""
     nid = hub.resolve(nid)
     rec = hub.store.satellites.get(nid)
     if rec is None:
         raise ApiError(404, "no adopted satellite with that id")
     change = body.model_dump(exclude_none=True)
+    if not admin and any(k not in CONTROL_FIELDS for k in change):
+        raise errors.insufficient_scope(["satellites:admin"])
+    if "buttons" in change:
+        change["buttons"] = checked_buttons(nid, change["buttons"], rec.config.get("buttons") or {})
+        await refuse_non_addresses(
+            (named.group(1) for edges in change["buttons"].values() for action in edges.values()
+             if (named := secret_import.SECRET_WEBHOOK.match(action))), "buttons")
     s = hub.sessions.get(nid)
     # Offline, the caps it last proved its adoption with: a Korvo that is
     # switched off still has no audio devices. Refused only on what is known,
@@ -3450,7 +3727,7 @@ async def configure(nid: str, body: ConfigBody) -> dict:
     if change:
         hub.publish({"type": "config", "satellite": nid, "changed": sorted(change)})
     _mqtt_satellite(nid)
-    return hub.describe(nid)
+    return nid
 
 
 @app.get("/satellites/{nid}/airplay/artwork")
@@ -3551,10 +3828,13 @@ async def say(nid: str, body: SayBody) -> Response:
     s = _speaker_on(hub.speaker_for(hub.session(nid)))
     if not TTS_URL:
         raise ApiError(503, "SATELLITES_TTS_URL is not set, so there is no voice to speak with")
-    async with httpx.AsyncClient(timeout=120) as c:
-        r = await c.post(f"{TTS_URL}/v1/audio/speech", json={
-            "model": "kokoro", "voice": body.voice or TTS_VOICE, "input": body.text,
-            "response_format": "pcm"})
+    async with httpx.AsyncClient(timeout=120, follow_redirects=False) as c:
+        try:
+            r = await gateway.request(c, "POST", f"{TTS_URL}/v1/audio/speech", json={
+                "model": "kokoro", "voice": body.voice or TTS_VOICE, "input": body.text,
+                "response_format": "pcm"})
+        except gateway.NotReady as e:
+            raise ApiError(503, f"tts: {e}", code="not_ready") from None
     if r.status_code != 200:
         raise ApiError(502, f"tts answered {r.status_code}: {r.text[:200]}")
     # Asked again: synthesis takes seconds, and the speaker may have been
@@ -3766,9 +4046,12 @@ async def airplay_command(nid: str, command: Literal[AIRPLAY_COMMANDS]) -> dict:
     return {"command": command, "status": result.get("status"), "confirmed": result.get("confirmed")}
 
 
-@app.get("/satellites/{nid}/listen")
+@app.post("/satellites/{nid}/listen")
 async def listen(nid: str, seconds: float = Query(5, gt=0, le=60),
                  channel: int | None = Query(None, ge=0, le=7)) -> Response:
+    """A recording of the raw microphone channels. A POST, not a GET: it
+    opens a microphone, which a link or an <img> on another site must never
+    do (D15, H3); the gateway audits each one."""
     s = hub.session(nid)
     if s.status.get("muted"):
         raise ApiError(409, "the satellite is muted at the device; only its REC button unmutes it")

@@ -2,7 +2,7 @@
 """Benchmark stt-stack across locales, sources and recording conditions.
 
     python bench.py fetch                      cache samples locally
-    python bench.py run  --url http://host:8000
+    python bench.py run  --url https://calliope.example
     python bench.py report                     compare runs
 
 Fetching is separate from running so every run uses byte-identical audio. A
@@ -143,10 +143,10 @@ def run(url: str, label: str, conditions: list[str], limit: int | None,
     rng = np.random.default_rng(0)
     results = []
 
-    # The benchmark is a client like any other. Point it at a service with
-    # STT_API_KEYS set and every request comes back 401 unless STT_API_KEY is
-    # exported here.
-    key = os.getenv("STT_API_KEY", "").strip()
+    # The benchmark is a client like any other. stt-stack answers only what
+    # the Calliope gateway forwards, so --url is the gateway and CALLIOPE_KEY
+    # an API key holding speech:transcribe; without one every request is a 401.
+    key = os.getenv("CALLIOPE_KEY", "").strip()
     headers = {"Authorization": f"Bearer {key}"} if key else {}
 
     local = None

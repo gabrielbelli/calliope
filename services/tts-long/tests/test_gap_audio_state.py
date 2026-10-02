@@ -37,6 +37,11 @@ def _wait(client, job_id: str, timeout: float = 30.0) -> dict:
     raise AssertionError(f"job {job_id} never finished")
 
 
+# A run another service posted is a system record: the admin these tests run
+# as reaches it by ID only by naming the system rows (D32).
+SYSTEM = {"owner": "system"}
+
+
 def _imported(client, kind: str) -> str:
     """One finished run from another service, as that service posts it."""
     created = client.post("/runs", json={
@@ -59,13 +64,15 @@ def test_deleting_the_audio_of_a_run_that_never_had_any_is_refused(speech):
     removed a file that never existed on this machine at all.
     """
     job_id = _imported(speech, "speech")
-    assert speech.get(f"/jobs/{job_id}").json()["audio"] == {"state": "never"}
+    row = speech.get(f"/jobs/{job_id}", params=SYSTEM)
+    assert row.json()["audio"] == {"state": "never"}
 
-    refused = speech.delete(f"/jobs/{job_id}/audio")
+    refused = speech.delete(f"/jobs/{job_id}/audio", params=SYSTEM)
     assert refused.status_code == 409, (
         "a run with no audio here answered "
         + str(refused.status_code) + ": " + refused.text)
-    assert speech.get(f"/jobs/{job_id}").json()["audio"] == {"state": "never"}, (
+    row = speech.get(f"/jobs/{job_id}", params=SYSTEM)
+    assert row.json()["audio"] == {"state": "never"}, (
         "the refused delete still changed the row, so the state is a lie that "
         "survives the 409")
 
@@ -120,7 +127,7 @@ def test_a_clone_record_may_still_come_back_saying_its_audio_was_deleted(speech)
         "host": "orko", "status": "done", "voice": "default",
         "audio_deleted": True})
     assert created.status_code == 201, created.text
-    row = speech.get(f"/jobs/{created.json()['id']}").json()
+    row = speech.get(f"/jobs/{created.json()['id']}", params=SYSTEM).json()
     assert row["audio"] == {"state": "deleted"}
 
 

@@ -59,7 +59,7 @@ def test_a_speaker_turned_off_while_the_reply_is_being_handed_over_is_not_played
         await real_release(s)
         if not patched["done"]:
             patched["done"] = True
-            await app.configure(NID, app.ConfigBody(speaker_enabled=False))
+            await app.update_satellite(NID, app.ConfigBody(speaker_enabled=False), admin=True)
     monkeypatch.setattr(app.hub, "release_duck", release_then_patch)
 
     with client.websocket_connect("/satellites/ws") as ws:

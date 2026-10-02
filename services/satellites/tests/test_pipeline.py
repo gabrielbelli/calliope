@@ -288,7 +288,6 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("SATELLITES_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("SATELLITES_WAKE_WORDS", "hey_jarvis:0.5")
     monkeypatch.setenv("SATELLITES_FRONTEND", "0")
-    monkeypatch.delenv("SATELLITES_API_KEYS", raising=False)
     monkeypatch.delenv("SATELLITES_TTS_URL", raising=False)
 
 
@@ -790,7 +789,7 @@ def test_a_button_mapping_is_validated_and_firmware_without_actions_is_sent_none
         adopt(client, ws)
         satellite = plug(ws)
         ok = client.patch(f"/satellites/{NID}", json={"buttons": MUTE | {
-            "play": {"press": "ptt"}, "mode": {"release": "webhook:https://hooks.test/x"}}})
+            "play": {"press": "ptt"}, "mode": {"release": "webhook:secret:SATELLITES_BUTTON_X"}}})
         bad = [client.patch(f"/satellites/{NID}", json={"buttons": b}) for b in (
             {"play": {"press": "ptt"}},                              # no mute left anywhere
             {},                                                      # nor here
@@ -804,7 +803,7 @@ def test_a_button_mapping_is_validated_and_firmware_without_actions_is_sent_none
         also = client.patch(f"/satellites/{NID}", json={"buttons": MUTE | {"key1": {"press": "mute"}}})
         time.sleep(0.1)
     assert ok.status_code == 200
-    assert ok.json()["config"]["buttons"]["mode"] == {"release": "webhook:https://hooks.test/x"}
+    assert ok.json()["config"]["buttons"]["mode"] == {"release": "webhook:secret:SATELLITES_BUTTON_X"}
     assert [r.status_code for r in bad] == [422] * 6
     assert "never be unmuted" in bad[0].text
     assert "other than key1" in bad[2].text and "never be unmuted" in bad[2].text
@@ -846,16 +845,22 @@ def test_a_press_the_satellite_ran_is_not_run_again_by_the_hub(client, app, even
     assert of(events, "wake") == [], "the hub talked on a button the satellite muted on"
 
 
-def test_a_webhook_button_posts_the_press_and_still_publishes_it(client, app, events):
+def test_a_webhook_button_posts_the_press_and_still_publishes_it(client, app, events, store):
+    """The mapping names a secret_url secret; the press is posted to the
+    address it holds (D62)."""
     posted: list[dict] = []
 
     def hook(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "http://hooks.test/b"
         posted.append(json.loads(request.content))
         return httpx.Response(204)
     app.hub.http = httpx.AsyncClient(transport=httpx.MockTransport(hook))
+    store.put("SATELLITES_BUTTON_MODE", "http://hooks.test/b", ["http://hooks.test"],
+              kind="secret_url")
     with client.websocket_connect("/satellites/ws") as ws:
         adopt(client, ws)
-        client.patch(f"/satellites/{NID}", json={"buttons": MUTE | {"mode": {"press": "webhook:http://hooks.test/b"}}})
+        client.patch(f"/satellites/{NID}", json={"buttons": MUTE | {
+            "mode": {"press": "webhook:secret:SATELLITES_BUTTON_MODE"}}})
         ws.send_json({"type": "button", "button": "mode", "action": "press"})
         wait(lambda: posted, what="the webhook")
     assert posted == [{"satellite": "kitchen", "satellite_id": NID, "button": "mode", "action": "press",

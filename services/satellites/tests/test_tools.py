@@ -13,7 +13,7 @@ import json
 import httpx
 import pytest
 from test_llm import LLM, ask, delta, one_body, sent, sse
-from test_router import Fake
+from test_router import HA_HOSTS, Fake
 
 from app import tools
 from app.destinations import DestinationError, Llm
@@ -170,9 +170,9 @@ async def test_the_weather_somewhere_named_is_geocoded_in_the_questions_language
     assert (geo.url.params["name"], geo.url.params["language"]) == ("Lisboa", "pt")
 
 
-async def test_home_and_its_time_zone_come_from_home_assistant_when_not_configured(fake, client, monkeypatch):
+async def test_home_and_its_time_zone_come_from_home_assistant_when_not_configured(store, fake, client, monkeypatch):
     monkeypatch.setattr(tools, "_home_assistant", lambda: ("http://ha.test:8123", "SATELLITES_HA_TOKEN"))
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", "ha-token-do-not-leak")
+    store.put("SATELLITES_HA_TOKEN", "ha-token-do-not-leak", HA_HOSTS)
     fake.handlers["ha.test"] = lambda r: httpx.Response(200, json={
         "latitude": 10.0, "longitude": 20.0, "location_name": "Home", "time_zone": "Etc/GMT+3"})
     await tools.prime(client)
@@ -185,13 +185,13 @@ async def test_home_and_its_time_zone_come_from_home_assistant_when_not_configur
     assert len([r for r in fake.seen if r.url.host == "ha.test"]) == 1
 
 
-async def test_a_word_without_tools_tells_the_time_in_home_assistants_zone(fake, client, monkeypatch):
+async def test_a_word_without_tools_tells_the_time_in_home_assistants_zone(store, fake, client, monkeypatch):
     """Home was primed only for a word with tools, so the default language
     model word, with none, told the time in UTC although the README promised
     Home Assistant's zone. A Home Assistant with no location set still gives
     its zone, and its unit system."""
     monkeypatch.setattr(tools, "_home_assistant", lambda: ("http://ha.test:8123", "SATELLITES_HA_TOKEN"))
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", "ha-token-do-not-leak")
+    store.put("SATELLITES_HA_TOKEN", "ha-token-do-not-leak", HA_HOSTS)
     fake.handlers["ha.test"] = lambda r: httpx.Response(200, json={
         "time_zone": "America/New_York", "unit_system": {"temperature": "°F", "length": "mi"}})
     fake.handlers["llm.test"] = lambda r: sse(delta("stop", content="Hi."))
@@ -202,11 +202,11 @@ async def test_a_word_without_tools_tells_the_time_in_home_assistants_zone(fake,
         "Where home is is not known here; ask for a named place.")
 
 
-async def test_a_home_assistant_that_fails_is_not_asked_again_every_turn(fake, client, monkeypatch):
+async def test_a_home_assistant_that_fails_is_not_asked_again_every_turn(store, fake, client, monkeypatch):
     """A failed /api/config was asked again on every turn, each a round trip
     (up to 3 s on a Home Assistant that times out) before the model."""
     monkeypatch.setattr(tools, "_home_assistant", lambda: ("http://ha.test:8123", "SATELLITES_HA_TOKEN"))
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", "ha-token-do-not-leak")
+    store.put("SATELLITES_HA_TOKEN", "ha-token-do-not-leak", HA_HOSTS)
     fake.handlers["ha.test"] = lambda r: httpx.Response(502, text="bad gateway")
     await tools.prime(client)
     await tools.prime(client)
@@ -216,11 +216,11 @@ async def test_a_home_assistant_that_fails_is_not_asked_again_every_turn(fake, c
     assert len([r for r in fake.seen if r.url.host == "ha.test"]) == 2, "never asked again"
 
 
-async def test_a_bad_home_assistant_token_does_not_fail_the_turn(fake, client, monkeypatch):
+async def test_a_bad_home_assistant_token_does_not_fail_the_turn(store, fake, client, monkeypatch):
     """A token with a line break raised out of prime, so every language
     model turn failed with Home Assistant's token error."""
     monkeypatch.setattr(tools, "_home_assistant", lambda: ("http://ha.test:8123", "SATELLITES_HA_TOKEN"))
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", "abc\r")
+    store.put("SATELLITES_HA_TOKEN", "abc\r", HA_HOSTS)
     fake.handlers["llm.test"] = lambda r: sse(delta("stop", content="Hi."))
     assert await said(SEARCHING, client) == "Hi."
     assert [r for r in fake.seen if r.url.host == "ha.test"] == []

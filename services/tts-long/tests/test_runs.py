@@ -15,6 +15,8 @@ import json
 import time
 from pathlib import Path
 
+from voice_common.conformance import FakeGateway
+
 
 # The contract between this service and the two that post to it. Reachable from
 # every service directory under the documented test command.
@@ -58,7 +60,8 @@ def test_the_shared_fixture_round_trips(speech):
         if "id" in body:
             assert job_id == body["id"], "an id the sender chose was thrown away"
 
-        row = speech.get(f"/jobs/{job_id}").json()
+        # EVERY OWNER, for the reason the listing below gives.
+        row = speech.get(f"/jobs/{job_id}", params={"owner": "all"}).json()
         # THE KEY IS THE EXAMPLE'S NAME, NOT THE `kind` COLUMN, and the fourth
         # example is why. A preset-voice job is `speech` -- it has no speaker
         # encoder, so it is not cloning anything -- and `KINDS` deliberately
@@ -71,7 +74,9 @@ def test_the_shared_fixture_round_trips(speech):
             assert row.get(field) == value, f"{kind}.{field} did not survive"
         assert row["text"] == body["text"]
 
-    listing = speech.get("/jobs").json()
+    # EVERY OWNER. Two of the four are a user's and one is the hub's, so the
+    # default `me` would show none of them to the admin asking.
+    listing = speech.get("/jobs?owner=all").json()
     rows = {j["kind"]: j for j in listing["jobs"]}
     # AUDIO THAT WAS NEVER KEPT IS NOT AUDIO THAT WAS LOST. Telling a reader
     # "expired" about a file that never existed is the lie this state prevents.
@@ -93,7 +98,7 @@ def test_a_sender_cannot_set_path(speech):
     assert r.status_code == 400, r.text
     assert "path" in r.text
     assert not any(j.get("path") == "/etc/passwd" for j in
-                   speech.get("/jobs").json()["jobs"])
+                   speech.get("/jobs?owner=all").json()["jobs"])
 
 
 def test_a_sender_cannot_claim_an_id_that_is_already_a_job(speech):
@@ -121,8 +126,9 @@ def test_an_unknown_field_does_not_400(speech):
                                    "engine": "kokoro", "host": "orko",
                                    "a_field_from_next_year": {"deep": [1, 2]}})
     assert r.status_code == 201, r.text
-    row = speech.get(f"/jobs/{r.json()['id']}").json()
-    assert "a_field_from_next_year" not in row
+    row = speech.get(f"/jobs/{r.json()['id']}", params={"owner": "system"})
+    assert row.status_code == 200, row.text
+    assert "a_field_from_next_year" not in row.json()
 
 
 def test_a_record_with_no_kind_reads_as_clone(speech, tmp_path):
@@ -137,7 +143,8 @@ def test_a_record_with_no_kind_reads_as_clone(speech, tmp_path):
         {"status": "done", "voice": "narrator", "finished_at": 1.0}))
     main._recover()
 
-    row = speech.get("/jobs/old-1").json()
+    # No owner, so a system record (D32), reached by naming the system rows.
+    row = speech.get("/jobs/old-1", params={"owner": "system"}).json()
     assert row["kind"] == "clone"
     assert row["voice"] == "narrator"
 
@@ -318,7 +325,11 @@ def test_a_legacy_record_beside_the_audio_is_moved_once(speech, tmp_path,
 
 
 def _seed(speech):
-    """One record of each shape the listing has to tell apart."""
+    """One record of each shape the listing has to tell apart.
+
+    Posted as stt with no owner, so all three are system records and the
+    listings below ask for `owner=all`.
+    """
     bodies = [
         {"kind": "speech", "service": "tts", "engine": "kokoro", "host": "orko",
          "voice": "bm_george", "text": "spoken now"},
@@ -356,7 +367,7 @@ def test_a_live_job_survives_every_filter_combination(speech):
 
     main.jobs["live-1"] = {"id": "live-1", "status": "queued", "cancelled": False,
                            "created_at": time.time(), "segments": [], "text": "",
-                           "kind": "clone"}
+                           "kind": "clone", "owner": FakeGateway.USER}
     try:
         for query in ("", "?audio=deleted", "?audio=expired", "?audio=present",
                       "?status=done", "?status=failed",
@@ -372,7 +383,8 @@ def test_a_failed_job_is_never_hidden_by_an_audio_filter(speech):
     the exact moment its owner is watching it, which reads as data loss rather
     than as a failure."""
     _, _, failed = _seed(speech)
-    ids = [j["id"] for j in speech.get("/jobs?audio=present").json()["jobs"]]
+    ids = [j["id"] for j in
+           speech.get("/jobs?audio=present&owner=all").json()["jobs"]]
     assert failed in ids
 
 
@@ -382,9 +394,9 @@ def test_the_kind_filter_is_what_makes_the_default_shippable(speech):
     before a filter is a cap on the wrong set, which is why this is served
     here and not in the browser."""
     spoken, heard, cloned = _seed(speech)
-    got = speech.get("/jobs?kind=speech").json()
+    got = speech.get("/jobs?kind=speech&owner=all").json()
     assert [j["id"] for j in got["jobs"]] == [spoken]
-    got = speech.get("/jobs?kind=speech,transcribe").json()
+    got = speech.get("/jobs?kind=speech,transcribe&owner=all").json()
     assert {j["id"] for j in got["jobs"]} == {spoken, heard}
 
 
@@ -392,7 +404,7 @@ def test_counts_are_computed_before_the_filter(speech):
     """The counts are what stop a default that hides rows from reading as data
     loss. "Everything (412)" has to be legible without asking a second time."""
     _seed(speech)
-    got = speech.get("/jobs?kind=speech").json()
+    got = speech.get("/jobs?kind=speech&owner=all").json()
     assert len(got["jobs"]) == 1
     assert got["counts"]["all"] == 3
     assert got["counts"]["speech"] == 1
@@ -448,8 +460,6 @@ def test_a_sender_in_a_loop_is_refused_before_the_disk_fills(speech,
 def test_the_ceiling_is_not_a_scandir_per_write(speech, monkeypatch):
     """A count per write is O(n) per write and quadratic over a batch, on the
     same disk the audio is on. The count is cached on a timer."""
-    from app import main
-
     calls = {"n": 0}
     real = Path.glob
 

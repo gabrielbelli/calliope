@@ -15,20 +15,25 @@
 # Run:
 #   docker run -p 8001:8001 -v tts-models:/models --cpus 4 -e TTS_THREADS=4 calliope-tts
 #
-# Run with authentication and TLS:
+# Run with TLS:
 #   docker run -p 8001:8001 -v tts-models:/models -v /etc/tts-certs:/certs:ro \
-#     -e TTS_API_KEYS=key-one,key-two \
 #     -e TTS_TLS_CERT=/certs/fullchain.pem -e TTS_TLS_KEY=/certs/privkey.pem \
 #     calliope-tts
 #
-# Both are off when their variables are unset, which is how the service shipped
-# and how it stays on upgrade. The key file must be readable by uid 1000; the
-# entrypoint checks that and refuses to start rather than falling back to HTTP.
+# TLS is off when its variables are unset. The key file must be readable by uid
+# 1000; the entrypoint checks that and refuses to start rather than falling
+# back to HTTP.
 #
-# That entrypoint is not in this service. It ships in packages/common and pip
-# installs it to /usr/local/bin, so the TLS logic and the auth logic come from
-# one tree and cannot be at different versions inside one image — which is
-# exactly how three copies of the script ended up with three different holes.
+# Every route but /health answers 401 without the Calliope gateway's signed
+# identity assertion, which it verifies with the public key the gateway writes
+# to /run/calliope/identity.pub. Run behind the gateway; on its own, this image
+# serves /health and nothing else.
+#
+# The entrypoint is not in this service. It ships in packages/common and pip
+# installs it to /usr/local/bin, so the TLS logic and the identity check come
+# from one tree and cannot be at different versions inside one image — which
+# is exactly how three copies of the script ended up with three different
+# holes.
 
 FROM python:3.13-slim-trixie
 

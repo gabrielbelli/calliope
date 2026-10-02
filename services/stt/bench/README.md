@@ -9,10 +9,14 @@ python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 
 ./.venv/bin/python bench.py fetch                      # cache samples once
-./.venv/bin/python bench.py run --url http://orko:8000 --label whisper-only
-./.venv/bin/python bench.py run --url http://orko:8000 --label whisper+parakeet
+export CALLIOPE_KEY=calliope_…                          # a key holding speech:transcribe
+./.venv/bin/python bench.py run --url https://calliope.example --label whisper-only
+./.venv/bin/python bench.py run --url https://calliope.example --label whisper+parakeet
 ./.venv/bin/python bench.py report
 ```
+
+`--url` is the Calliope gateway: stt-stack answers only the requests the
+gateway forwards, each with its signed identity assertion.
 
 The venv is deliberate: `datasets` pulls a large dependency tree that has no
 business in a system interpreter, and pinning it here keeps a benchmark run

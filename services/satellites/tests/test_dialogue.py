@@ -30,6 +30,7 @@ SECRET = "eyJhbGciOiJIUzI1NiJ9.c2VjcmV0LWhhLXRva2Vu.do-not-leak"
 ONE_SECOND = b"\x00\x00" * 16000
 LLM = {"type": "llm", "base_url": "http://llm.test/v1", "model": "tiny", "system": "Be brief."}
 HA = {"type": "ha_conversation", "url": "http://ha.test:8123"}
+HA_HOSTS = ["http://ha.test:8123", "https://ha.test:8123"]
 
 
 def sse(pieces: list[str], delay: float = 0.0) -> httpx.Response:
@@ -307,8 +308,8 @@ async def test_each_utterance_is_answered_in_the_voice_of_the_language_it_was_sp
     assert json.loads(fake.sent("tts.test")[0].content)["voice"] == voice
 
 
-async def test_home_assistant_is_told_the_language_that_was_detected(fake, monkeypatch):
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+async def test_home_assistant_is_told_the_language_that_was_detected(store, fake, monkeypatch):
+    store.put("SATELLITES_HA_TOKEN", SECRET, HA_HOSTS)
     fake.handlers["ha.test"] = lambda r: httpx.Response(200, json={"response": {
         "response_type": "action_done", "speech": {"plain": {"speech": "Pronto."}}}})
     r = router(fake, hey_jarvis={"action": {"destination": HA}})
@@ -327,8 +328,8 @@ async def test_a_french_conversation_ends_on_a_french_goodbye(fake):
     assert out.ended
 
 
-async def test_a_household_in_portugal_is_understood_in_european_portuguese(fake, monkeypatch):
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+async def test_a_household_in_portugal_is_understood_in_european_portuguese(store, fake, monkeypatch):
+    store.put("SATELLITES_HA_TOKEN", SECRET, HA_HOSTS)
     monkeypatch.setenv("SATELLITES_LANGUAGES", "pt-PT")
     fake.handlers["ha.test"] = lambda r: httpx.Response(200, json={"response": {
         "response_type": "action_done", "speech": {"plain": {"speech": "Feito."}}}})
@@ -440,8 +441,8 @@ def ha_error(request):
         "speech": {"plain": {"speech": "Sorry, I couldn't understand that"}}}})
 
 
-async def test_a_command_home_assistant_did_not_understand_is_handed_to_its_conversation(fake, monkeypatch):
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+async def test_a_command_home_assistant_did_not_understand_is_handed_to_its_conversation(store, fake, monkeypatch):
+    store.put("SATELLITES_HA_TOKEN", SECRET, HA_HOSTS)
     fake.handlers["ha.test"] = ha_error
     fake.handlers["llm.test"] = lambda r: sse(["A black hole is ", "very dense."])
     r = router(fake,
@@ -455,8 +456,8 @@ async def test_a_command_home_assistant_did_not_understand_is_handed_to_its_conv
     assert "Sorry" not in (out.spoken_text or "")
 
 
-async def test_without_a_fallback_home_assistants_did_not_understand_is_spoken_as_before(fake, monkeypatch):
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+async def test_without_a_fallback_home_assistants_did_not_understand_is_spoken_as_before(store, fake, monkeypatch):
+    store.put("SATELLITES_HA_TOKEN", SECRET, HA_HOSTS)
     fake.handlers["ha.test"] = ha_error
     r = router(fake, alexa={"action": {"destination": HA}})
     out = await turn(r, "alexa", "flibble the wotsit")
@@ -464,8 +465,8 @@ async def test_without_a_fallback_home_assistants_did_not_understand_is_spoken_a
     assert out.handed_over_to is None
 
 
-async def test_a_destination_that_fails_outright_hands_over_too(fake, monkeypatch):
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+async def test_a_destination_that_fails_outright_hands_over_too(store, fake, monkeypatch):
+    store.put("SATELLITES_HA_TOKEN", SECRET, HA_HOSTS)
     fake.handlers["ha.test"] = lambda r: httpx.Response(500, text="boom")
     fake.handlers["llm.test"] = lambda r: sse(["Here."])
     r = router(fake, alexa={"action": {"destination": HA, "fallback": "hey_jarvis"}},
@@ -600,7 +601,7 @@ class FakeHaRest:
 
 
 @pytest.fixture
-def ha_socket(monkeypatch, fake):
+def ha_socket(monkeypatch, fake, store):
     sockets: list[FakeHaSocket] = []
     made: dict = {}
 
@@ -611,7 +612,7 @@ def ha_socket(monkeypatch, fake):
         return sock
     monkeypatch.setattr(HaAssist, "connect", staticmethod(connect))
     monkeypatch.setattr(HaAssist, "devices", {})
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", SECRET)
+    store.put("SATELLITES_HA_TOKEN", SECRET, HA_HOSTS)
     made["rest"] = fake.handlers["ha.test"] = FakeHaRest()
     return sockets, made
 
@@ -807,8 +808,8 @@ async def test_an_assist_pipeline_that_did_not_understand_hands_over_like_ha_con
     assert out.handed_over_to == "hey_jarvis" and out.reply_text == "Let me think."
 
 
-async def test_a_refused_token_is_named_by_its_variable_and_never_shown(fake, ha_socket, monkeypatch):
-    monkeypatch.setenv("SATELLITES_HA_TOKEN", "wrong-token-value")
+async def test_a_refused_token_is_named_by_its_variable_and_never_shown(store, fake, ha_socket, monkeypatch):
+    store.put("SATELLITES_HA_TOKEN", "wrong-token-value", HA_HOSTS)
     r = router(fake, hey_jarvis={"action": {"destination": ASSIST}})
     out = await turn(r, "hey_jarvis", "lights")
     assert "SATELLITES_HA_TOKEN" in out.error and "wrong-token-value" not in out.error

@@ -12,9 +12,12 @@ recognisers (460 MB and 2.9 GB) are not present.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import re
 import struct
+import sys
+import threading
 import wave
 from pathlib import Path
 from urllib.parse import unquote
@@ -22,9 +25,16 @@ from urllib.parse import unquote
 import numpy as np
 import pytest
 from starlette.testclient import TestClient
+from voice_common.conformance import FakeGateway
+from voice_common.scopes import (PRESETS, SERVICE_PRINCIPALS, effective,
+                                 session_scopes)
 
 from app import asr, boosting, openai_api, pipeline, profiles
 from app.main import app
+
+# Every request reaches this service through the gateway, which signs an
+# assertion addressed to it by name.
+AUDIENCE = "stt"
 
 REPO = Path(__file__).resolve().parents[1]
 SHIPPED = REPO / "glossaries"
@@ -122,39 +132,44 @@ def builtin(tmp_path: Path) -> Path:
     return directory
 
 
-def serve(builtin: Path, custom: Path | None = None,
+def serve(gateway: FakeGateway, builtin: Path, custom: Path | None = None,
           engine: FakeEngine | None = None) -> TestClient:
     """A client over the real app, with the registry and engine injected.
 
     TestClient WITHOUT its context manager, which is what keeps the lifespan
     from running: `with TestClient(app)` starts it, and the lifespan loads a
     real 460 MB model.
+
+    Every request carries the assertion the gateway forwards for a signed-in
+    admin, who holds the `:all` scopes and so works in the system namespace:
+    the single-tenant deployment every test below was written against. The
+    tests about owners sign as somebody else, request by request.
     """
     pipeline.state.clear()
     pipeline.state["asr"] = engine or FakeEngine()
     pipeline.state["glossaries"] = profiles.Registry(
         builtin_dir=builtin, custom_dir=custom)
     pipeline.state["rules"] = []
-    return TestClient(app)
+    return TestClient(app, headers=gateway.headers(AUDIENCE))
 
 
 @pytest.fixture
-def client(builtin: Path, tmp_path: Path):  # noqa: ANN201
+def client(gateway: FakeGateway, builtin: Path, tmp_path: Path):  # noqa: ANN201
     """A deployment with the built-ins and NO volume mounted for custom ones.
 
     The custom directory is named and absent rather than unset, because that is
     what an unmounted /glossaries actually looks like from inside a container.
     """
-    served = serve(builtin, tmp_path / "not-mounted")
+    served = serve(gateway, builtin, tmp_path / "not-mounted")
     yield served
     pipeline.state.clear()
 
 
 @pytest.fixture
-def writable(builtin: Path, tmp_path: Path):  # noqa: ANN201
+def writable(gateway: FakeGateway, builtin: Path, tmp_path: Path):  # noqa: ANN201
     custom = tmp_path / "custom"
     custom.mkdir()
-    served = serve(builtin, custom)
+    served = serve(gateway, builtin, custom)
     served.custom = custom  # type: ignore[attr-defined]
     yield served
     pipeline.state.clear()
@@ -283,8 +298,8 @@ def test_a_profile_reaches_both_halves_on_parakeet(client: TestClient) -> None:
 
 
 def test_a_profile_reaches_the_decoder_on_an_engine_that_takes_one(
-        builtin: Path) -> None:
-    client = serve(builtin, engine=FakeWhisper())
+        gateway: FakeGateway, builtin: Path) -> None:
+    client = serve(gateway, builtin, engine=FakeWhisper())
     try:
         response = client.post(
             "/v1/audio/transcriptions",
@@ -416,8 +431,8 @@ def test_a_file_in_the_custom_directory_cannot_shadow_a_built_in(
     custom.mkdir()
     (custom / "tech.txt").write_text("a b = Shadowed\n", encoding="utf-8")
     registry = profiles.Registry(builtin_dir=builtin, custom_dir=custom)
-    assert registry.get("tech").source == "builtin"
-    assert "a b" not in registry.get("tech").parsed.replacements
+    assert registry.get("tech", profiles.DEPLOYMENT).source == "builtin"
+    assert "a b" not in registry.get("tech", profiles.DEPLOYMENT).parsed.replacements
 
 
 # ── writability follows the volume ────────────────────────────────────────────
@@ -435,6 +450,8 @@ def test_writes_are_refused_when_no_volume_is_mounted(
     assert response.status_code == 503
     detail = response.json()["detail"]
     assert "mounted" in detail
+    # The variable, not the path: the reason reaches every caller.
+    assert "STT_GLOSSARY_DIR" in detail and "not-mounted" not in detail
 
     listing = client.get("/glossaries").json()
     assert listing["writable"] is False
@@ -536,6 +553,17 @@ def test_the_entrypoint_takes_ownership_of_the_glossary_directory() -> None:
     """
     chown = _containerfile_env()["VOICE_CHOWN_DIRS"].split()
     assert profiles.DEFAULT_CUSTOM_DIR in chown
+
+
+def test_the_entrypoint_takes_ownership_of_the_users_directory() -> None:
+    """The entrypoint looks only at the top of each directory it is given.
+
+    A users/ that arrived root-owned inside a volume whose top is already uid
+    1000's would refuse every user's first profile while the system's went on
+    working, so it is listed on its own.
+    """
+    chown = _containerfile_env()["VOICE_CHOWN_DIRS"].split()
+    assert f"{profiles.DEFAULT_CUSTOM_DIR}/{profiles.USERS}" in chown
 
 
 def test_the_whole_write_path_round_trips(writable: TestClient) -> None:
@@ -700,6 +728,392 @@ def test_a_json_body_without_text_is_refused_by_name(
     assert "text" in response.json()["detail"]
 
 
+# ── whose profile it is ───────────────────────────────────────────────────────
+#
+# Every test above signs as an admin, who holds the `:all` scopes and so works
+# in the system namespace, which is the single-tenant deployment those tests
+# were written against. These sign as the household: two speech users, the
+# Home Assistant key and the satellite hub.
+
+ALICE = "u_bbbbbbbbbbbbbbbb"
+BOB = "u_cccccccccccccccc"
+ADMIN = FakeGateway.USER
+
+
+def as_user(gateway: FakeGateway, sub: str, role: str = "speech") -> dict[str, str]:
+    """A signed-in user of `role`, as the gateway forwards their session."""
+    return gateway.headers(AUDIENCE, sub=sub, scopes=session_scopes(role))
+
+
+def as_key(gateway: FakeGateway, preset: str, owner: str = ADMIN) -> dict[str, str]:
+    """An API key made from `preset` by an admin, with the scopes it really holds."""
+    return gateway.headers(AUDIENCE, sub=owner, cred="k_aaaaaaaaaaaa",
+                           scopes=effective(PRESETS[preset].scopes, "admin"))
+
+
+def as_hub(gateway: FakeGateway) -> dict[str, str]:
+    """svc:satellites with exactly the scopes the gateway gives it, so this
+    suite fails if the principal ever loses glossaries:ha (D34)."""
+    return gateway.headers(AUDIENCE, kind="service", sub="svc:satellites",
+                           scopes=SERVICE_PRINCIPALS["satellites"])
+
+
+def transcribe(client: TestClient, headers: dict[str, str], **data: str):  # noqa: ANN201
+    return client.post("/v1/audio/transcriptions", headers=headers,
+                       files={"file": ("clip.wav", wav(), "audio/wav")},
+                       data={"model": "whisper-1", **data})
+
+
+def visible_names(message: str) -> list[str]:
+    """The names an "unknown profile" error offers, from its "You can use:" list."""
+    listed = message.split("You can use: ", 1)[1].split(". ", 1)[0]
+    return listed.split(", ")
+
+
+def test_a_users_profile_is_invisible_to_every_other_user(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    """Another user's profile is not refused, it is absent: a 404 like a typo.
+
+    A refusal would say it exists. The error on a transcription lists only
+    what this caller could have named, so it cannot be used to enumerate
+    anybody else's vocabulary either.
+    """
+    alice, bob = as_user(gateway, ALICE), as_user(gateway, BOB)
+    created = writable.put("/glossaries/mine", headers=alice,
+                           content="theory dashboard = Alice Dashboard\n")
+    assert created.status_code == 201, created.text
+    assert created.json()["owner"] == ALICE
+    assert (writable.custom / "users" / ALICE / "mine.txt").is_file()  # type: ignore[attr-defined]
+
+    assert writable.get("/glossaries/mine", headers=bob).status_code == 404
+    assert [entry["name"] for entry in writable.get(
+        "/glossaries", headers=bob).json()["glossaries"]] == ["dictation", "tech"]
+    refused = transcribe(writable, bob, glossary="mine")
+    assert refused.status_code == 400
+    assert visible_names(refused.json()["error"]["message"]) == ["dictation", "tech"]
+    native = writable.post("/transcribe", headers=bob, data={"glossary": "mine"},
+                           files={"file": ("clip.wav", wav(), "audio/wav")})
+    assert native.status_code == 400
+    assert "mine" not in native.json()["detail"].split("you can use:")[1]
+
+    applied = transcribe(writable, alice, glossary="mine")
+    assert applied.status_code == 200
+    assert "Alice Dashboard" in applied.json()["text"]
+    # Nor is it the system's: the admin finds it only by asking for its owner.
+    assert writable.get("/glossaries/mine").status_code == 404
+    assert writable.get(f"/glossaries/mine?owner={ALICE}").status_code == 200
+
+
+def test_the_same_name_for_two_users_compiles_separately(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    """The compiled cache was keyed by name alone, which would serve one
+    user's rules to the next user who chose the same name."""
+    alice, bob = as_user(gateway, ALICE), as_user(gateway, BOB)
+    writable.put("/glossaries/mine", headers=alice,
+                 content="theory dashboard = Alice Dashboard\n")
+    writable.put("/glossaries/mine", headers=bob,
+                 content="theory dashboard = Bob Dashboard\n")
+    for headers, expected in ((alice, "Alice"), (bob, "Bob"), (alice, "Alice")):
+        response = transcribe(writable, headers, glossary="mine")
+        assert response.status_code == 200
+        assert f"{expected} Dashboard" in response.json()["text"]
+
+
+def test_a_speech_user_cannot_reach_another_namespace(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    """?owner= is the one widening this service does, and only for `:all`."""
+    bob = as_user(gateway, BOB)
+    refusals = (
+        writable.get(f"/glossaries?owner={ALICE}", headers=bob),
+        writable.get("/glossaries?owner=all", headers=bob),
+        writable.get("/glossaries?owner=system", headers=bob),
+        writable.get(f"/glossaries/mine?owner={ALICE}", headers=bob),
+        writable.put(f"/glossaries/mine?owner={ALICE}", headers=bob,
+                     content="a b = C\n"),
+        writable.put("/glossaries/mine?owner=system", headers=bob,
+                     content="a b = C\n"),
+        writable.delete(f"/glossaries/mine?owner={ALICE}", headers=bob),
+    )
+    for response in refusals:
+        assert response.status_code == 403, response.text
+        assert response.json()["error"]["code"] == "insufficient_scope"
+    assert "glossaries:write:all" in refusals[4].headers["WWW-Authenticate"]
+    assert not (writable.custom / "mine.txt").exists()  # type: ignore[attr-defined]
+    assert not (writable.custom / "users" / ALICE).exists()  # type: ignore[attr-defined]
+
+
+def test_an_admin_edits_a_users_profile_by_naming_its_owner(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    alice = as_user(gateway, ALICE)
+    writable.put("/glossaries/mine", headers=alice,
+                 content="theory dashboard = Alice Dashboard\n")
+    writable.put("/glossaries/home-assistant", content="a b = C\n")
+
+    every = writable.get("/glossaries?owner=all").json()["glossaries"]
+    assert {(entry["owner"], entry["name"]) for entry in every} == {
+        ("system", "dictation"), ("system", "tech"), ("system", "home-assistant"),
+        (ALICE, "mine")}
+    # Her listing is hers and the built-ins: the system's reserved profile is
+    # not filed under her, where a GET of it would be a 400.
+    hers = writable.get(f"/glossaries?owner={ALICE}").json()["glossaries"]
+    assert [entry["name"] for entry in hers] == ["dictation", "mine", "tech"]
+
+    edited = writable.put(f"/glossaries/mine?owner={ALICE}",
+                          content="theory dashboard = Edited Dashboard\n")
+    assert edited.status_code == 200, edited.text
+    assert (edited.json()["owner"], edited.json()["created"]) == (ALICE, False)
+    assert writable.get("/glossaries/mine", headers=alice).json()["replacements"] == {
+        "theory dashboard": "Edited Dashboard"}
+    # And it is still hers, not a system profile the admin now holds.
+    assert writable.get("/glossaries/mine").status_code == 404
+
+    assert writable.delete(f"/glossaries/mine?owner={ALICE}").status_code == 200
+    assert writable.get("/glossaries/mine", headers=alice).status_code == 404
+
+
+@pytest.mark.parametrize("owner", [
+    "../x", "../../etc", "u_../../etc", "U_BBBBBBBBBBBBBBBB", "u_bbbb", "users",
+    "svc:satellites", ""])
+def test_an_owner_that_is_not_an_id_is_refused_before_any_path_is_built(
+        writable: TestClient, gateway: FakeGateway, owner: str) -> None:
+    for response in (writable.get(f"/glossaries?owner={owner}"),
+                     writable.get(f"/glossaries/mine?owner={owner}"),
+                     writable.put(f"/glossaries/mine?owner={owner}",
+                                  content="a b = C\n")):
+        assert response.status_code == 400, (owner, response.text)
+    assert sorted(p.name for p in writable.custom.iterdir()) == []  # type: ignore[attr-defined]
+
+
+def test_home_assistant_is_writable_only_with_glossaries_ha_or_write_all(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    """ADR 0017's "any key can overwrite it", closed (D34).
+
+    Spelled `Home-Assistant` too: the gateway's rule for the reserved profile
+    matches the path exactly, so that spelling reaches this service as an
+    ordinary name with only glossaries:write:own checked, and means the same
+    file once it is lower-cased.
+    """
+    text = "made a comet = made a commit\n"
+    for name in ("home-assistant", "Home-Assistant", "HOME-ASSISTANT "):
+        for headers in (as_user(gateway, ALICE), as_key(gateway, "speech")):
+            refused = writable.put(f"/glossaries/{name}", headers=headers,
+                                   content=text)
+            assert refused.status_code == 403, (name, refused.text)
+            assert refused.json()["error"]["code"] == "insufficient_scope"
+    assert writable.delete("/glossaries/Home-Assistant",
+                           headers=as_user(gateway, ALICE)).status_code == 403
+    assert not (writable.custom / "home-assistant.txt").exists()  # type: ignore[attr-defined]
+
+    created = writable.put("/glossaries/home-assistant",
+                           headers=as_key(gateway, "home-assistant"), content=text)
+    assert created.status_code == 201, created.text
+    assert created.json()["owner"] == "system"
+    assert (writable.custom / "home-assistant.txt").is_file()  # type: ignore[attr-defined]
+    replaced = writable.put("/glossaries/home-assistant", content=text)
+    assert replaced.status_code == 200, replaced.text
+
+    # Never a user's, whoever asks: it is the system's or nothing.
+    assert writable.put("/glossaries/home-assistant?owner=me",
+                        content=text).status_code == 400
+
+
+def test_a_users_own_home_assistant_file_is_never_loaded(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    """Dropped into a user's directory by hand, it would otherwise shadow the
+    system's for that user, or be read as the reserved profile."""
+    mine = writable.custom / "users" / ALICE  # type: ignore[attr-defined]
+    mine.mkdir(parents=True)
+    (mine / "home-assistant.txt").write_text("a b = Planted\n", encoding="utf-8")
+    alice = as_user(gateway, ALICE)
+    assert [entry["name"] for entry in writable.get(
+        "/glossaries", headers=alice).json()["glossaries"]] == ["dictation", "tech"]
+    assert transcribe(writable, alice, glossary="home-assistant").status_code == 400
+    assert profiles.RESERVED not in pipeline.state["glossaries"].namespace(ALICE)
+
+
+def test_the_home_assistant_key_transcribes_with_its_glossary(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    """M3: without `glossaries:ha` resolving the name, HA's key got a 400 and
+    the integration fell back to transcribing with no glossary at all.
+
+    A speech user naming it gets the same "unknown profile" as a typo, listing
+    only their own names and the built-ins.
+    """
+    writable.put("/glossaries/home-assistant", content="made a comet = made a commit\n")
+    key = as_key(gateway, "home-assistant")
+    for response in (
+            transcribe(writable, key, glossary="home-assistant"),
+            writable.post("/transcribe", headers=key, data={"glossary": "home-assistant"},
+                          files={"file": ("clip.wav", wav(), "audio/wav")})):
+        assert response.status_code == 200, response.text
+        assert "made a commit" in response.json()["text"]
+
+    alice = as_user(gateway, ALICE)
+    writable.put("/glossaries/mine", headers=alice, content="a b = C\n")
+    refused = transcribe(writable, alice, glossary="home-assistant")
+    assert refused.status_code == 400
+    assert visible_names(refused.json()["error"]["message"]) == ["dictation", "mine", "tech"]
+    assert writable.get("/glossaries/home-assistant", headers=alice).status_code == 403
+    assert "home-assistant" not in [
+        entry["name"] for entry in writable.get("/glossaries", headers=alice).json()["glossaries"]]
+
+
+def test_the_hub_names_the_system_profiles_and_home_assistant(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    """svc:satellites sends glossary=home-assistant for every satellite command.
+
+    A service resolves in the system namespace (D33), which is where that
+    profile lives, and names it by holding glossaries:ha (D34); it has no
+    namespace of its own to manage profiles in.
+    """
+    writable.put("/glossaries/home-assistant", content="made a comet = made a commit\n")
+    writable.put("/glossaries/mine", headers=as_user(gateway, ALICE), content="a b = C\n")
+    hub = as_hub(gateway)
+    response = transcribe(writable, hub, glossary="home-assistant")
+    assert response.status_code == 200, response.text
+    assert "made a commit" in response.json()["text"]
+    refused = transcribe(writable, hub, glossary="mine")
+    assert refused.status_code == 400
+    assert visible_names(refused.json()["error"]["message"]) == [
+        "dictation", "home-assistant", "tech"]
+    assert writable.get("/glossaries", headers=hub).status_code == 403
+    assert writable.get("/glossaries?owner=me", headers=hub).status_code == 400
+
+
+def test_the_hub_selects_home_assistant_but_cannot_change_it(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    """glossaries:ha is the hub's to select the profile for Assist; changing the
+    household's vocabulary is a person's act, so a service key cannot (§1.6)."""
+    writable.put("/glossaries/home-assistant", content="made a comet = made a commit\n")
+    hub = as_hub(gateway)
+    put = writable.put("/glossaries/home-assistant", headers=hub, content="x y = Z\n")
+    delete = writable.delete("/glossaries/home-assistant", headers=hub)
+    ha_key = writable.put("/glossaries/home-assistant",
+                          headers=as_key(gateway, "home-assistant"), content="x y = Z\n")
+    assert put.status_code == delete.status_code == 403
+    assert ha_key.status_code in (200, 201), ha_key.text
+
+
+def test_a_service_without_glossaries_ha_cannot_name_home_assistant(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    """Being a service is not a scope (D34). Granted by kind, the reserved
+    profile would go, unasked, to the next service given transcription."""
+    writable.put("/glossaries/home-assistant", content="made a comet = made a commit\n")
+    service = gateway.headers(AUDIENCE, kind="service", sub="svc:satellites",
+                              scopes={"speech:transcribe"})
+    refused = transcribe(writable, service, glossary="home-assistant")
+    assert refused.status_code == 400
+    assert visible_names(refused.json()["error"]["message"]) == ["dictation", "tech"]
+
+
+def test_health_never_lists_a_users_profile(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    """/health is open inside the network and reaches every health:read holder
+    through the gateway (D50). A profile's name is somebody's vocabulary."""
+    writable.put("/glossaries/mine", headers=as_user(gateway, ALICE),
+                 content="a b = C\n")
+    writable.put("/glossaries/shared", content="a b = C\n")
+    writable.put("/glossaries/home-assistant", content="a b = C\n")
+    body = TestClient(app).get("/health").json()
+    assert body["glossaries"] == ["dictation", "home-assistant", "shared", "tech"]
+
+
+def _keys(body: object) -> set[str]:
+    if isinstance(body, dict):
+        return set(body) | {key for value in body.values() for key in _keys(value)}
+    if isinstance(body, list):
+        return {key for value in body for key in _keys(value)}
+    return set()
+
+
+def test_no_response_names_a_path(writable: TestClient, gateway: FakeGateway,
+                                  builtin: Path) -> None:
+    """A user's directory is named by their ID, and the volume's layout is the
+    operator's business; neither is any caller's."""
+    alice = as_user(gateway, ALICE)
+    responses = [
+        writable.put("/glossaries/mine", headers=alice, content="a b = C\n"),
+        writable.get("/glossaries/mine", headers=alice),
+        writable.get("/glossaries", headers=alice),
+        writable.get("/glossaries?owner=all"),
+        writable.put("/glossaries/tech", content="a b = C\n"),
+        writable.delete("/glossaries/mine", headers=alice),
+    ]
+    for response in responses:
+        assert not _keys(response.json()) & {"path", "builtin_dir", "custom_dir"}
+        for directory in (writable.custom, builtin):  # type: ignore[attr-defined]
+            assert str(directory) not in response.text
+
+
+def test_a_users_profile_edited_on_disk_is_noticed(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    """_watched covers users/ and each users/<id>/, not only the top level.
+
+    A new user's first profile changes users/; their next one changes only
+    their own directory, and an edit in place changes only the file.
+    """
+    users = writable.custom / "users"  # type: ignore[attr-defined]
+    alice = as_user(gateway, ALICE)
+    writable.put("/glossaries/mine", headers=alice, content="a b = First\n")
+
+    (users / ALICE / "mine.txt").write_text("a b = Edited\n", encoding="utf-8")
+    assert writable.get("/glossaries/mine", headers=alice).json()["replacements"] == {
+        "a b": "Edited"}
+
+    (users / ALICE / "second.txt").write_text("c d = Second\n", encoding="utf-8")
+    assert writable.get("/glossaries/second", headers=alice).status_code == 200
+
+    (users / BOB).mkdir()
+    (users / BOB / "his.txt").write_text("e f = His\n", encoding="utf-8")
+    assert writable.get("/glossaries/his", headers=as_user(gateway, BOB)).status_code == 200
+
+
+def test_a_built_in_cannot_be_shadowed_in_a_users_namespace(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    """Built-ins are everyone's, so nobody's own `tech` may hide one."""
+    alice = as_user(gateway, ALICE)
+    assert writable.put("/glossaries/tech", headers=alice,
+                        content="a b = C\n").status_code == 409
+    assert writable.delete("/glossaries/tech", headers=alice).status_code == 409
+    mine = writable.custom / "users" / ALICE  # type: ignore[attr-defined]
+    mine.mkdir(parents=True)
+    (mine / "tech.txt").write_text("a b = Shadowed\n", encoding="utf-8")
+    body = writable.get("/glossaries/tech", headers=alice).json()
+    assert body["source"] == "builtin"
+    assert "a b" not in body["replacements"]
+
+
+def test_a_directory_that_is_not_a_user_id_is_never_read(
+        writable: TestClient, gateway: FakeGateway) -> None:
+    users = writable.custom / "users"  # type: ignore[attr-defined]
+    for odd in ("svc:satellites", "admin", "U_BBBBBBBBBBBBBBBB"):
+        (users / odd).mkdir(parents=True)
+        (users / odd / "x.txt").write_text("a b = C\n", encoding="utf-8")
+    every = writable.get("/glossaries?owner=all").json()["glossaries"]
+    assert {entry["owner"] for entry in every} == {"system"}
+
+
+def test_a_user_keeps_a_bounded_number_of_profiles(
+        writable: TestClient, gateway: FakeGateway,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every profile is read into memory at each rescan, and every user can
+    write one: without a ceiling one account could grow this container."""
+    monkeypatch.setattr(profiles, "MAX_PER_USER", 2)
+    alice = as_user(gateway, ALICE)
+    for name in ("one", "two"):
+        assert writable.put(f"/glossaries/{name}", headers=alice,
+                            content="a b = C\n").status_code == 201
+    full = writable.put("/glossaries/three", headers=alice, content="a b = C\n")
+    assert full.status_code == 409
+    assert "delete one first" in full.json()["detail"]
+    # Replacing one she has is not a new one, and the system has no ceiling.
+    assert writable.put("/glossaries/one", headers=alice,
+                        content="a b = D\n").status_code == 200
+    for name in ("one", "two", "three"):
+        assert writable.put(f"/glossaries/{name}",
+                            content="a b = C\n").status_code == 201
+
+
 # ── the registry itself ───────────────────────────────────────────────────────
 
 
@@ -714,18 +1128,142 @@ def test_an_env_named_file_becomes_a_profile_rather_than_a_global(
     operator = tmp_path / "personal.txt"
     operator.write_text("catalaxy = Catallaxy\n", encoding="utf-8")
     registry = profiles.Registry(builtin_dir=builtin, env_file=operator)
-    assert registry.get("personal").source == "env"
-    assert registry.select([]).rules == []
-    assert registry.select(["personal"]).rules
+    assert registry.get("personal", profiles.DEPLOYMENT).source == "env"
+    assert registry.select([], profiles.DEPLOYMENT).rules == []
+    assert registry.select(["personal"], profiles.DEPLOYMENT).rules
 
 
 def test_compiled_rules_are_cached_per_selection(builtin: Path) -> None:
     """The cost of a profile is the regex compilation, not the read."""
     registry = profiles.Registry(builtin_dir=builtin)
-    first = registry.select(["tech"])
-    assert registry.select(["tech"]) is first
+    first = registry.select(["tech"], profiles.DEPLOYMENT)
+    assert registry.select(["tech"], profiles.DEPLOYMENT) is first
     registry.reload()
-    assert registry.select(["tech"]) is not first
+    assert registry.select(["tech"], profiles.DEPLOYMENT) is not first
+
+
+def test_the_compiled_cache_drops_its_oldest_selection_when_full(
+        builtin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its key is the request's own choice in order, so any caller could
+    otherwise grow it one request at a time: `tech`, `dictation,tech`, ..."""
+    monkeypatch.setattr(profiles, "MAX_COMPILED", 3)
+    registry = profiles.Registry(builtin_dir=builtin)
+    first = registry.select(["tech"], profiles.DEPLOYMENT)
+    for choice in (["dictation"], ["dictation", "tech"]):
+        registry.select(choice, profiles.DEPLOYMENT)
+    assert registry.select(["tech"], profiles.DEPLOYMENT) is first
+    registry.select(["tech", "dictation"], profiles.DEPLOYMENT)
+    assert registry.select(["tech"], profiles.DEPLOYMENT) is not first
+
+
+def test_a_repeated_profile_counts_once_at_its_last_position(builtin: Path) -> None:
+    """Later profiles win the merge, so `tech,dictation,tech` is `dictation,tech`
+    and shares its compiled selection rather than adding a larger one."""
+    registry = profiles.Registry(builtin_dir=builtin)
+    once = registry.select(["dictation", "tech"], profiles.DEPLOYMENT)
+    assert registry.select(["tech", "dictation", "Tech "], profiles.DEPLOYMENT) is once
+    assert once.names == ("dictation", "tech")
+
+
+def test_a_mebibyte_of_repeated_names_compiles_one_small_selection(
+        client: TestClient) -> None:
+    """Recheck M-4, measured: a 1 MiB `glossary=tech,tech,...` field kept every
+    repeat in the cache key and the selection, about 27 MB an entry, so 256
+    ordinary requests held 6.8 GB of this container."""
+    field = ",".join(["tech"] * (1024 * 1024 // len("tech,")))
+    response = transcribe(client, {}, glossary=field)
+    assert response.status_code == 200, response.text
+    compiled = pipeline.state["glossaries"]._compiled
+    assert list(compiled) == [((profiles.SYSTEM, "tech"),)]
+    assert next(iter(compiled.values())).names == ("tech",)
+
+
+def test_more_profiles_than_the_ceiling_are_refused_by_name(
+        client: TestClient) -> None:
+    """Counted before any name is resolved, so the refusal costs nothing
+    however long the field is, and names the limit rather than a profile."""
+    many = ",".join(f"p{n}" for n in range(profiles.MAX_SELECTED + 1))
+    limit = f"at most {profiles.MAX_SELECTED}"
+    refused = transcribe(client, {}, glossary=many)
+    assert refused.status_code == 400
+    assert refused.json()["error"]["param"] == "glossary"
+    assert limit in refused.json()["error"]["message"]
+    native = client.post("/transcribe", data={"glossary": many},
+                         files={"file": ("clip.wav", wav(), "audio/wav")})
+    assert native.status_code == 400
+    assert limit in native.json()["detail"]
+    repeated = ",".join(["tech"] * (profiles.MAX_SELECTED + 1))
+    assert transcribe(client, {}, glossary=repeated).status_code == 200
+
+
+def test_selections_from_many_threads_at_once_never_raise(
+        builtin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """/transcribe selects on the thread pool beside the /v1 routes, so two can
+    find the cache full at once. Unlocked, both evicted the same oldest entry
+    and the second raised, which was a 500 on a transcription."""
+    monkeypatch.setattr(profiles, "MAX_COMPILED", 1)
+    registry = profiles.Registry(builtin_dir=builtin)
+    choices = (["tech"], ["dictation"], ["tech", "dictation"], ["dictation", "tech"])
+    failures: list[BaseException] = []
+
+    def churn(offset: int) -> None:
+        try:
+            for turn in range(1000):
+                registry.select(choices[(turn + offset) % len(choices)],
+                                profiles.DEPLOYMENT)
+        except BaseException as exc:  # noqa: BLE001 - any raise is the defect
+            failures.append(exc)
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # switch threads as often as CPython will
+    try:
+        threads = [threading.Thread(target=churn, args=(n,)) for n in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(interval)
+    assert failures == []
+    assert len(registry._compiled) <= 1
+
+
+def test_a_selection_compiled_before_a_rescan_is_not_cached_after_it(
+        builtin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transcription compiling while a PUT rescans would otherwise cache the
+    old rules, and every later request would get them until the next change
+    on disk."""
+    registry = profiles.Registry(builtin_dir=builtin)
+    compile_rules = profiles.glossary.compile_rules
+
+    def rescanned_meanwhile(terms):  # noqa: ANN001, ANN202
+        registry.reload()
+        return compile_rules(terms)
+
+    monkeypatch.setattr(profiles.glossary, "compile_rules", rescanned_meanwhile)
+    registry.select(["tech"], profiles.DEPLOYMENT)
+    assert registry._compiled == {}
+
+
+def test_the_v1_routes_rescan_off_the_event_loop(
+        client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rescan stats every user's profiles, so it grows with the household,
+    and on the event loop a slow volume would hold up /health with it."""
+    on_loop: list[bool] = []
+    refresh = profiles.Registry.refresh
+
+    def watched(self: profiles.Registry) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop.append(False)
+        else:
+            on_loop.append(True)
+        refresh(self)
+
+    monkeypatch.setattr(profiles.Registry, "refresh", watched)
+    assert transcribe(client, {}, glossary="tech").status_code == 200
+    assert on_loop == [False]
 
 
 def test_a_hotword_is_never_turned_into_a_replacement(builtin: Path) -> None:
@@ -735,7 +1273,7 @@ def test_a_hotword_is_never_turned_into_a_replacement(builtin: Path) -> None:
     quietly promoted one form to the other would be invisible in the diff.
     """
     registry = profiles.Registry(builtin_dir=builtin)
-    selection = registry.select(["tech"])
+    selection = registry.select(["tech"], profiles.DEPLOYMENT)
     assert "PostgreSQL" in (selection.hotwords or "")
     assert all(pattern.pattern != r"\bPostgreSQL\b"
                for pattern, _ in selection.rules)
@@ -755,7 +1293,7 @@ def v1(client: TestClient, **data: str):  # noqa: ANN201
 
 
 def test_a_prompt_is_honoured_on_parakeet_rather_than_refused(
-        builtin: Path) -> None:
+        gateway: FakeGateway, builtin: Path) -> None:
     """The 400 this replaces was a spec field answered with an error.
 
     `prompt` is defined as text that guides the model and vocabulary is what it
@@ -764,7 +1302,7 @@ def test_a_prompt_is_honoured_on_parakeet_rather_than_refused(
     example of saying no by name. The terms reach the repair stage — and, since
     boosting.py, the decoder too, but only when the request asks for it.
     """
-    client = serve(builtin, engine=FakeEngine("I opened the theoria dashboard"))
+    client = serve(gateway, builtin, engine=FakeEngine("I opened the theoria dashboard"))
     try:
         response = v1(client, prompt="Theoria")
         assert response.status_code == 200
@@ -777,9 +1315,9 @@ def test_a_prompt_is_honoured_on_parakeet_rather_than_refused(
         pipeline.state.clear()
 
 
-def test_a_prompt_term_reaches_both_halves_on_whisper(builtin: Path) -> None:
+def test_a_prompt_term_reaches_both_halves_on_whisper(gateway: FakeGateway, builtin: Path) -> None:
     """Whisper must not lose the decoder half to gain the repair half."""
-    client = serve(builtin, engine=FakeWhisper("I opened the theoria dashboard"))
+    client = serve(gateway, builtin, engine=FakeWhisper("I opened the theoria dashboard"))
     try:
         response = v1(client, prompt="Theoria")
         assert response.status_code == 200
@@ -790,7 +1328,7 @@ def test_a_prompt_term_reaches_both_halves_on_whisper(builtin: Path) -> None:
 
 
 def test_a_prompt_cannot_recover_a_word_the_model_never_approached(
-        builtin: Path) -> None:
+        gateway: FakeGateway, builtin: Path) -> None:
     """The honest limit, pinned so no comment can drift into claiming more.
 
     A bare term names its own spelling and no wrong one, so "entropic" is not
@@ -798,7 +1336,7 @@ def test_a_prompt_cannot_recover_a_word_the_model_never_approached(
     in a profile, or real decoder biasing, recovers that — and this engine has
     neither.
     """
-    client = serve(builtin, engine=FakeEngine("entropic released a model"))
+    client = serve(gateway, builtin, engine=FakeEngine("entropic released a model"))
     try:
         response = v1(client, prompt="Anthropic")
         assert response.status_code == 200
@@ -809,7 +1347,7 @@ def test_a_prompt_cannot_recover_a_word_the_model_never_approached(
 
 
 def test_an_all_lowercase_term_does_not_lowercase_correct_text(
-        builtin: Path) -> None:
+        gateway: FakeGateway, builtin: Path) -> None:
     """`sync` as a term would compile to a rule that BREAKS a right sentence.
 
     Every rule matches case-insensitively, so a lower-case term rewrites a
@@ -817,7 +1355,7 @@ def test_an_all_lowercase_term_does_not_lowercase_correct_text(
     are full of these terms — `commit`, `nginx`, `kubectl` — so this is the
     ordinary case rather than an exotic one.
     """
-    client = serve(builtin, engine=FakeEngine("Sync the files, then commit"))
+    client = serve(gateway, builtin, engine=FakeEngine("Sync the files, then commit"))
     try:
         response = v1(client, prompt="sync, commit")
         assert response.status_code == 200
@@ -827,9 +1365,9 @@ def test_an_all_lowercase_term_does_not_lowercase_correct_text(
 
 
 def test_a_two_letter_term_does_not_rewrite_an_ordinary_word(
-        builtin: Path) -> None:
+        gateway: FakeGateway, builtin: Path) -> None:
     """`US` would turn "he told us" into "he told US" on every request."""
-    client = serve(builtin, engine=FakeEngine("he told us the plan"))
+    client = serve(gateway, builtin, engine=FakeEngine("he told us the plan"))
     try:
         response = v1(client, prompt="US")
         assert response.status_code == 200
@@ -839,7 +1377,7 @@ def test_a_two_letter_term_does_not_rewrite_an_ordinary_word(
 
 
 def test_a_profile_and_a_prompt_compose_with_the_request_last(
-        builtin: Path) -> None:
+        gateway: FakeGateway, builtin: Path) -> None:
     """Both halves, both sources, and the caller's own spelling winning.
 
     The profile rewrites "theory dashboard" to "Theoria dashboard"; the
@@ -847,7 +1385,7 @@ def test_a_profile_and_a_prompt_compose_with_the_request_last(
     request that names one term must not displace the profile it also asked
     for, and must not be displaced by it.
     """
-    client = serve(builtin, engine=FakeWhisper(
+    client = serve(gateway, builtin, engine=FakeWhisper(
         "the theory dashboard runs on postgresql"))
     try:
         response = v1(client, glossary="dictation,tech", prompt="PostgreSQL")
@@ -863,7 +1401,7 @@ def test_a_profile_and_a_prompt_compose_with_the_request_last(
 
 
 def test_a_profiles_bare_hotword_still_never_rewrites_the_text(
-        builtin: Path) -> None:
+        gateway: FakeGateway, builtin: Path) -> None:
     """The asymmetry with a prompt is deliberate and has to stay deliberate.
 
     Both shipped profiles promise in their own headers that a bare term
@@ -872,7 +1410,7 @@ def test_a_profiles_bare_hotword_still_never_rewrites_the_text(
     rewrite; a `prompt` cannot express one at all, which is the whole reason
     its terms get the weaker repair instead of nothing.
     """
-    client = serve(builtin, engine=FakeEngine("we deployed postgresql today"))
+    client = serve(gateway, builtin, engine=FakeEngine("we deployed postgresql today"))
     try:
         response = v1(client, glossary="tech")
         assert response.status_code == 200
@@ -881,10 +1419,10 @@ def test_a_profiles_bare_hotword_still_never_rewrites_the_text(
         pipeline.state.clear()
 
 
-def test_keywords_are_read_as_the_same_list_as_a_prompt(builtin: Path) -> None:
+def test_keywords_are_read_as_the_same_list_as_a_prompt(gateway: FakeGateway, builtin: Path) -> None:
     """The list-shaped spelling of the same field, bracketed and bare."""
     for key in ("keywords[]", "keywords"):
-        client = serve(builtin, engine=FakeEngine("I opened the theoria dashboard"))
+        client = serve(gateway, builtin, engine=FakeEngine("I opened the theoria dashboard"))
         try:
             response = v1(client, **{key: "Theoria"})
             assert response.status_code == 200, key
@@ -893,13 +1431,13 @@ def test_keywords_are_read_as_the_same_list_as_a_prompt(builtin: Path) -> None:
             pipeline.state.clear()
 
 
-def test_too_many_terms_are_refused_by_name(builtin: Path) -> None:
+def test_too_many_terms_are_refused_by_name(gateway: FakeGateway, builtin: Path) -> None:
     """Every term is a regex run over every word; a paste is not a vocabulary.
 
     profiles.MAX_ENTRIES is the same ceiling a glossary file is held to, for
     the same reason, rather than a second number to keep in step with it.
     """
-    client = serve(builtin)
+    client = serve(gateway, builtin)
     try:
         response = v1(client, prompt=", ".join(
             f"Term{n}" for n in range(profiles.MAX_ENTRIES + 1)))
@@ -912,7 +1450,7 @@ def test_too_many_terms_are_refused_by_name(builtin: Path) -> None:
 
 
 def test_hotwords_off_drops_the_decoder_half_and_keeps_the_repair(
-        builtin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        gateway: FakeGateway, builtin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """STT_HOTWORDS=0 measures the model, not the text repair.
 
     It exists so a benchmark can separate what the vocabulary contributes from
@@ -923,7 +1461,7 @@ def test_hotwords_off_drops_the_decoder_half_and_keeps_the_repair(
     stake.
     """
     monkeypatch.setattr(pipeline, "HOTWORDS_ENABLED", False)
-    client = serve(builtin, engine=FakeWhisper("I opened the theoria dashboard"))
+    client = serve(gateway, builtin, engine=FakeWhisper("I opened the theoria dashboard"))
     try:
         response = v1(client, prompt="Theoria", glossary="tech")
         assert response.status_code == 200
@@ -942,8 +1480,8 @@ def test_hotwords_off_drops_the_decoder_half_and_keeps_the_repair(
 # have nowhere to put a key at all.
 
 
-def test_the_repaired_header_names_what_was_rewritten(builtin: Path) -> None:
-    client = serve(builtin, engine=FakeEngine("I opened the theory dashboard"))
+def test_the_repaired_header_names_what_was_rewritten(gateway: FakeGateway, builtin: Path) -> None:
+    client = serve(gateway, builtin, engine=FakeEngine("I opened the theory dashboard"))
     try:
         response = v1(client, glossary="dictation")
         assert response.status_code == 200
@@ -953,9 +1491,9 @@ def test_the_repaired_header_names_what_was_rewritten(builtin: Path) -> None:
 
 
 def test_the_repaired_header_is_absent_when_nothing_fired(
-        builtin: Path) -> None:
+        gateway: FakeGateway, builtin: Path) -> None:
     """Its presence has to mean something, so it is not sent empty."""
-    client = serve(builtin, engine=FakeEngine("nothing here matches"))
+    client = serve(gateway, builtin, engine=FakeEngine("nothing here matches"))
     try:
         response = v1(client, glossary="dictation")
         assert response.status_code == 200
@@ -965,7 +1503,7 @@ def test_the_repaired_header_is_absent_when_nothing_fired(
 
 
 def test_a_term_the_decoder_already_spelled_right_is_not_reported(
-        builtin: Path) -> None:
+        gateway: FakeGateway, builtin: Path) -> None:
     """A match is not a change, and the header must report changes.
 
     Rules match case-insensitively, and a term rule is built from its own
@@ -973,7 +1511,7 @@ def test_a_term_the_decoder_already_spelled_right_is_not_reported(
     matches would make this header name terms nothing happened to, which is
     the same false report as a silent substitution with the sign flipped.
     """
-    client = serve(builtin, engine=FakeEngine("Theoria shipped today"))
+    client = serve(gateway, builtin, engine=FakeEngine("Theoria shipped today"))
     try:
         response = v1(client, prompt="Theoria")
         assert response.status_code == 200
@@ -984,14 +1522,14 @@ def test_a_term_the_decoder_already_spelled_right_is_not_reported(
 
 
 def test_a_non_latin1_repaired_term_does_not_become_a_500(
-        builtin: Path) -> None:
+        gateway: FakeGateway, builtin: Path) -> None:
     """Starlette encodes a header value as latin-1, and terms are not latin-1.
 
     A Cyrillic or CJK vendor name is a perfectly ordinary glossary entry, and
     putting it in a header raw turns a working transcription into an unhandled
     UnicodeEncodeError after the work is done. Percent-encoded UTF-8 instead.
     """
-    client = serve(builtin, engine=FakeEngine("we index with яндекс"))
+    client = serve(gateway, builtin, engine=FakeEngine("we index with яндекс"))
     try:
         response = v1(client, prompt="Яндекс")
         assert response.status_code == 200
@@ -1020,7 +1558,7 @@ def test_a_comma_inside_a_term_does_not_split_the_header(
     assert unquote(header) == "Acme, Inc."
 
 
-def test_the_requests_own_spelling_wins_over_the_profiles(builtin: Path) -> None:
+def test_the_requests_own_spelling_wins_over_the_profiles(gateway: FakeGateway, builtin: Path) -> None:
     """Request rules run LAST, and that is what decides a disagreement.
 
     The `dictation` profile produces "Theoria dashboard"; this request asks for
@@ -1030,7 +1568,7 @@ def test_the_requests_own_spelling_wins_over_the_profiles(builtin: Path) -> None
     is the one ordering rule _decode_vocabulary has always had on the other
     half.
     """
-    client = serve(builtin, engine=FakeEngine("I opened the theory dashboard"))
+    client = serve(gateway, builtin, engine=FakeEngine("I opened the theory dashboard"))
     try:
         response = v1(client, glossary="dictation", prompt="Theoria Dashboard")
         assert response.status_code == 200
@@ -1040,7 +1578,7 @@ def test_the_requests_own_spelling_wins_over_the_profiles(builtin: Path) -> None
 
 
 def test_the_repaired_header_reaches_the_formats_with_no_body_key(
-        builtin: Path) -> None:
+        gateway: FakeGateway, builtin: Path) -> None:
     """`text`, `srt` and `vtt` have nowhere to put a key, which is the point.
 
     A body key would also have changed the response shape, which ADR 0001
@@ -1048,7 +1586,7 @@ def test_the_repaired_header_reaches_the_formats_with_no_body_key(
     five formats.
     """
     for response_format in ("json", "text", "verbose_json", "srt", "vtt"):
-        client = serve(builtin, engine=FakeEngine("I opened the theory dashboard"))
+        client = serve(gateway, builtin, engine=FakeEngine("I opened the theory dashboard"))
         try:
             response = v1(client, glossary="dictation",
                           response_format=response_format)
@@ -1062,7 +1600,7 @@ def test_the_repaired_header_reaches_the_formats_with_no_body_key(
 # ── decode-time biasing, at the route ─────────────────────────────────────────
 
 
-def test_boosting_is_off_unless_the_request_asks(builtin: Path) -> None:
+def test_boosting_is_off_unless_the_request_asks(gateway: FakeGateway, builtin: Path) -> None:
     """The failure: an always-on boost list, which is what the +12% rules out.
 
     A glossary whose terms do NOT occur in the audio raised WER by 12% on
@@ -1075,7 +1613,7 @@ def test_boosting_is_off_unless_the_request_asks(builtin: Path) -> None:
     for data in ({"prompt": "Theoria"},
                  {"keywords[]": "Theoria"},
                  {"glossary": "dictation"}):
-        client = serve(builtin, engine=FakeEngine("the theory dashboard"))
+        client = serve(gateway, builtin, engine=FakeEngine("the theory dashboard"))
         try:
             response = v1(client, **data)
             assert response.status_code == 200
@@ -1085,7 +1623,7 @@ def test_boosting_is_off_unless_the_request_asks(builtin: Path) -> None:
             pipeline.state.clear()
 
 
-def test_untokenisable_phrase_is_a_400_naming_the_character(builtin: Path) -> None:
+def test_untokenisable_phrase_is_a_400_naming_the_character(gateway: FakeGateway, builtin: Path) -> None:
     """The failure: a caller believing their vocabulary reached the decoder.
 
     Same argument as profiles.UnknownProfile. A phrase whose characters have no
@@ -1094,7 +1632,7 @@ def test_untokenisable_phrase_is_a_400_naming_the_character(builtin: Path) -> No
     up until a transcript is wrong. Named with the offending character, because
     "one of your terms" is not something anybody can act on.
     """
-    client = serve(builtin, engine=FakeEngine())
+    client = serve(gateway, builtin, engine=FakeEngine())
     try:
         response = v1(client, prompt="日本語", boost="true")
         assert response.status_code == 400
@@ -1111,7 +1649,7 @@ def test_untokenisable_phrase_is_a_400_naming_the_character(builtin: Path) -> No
 
 
 def test_hotwords_off_refuses_boost_rather_than_dropping_it(
-        builtin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        gateway: FakeGateway, builtin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The failure: STT_HOTWORDS=0 becoming a half-open door on the default engine.
 
     That switch exists so a benchmark can measure the model rather than the
@@ -1121,7 +1659,7 @@ def test_hotwords_off_refuses_boost_rather_than_dropping_it(
     biased. pipeline.run holds the second lock on the same door.
     """
     monkeypatch.setattr(pipeline, "HOTWORDS_ENABLED", False)
-    client = serve(builtin, engine=FakeEngine())
+    client = serve(gateway, builtin, engine=FakeEngine())
     try:
         response = v1(client, prompt="Theoria", boost="true")
         assert response.status_code == 400
@@ -1134,7 +1672,7 @@ def test_hotwords_off_refuses_boost_rather_than_dropping_it(
 
 
 def test_hotwords_off_strips_the_vocabulary_inside_the_pipeline_too(
-        builtin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch: pytest.MonkeyPatch) -> None:
     """The second lock, tested at the second lock.
 
     The route's refusal is reachable only through /v1. pipeline.run is what
@@ -1143,7 +1681,8 @@ def test_hotwords_off_strips_the_vocabulary_inside_the_pipeline_too(
     was still being biased.
     """
     monkeypatch.setattr(pipeline, "HOTWORDS_ENABLED", False)
-    client = serve(builtin, engine=FakeEngine())
+    pipeline.state.clear()
+    pipeline.state["asr"] = FakeEngine()
     try:
         pipeline.run(wav(), asr.Options(hotwords="Theoria",
                                         vocabulary=("Theoria",), boost=True))
@@ -1155,7 +1694,7 @@ def test_hotwords_off_strips_the_vocabulary_inside_the_pipeline_too(
         pipeline.state.clear()
 
 
-def test_boost_reports_which_phrases_reached_the_decoder(builtin: Path) -> None:
+def test_boost_reports_which_phrases_reached_the_decoder(gateway: FakeGateway, builtin: Path) -> None:
     """The failure: a term dropped by a ceiling with nobody told.
 
     Only ONE of the three ways a term can fail to reach the decoder is a 400 —
@@ -1164,7 +1703,7 @@ def test_boost_reports_which_phrases_reached_the_decoder(builtin: Path) -> None:
     find out. x-boost-applied names what actually got there; its absence means
     nothing did.
     """
-    client = serve(builtin, engine=FakeEngine())
+    client = serve(gateway, builtin, engine=FakeEngine())
     try:
         response = v1(client, prompt="Anthropic, US, Theoria", boost="true")
         assert response.status_code == 200
@@ -1178,14 +1717,14 @@ def test_boost_reports_which_phrases_reached_the_decoder(builtin: Path) -> None:
 
 
 def test_a_malformed_boost_is_refused_rather_than_read_as_false(
-        builtin: Path) -> None:
+        gateway: FakeGateway, builtin: Path) -> None:
     """The failure: boost=yes-please quietly meaning off.
 
     A value this route cannot parse is a request whose intent it does not know,
     and guessing "off" would be the accepted-and-dropped defect wearing a
     different hat.
     """
-    client = serve(builtin, engine=FakeEngine())
+    client = serve(gateway, builtin, engine=FakeEngine())
     try:
         response = v1(client, prompt="Theoria", boost="yes-please")
         assert response.status_code == 400

@@ -53,7 +53,7 @@ import httpx
 from . import language as lang
 from . import telemetry
 from .destinations import (DestinationError, HaAssist, NotUnderstood, Pipeline, Request, Turn,
-                           _held, transport_error)
+                           _known, transport_error)
 from .router import (MIC_RATE, SPEAKER_RATE, Failed, Outcome, Route, Router, clip,
                      strip_wake_phrase)
 
@@ -486,8 +486,7 @@ async def _answer(router: Router, route: Route, out: Outcome, sink: Sink, *, mem
         except httpx.HTTPError as e:
             # Its words without the key: this reaches Outcome.error, the INFO
             # log, the event stream and the page (destinations.transport_error).
-            keys = (_held(name) for name in dest.env_vars())
-            raise Failed(f"destination: {transport_error(e, *keys)}") from None
+            raise Failed(f"destination: {transport_error(e, *_known(dest.env_vars()))}") from None
         finally:
             out.timings_ms["destination"] = round(out.timings_ms.get("destination", 0.0)
                                                   + (time.monotonic() - t) * 1000, 1)

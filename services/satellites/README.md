@@ -24,7 +24,7 @@ out of `GATEWAY_API_KEYS`, is
 
 **Contents:** [Quick start](#quick-start) · [Deploy](#deploy) ·
 [Upgrade](#upgrade) · [Status](#status) · [Adoption](#adoption) ·
-[Routes](#routes) · [Events](#events) · [The device protocol](#the-device-protocol) ·
+[Access](#access) · [Routes](#routes) · [Events](#events) · [The device protocol](#the-device-protocol) ·
 [Listening](#listening) · [Wake words](#wake-words) ·
 [Destinations](#destinations) · [Keys](#keys) · [Lights](#lights) ·
 [Buttons](#buttons) · [Media](#media) · [AirPlay](#airplay) ·
@@ -56,11 +56,15 @@ else.
 
 1. **Add the hub to the deployment.** `compose.yaml` has the
    `voice-satellites` block and its `nodes-data` volume. The volume holds the
-   adoptions, the wake words, stored keys, firmware and models: losing it
-   un-adopts every satellite. The gateway reaches the hub through
-   `GATEWAY_SATELLITES_URL` (default `http://voice-satellites:8003`).
-2. **Point it at speech.** `SATELLITES_STT_URL` and `SATELLITES_TTS_URL`, as
-   compose sets them. Without STT, wake words are heard and nothing is
+   adoptions, the wake words, firmware and models: losing it un-adopts every
+   satellite. The gateway reaches the hub through `GATEWAY_SATELLITES_URL`
+   (default `http://voice-satellites:8003`), and writes the hub's credentials
+   (`service.key` and `identity.pub`) to the `calliope-svc-satellites` volume,
+   which the hub mounts read-only at `/run/calliope` ([Access](#access)).
+2. **Point it at speech, through the gateway.** `SATELLITES_STT_URL` and
+   `SATELLITES_TTS_URL` are `http://voice-gateway:8081`, the gateway's
+   internal listener, which takes the hub's service key and forwards to
+   stt-stack and tts-stack. Without STT, wake words are heard and nothing is
    transcribed.
 3. **Serve the gateway over TLS with a certificate the firmware trusts.**
    Release firmware connects only to `wss://`, and it checks the certificate
@@ -83,7 +87,8 @@ else.
 6. **Give a wake word something to do.** Every satellite hears `hey_jarvis`
    at first, and it echoes what it heard until it has an action
    ([Wake words](#wake-words)).
-7. **Then, as needed:** an API key for a language model ([Keys](#keys)),
+7. **Then, as needed:** an API key for a language model, stored in Admin ›
+   Secrets ([Keys](#keys)),
    Home Assistant through the Calliope integration
    ([`clients/home-assistant`](../../clients/home-assistant/README.md)) or
    over MQTT ([below](#home-assistant-over-mqtt)), and a firmware signing key
@@ -195,21 +200,61 @@ that lost its token (a factory reset) is forgotten and adopted again.
 Every route takes a satellite's id (the MAC, with or without colons) or its
 name.
 
+## Access
+
+**Every request carries the gateway's assertion.** The gateway checks the
+caller's session or API key and its scopes, then forwards the request with a
+signed `X-Calliope-Identity` header for the audience `satellites`. The hub
+verifies it with the public key in `/run/calliope/identity.pub` and answers
+anything without a valid one with 401, the device socket included. `/health`
+is the one exception. `/docs`, `/redoc` and `/openapi.json` do not exist. The
+header is removed before any handler runs, so nothing the hub sends onward
+carries it.
+
+**The gateway decides who may call what.** The hub reads the caller's scopes
+in three places only:
+
+| What | Without `satellites:admin` |
+|---|---|
+| `config.buttons` in `GET /satellites`, `GET /satellites/{id}` and every answer that describes a satellite | left out. A button's webhook names a secret. |
+| The wake words (`GET /satellites/wake-words`, the `wake_words` event) | each word's `name`, `threshold`, `satellites`, `mode` and `state`, and its action as `{"type": ...}` alone |
+| `PATCH /satellites/{id}` | only the controls: `volume`, `mic_gain_db`, `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness`, `audio_sink`, `audio_source`, `echo_reference`, `output_satellite`, `airplay_enabled` and `airplay_name`. Anything else, the name and the button mapping among them, is 403 `insufficient_scope` naming `satellites:admin`, and nothing in that PATCH is saved |
+
+MQTT carries no button mapping either.
+
+**The device socket answers only the gateway's relay.** A satellite has no
+login. The gateway relays its socket for anyone and adds a relay assertion
+(`svc:gateway-relay`), and the hub refuses any other caller on the socket
+(1008), and the relay on every HTTP route (403 `relay_only`). The adoption
+token decides what a connection may do, as before
+([Adoption](#adoption)). Because anyone on the internet can say hello:
+
+- at most 32 unadopted satellites are kept. A newer one makes the oldest go,
+  and a connected one is closed with 1013. Each shows the address it said
+  hello from.
+- a hello that proves no adoption is taken at most 10 times a minute from one
+  address, then closed with 1013. A hello with a valid token is never held
+  back, so forty satellites reconnecting together after a restart, all from
+  the gateway's address, come straight back.
+- the address is the last `X-Forwarded-For` entry, which the gateway writes,
+  else the peer. It is believed because only a request with the gateway's
+  assertion reaches the hub.
+
 ## Routes
 
 | Route | What it does |
 |---|---|
 | `WS /satellites/ws` | The device connection. Protocol below. |
 | `WS /nodes/ws` | The same handler, under the name pre-release builds used until 2026-09-25. A board flashed from one runs firmware that connects here, and its next firmware arrives over this socket, so the old path stays until no board reports firmware from before the rename ([ADR 0013](../../docs/adr/0013-satellites-one-door.md#renamed)). The gateway relays both. |
-| `GET /health` | No key. `status`, and `satellites` (`online`, `adopted`, `pending`), `tts`, `voice` (the wake word engine's state, its words and thresholds, the front-end, the model directory), `routing` (how many words have an action, the STT URL and engine, a `load_error`) and `mqtt` (null without it). The gateway's own `/health` carries it as `backends.satellites` |
+| `GET /health` | No assertion. `status` (`not_ready` until the gateway has written the hub's credentials), and `satellites` (`online`, `adopted`, `pending`), `tts`, `voice` (the wake word engine's state, its words and thresholds, the front-end, the model directory), `routing` (how many words have an action, the STT URL and engine, a `load_error`) and `mqtt` (null without it). The gateway's own `/health` carries it as `backends.satellites` |
 | `GET /satellites` | Every satellite seen since the hub started, adopted or not, each as `GET /satellites/{id}` describes it |
 | `GET /satellites/events` | Server-sent events, one JSON object each. [Events](#events) lists every type |
-| `GET /satellites/wake-words` | `{"available", "words", "ptt", "custom", "env", "secrets", "tools", "warnings", "load_error"}`: the names the hub can load, each word's whole entry with its `state` and `error`, push-to-talk's entry, which secrets the actions name have a value, where each value lives, and which language model tools work here (`web_search` only with `SATELLITES_SEARXNG_URL`). [Wake words](#wake-words). |
+| `GET /satellites/wake-words` | `{"available", "words", "ptt", "custom", "env", "tools", "warnings", "load_error"}`: the names the hub can load, each word's whole entry with its `state` and `error`, push-to-talk's entry, which secrets the actions name have a value in the secret store (names and booleans), and which language model tools work here (`web_search` only with `SATELLITES_SEARXNG_URL`). Without `satellites:admin`, only `{"words", "ptt"}` and each action's kind ([Access](#access)). [Wake words](#wake-words). |
 | `PUT /satellites/wake-words` | `{"words": [...], "ptt": {...}}`: replace them all, live. A field an entry leaves out keeps its saved value. A bad set is a 422 and the old one stays. |
 | `POST /satellites/wake-words/models?name=` | A custom wake word: the `.onnx` as the raw body, checked to be an openWakeWord classifier (input `[batch, 16, 96]`, under 5 MB) before it is written. Then offered in `available` and assigned like a built-in. [`tools/wakeword-train`](../../tools/wakeword-train/README.md) trains one; a model trained there is CC BY-NC-SA 4.0, because its training features and feature models are. |
 | `DELETE /satellites/wake-words/models/{name}` | Only a custom model, and only once no wake word uses it (409 otherwise). |
 | `GET /satellites/{id}` | One satellite: its name, whether it is adopted and online, model, `firmware`, `config`, its last `status`, `caps` (while it is offline, the caps it last proved its adoption with; `{}` for one the hub has never seen), the update in progress (`ota`), `listening`, `earcons`, `wake_words` (the names assigned to it), `output` (`speaker`, `jack` or `null`, [Speaker or jack](#speaker-or-jack)), `boot` (`reset_reason`, `stages_ms`, and `stalled_in` and `stall_restarts` after a stalled start; firmware from 2026-09-26) `latency` (how quickly its last 20 replies began and ended, [Streaming](#streaming)), `media` (what `POST /satellites/{id}/media` takes for it and what plays for it, or `null`, [Media](#media)) and `update` (`sha256`, `version`, `uploaded_at` of the image `POST /satellites/ota` would install, when that is an update: the newest for its model by the page's own ordering that it would accept, not what it runs, not older, not what an update in progress installs; else `null`) |
-| `PATCH /satellites/{id}` | `output_satellite`: another adopted satellite that plays what this one plays (its replies, earcons, Say and tones), or `""` for its own speaker ([Output](#output)); `airplay_enabled` and `airplay_name` (up to 64 printable characters, `""` for the satellite's name) on a satellite with caps `airplay`, 409 `no_airplay` otherwise; `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness` (1-100), `ring_top` (0-11: the LED at 12 o'clock as mounted, where a bar on the ring starts) and `ring_upside_down` (the bar then runs the other way, so it still fills clockwise as seen), `buttons` ([Buttons](#buttons)); `local_volume_buttons` for firmware from before 2026-09-27. While the satellite is offline, `audio_sink`, `audio_source`, `echo_reference` and the AirPlay settings are refused (409 `no_audio_devices`, `no_airplay`) when its saved caps lack them; with no saved caps they are taken. Every PATCH publishes a `config` event naming what changed. `speaker_enabled: false` also ends the media playing there |
+| `PATCH /satellites/{id}` | `output_satellite`: another adopted satellite that plays what this one plays (its replies, earcons, Say and tones), or `""` for its own speaker ([Output](#output)); `airplay_enabled` and `airplay_name` (up to 64 printable characters, `""` for the satellite's name) on a satellite with caps `airplay`, 409 `no_airplay` otherwise; `name`, `volume` (0-100), `mic_gain_db` (0-37.5), `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness` (1-100), `ring_top` (0-11: the LED at 12 o'clock as mounted, where a bar on the ring starts) and `ring_upside_down` (the bar then runs the other way, so it still fills clockwise as seen), `buttons` ([Buttons](#buttons): a webhook must be `webhook:secret:<NAME>`, and a raw URL is 422 `use_secret`); `local_volume_buttons` for firmware from before 2026-09-27. Beyond the controls, a PATCH needs `satellites:admin` ([Access](#access)). While the satellite is offline, `audio_sink`, `audio_source`, `echo_reference` and the AirPlay settings are refused (409 `no_audio_devices`, `no_airplay`) when its saved caps lack them; with no saved caps they are taken. Every PATCH publishes a `config` event naming what changed. `speaker_enabled: false` also ends the media playing there |
 | `POST /satellites/{id}/adopt` | `{"name": "..."}` |
 | `POST /satellites/{id}/forget` | |
 | `POST /satellites/{id}/identify` | Blink for five seconds. Works before adoption, which is the point. |
@@ -219,20 +264,19 @@ name.
 | `POST /satellites/{id}/say` | `{"text": "...", "voice": "bm_george"}`: Kokoro, via `SATELLITES_TTS_URL`. 409 for a satellite with `speaker_enabled` false. |
 | `POST /satellites/{id}/flush` | Stop: drop the speaker audio queued and playing, end the media stream on it and on the satellite that plays for it, and cancel the conversation in progress |
 | `POST /satellites/{id}/ptt` | `{"wake_word": "..."}`, optional: listen as if the satellite's push-to-talk button had been pressed, handled by that word's entry or by `ptt`. 204, or 409 naming why not (`satellite_busy`, also while a wake word it heard is being [double-checked](#double-checking-a-wake-word); `satellite_muted`, `mic_disabled`, `trigger_word`), or 404 `wake_word_not_found`. For Home Assistant. |
-| `GET /satellites/{id}/listen?seconds=5&channel=` | A WAV of the raw mic channels, up to 60 s |
+| `POST /satellites/{id}/listen?seconds=5&channel=` | A WAV of the raw mic channels, up to 60 s. A POST, because it opens a microphone, which a link or an image on another site must never do; a GET is 405 |
 | `GET /satellites/{id}/airplay/artwork?v=` | The cover of what an AirPlay receiver plays, as its satellite last sent it (`image/jpeg` or `image/png`, with its SHA-256 as the ETag). 404 before one arrives, after a status stops naming it, and when `v` (a SHA-256) is not the picture held ([AirPlay](#airplay)) |
 | `POST /satellites/{id}/airplay/{command}` | `play`, `pause`, `play_pause`, `next`, `previous`, `stop` or `disconnect`, to the phone playing to its AirPlay receiver (422 for anything else). 200 `{"command", "status", "confirmed"}` once the satellite has answered; 409 `no_airplay`, `airplay_no_controls`, `airplay_idle` or `airplay_no_remote` at once; 502 `airplay_refused` in the phone's or Shairport Sync's words; 504 `satellite_timeout` after 6 s ([AirPlay](#airplay)) |
 | `POST /satellites/{id}/media?announce=0` | A 16-bit PCM WAV as the body, in the format `media` names, played as it arrives: music, or with `announce=1` an announcement. Answered once it has played or been stopped: `{"played_s", "stopped", "reason"}`. 409 `speaker_disabled` or `no_speaker`, 415 `unsupported_audio` or `format_mismatch`, 413 `announce_too_long`, all before any audio plays. For Home Assistant ([Media](#media)) |
 | `POST /satellites/{id}/media/stop` | End the media stream playing for it, and have a satellite with a media lane drop what it holds. 204 whether or not anything was playing. For Home Assistant |
 | `POST /satellites/{id}/set-hub` | `{"url": "wss://host:port"}`: the satellite saves it and reboots onto that hub |
 | `POST /satellites/{id}/inject?play=0&wake_word=` | A 16 kHz mono 16-bit WAV as the body, through the satellite's own wake words, the endpoint and routing path as if the satellite had heard it. [Verifying](#verifying-the-pipeline-without-a-voice). |
-| `GET /satellites/routing` | What each wake word does, which secret variables are set (never their values), the STT and TTS URLs and engine, warnings |
+| `GET /satellites/routing` | What each wake word does, which of the secrets it names have a value (never the values), the STT and TTS URLs and engine, warnings |
 | `PUT /satellites/routing` | 409 `routing_per_wake_word`: routing is saved with each wake word. [Routing](#routing). |
 | `POST /satellites/routing/test` | `{"satellite", "wake_word", "text"}`: a typed sentence through that word's action and TTS. Plays nothing. |
-| `POST /satellites/ha/pipelines` | `{"url", "token_env"}`: Home Assistant's Assist pipelines and its preferred one, asked with the token that variable holds, for an `ha_assist` word's picker. 409 `token_missing` when it holds none. |
-| `POST /satellites/llm/models` | `{"base_url", "api_key_env"}`: `{"models": [...]}`, the ids a language model server lists at `GET {base_url}/models`, asked with that key, for an `llm` word's picker. A listing that pages (`has_more` and `last_id`, as Anthropic's does) is read to its end, from `after_id`, up to ten pages more. 502 in the server's own words, 504 after 10 s. |
-| `POST /satellites/llm/test` | An `llm` destination, saved or not: one short question through the same path a turn takes, with no TTS. `{"model", "reply", "first_token_ms", "total_ms", "token_limit"}`, or 502 in the provider's words, or 504 after 25 s. |
-| `PUT /satellites/secrets` | `{"name": "OPENAI_API_KEY", "value": "..."}`: store an API key on the hub under that name, or clear it with `"value": null`. Answers the wake word view. No route reads a value back. 409 `set_in_environment` when the environment already sets the name. [Keys](#keys). |
+| `POST /satellites/ha/pipelines` | `{"url", "token_env"}`: Home Assistant's Assist pipelines and its preferred one, asked with the token that secret holds, for an `ha_assist` word's picker. 409 `token_missing` when it holds none, 403 `host_not_allowed` for an address the secret does not name. |
+| `POST /satellites/llm/models` | `{"base_url", "api_key_env"}`: `{"models": [...]}`, the ids a language model server lists at `GET {base_url}/models`, asked with that key, for an `llm` word's picker. A listing that pages (`has_more` and `last_id`, as Anthropic's does) is read to its end, from `after_id`, up to ten pages more. 403 `host_not_allowed` for an address the key's secret does not name, 502 in the server's own words, 504 after 10 s. |
+| `POST /satellites/llm/test` | An `llm` destination, saved or not: one short question through the same path a turn takes, with no TTS. `{"model", "reply", "first_token_ms", "total_ms", "token_limit"}`, or 403 `host_not_allowed`, or 502 in the provider's words, or 504 after 25 s. |
 | `GET /satellites/telemetry` | Whether [telemetry](#telemetry) is on, its `level`, `retention_days` and `max_mb`, the day `files` it holds, the `clips` it keeps (`count`, `bytes`), and `bytes`: everything kept, clips included |
 | `PUT /satellites/telemetry` | `{"enabled": true, "level": "full|timings", "retention_days": 1-365, "max_mb": 10-5000}`, any of them: saved and in force at once. 422 for a value out of range |
 | `DELETE /satellites/telemetry` | Delete every record and every clip; the settings stay |
@@ -262,8 +306,8 @@ The gateway routes all of these. The Satellites tab uses all but nine:
 
 ### Events
 
-`GET /satellites/events` is a server-sent event stream behind the same keys
-as the rest of the API. Each event is one JSON object, and `satellite` is the
+`GET /satellites/events` is a server-sent event stream that needs
+`satellites:read`, as the rest of the read API does. Each event is one JSON object, and `satellite` is the
 satellite's id. An event from a clip run through `/inject` carries
 `"injected": true`.
 
@@ -274,13 +318,13 @@ satellite's id. An event from a clip run through `/inject` carries
 | `pending` | A satellite with no token connects | `address` |
 | `status` | Every status report, about every 10 s | `status`: the report as sent ([protocol](#the-device-protocol)) |
 | `settings` | A button on the satellite changed a setting, or the satellite changed one itself (a status with `cause: "local"`: a Pi whose output volume a phone's AirPlay slider moved) | `settings`: what changed, among `volume`, `lights_enabled` and `brightness` |
-| `config` | The hub's record of a satellite changed: a PATCH, or a setting the satellite reported for the first time | `changed`: the names of what changed, never the values (a button mapping holds webhook addresses) |
+| `config` | The hub's record of a satellite changed: a PATCH, a setting the satellite reported for the first time, or a button webhook moved into the secret store | `changed`: the names of what changed, never the values |
 | `firmware` | An image is uploaded or deleted | `action` (`added` or `deleted`), `sha256`, and `model` and `version` when added. No `satellite`: any satellite of that model may have an `update` now |
 | `output` | The hub decides the audio goes to the speaker or the jack | `output` ([Speaker or jack](#speaker-or-jack)) |
 | `jack` | A plug goes in or out of a Linux satellite's card that detects its jacks | `device`, `name` (the PipeWire node), `direction` (`output` or `input`), `plugged` |
 | `button` | A button is pressed or released | `button`, `action` (`press` or `release`), `held_ms` |
 | `ota` | An update moves on | `state` (`started`, `progress`, `rebooting`, `verified`, `failed`), `pct`, `version`, `error` |
-| `wake_words` | A wake word's model finishes downloading, or fails | `words`: every word with its `state` and `error` |
+| `wake_words` | A wake word's model finishes downloading, or fails | `words`: every word with its `state` and `error`; to a subscriber without `satellites:admin`, as [Access](#access) shows them |
 | `wake` | A wake word is heard (for a word whose double-check is `on`, once STT has heard it too), or push-to-talk pressed | `wake_word`, `score`, `direction` |
 | `wake_rejected` | STT did not hear a wake word in the audio that held it ([Double-checking a wake word](#double-checking-a-wake-word)): the wake was dropped (`mode: "on"`), or would have been (`mode: "log"`) | `word`, `score`, `heard` (the transcript, up to 120 characters), `mode` |
 | `routed` | A command, or an injected clip, has been answered | `wake_word`, `rule_id` (the word that answered), `mode`, `reply_to`, `error`, `transcript`, `language`, `language_source`, `reply_language`, `voice`, `reply_text`, `spoken_text`, `interrupted`, `timings_ms`, `timeline_ms`, `endpoint`, `command_s`, `played`, `note` |
@@ -291,7 +335,12 @@ satellite's id. An event from a clip run through `/inject` carries
 | `media` | A media stream or an announcement starts, and when it ends ([Media](#media)) | `satellite` (the one that plays it), `source` (the one it was sent to), `id`, `announce`, `state` (`playing` or `ended`), `reason` (`null` while it plays), `played_s` |
 | `airplay_command` | After every AirPlay command sent to a satellite ([AirPlay](#airplay)) | `command`, `ok`, `status`, `confirmed` |
 
-Transcripts and replies are in this stream and not in the INFO log.
+Transcripts and replies are in this stream and not in the INFO log. A
+subscriber holding neither `satellites:control` nor `satellites:admin` (a
+`firmware-release` or `monitor` key) gets `turn`, `routed` and `wake_rejected`
+without `transcript`, `reply_text`, `spoken_text`, `error` and `heard`: what is
+said in the house is not theirs to read, as the same speech in Jobs needs
+`jobs:read:all`.
 
 ## The device protocol
 
@@ -717,28 +766,27 @@ records.
 ### Destinations
 
 A destination that needs a credential names it and never holds it:
-`token_env` or `api_key_env` is the name of a secret, whose value the hub
-reads on every request from its environment or from the keys it holds
-([Keys](#keys)). `GET /satellites/wake-words` says in `env` which named
-secrets have a value, as booleans, and in `secrets` where each value lives.
+`token_env`, `api_key_env` or `url_secret` is the name of a secret in the
+gateway's store, whose value the hub asks for when it is needed ([Keys](#keys)).
+`GET /satellites/wake-words` says in `env` which named secrets have a value,
+as booleans.
 
 The hub refuses, with a 422:
 
 - a field it does not know
-- a name that does not look like a variable's, so a pasted token is refused
+- a name that does not look like a secret's, so a pasted token is refused
 - a URL with a user and password in it
-- a name that is one of the hub's own settings: under `SATELLITES_` (or
-  `NODES_`) with no `TOKEN`, `KEY`, `SECRET` or `PASSWORD` in it as a word.
-  `SATELLITES_MQTT_URL`, which carries the broker's password, is one. Such a
-  name holds nothing for any destination, wherever an action, a picker or the
-  key box names it.
+
+A secret goes only to the hosts it names (its allowed hosts in Admin ›
+Secrets). A turn that would send it anywhere else fails and says which host
+and which secret; a picker or Test answers 403 `host_not_allowed`.
 
 | `type` | Fields | What it does |
 |---|---|---|
 | `ha_conversation` | `url`, `token_env` (`SATELLITES_HA_TOKEN`), `agent_id`, `timeout` (15, up to 120) | Home Assistant's `POST /api/conversation/process`, with the language that was spoken |
 | `ha_assist` | `url`, `token_env`, `pipeline` (an Assist pipeline id, picked by name on the page; unset, HA's preferred one), `timeout` (15, up to 120) | An Assist pipeline over HA's websocket API, **set up in Home Assistant**. It hears the command with its own speech-to-text, understands it with the satellite's own HA device (so "the lights" are that room's), and speaks the reply with its own text-to-speech and voice, in its own language. The word's language and voice are not read. A pipeline with no speech-to-text or text-to-speech leaves that part to Calliope's own. The satellite's device exists only where the Calliope integration is installed ([`clients/home-assistant`](../../clients/home-assistant/README.md)) |
 | `llm` | [below](#language-model-destination) | Any OpenAI-compatible `POST /chat/completions`, streamed, with the conversation so far |
-| `webhook` | `url`, `token_env`, `timeout` (15, up to 120) | POST `{satellite, satellite_id, wake_word, mode, text, language, audio_seconds, history}`. A JSON `reply` string is spoken |
+| `webhook` | `url` or `url_secret` (the name of a `secret_url` secret that holds the address, for a URL that is itself a credential, such as Home Assistant's `/api/webhook/<id>`; it is never shown or logged), `token_env`, `timeout` (15, up to 120) | POST `{satellite, satellite_id, wake_word, mode, text, language, audio_seconds, history}`. A JSON `reply` string is spoken |
 | `echo` | | Says back what it heard |
 
 Both Home Assistant destinations keep HA's `conversation_id` for as long as a
@@ -751,7 +799,7 @@ conversation lasts, so HA keeps its own context between turns.
 | `base_url` | | | The address before `/chat/completions`, such as `https://api.openai.com/v1`. One saved with `/chat/completions` on the end is saved without it |
 | `model` | | up to 120 characters | The model id, from the server's list or typed |
 | `system` | unset | up to 8000 characters | The system prompt. The hub adds the date and time, what the tools are for, and the language to answer in |
-| `api_key_env` | `SATELLITES_LLM_API_KEY` | a variable's name, or `null` | The key's name ([Keys](#keys)). With no value, no `Authorization` is sent, which suits a server of your own |
+| `api_key_env` | `SATELLITES_LLM_API_KEY` | a secret's name, or `null` | The key's name ([Keys](#keys)). With no value, no `Authorization` is sent, which suits a server of your own |
 | `max_tokens` | 400 | 1 to 8192 | The reply limit. A reasoning model spends part of it thinking |
 | `timeout` | 30 | up to 120 | Seconds |
 | `stream` | true | | Stream the reply, so the first sentence is spoken while the model writes the rest ([Streaming](#streaming)) |
@@ -818,7 +866,7 @@ provider, the address or the key, press **List models**.
 | Groq | `https://api.groq.com/openai/v1` | |
 | Mistral | `https://api.mistral.ai/v1` | |
 | DeepSeek | `https://api.deepseek.com` | |
-| Your own | e.g. `http://llm.example.com:8080/v1` | llama.cpp's server, vLLM, Ollama's `/v1`. Usually no key: set `api_key_env` to `null`, or leave the variable it names unset. The address is the hub's view of the network, so `localhost` is the hub's own container. |
+| Your own | e.g. `http://llm.example.com:8080/v1` | llama.cpp's server, vLLM, Ollama's `/v1`. Usually no key: set `api_key_env` to `null`, or leave the secret it names unset. The address is the hub's view of the network, so `localhost` is the hub's own container. |
 
 The list shows every id the server returns, including models that cannot
 chat (embeddings, speech). The Satellites tab's Test asks the form as it
@@ -827,34 +875,66 @@ long the first words and the whole reply took.
 
 ### Keys
 
-An action names its key (`api_key_env`, `token_env`) and never holds it. The
-hub reads the value on every request, from one of two places, so a change
-applies from the next turn with no restart.
+An action names its key (`api_key_env`, `token_env`, `url_secret`) and never
+holds it. **Every value is in the gateway's secret store**, set in Admin ›
+Secrets (or from a key box on the Satellites tab, which calls the same
+`PUT /admin/secrets/{name}`), and nowhere on the hub's volume. The hub asks
+`GET http://voice-gateway:8081/internal/secrets/{name}` with its service key:
 
-1. **The hub's environment**, like any other setting: `OPENAI_API_KEY` in the
-   container's secret settings. The environment wins. A value with a line
-   break, a space or a character outside printable ASCII in it is not sent:
-   a `.env` saved with Windows line endings, or a secret made from a file
-   that ends in a newline, leaves one on the end. The turn, the model list
-   and Test say which variable to set again, and never what it holds.
-2. **A key stored on the hub**, from a language model word's API key box on
-   the Satellites tab, or with `PUT /satellites/secrets` and `{"name":
-   "OPENAI_API_KEY", "value": "..."}`. `"value": null` clears it. The hub
-   keeps it in `secrets.json` in `SATELLITES_DATA_DIR`, mode 0600, beside
-   `wake_words.json` and never in it. Clearing the last key removes the file.
+- a value is kept in memory for a minute, so a change reaches the next turns
+  within a minute and no restart is needed. A secret with no value (404) is
+  never kept, and a cleared one stops at once;
+- while the gateway does not answer, or answers 503, the last value it gave is
+  used, with one WARNING. Any other answer (403 not a consumer, 401, 500) stops
+  the value at once, also with one WARNING that names the secret;
+- the model list, Test and the Assist pipeline picker ask afresh, and so does
+  a turn whose provider refused the key (401), once;
+- a value goes only to the hosts its secret names: each entry and each target
+  are compared as `scheme://host:port` (IDNA, lower case, no trailing dot, no
+  user, the default port written out). An entry without a scheme means
+  `https` only, so a token goes over plain `http` only when the entry says
+  `http`. No request that carries a secret follows a redirect.
 
-No route answers a value, so a stored key is never shown again. `GET
-/satellites/wake-words` says in `secrets` which names have a value and where
-(`"environment"` or `"hub"`), and warns about a stored key that no action
-reads. The name and the value travel in the request body, because the
-gateway and voice-ui log paths. The hub refuses a key under a name the
-environment already sets, with 409 `set_in_environment`, because it would
-never send that value. A 422 says what was wrong and never repeats what was
-sent. The log names a key and never its value.
+A value with a line break, a space or a character outside printable ASCII in
+it is not sent: a `.env` saved with Windows line endings, or a secret made from
+a file that ends in a newline, leaves one on the end. The turn, the model list
+and Test name the secret, and never what it holds. No route, log line or event
+carries a value.
 
-**The data volume's backups hold every stored key.** Keep a key in the
-environment instead if that is not acceptable.
-[ADR 0015](../../docs/adr/0015-the-hub-may-hold-a-key.md) has the reasoning.
+**What the hub held before is imported once.** At its first start with the
+store, the hub posts to `POST /internal/secrets/import`, with the hosts its own
+configuration sends each one to as its allowed hosts:
+
+| What | Imported as |
+|---|---|
+| `secrets.json` on the data volume (keys stored from the Satellites tab by an older hub) | each key under its name; the file is overwritten with zeros and removed once the store holds every one |
+| a variable in the hub's environment that an action names, and `SATELLITES_HA_TOKEN` and `SATELLITES_LLM_API_KEY` | itself, ignored from then on (a WARNING names it: remove it) |
+| the password in `SATELLITES_MQTT_URL` | `SATELLITES_MQTT_PASSWORD` |
+| a button's `webhook:https://…` | `SATELLITES_BUTTON_<SATELLITE>_<BUTTON>_<EVENT>` (`secret_url`; the gateway takes any name under `SATELLITES_BUTTON_` from the hub), and the mapping is rewritten to `webhook:secret:<NAME>`. A button whose name would read like another's (`vol-up` beside `vol_up`) gets a short hash on the end instead |
+
+The hub's own settings (`SATELLITES_MQTT_URL`, `SATELLITES_DATA_DIR` and the
+like) are never imported, whatever an action names. What is imported, and the
+hosts each copy may go to, are read once, at start.
+
+Until the gateway answers the import, the hub keeps its own copies and uses
+them, so it works with the gateway down, and tries again every minute. **Any
+answer ends them**: a 2xx, a 410 (the window is closed) or any other 4xx (a
+refusal that asking again would not change). From then on the store is the
+one source. Its last batch closes the hub's import window: the gateway takes
+nothing more from it until an operator runs
+`python -m app.admin reopen-import satellites` there. Every imported secret is
+marked unreviewed until an admin confirms it in Admin › Secrets.
+
+When the store has been asked for every name, the hub writes
+`secret-import.done` on its data volume, and every later start skips the
+import and keeps no copy: a variable still set is only named as ignored. To
+import again after `reopen-import`, delete that file and restart the hub.
+
+A webhook's address must be a `secret_url` secret. `PATCH` and
+`PUT /satellites/wake-words` refuse, with 422 `not_a_secret_url`, a
+`webhook:secret:<NAME>` or `url_secret` naming a secret the store holds as
+another kind, and a press or a wake word refuses one whose kind the store does
+not state.
 
 ### Lights
 
@@ -917,7 +997,7 @@ a choice:
 | `dimmer`, `brighter` | the satellite | Brightness down or up a step (10, 20, 35, 60, 100 %) |
 | `ptt` | the hub | Push-to-talk: listen as if a wake word had been heard, and do what the `ptt` entry in `wake_words.json` says |
 | `stop` | the hub | What `POST /satellites/{id}/flush` does |
-| `webhook:<url>` | the hub | POST `{"satellite", "satellite_id", "button", "action", "held_ms"}` to the URL, 10 s at most, no redirects followed |
+| `webhook:secret:<NAME>` | the hub | POST `{"satellite", "satellite_id", "button", "action", "held_ms"}` to the address the `secret_url` secret `<NAME>` holds, if its host is one the secret names; 10 s at most, no redirects followed. The log names the secret and never the address. A raw `webhook:https://…` is refused with 422 `use_secret` ([Keys](#keys)) |
 | `none` | | Nothing |
 
 **The satellite's own actions run on it**, sent as `button_actions` in the
@@ -1363,10 +1443,44 @@ those four settings can be changed from the broker. Button presses and wake
 words are dropped while the broker is away rather than delivered late. State,
 discovery and availability are retained and sent again on every reconnect.
 Forgetting a satellite removes its device. Injected test clips are not
-published. Checked against Home Assistant 2026.8.1's own MQTT integration: 14
-entities under one device. The audio output sensor came after, and is checked
-against that version's sensor code only: an unknown output renders `None`,
-which it takes as no value rather than as an invalid option.
+published, and neither is a button mapping. Checked against Home Assistant
+2026.8.1's own MQTT integration: 14 entities under one device. The audio output
+sensor came after, and is checked against that version's sensor code only: an
+unknown output renders `None`, which it takes as no value rather than as an
+invalid option.
+
+The broker's password is the secret `SATELLITES_MQTT_PASSWORD`, sent only to
+the broker its allowed hosts name (`mqtt://host:1883` or `mqtts://host:8883`).
+The bridge asks for it at every connect and once a minute, and reconnects when
+it has changed.
+
+**The broker is an authentication boundary of its own.** A command topic
+(`<base>/<id>/set/<field>`) turns a satellite's microphone, speaker and lights
+on or off and sets its volume, with no Calliope credential: whoever may
+publish there may switch a muted microphone back on. Home Assistant's switches
+publish those commands, so give the broker an ACL in which Home Assistant's
+user is the only one that may publish to `calliope/satellites/+/set/#`, the
+hub's user publishes everything else under `calliope/satellites/`, and no
+other broker user may publish under it at all. Mosquitto as Home Assistant's
+add-on sets it up lets every broker user publish to every topic until an ACL
+is added. For example, in Mosquitto's `acl_file`:
+
+```text
+user calliope-hub
+topic write calliope/satellites/bridge/#
+topic write calliope/satellites/+/availability
+topic write calliope/satellites/+/state
+topic write calliope/satellites/+/wake_word
+topic write calliope/satellites/+/wake
+topic write calliope/satellites/+/button/#
+topic read calliope/satellites/+/set/#
+topic read homeassistant/status
+topic write homeassistant/+/+/+/config
+
+user homeassistant
+topic read calliope/satellites/#
+topic write calliope/satellites/+/set/#
+```
 
 ## Signed firmware
 
@@ -1394,7 +1508,7 @@ not get them.
 say -v Samantha -o /tmp/q.aiff "hey jarvis, what time is it"   # writes a file, plays nothing
 ffmpeg -loglevel error -i /tmp/q.aiff -ar 16000 -ac 1 -c:a pcm_s16le /tmp/q.wav
 curl -sS -H "Authorization: Bearer $KEY" --data-binary @/tmp/q.wav \
-  https://calliope.example.com/satellites/kitchen/inject | jq
+  https://calliope.example.com/satellites/kitchen/inject | jq   # a key with satellites:listen
 ```
 
 The answer carries `heard` (wake word, score, position), `command` (why it
@@ -1471,25 +1585,25 @@ from `/inject` are counted apart, as `injected_turns`.
 | Variable | Default | |
 |---|---|---|
 | `SATELLITES_DATA_DIR` | `/data` | Where the hub keeps its state ([The data volume](#the-data-volume)). Mount a volume: losing it un-adopts every satellite. |
-| `SATELLITES_TTS_URL` | unset | tts-stack's base URL, for `say` and every reply. Unset, `say` answers 503 and names this variable. |
+| `SATELLITES_TTS_URL` | unset | Where speech is asked for, for `say` and every reply: `http://voice-gateway:8081`, the gateway's internal listener. The hub's service key is sent only there ([Access](#access)). Unset, `say` answers 503 and names this variable. |
 | `SATELLITES_TTS_VOICE` | `bm_george` | |
 | `SATELLITES_SEARXNG_URL` | unset | A SearXNG with JSON output on (`search.formats: [html, json]`), for the `web_search` tool. Unset, the tool tells the model search is not set up. SafeSearch is the instance's own setting. |
 | `SATELLITES_HOME_LAT`, `SATELLITES_HOME_LON`, `SATELLITES_HOME_NAME` | unset | Home, for the `weather` tool. Unset, Home Assistant's own location is used (`GET /api/config`, through the first Home Assistant action and its token, kept an hour; a failed ask is not repeated for five minutes). |
 | `SATELLITES_TIMEZONE` | Home Assistant's, else `TZ`, else UTC | The zone of the date and time every language model prompt carries, with tools or without. |
 | `SATELLITES_UNITS` | Home Assistant's unit system, else `metric` | `us` or `metric`: the `weather` tool's °F, mph and inches, or °C, km/h and mm. |
 | `SATELLITES_LANGUAGES` | `en` | The household's languages as BCP 47 tags, most spoken first: `fr`, `pt-PT`, `en,pt-BR`. The first is what a new conversation is expected to be in and what an answer falls back to; each tag's region is how its language is sent on ([Language](#language)). A tag for a language the recogniser does not hear is left out, with a warning at start. |
-| `SATELLITES_STT_URL` | unset | stt-stack's base URL. Unset, wake words are still heard and published, and routing says there is no STT. |
+| `SATELLITES_STT_URL` | unset | Where transcription is asked for: `http://voice-gateway:8081`, as for `SATELLITES_TTS_URL`. The engines stt-stack runs are read from that listener's `/health`. Unset, wake words are still heard and published, and routing says there is no STT. |
 | `SATELLITES_WAKE_WORDS` | `hey_jarvis:0.5` | Read once: the words `wake_words.json` starts with, each for every satellite, on the first start with a volume that has none. Names and thresholds, comma-separated. A name alone gets 0.5. Empty means none; push-to-talk still works. After that, [Wake words](#wake-words). |
 | `SATELLITES_MODEL_DIR` | `$SATELLITES_DATA_DIR/models` | Where wake word models live. The image's own are copied here at start; other built-in names (`alexa`, `hey_mycroft`, `hey_rhasspy`, `weather`) are fetched here once, when a word first names them, and `<name>.onnx` of your own loads by its name ([`tools/wakeword-train`](../../tools/wakeword-train/README.md) trains one). |
 | `SATELLITES_FRONTEND` | `1` | `0` skips echo cancellation, beamforming and noise suppression. |
 | `SATELLITES_DEBUG_AUDIO` | `0` | `1` keeps the last ten commands' surroundings under `$SATELLITES_DATA_DIR/debug`: 16 s of processed output, the first raw microphone, and the command, as WAV. It records the room; switch it on to find out why a command came back empty, then off. |
-| `SATELLITES_MQTT_URL` | unset | `mqtt://user:pass@host:1883` or `mqtts://...` (the system CA store, or `SSL_CERT_FILE`). Unset, no MQTT. |
+| `SATELLITES_MQTT_URL` | unset | `mqtt://user@host:1883` or `mqtts://...` (the system CA store, or `SSL_CERT_FILE`). Unset, no MQTT. The password is the secret `SATELLITES_MQTT_PASSWORD` ([Keys](#keys)); one still written in this URL is imported there once and ignored after. |
 | `SATELLITES_MQTT_PREFIX` | `homeassistant` | Home Assistant's discovery prefix |
 | `SATELLITES_MQTT_BASE` | `calliope/satellites` | The hub's own topics; two hubs on one broker need two |
-| `SATELLITES_HA_TOKEN` | unset | The default `token_env` of the `ha_conversation` and `ha_assist` destinations: a long-lived access token |
-| `SATELLITES_LLM_API_KEY` | unset | The default `api_key_env` of an `llm` destination. A key can also be stored under this name from the Satellites tab ([Keys](#keys)); set here, it wins. With neither, no `Authorization` is sent. |
+| `SATELLITES_HA_TOKEN` | | Not a setting: a secret in Admin › Secrets, the default `token_env` of the `ha_conversation` and `ha_assist` destinations (a long-lived access token). A value still set here is imported once and ignored after ([Keys](#keys)) |
+| `SATELLITES_LLM_API_KEY` | | Not a setting: a secret in Admin › Secrets, the default `api_key_env` of an `llm` destination. With no value, no `Authorization` is sent. A value still set here is imported once and ignored after ([Keys](#keys)) |
 | `SATELLITES_FIRMWARE_PUBKEY` | unset | A PEM public key, or a path to one. Set, uploads must be signed by it. A bad value stops the service at start. |
-| `SATELLITES_API_KEYS` | unset | As on the other backends. Behind the gateway it stays unset. |
+| `SATELLITES_API_KEYS` | | Removed. Set, it is ignored, logged at ERROR every minute and listed in `/health` as `ignored_variables`; the hub keeps serving ([Access](#access)). |
 | `SATELLITES_LOG_LEVEL` | `INFO` | Transcripts and replies are logged only at `DEBUG`. |
 | `SATELLITES_TELEMETRY` | `off` | Where a hub with no saved choice starts: `off`, `on` (or `full`), or `timings`. The Satellites tab and `PUT /satellites/telemetry` change it after that, and their choice is the one kept ([Telemetry](#telemetry)). |
 
@@ -1506,7 +1620,8 @@ action carried over from a rule saved before the rename says `"token_env":
 |---|---|
 | `satellites.json` | Each adopted satellite: its name, model and config, and its token's SHA-256 only. Beside them, under `caps`, the caps each last proved its adoption with; kept outside the records so that the image before them still starts on the file |
 | `wake_words.json` | The wake words and push-to-talk, each with its action ([Wake words](#wake-words)) |
-| `secrets.json` | The API keys stored from the Satellites tab, mode 0600, in plain text ([Keys](#keys)) |
+| `secrets.json` | Only on a volume from before the secret store: the keys stored from the Satellites tab. Imported into the store at start, then overwritten with zeros and removed once the gateway confirms every one ([Keys](#keys)) |
+| `secret-import.done` | Written once the import is over: when, how the gateway answered, and which names the store holds and lacks. Names only, never a value ([Keys](#keys)) |
 | `firmware/` | Uploaded firmware images |
 | `models/` | Wake word models, fetched and uploaded (`SATELLITES_MODEL_DIR`) |
 | `debug/` | With `SATELLITES_DEBUG_AUDIO=1`, the last ten commands' audio |
@@ -1515,8 +1630,7 @@ action carried over from a rule saved before the rename says `"token_env":
 | `rules.json` | Routing from before 2026-09-25. Read once into `wake_words.json`, then left where it is |
 | `nodes.json` | A pre-release build's satellites. Read once into `satellites.json`, then left where it is |
 
-**Backups of the volume hold every stored key.** Keep a key in the
-environment instead if that is not acceptable.
+The volume holds no key: every secret is in the gateway's store.
 
 `ORT_DISABLE_TELEMETRY=1` is set in the image and by `app/wakeword.py`. ONNX
 Runtime's Linux wheel reports usage to Microsoft and writes a device id without

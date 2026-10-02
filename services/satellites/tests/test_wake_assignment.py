@@ -21,7 +21,6 @@ import importlib
 import json
 import logging
 import os
-import stat
 import threading
 import time
 import wave
@@ -32,7 +31,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from app import destinations, listening, wakeword, wakewords_config
+from app import listening, wakeword, wakewords_config
 from app.wakeword import Detection
 from test_pipeline import (FIXTURES, FRAME, MAC, MAC2, NID, NID2, Satellite, Services, adopt,
                            floor, of, route_to_fakes, routed, voiced, wait, wav)
@@ -102,7 +101,6 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("SATELLITES_MODEL_DIR", str(tmp_path / "models"))
     monkeypatch.setenv("SATELLITES_WAKE_WORDS", "hey_jarvis:0.5")
     monkeypatch.setenv("SATELLITES_FRONTEND", "0")
-    monkeypatch.delenv("SATELLITES_API_KEYS", raising=False)
     monkeypatch.delenv("SATELLITES_TTS_URL", raising=False)
 
 
@@ -497,17 +495,13 @@ def test_available_names_the_built_in_words_and_your_own_but_no_feature_model(tm
     assert wakewords_config.available(tmp_path / "missing") == sorted(wakeword.MODELS)
 
 
-# ---- keys the hub holds -------------------------------------------------------------------------
+# ---- keys, from the secret store ---------------------------------------------------------------
 
 KEY_NAME = "SATELLITES_TEST_LLM_KEY"
 KEY = "sk-test-do-not-leak-4b1d9e"
 LLM_WORD = {"name": "hey_jarvis", "threshold": 0.5, "satellites": ["*"], "mode": "command",
             "action": {"destination": {"type": "llm", "base_url": "http://llm.test/v1",
                                        "model": "tiny", "api_key_env": KEY_NAME, "stream": False}}}
-
-
-def store_key(c, value, name: str = KEY_NAME):
-    return c.put("/satellites/secrets", json={"name": name, "value": value})
 
 
 def llm_answers(services: Services) -> None:
@@ -524,110 +518,64 @@ def try_word(c):
                                                     "text": "hi"})
 
 
-def test_a_key_stored_from_the_page_is_0600_used_and_never_answered(
-        app, services, tmp_path, monkeypatch, caplog):
-    """The page's key box: the key goes in once, is sent on the next turn
-    with no restart, lives in a file only the hub's user can read, and comes
-    back in no answer, no file the API serves and no log line."""
-    monkeypatch.delenv(KEY_NAME, raising=False)
+def test_a_key_in_the_secret_store_is_used_and_never_answered(
+        app, services, tmp_path, store, caplog):
+    """The key is the store's (Admin › Secrets): sent on the next turn with
+    no restart, said to be set by name alone, and in no answer, no file the
+    hub writes and no log line."""
     caplog.set_level(logging.DEBUG)
     llm_answers(services)
     with TestClient(app.app) as c:
         route_to_fakes(app, services, tmp_path)
-        stored = store_key(c, KEY)
-        saved = put(c, LLM_WORD)
+        unset = put(c, LLM_WORD).json()
+        store.put(KEY_NAME, KEY, ["http://llm.test"])
         view, rules, tried = c.get("/satellites/wake-words"), c.get("/satellites/routing"), try_word(c)
 
-    assert stored.status_code == saved.status_code == tried.status_code == 200, stored.text
-    assert stat.S_IMODE((tmp_path / "secrets.json").stat().st_mode) == 0o600
-    # Stored before any word names it: held, and said to be read by nobody.
-    assert stored.json()["secrets"] == {KEY_NAME: "hub"}
-    assert (f"a key is stored on the hub as {KEY_NAME}, and no action reads it"
-            in stored.json()["warnings"])
-    body = view.json()
-    assert body["env"] == {KEY_NAME: True} and body["secrets"] == {KEY_NAME: "hub"}
-    assert not any(KEY_NAME in w for w in body["warnings"])
-    assert rules.json()["env"] == {KEY_NAME: True}
+    assert unset["env"] == {KEY_NAME: False}
+    assert view.json()["env"] == {KEY_NAME: True} and rules.json()["env"] == {KEY_NAME: True}
+    assert "secrets" not in view.json()
     # Used, so its absence everywhere below is not a key nobody read.
     assert tried.json()["reply_text"] == "Hi." and sent_key(services) == f"Bearer {KEY}"
-    for text in (stored.text, saved.text, view.text, rules.text, tried.text,
-                 (tmp_path / "wake_words.json").read_text(), caplog.text):
+    for text in (view.text, rules.text, tried.text, caplog.text,
+                 *(f.read_text() for f in tmp_path.glob("*.json"))):
         assert KEY not in text
-    assert f"secret {KEY_NAME} stored on the hub" in caplog.text
-
-    # A restart reads it back from the volume.
-    fresh = importlib.reload(app)
-    with TestClient(fresh.app) as c:
-        after = c.get("/satellites/wake-words").json()
-        assert destinations._secret(KEY_NAME) == KEY
-    assert after["secrets"] == {KEY_NAME: "hub"} and after["env"] == {KEY_NAME: True}
 
 
-def test_a_key_the_environment_sets_is_refused_and_the_environment_wins(
-        app, services, tmp_path, monkeypatch):
-    """A stored value the environment shadows would look stored and never be
-    sent, so storing under such a name is refused. A key stored before the
-    environment set the name is still there, and the environment's is sent."""
+def test_no_request_the_hub_makes_carries_the_assertion_it_was_sent(
+        app, services, tmp_path, store):
+    """D65: the gateway's assertion, valid for a minute, never travels on to
+    Home Assistant, a language model, a webhook, STT or TTS: identity.install
+    takes it out of the request before any handler runs, and every client is
+    given its headers by name."""
+    store.put("SATELLITES_HA_TOKEN", "ha-token-do-not-leak", ["http://ha.test:8123"])
+    store.put(KEY_NAME, KEY, ["http://llm.test", "http://hook.test"])
+    services.handlers["ha.test"] = lambda r: httpx.Response(200, json={"response": {
+        "response_type": "action_done", "speech": {"plain": {"speech": "Done."}}}})
+    services.handlers["hook.test"] = lambda r: httpx.Response(200, json={"reply": "Done."})
     llm_answers(services)
-    monkeypatch.delenv(KEY_NAME, raising=False)
+    destinations = [
+        {"type": "ha_conversation", "url": "http://ha.test:8123"},
+        LLM_WORD["action"]["destination"],
+        {"type": "webhook", "url": "http://hook.test/voice", "token_env": KEY_NAME}]
     with TestClient(app.app) as c:
         route_to_fakes(app, services, tmp_path)
-        put(c, LLM_WORD)
-        assert store_key(c, KEY).status_code == 200
-        monkeypatch.setenv(KEY_NAME, "sk-test-from-the-environment")
-        try_word(c)
-        wins = sent_key(services)
-        refused = store_key(c, "sk-test-another-one")
-        view = c.get("/satellites/wake-words").json()
-        cleared = store_key(c, None)
-
-    assert wins == "Bearer sk-test-from-the-environment"
-    assert refused.status_code == 409, refused.text
-    assert refused.json()["error"]["code"] == "set_in_environment"
-    assert "sk-test-another-one" not in refused.text
-    assert view["secrets"] == {KEY_NAME: "environment"} and view["env"] == {KEY_NAME: True}
-    # Clearing is never refused: it takes away a value that was not sent.
-    assert cleared.status_code == 200 and not (tmp_path / "secrets.json").exists()
+        for destination in destinations:
+            assert put(c, LLM_WORD | {"action": {"destination": destination}}).status_code == 200
+            assert try_word(c).json()["error"] is None
+    hosts = {r.url.host for r in services.seen}
+    assert {"ha.test", "llm.test", "hook.test", "tts.test"} <= hosts
+    assert not [(r.url.host, k) for r in services.seen for k in r.headers
+                if k.lower().startswith("x-calliope-")]
 
 
-def test_clearing_the_last_key_removes_the_file(app, tmp_path, monkeypatch):
-    for name in (KEY_NAME, "SATELLITES_TEST_OTHER_KEY"):
-        monkeypatch.delenv(name, raising=False)
+def test_the_hub_no_longer_stores_keys_of_its_own(app, tmp_path):
+    """PUT /satellites/secrets is gone (D47): the page stores a key through
+    PUT /admin/secrets/{name} on the gateway, and the hub writes no
+    secrets.json."""
     with TestClient(app.app) as c:
-        store_key(c, KEY)
-        store_key(c, "sk-test-other-value", name="SATELLITES_TEST_OTHER_KEY")
-        one = store_key(c, None)
-        left = json.loads((tmp_path / "secrets.json").read_text())
-        last = store_key(c, None, name="SATELLITES_TEST_OTHER_KEY")
-        again = store_key(c, None)  # nothing to clear is not an error
-    assert one.status_code == last.status_code == again.status_code == 200
-    assert left == {"version": 1, "secrets": {"SATELLITES_TEST_OTHER_KEY": "sk-test-other-value"}}
-    assert one.json()["secrets"] == {"SATELLITES_TEST_OTHER_KEY": "hub"}
-    assert not (tmp_path / "secrets.json").exists()
-    assert last.json()["secrets"] == {} and destinations._secret(KEY_NAME) is None
-
-
-@pytest.mark.parametrize("body, value", [
-    ({"name": KEY_NAME, "value": "sk-test do-not-leak"}, "sk-test do-not-leak"),
-    ({"name": KEY_NAME, "value": KEY + "\n"}, KEY),
-    ({"name": KEY_NAME, "value": "k" * 4097}, "k" * 4097),
-    ({"name": KEY_NAME, "value": ""}, None),
-    ({"name": KEY_NAME}, None),
-    ({"name": KEY_NAME, "value": KEY, "key": KEY}, KEY),
-    ({"name": KEY, "value": None}, KEY),
-    ({"name": "SATELLITES_" + KEY.upper().replace("-", "_"), "value": KEY, "note": KEY}, KEY),
-], ids=["space", "newline", "4097-characters", "empty", "no-value", "extra-field", "value-as-name",
-        "extra-field-and-good-name"])
-def test_a_malformed_key_is_refused_without_being_repeated(app, tmp_path, body, value):
-    """Each a 422 that stores nothing and says nothing of what was sent. A
-    body that leaves the value out is refused, not taken as a clear."""
-    with TestClient(app.app) as c:
-        r = c.put("/satellites/secrets", json=body)
-    assert r.status_code == 422, r.text
-    assert not (tmp_path / "secrets.json").exists()
-    if value:
-        assert value not in r.text and KEY not in r.text
-    assert all(set(e) == {"type", "loc", "msg"} for e in r.json()["detail"])
+        r = c.put("/satellites/secrets", json={"name": KEY_NAME, "value": KEY})
+    assert r.status_code in (404, 405), r.text
+    assert KEY not in r.text and not (tmp_path / "secrets.json").exists()
 
 
 # ---- inject ---------------------------------------------------------------------------------------

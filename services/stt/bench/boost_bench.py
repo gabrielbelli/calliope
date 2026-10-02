@@ -305,7 +305,7 @@ def check_shim(engine, clips: list[dict]) -> None:
 
 
 def _score(clips: list[dict], hyps: list[str]) -> dict:
-    from jiwer import cer, process_words, wer
+    from jiwer import cer, wer
 
     pairs = [(bench.normalise(c["ref"], c["locale"]), bench.normalise(h, c["locale"]))
              for c, h in zip(clips, hyps) if c["ref"].strip()]

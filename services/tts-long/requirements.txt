@@ -3,10 +3,11 @@
 # FP16 runs at 1/64 rate, so it would not help even where one exists.
 --extra-index-url https://download.pytorch.org/whl/cpu
 
-# The shared wire contract: API key auth, the OpenAI error envelope, the
-# health route, Segment and OpenAISpeechRequest, the PCM byte cast, and the
-# entrypoint that setuptools installs to /usr/local/bin. [audio] pulls numpy,
-# which this image needs anyway.
+# The shared wire contract: the identity assertion's verifier (which brings
+# cryptography), the OpenAI error envelope, the health route, Segment and
+# OpenAISpeechRequest, the PCM byte cast, and the entrypoint that setuptools
+# installs to /usr/local/bin. [audio] pulls numpy, which this image needs
+# anyway.
 #
 # A PATH into this repository, not a tarball pinned by SHA. The pin was right
 # while voice-common was its own repository: a change there reached this

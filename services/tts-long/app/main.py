@@ -39,7 +39,13 @@ The native routes stay the ones to prefer for batch work — realtime_factor,
 per-segment pauses and the queue position have no field in the OpenAI shape
 and are dropped there.
 
-Authentication, the health contract, the error envelope, `Segment` and the
+WHO IS ASKING comes from the gateway's signed assertion (voice_common.identity,
+D52): every request but /health needs one, and this service decides nothing
+about access with it. It PARTITIONS: a job belongs to the `sub` that created
+it, another user's job answers 404, and only an `:all` scope widens a listing
+(D31, D32). A voice clip resolves in the caller's own namespace (D35).
+
+The health contract, the error envelope, `Segment` and the
 logging setup are voice_common's. app/envelope.py is gone: it was this
 service's private copy of the envelope, written while voice-common was pinned
 by tarball SHA, and every line of it now lives in voice_common.errors — it was
@@ -66,23 +72,26 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, create_model
 from starlette.concurrency import run_in_threadpool
-from voice_common import auth, logging as voice_logging
+from voice_common import errors, identity, logging as voice_logging
 from voice_common.errors import error_response, install_errors
 from voice_common.health import install_health
+from voice_common.identity import Claims
 from voice_common.models import OpenAISpeechRequest, Segment
+from voice_common.scopes import (CREDENTIAL, SERVICE_SUB, USER_ID,
+                                 check_owner_filter, is_system_owner)
 
 from voice_common.engines import CATALOGUE, CONTROL_RANGES, WIRE_CONTROLS, slug
 
 from . import voices as voice_registry
 from .chunking import chunk_text, speech_seconds
-from .engines import (DEFAULT_ENGINE, ENGINES, LOCAL_ENGINES,
-                      LOCAL_RESIDENT_MAX, PRESET_VOICE_ENGINE, Refusal,
-                      defaults_for, engine_rows, refuse, refuse_unavailable,
-                      spec_for, warn_voice_collisions)
+from .engines import (DEFAULT_ENGINE, ENGINES, LOCAL_RESIDENT_MAX,
+                      PRESET_VOICE_ENGINE, Refusal, defaults_for, engine_rows,
+                      refuse, refuse_unavailable, spec_for,
+                      warn_voice_collisions)
 
 
 def _control_field(name: str):
@@ -117,6 +126,7 @@ from .dispatch import FINISHED, YIELDED, Dispatcher, LaneProbe
 from .encoders import MEDIA_TYPES, available_formats, encode, make_encoder
 from .remote import (RemoteSynth, RemoteUnavailable, RemoteYield, RunnerClient,
                      RunnerConfig)
+from .runner_key import RunnerKey
 from .synth import SAMPLE_RATE, Synth, speech_tokens
 
 OUT_DIR = Path(os.getenv("TTS_OUTPUT_DIR", "/output"))
@@ -243,6 +253,17 @@ SYNC_TIMEOUT = float(os.getenv("TTS_OPENAI_SYNC_TIMEOUT", "180"))
 # backpressure of any kind here: an unbounded number of multi-minute jobs
 # could be queued, and the queue is the memory and the disk of one process.
 MAX_QUEUE = int(os.getenv("TTS_MAX_QUEUE", "32"))
+# HOW MUCH OF THAT QUEUE ONE PERSON MAY HOLD (D37). The queue is shared by the
+# household, and thirty-two jobs from one browser tab in a loop would answer
+# 429 to everybody else for an hour. Counted per `sub`, queued and running
+# together; services are exempt, because their work is somebody's request
+# that already passed this check. 0 disables it, as MAX_QUEUE's 0 does.
+MAX_LIVE_JOBS_PER_USER = int(os.getenv("TTS_LONG_MAX_LIVE_JOBS_PER_USER") or 4)
+# THE LONGEST TEXT ONE /jobs REQUEST MAY CARRY, in characters, `segments`
+# included (D37). /v1/audio/speech already stops at OpenAI's 4096; /jobs had
+# no ceiling at all, so one body could hold days of compute. 413, because the
+# body is the problem and no retry of the same body will fix it. 0 disables it.
+MAX_TEXT = int(os.getenv("TTS_LONG_MAX_TEXT") or 100000)
 # TWO SWEEPS, BECAUSE A RECORD AND A FILE ARE NOT THE SAME THING and one TTL
 # destroyed both. The audio is megabytes and is worth reclaiming daily; the
 # record is a few hundred bytes and is the only evidence the job ever happened.
@@ -321,13 +342,14 @@ events: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
 # That is what makes Registry.refresh worth having: a clip written into the
 # shared volume by services/ui becomes resolvable on the next request rather
 # than on the next restart of a container that carries 6.5 GB of Chatterbox.
-VOICES = voice_registry.load_registry()
+# One namespace per user plus the system one (D35); see app/voices.py.
+VOICES = voice_registry.load_voices()
 # A CLIP THAT SHARES A NAME WITH A PRESET VOICE, SAID OUT LOUD ONCE AND NEVER
 # REFUSED. Both stay reachable, because a voice here is a PAIR: `pt_male` on a
 # preset engine is the checkpoint's embedding and `pt_male` on a cloning engine
 # is the file. A service that would not start over a filename would be worse
 # than the collision it was refusing.
-warn_voice_collisions(VOICES.clips, log)
+warn_voice_collisions(VOICES.system.clips, log)
 FORMATS = available_formats()
 
 
@@ -1316,6 +1338,12 @@ RECORD_KEYS = (
     # ABSENT MEANS "clone". That default is what makes every sidecar written
     # before this release a valid record with no migration of its contents.
     "kind", "service", "engine", "host", "route", "client",
+    # WHOSE RUN IT WAS, AND HOW THEY SIGNED IN (D31). `owner` is the user ID or
+    # `svc:<name>`; `credential` is `session`, an API key's ID or the service.
+    # ABSENT MEANS SYSTEM: every record written before there were users has
+    # neither, and is visible only to a holder of jobs:read:all. Nothing is
+    # rewritten to say so.
+    "owner", "credential",
     # WHY THAT ENGINE, beside which one. "pinned" means the caller typed the
     # name; "default" means they typed nothing. Without it a change of
     # TTS_DEFAULT_ENGINE is invisible in every row written either side of it.
@@ -1494,7 +1522,24 @@ def _read_record(job_id: str) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {key: value for key, value in data.items() if key in RECORD_KEYS}
+    kept = {key: value for key, value in data.items() if key in RECORD_KEYS}
+    # WHO A ROW BELONGS TO IS CHECKED ON THE WAY IN AS WELL, for the same
+    # reason as `path`: an owner that is not an ID is not an owner, and the
+    # row falls back to system, which only `:all` holders see.
+    if not _is_owner(kept.get("owner")):
+        kept.pop("owner", None)
+    if not _is_credential(kept.get("credential")):
+        kept.pop("credential", None)
+    return kept
+
+
+def _is_owner(value: object) -> bool:
+    return isinstance(value, str) and bool(USER_ID.fullmatch(value)
+                                           or SERVICE_SUB.fullmatch(value))
+
+
+def _is_credential(value: object) -> bool:
+    return isinstance(value, str) and bool(CREDENTIAL.fullmatch(value))
 
 
 def _migrate_legacy_records() -> int:
@@ -1664,7 +1709,15 @@ async def lifespan(app: FastAPI):
     # returns None when TTS_RUNNER_HOST is not set, state["runner"] stays None,
     # and _backend_for returns the local Synth without importing anything else.
     runner_cfg = RunnerConfig.from_env()
-    state["runner"] = RunnerClient(runner_cfg) if runner_cfg else None
+    state["runner"] = None
+    if runner_cfg:
+        # THE KEY COMES FROM THE GATEWAY'S SECRET STORE, and the old file or
+        # variable is posted there once, off the startup path: a gateway that
+        # is still starting must not hold this service's lifespan open. A
+        # deployment with no runner never touches the store at all.
+        runner_key = RunnerKey.from_env(runner_cfg.origin)
+        runner_key.start_import()
+        state["runner"] = RunnerClient(runner_cfg, key=runner_key)
     # ONE CLIENT, AND A SECOND ONE IS NOT BUILT HERE ANY MORE. `runner_cfg
     # .for_cpu()` used to build a second RunnerClient for `chatterbox-cpu` at
     # every startup -- a whole TLS context and a pinned certificate for a
@@ -1684,16 +1737,16 @@ async def lifespan(app: FastAPI):
     # the second machine.
     dispatch.start()
     sweeper = asyncio.create_task(_sweeper())
-    log.info("ready, %d threads, idle timeout %.0fs, formats %s, voices %s, "
-             "engines %s (default %s; models load on first job)",
-             THREADS, IDLE_TIMEOUT, ", ".join(FORMATS), ", ".join(VOICES.names),
-             ", ".join(ENGINES), DEFAULT_ENGINE)
-    if VOICES.aliased:
+    log.info("ready, %d threads, idle timeout %.0fs, formats %s, system "
+             "voices %s, engines %s (default %s; models load on first job)",
+             THREADS, IDLE_TIMEOUT, ", ".join(FORMATS),
+             ", ".join(VOICES.system.names), ", ".join(ENGINES), DEFAULT_ENGINE)
+    if VOICES.system.aliased:
         log.warning("no reference clip for %s: those names answer with the "
                     "built-in voice and every response says so in X-Voice. "
                     "Drop <name>.wav into TTS_VOICE_DIR to give them their own "
                     "voice, or set TTS_VOICE_STRICT=1 to refuse them.",
-                    ", ".join(VOICES.aliased))
+                    ", ".join(VOICES.system.aliased))
     if len(FORMATS) < len(MEDIA_TYPES):
         # Including the schema's DEFAULT, which is mp3 — so on a checkout
         # without ffmpeg every request that omits response_format is refused.
@@ -1738,20 +1791,19 @@ app = FastAPI(
 )
 
 # Installed on the app rather than route by route, so a route added later is
-# covered without anyone having to remember to ask for it. TTS_API_KEYS is a
-# parameter of the shared middleware precisely so that no operator-visible
-# variable had to be renamed for this service to stop keeping its own copy —
-# a copy that, among other things, could never authenticate a key with an
-# accent in it and answered 401 to a probe written `/health/`.
-auth.install(app, "TTS_API_KEYS")
+# covered without anyone having to remember to ask for it. Every request but
+# GET /health needs the gateway's assertion for THIS audience (D52), which
+# also removes /docs and /openapi.json: a schema is a free map of the service.
+# TTS_API_KEYS is gone with the key middleware it configured; if it is still
+# set it is named in the log every minute and in /health, and ignored (D63).
+identity.install(app, "tts-long")
 
 # The /v1 error envelope, in the four-field shape the schema requires, plus
 # the 404, 405 and 500 handlers that used to escape it. Order against
-# auth.install no longer matters: the middleware's 401 is built by the same
-# error_response as everything else, so it carries `param` without this
-# service rebinding a name to put it there. The native routes keep FastAPI's
-# own `{"detail": ...}` and its 422: /jobs is the older contract and something
-# out there already parses it.
+# identity.install does not matter: its 401 is rendered by the same function
+# as every other error. The native routes keep FastAPI's own
+# `{"detail": ...}` and a quiet 422: /jobs is the older contract and
+# something out there already parses it.
 install_errors(app)
 
 
@@ -1853,7 +1905,11 @@ async def _health() -> dict[str, object]:
     moving a thirty-second wait off the loop still leaves it holding a
     healthcheck open past its own timeout.
     """
-    pool: _Synths = state["synths"]  # type: ignore[assignment]
+    # None before the lifespan has run, which is how the shared conformance
+    # suite builds this app: it asks /health with no model and no lanes, and
+    # an answer is owed even then, because the probe that asks has no way to
+    # know how far start-up has got.
+    pool: _Synths | None = state.get("synths")  # type: ignore[assignment]
     runner = state.get("runner")
     snapshot = (await run_in_threadpool(runner.snapshot)
                 if runner is not None else None)
@@ -1861,7 +1917,7 @@ async def _health() -> dict[str, object]:
     probe = lane.probe if lane is not None else None
     return {
         "status": "ok",
-        "model_loaded": pool.loaded,
+        "model_loaded": pool is not None and pool.loaded,
         "threads": THREADS,
         "queued": dispatch.depth(),
         "queue_capacity": MAX_QUEUE,
@@ -1906,7 +1962,8 @@ async def _health() -> dict[str, object]:
                 "local": {"ready": ENGINES[engine].local,
                           "why": "" if ENGINES[engine].local
                                  else "not in TTS_LOCAL_ENGINES",
-                          "resident": pool.resident(engine)},
+                          "resident": pool is not None
+                                      and pool.resident(engine)},
                 "runner": {
                     "ready": bool(probe is not None and probe.ok_for(engine)),
                     "why": (probe.why_for(engine) if probe is not None
@@ -1959,7 +2016,28 @@ def _estimate(chars: int, engine: str | None = None) -> int:
                                               engine)[1]))
 
 
-def _enqueue(*, segments: list[tuple[str, float]], language: str | None,
+# ONE ADMISSION AT A TIME. The critical section is one walk of `jobs`, the
+# dispatcher's depth and a deque append, so /v1/audio/speech, which takes it
+# on the event loop, waits at most that long for a /jobs thread that holds it.
+# Nothing slow (_choose, a voice rescan, chunking) runs under it.
+_admission = threading.Lock()
+
+
+class NotAdmitted(Exception):
+    """_enqueue refused a job: this person's share of the queue, or the queue.
+
+    Raised, not returned, from inside the lock that makes the check and the
+    insertion one step. Each route renders it in its own envelope, as with
+    Refusal.
+    """
+
+    def __init__(self, *, full: bool) -> None:
+        super().__init__("the queue is full" if full else "per-user cap")
+        self.full = full
+
+
+def _enqueue(*, claims: Claims, segments: list[tuple[str, float]],
+             language: str | None,
              controls: dict | None = None,
              voice: str, reference: str | None, fmt: str = "wav",
              text: str | None = None,
@@ -1967,11 +2045,22 @@ def _enqueue(*, segments: list[tuple[str, float]], language: str | None,
              engine_reason: str = "default",
              waiter: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None,
              stream: Stream | None = None) -> str:
+    """Admit one job, or raise NotAdmitted and create nothing.
+
+    The caps are checked HERE, under `_admission`, and not by the routes
+    before they call this. A check in the route and an insertion here were
+    two steps with `_choose` between them, and concurrent requests from one
+    person all passed the check before any of them was counted: five jobs
+    got in against a cap of four.
+    """
     spec = spec if spec is not None else ENGINES[DEFAULT_ENGINE]
     controls = controls or {}
     job_id = str(uuid.uuid4())
-    jobs[job_id] = {
+    job = {
         "id": job_id, "status": "queued", "created_at": time.time(),
+        # FROM THE ASSERTION AND NOWHERE ELSE (D31). A body field could name
+        # anybody; the gateway's signature cannot be made to.
+        "owner": claims.sub, "credential": claims.cred,
         # THE THREE FIELDS THAT MAKE THIS ROW COMPARABLE WITH ANOTHER
         # SERVICE'S. tts-long is no longer the only thing that produces a
         # record -- Kokoro and Parakeet post theirs to /runs -- so a row that
@@ -2025,11 +2114,20 @@ def _enqueue(*, segments: list[tuple[str, float]], language: str | None,
         "estimated_seconds": _estimate(sum(len(t) for t, _ in segments),
                                        spec.id),
     }
-    # Registered before the job is visible to the worker, or a fast job could
-    # finish and find nothing to wake.
-    if waiter is not None:
-        events[job_id] = waiter
-    dispatch.submit(job_id)
+    with _admission:
+        if _at_user_cap(claims):
+            raise NotAdmitted(full=False)
+        if _full():
+            raise NotAdmitted(full=True)
+        jobs[job_id] = job
+        # Registered before the job is visible to the worker, or a fast job
+        # could finish and find nothing to wake.
+        if waiter is not None:
+            events[job_id] = waiter
+        # Inside the lock as well: _full() counts the dispatcher's deque, so a
+        # job in `jobs` but not yet submitted would be invisible to the next
+        # caller's check.
+        dispatch.submit(job_id)
     return job_id
 
 
@@ -2041,6 +2139,34 @@ def _full() -> bool:
     was never the ceiling.
     """
     return MAX_QUEUE > 0 and dispatch.depth() >= MAX_QUEUE
+
+
+def _at_user_cap(claims: Claims) -> bool:
+    """Does this person already hold their share of the queue (D37)?
+
+    Over a snapshot, for the reason _pending_work gives. Called only under
+    `_admission`.
+
+    A CANCELLED JOB THAT IS STILL QUEUED DOES NOT COUNT. DELETE marks it and
+    leaves its status alone until the dispatcher reaches it, which can be
+    after everybody else's work, and it will generate nothing when it does.
+    Counting it made the 429's own advice, "cancel one first", not work. A
+    cancelled job that is running still counts: it holds a lane until its
+    next chunk boundary.
+    """
+    if claims.kind == "service" or MAX_LIVE_JOBS_PER_USER <= 0:
+        return False
+    live = sum(1 for job in list(jobs.values())
+               if job.get("owner") == claims.sub
+               and (job["status"] == "running"
+                    or (job["status"] == "queued" and not job.get("cancelled"))))
+    return live >= MAX_LIVE_JOBS_PER_USER
+
+
+def _user_cap_message() -> str:
+    return (f"you already have {MAX_LIVE_JOBS_PER_USER} jobs queued or "
+            f"running, which is the most one person may hold on this shared "
+            f"queue; collect or cancel one first")
 
 
 def _retry_after() -> int:
@@ -2069,16 +2195,22 @@ def _pending_work() -> float:
 
 
 @app.post("/jobs", status_code=202)
-def create_job(req: JobRequest) -> dict[str, object]:
+def create_job(req: JobRequest, request: Request) -> dict[str, object]:
+    claims = identity.claims_of(request)
     if not req.text and not req.segments:
         raise HTTPException(400, "provide either text or segments")
+    chars = len(req.text or "") + sum(len(s.text) for s in req.segments or ())
+    if MAX_TEXT > 0 and chars > MAX_TEXT:
+        raise HTTPException(413, f"the text is {chars} characters and one job "
+                                 f"may carry at most {MAX_TEXT}; split it into "
+                                 f"several jobs")
     # THE SAME SEQUENCE AS /v1/audio/speech AND THE SAME REFUSALS, rendered in
     # this route's own shape. /jobs keeps `{"detail": ...}` and /v1 keeps
     # OpenAI's four-field envelope -- one function decides WHAT is refused,
     # each route decides how its own callers are told, and unifying the two
     # would break something out there that already parses this one.
     chosen = _choose(model=req.model, voice=req.voice, language=req.language,
-                     controls=_wire_controls(req))
+                     controls=_wire_controls(req), claims=claims)
     if isinstance(chosen, Refusal):
         # NOTHING IS CREATED. R9 in particular is refused here rather than
         # queued: a 202 nothing can serve is a progress bar that never moves,
@@ -2086,21 +2218,23 @@ def create_job(req: JobRequest) -> dict[str, object]:
         # OTHER engine on a completely idle lane.
         headers = {"Retry-After": "60"} if chosen.status == 503 else None
         raise HTTPException(chosen.status, chosen.message, headers=headers)
-    if _full():
+    segments = _segments(req.text, req.segments)
+    params = chosen.params
+    try:
+        job_id = _enqueue(claims=claims, segments=segments, text=req.text,
+                          language=params.get("language"), controls=params,
+                          voice=chosen.voice, reference=chosen.reference,
+                          spec=chosen.spec, model_requested=req.model,
+                          engine_reason=chosen.engine_reason)
+    except NotAdmitted as refused:
+        retry = _retry_after()
         # The queue is one process's memory and disk. Nothing bounded it
         # before, so a client in a loop could accept an hour of work in a
         # second and then wait an hour for the first of it.
-        retry = _retry_after()
-        raise HTTPException(429, f"queue is full ({MAX_QUEUE} jobs); retry in "
-                                 f"about {retry}s",
-                            headers={"Retry-After": str(retry)})
-    segments = _segments(req.text, req.segments)
-    params = chosen.params
-    job_id = _enqueue(segments=segments, text=req.text,
-                      language=params.get("language"), controls=params,
-                      voice=chosen.voice, reference=chosen.reference,
-                      spec=chosen.spec, model_requested=req.model,
-                      engine_reason=chosen.engine_reason)
+        message = (f"queue is full ({MAX_QUEUE} jobs); retry in about {retry}s"
+                   if refused.full else _user_cap_message())
+        raise HTTPException(429, message,
+                            headers={"Retry-After": str(retry)}) from None
     # Read back off the job rather than computed a second time, so the 202 and
     # every later GET /jobs quote the same number. Two calls to _estimate()
     # either side of a finished job would not.
@@ -2164,7 +2298,7 @@ def _runlog_room() -> bool:
 
 
 @app.post("/runs", status_code=201)
-def import_run(record: dict) -> dict[str, str]:
+def import_run(record: dict, request: Request) -> dict[str, str]:
     """Accept one finished run from another service in this stack.
 
     A `dict` rather than a pydantic model ON PURPOSE, and it is the whole
@@ -2179,10 +2313,18 @@ def import_run(record: dict) -> dict[str, str]:
     compatibility case, and a 400 that names the field is how it gets fixed
     rather than silently ignored.
 
-    SERVICE TO SERVICE, NEVER FROM THE BROWSER. This route is deliberately
-    absent from the page's proxy table and from the gateway: a mutable log with
-    the page as a writer is not a log.
+    SERVICE TO SERVICE, NEVER FROM THE BROWSER, and now checked rather than
+    hoped. The gateway serves this route on its internal listener only, to a
+    service key holding runs:write (D6), and the scope is required here too:
+    a mutable log with the page as a writer is not a log.
+
+    `owner` IS TAKEN FROM A SERVICE, because stt and tts are the ones who know
+    whose request they answered: it is the `sub` of the assertion THEY
+    received (D31). It must be a user ID or a service; anything else is a
+    sender bug and answers 400 naming the field. A record that names no owner
+    belongs to the sender, which makes it a system record.
     """
+    claims = identity.require(request, "runs:write")
     if not RUNLOG_ACCEPT:
         # 404 rather than 403, and the senders treat any failure the same way:
         # drop the record and carry on. Switching this off must not make
@@ -2194,10 +2336,20 @@ def import_run(record: dict) -> dict[str, str]:
     if forbidden:
         raise HTTPException(400, f"{forbidden} are set by this service and "
                                  f"cannot be sent")
-    service = str(record.get("service") or "unknown")[:64]
-    if not _runlog_allowed(service):
-        raise HTTPException(429, f"{service} has posted more than {RUNLOG_RATE} "
-                                 f"records in a minute",
+    owner, credential = record.get("owner"), record.get("credential")
+    if claims.kind != "service" or owner is None:
+        owner, credential = claims.sub, claims.cred
+    if not _is_owner(owner):
+        raise HTTPException(400, "owner must be a user ID or svc:<name>")
+    if credential is not None and not _is_credential(credential):
+        raise HTTPException(400, "credential must be session, a key ID or "
+                                 "svc:<name>")
+    # PER SENDER AS THE GATEWAY NAMED IT, not per the `service` the body
+    # claims: a sender that varied that field could otherwise give itself as
+    # many minutes of allowance as it liked.
+    if not _runlog_allowed(claims.sub):
+        raise HTTPException(429, f"{claims.sub} has posted more than "
+                                 f"{RUNLOG_RATE} records in a minute",
                             headers={"Retry-After": "60"})
     if not _runlog_room():
         raise HTTPException(429, f"this service is holding its ceiling of "
@@ -2238,11 +2390,14 @@ def import_run(record: dict) -> dict[str, str]:
     kept.setdefault("status", "done")
     kept.setdefault("created_at", time.time())
     kept.setdefault("started_at", kept["created_at"])
+    kept.pop("credential", None)
     job = {"id": job_id, "cancelled": False, "recovered": False,
            "path": None, "bytes": 0,
            "audio_deleted": False, "audio_expired": False}
     job.update(kept)
-    job.update(id=job_id, path=None, bytes=0, recovered=False)
+    job.update(id=job_id, path=None, bytes=0, recovered=False, owner=owner)
+    if credential is not None:
+        job["credential"] = credential
     jobs[job_id] = job
     _write_record(job)
     log.info("%s recorded a %s run on %s (%s)", job.get("service"),
@@ -2383,10 +2538,61 @@ def _wanted(raw: str | None, allowed: tuple[str, ...], name: str) -> set[str] | 
     return values
 
 
+def _owned_by(raw: str | None, claims: Claims, everyone: str = "jobs:read:all"):
+    """Which rows `?owner=` asks for, as a test on one job (D32).
+
+    ABSENT MEANS `me`, for everybody, admins included. Somebody else's rows
+    are a deliberate `?owner=all`, `system` or a user ID, which only a holder
+    of `everyone` (the `:all` form of the route's scope) may ask for and which
+    the gateway audits as an `:all` read or write. This service writes no
+    audit row of its own, so a default that widened would be an act on
+    somebody else's data that nobody chose and nothing recorded.
+
+    Validated before it is used anywhere, so `../x` is a 400 and never a
+    comparison, a path or a log line.
+    """
+    try:
+        value = check_owner_filter(raw or "me")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    if value in ("me", claims.sub):
+        return lambda job: job.get("owner") == claims.sub
+    if not identity.has(claims, everyone):
+        raise errors.insufficient_scope([everyone])
+    if value == "all":
+        return lambda job: True
+    if value == "system":
+        return lambda job: is_system_owner(job.get("owner"))
+    return lambda job: job.get("owner") == value
+
+
+def _job_for(job_id: str, claims: Claims, owner: str | None,
+             everyone: str) -> dict:
+    """One job, if this caller may see it; 404 otherwise, as if it did not exist.
+
+    THE LISTING'S RULE, APPLIED TO ONE ID. A job is reachable exactly when
+    `GET /jobs?owner=<the same value>` would list it, so somebody else's job
+    needs both the `:all` scope and an `?owner=` that covers it (`all`,
+    `system` or their ID). Holding the scope alone used to be enough, and a
+    `monitor` key could read any transcript in full, or an admin delete one,
+    with no `?owner=` on the request -- the one thing the gateway audits an
+    `:all` access by. Now every such access passes through that audit.
+
+    404 rather than 403, so an ID never confirms that somebody else's job
+    exists (D5).
+    """
+    covers = _owned_by(owner, claims, everyone)
+    job = jobs.get(job_id)
+    if not job or not covers(job):
+        raise HTTPException(404, "no such job")
+    return job
+
+
 @app.get("/jobs")
-def list_jobs(limit: int = 50, kind: str | None = None,
+def list_jobs(request: Request, limit: int = 50, kind: str | None = None,
               audio: str | None = None,
-              status: str | None = None) -> dict[str, object]:
+              status: str | None = None,
+              owner: str | None = None) -> dict[str, object]:
     """The listing, filtered ON THIS SIDE and counted before the filter.
 
     FILTERING HERE RATHER THAN IN THE BROWSER IS WHAT MAKES THE DEFAULT
@@ -2403,10 +2609,16 @@ def list_jobs(limit: int = 50, kind: str | None = None,
     audio; a naive filter makes it vanish at the moment its owner is watching
     it, which reads as data loss rather than as a failure.
 
-    `counts` is over EVERY record, before any filter, so the page can label
-    "Everything (412)" without a second request -- and so a default that hides
-    rows can say how many it is hiding.
+    `counts` is over EVERY record the caller may see, before any other
+    filter, so the page can label "Everything (412)" without a second request
+    -- and so a default that hides rows can say how many it is hiding.
+
+    THE OWNER FILTER COMES FIRST OF ALL, before the counts and the limit
+    (D32). Counting everybody's rows and then showing one person theirs would
+    tell them how much the rest of the household has said.
     """
+    claims = identity.claims_of(request)
+    mine = _owned_by(owner, claims)
     want_kind = _wanted(kind, KINDS, "kind")
     want_audio = _wanted(audio, AUDIO_STATES, "audio state")
     want_status = _wanted(status, STATUSES, "status")
@@ -2417,6 +2629,8 @@ def list_jobs(limit: int = 50, kind: str | None = None,
                               + ("failed", "cancelled", "live")}
     keep = []
     for job in sorted(list(jobs.values()), key=lambda j: -j["created_at"]):
+        if not mine(job):
+            continue
         shape = _public(job)
         state_ = shape["audio"]["state"]  # type: ignore[index]
         counts["all"] += 1
@@ -2441,7 +2655,7 @@ def list_jobs(limit: int = 50, kind: str | None = None,
 
 
 @app.get("/jobs/{job_id}")
-def get_job(job_id: str) -> dict:
+def get_job(job_id: str, request: Request, owner: str | None = None) -> dict:
     """One job, with the full text this time.
 
     The listing carries a 140-character preview so fifty of them stay small on
@@ -2449,9 +2663,7 @@ def get_job(job_id: str) -> dict:
     request a client makes when someone expands a row rather than every few
     seconds for everything.
     """
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "no such job")
+    job = _job_for(job_id, identity.claims_of(request), owner, "jobs:read:all")
     out = _public(job)
     # _said, not job["text"], so a segments-only job answers with what it will
     # say. `text` is null on those, and the page's expandable row reads exactly
@@ -2467,7 +2679,8 @@ def get_job(job_id: str) -> dict:
 
 
 @app.delete("/jobs/{job_id}/audio")
-def delete_job_audio(job_id: str) -> dict:
+def delete_job_audio(job_id: str, request: Request,
+                     owner: str | None = None) -> dict:
     """Free the disk and keep the record.
 
     THE TWO THINGS A FINISHED JOB IS, SEPARATED. Deleting used to mean both:
@@ -2483,9 +2696,7 @@ def delete_job_audio(job_id: str) -> dict:
     is not rebuilt from disk and would otherwise come back looking finished
     with a file behind it.
     """
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "no such job")
+    job = _job_for(job_id, identity.claims_of(request), owner, "jobs:delete:all")
     if job["status"] not in {"done", "failed", "cancelled"}:
         raise HTTPException(409, "that job has not finished; cancel it instead")
     if _audio(job)["state"] == "never":
@@ -2522,7 +2733,7 @@ def delete_job_audio(job_id: str) -> dict:
 
 
 @app.delete("/jobs/{job_id}")
-def delete_job(job_id: str) -> dict:
+def delete_job(job_id: str, request: Request, owner: str | None = None) -> dict:
     """Cancel a queued job, or discard a finished one.
 
     There was no way to do either: a 202 handed out an id and the worker ground
@@ -2530,9 +2741,7 @@ def delete_job(job_id: str) -> dict:
     started stops at its next chunk boundary — generate() has no interruption
     point inside it, so a sentence already in flight is finished and kept.
     """
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "no such job")
+    job = _job_for(job_id, identity.claims_of(request), owner, "jobs:delete:all")
     job["cancelled"] = True
     if job["status"] in {"done", "failed", "cancelled"}:
         _discard(job)
@@ -2551,10 +2760,9 @@ def _file_stream(path: str) -> Iterator[bytes]:
 
 
 @app.get("/jobs/{job_id}/audio")
-def get_audio(job_id: str) -> Response:
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "no such job")
+def get_audio(job_id: str, request: Request,
+              owner: str | None = None) -> Response:
+    job = _job_for(job_id, identity.claims_of(request), owner, "jobs:read:all")
     if job["status"] not in {"done", "cancelled"} or not job.get("path"):
         raise HTTPException(409, f"job is {job['status']}")
     fmt = job["format"]
@@ -2567,19 +2775,35 @@ def get_audio(job_id: str) -> Response:
         headers={"Content-Disposition": f'attachment; filename="{job_id}.{fmt}"'})
 
 
+def _voices_for(claims: Claims) -> voice_registry.Registry:
+    """The clips this caller may name (D35), rescanned where they changed.
+
+    A person gets their own namespace and the built-ins. The system namespace
+    -- every clip from before there were users -- goes with voices:write:all,
+    the scope that already lets its holder list and delete those clips.
+    Another user's namespace goes with nothing, an admin's included: holding
+    a scope that can DELETE somebody's clip is not a licence to speak in
+    their voice. A service gets the built-ins only; none of them clones.
+    """
+    return VOICES.visible_to(
+        user=claims.sub if claims.kind == "user" else None,
+        system=identity.has(claims, "voices:write:all"))
+
+
 @app.get("/voices")
-def list_voices() -> dict[str, object]:
+def list_voices(request: Request) -> dict[str, object]:
     """What `voice` may name. Unknown names are a 400, so they are listed.
 
     Refreshed first, because this is the call a UI makes to build a voice
     picker and a picker that cannot see a clip someone just added is the whole
-    reason the registry stopped being immutable.
+    reason the registry stopped being immutable. The caller's own view, so a
+    picker never offers a voice that would be refused.
     """
-    VOICES.refresh()
-    return {"voices": VOICES.names,
+    voices = _voices_for(identity.claims_of(request))
+    return {"voices": voices.names,
             "openai_aliases": {name: voice_registry.BUILTIN
-                               for name in VOICES.aliased},
-            "strict": VOICES.strict,
+                               for name in voices.aliased},
+            "strict": voices.strict,
             # ADDITIVE. `voices` keeps its exact shape -- a list of strings --
             # because a picker is reading it right now and a second engine is
             # not a reason to break one.
@@ -2590,11 +2814,11 @@ def list_voices() -> dict[str, object]:
             # short-clip voice from the turbo option, rather than disabling it
             # with the reason on the line, is how `chatterbox-cpu` stayed
             # invisible for its whole life.
-            "detail": [_voice_detail(name) for name in VOICES.names]}
+            "detail": [_voice_detail(voices, name) for name in voices.names]}
 
 
-def _voice_detail(name: str) -> dict[str, object]:
-    seconds = VOICES.seconds_for(name)
+def _voice_detail(voices: voice_registry.Registry, name: str) -> dict[str, object]:
+    seconds = voices.seconds_for(name)
     usable, excluded = [], {}
     for engine, spec in ENGINES.items():
         if not spec.facts.reference_audio:
@@ -2760,7 +2984,7 @@ def _render(refusal: Refusal) -> JSONResponse:
 
 
 def _choose(*, model: str | None, voice, language: str | None,
-            controls: dict) -> Chosen | Refusal:
+            controls: dict, claims: Claims) -> Chosen | Refusal:
     """The engine, then the voice inside that engine, then the pair.
 
     THE ENGINE IS RESOLVED FIRST NOW AND THE SWAP IS A DEFECT FIX. The old
@@ -2782,12 +3006,17 @@ def _choose(*, model: str | None, voice, language: str | None,
     same questions and used to ask two different subsets of them in two
     different orders -- which is how /jobs came to accept a language check the
     other route spelled differently and no `instructions` check at all.
+
+    THE CLIPS ARE THE CALLER'S, never the directory's: `claims` decides which
+    namespaces a name resolves in (D35), and an unknown name is refused with
+    the names THIS caller could have used, so the refusal lists nobody else's.
     """
     chosen = spec_for(model)
     if isinstance(chosen, Refusal):
         return chosen
     spec, engine_reason = chosen
 
+    voices = _voices_for(claims)
     requested = voice.id if isinstance(voice, CustomVoice) else voice
     if spec.voices is not None:
         # A CLOSED LIST OFF THE CHECKPOINT, NOT THE CLIP DIRECTORY. The name is
@@ -2814,8 +3043,7 @@ def _choose(*, model: str | None, voice, language: str | None,
         name = requested.strip()
         reference = None
     else:
-        VOICES.refresh()
-        resolved = VOICES.resolve(requested)
+        resolved = voices.resolve(requested)
         if resolved is None:
             owner = PRESET_VOICE_ENGINE.get((requested or "").strip())
             if owner is not None:
@@ -2829,14 +3057,14 @@ def _choose(*, model: str | None, voice, language: str | None,
                     return named
             return Refusal(
                 400,
-                f"unknown voice '{requested}': this service has "
-                f"{', '.join(VOICES.names)} for {spec.id}. It clones from a "
-                f"reference clip, so a voice is a file in TTS_VOICE_DIR.",
+                f"unknown voice '{requested}': you can use "
+                f"{', '.join(voices.names)} for {spec.id}. It clones from a "
+                f"reference clip, so a voice is a clip you have added.",
                 "unsupported_value", "voice")
         name, reference = resolved
 
     refusal = refuse(spec, language=language, controls=controls,
-                     voice_seconds=VOICES.seconds_for(name),
+                     voice_seconds=voices.seconds_for(name),
                      voice_name=name,
                      voice_is_object=isinstance(voice, CustomVoice),
                      voice_is_alias=(requested or "") in voice_registry.OPENAI_VOICES)
@@ -2868,7 +3096,7 @@ def _choose(*, model: str | None, voice, language: str | None,
                   engine_reason=engine_reason, params=params)
 
 
-def _validate(req: SpeechRequest) -> Chosen | JSONResponse:
+def _validate(req: SpeechRequest, claims: Claims) -> Chosen | JSONResponse:
     """Everything that can be refused before a single token is generated.
 
     Every parameter OpenAI's schema declares is either honoured or refused here
@@ -2924,14 +3152,31 @@ def _validate(req: SpeechRequest) -> Chosen | JSONResponse:
     # there are two: the languages a request may name are a property of the
     # checkpoint it is about to reach.
     chosen = _choose(model=req.model, voice=req.voice, language=req.language,
-                     controls=_wire_controls(req))
+                     controls=_wire_controls(req), claims=claims)
     if isinstance(chosen, Refusal):
         return _render(chosen)
     return chosen
 
 
+def _too_many(refused: NotAdmitted) -> JSONResponse:
+    """NotAdmitted in OpenAI's envelope, for /v1/audio/speech.
+
+    The only error response OpenAI's schema declares for this path, and there
+    was none of any kind here. Retry-After is the half that makes it
+    actionable: openai-python honours it when it retries a 429.
+    """
+    retry = _retry_after()
+    message = (f"the queue is full ({MAX_QUEUE} jobs ahead). This service "
+               f"generates one job at a time on CPU; retry in about {retry}s."
+               if refused.full else _user_cap_message())
+    response = error_response(429, message, type_="rate_limit_error",
+                              code="rate_limit_exceeded")
+    response.headers["Retry-After"] = str(retry)
+    return response
+
+
 @app.post("/v1/audio/speech")
-async def openai_speech(req: SpeechRequest) -> Response:
+async def openai_speech(req: SpeechRequest, request: Request) -> Response:
     """OpenAI's speech endpoint: streamed, synchronous, or a job id.
 
     OpenAI's contract is request/response. This service runs at roughly 0.21x
@@ -2950,31 +3195,22 @@ async def openai_speech(req: SpeechRequest) -> Response:
       says so, and Retry-After plus Location are there for the clients that
       can act on them.
     """
-    resolved = _validate(req)
+    claims = identity.claims_of(request)
+    resolved = _validate(req, claims)
     if isinstance(resolved, JSONResponse):
         return resolved
     voice_name, reference = resolved.voice, resolved.reference
     spec, params = resolved.spec, resolved.params
-
-    if _full():
-        # The only error response OpenAI's schema declares for this path, and
-        # there was none of any kind here. Retry-After is the half that makes
-        # it actionable: openai-python honours it when it retries a 429.
-        retry = _retry_after()
-        response = error_response(
-            429, f"the queue is full ({MAX_QUEUE} jobs ahead). This service "
-                 f"generates one job at a time on CPU; retry in about "
-                 f"{retry}s.",
-            type_="rate_limit_error", code="rate_limit_exceeded")
-        response.headers["Retry-After"] = str(retry)
-        return response
 
     text = req.input.strip()
     segments = _segments(text, None)
     fmt = req.response_format
 
     if req.stream_format == "sse":
-        return _sse_response(req, resolved, segments, text, fmt)
+        try:
+            return _sse_response(req, resolved, segments, text, fmt, claims)
+        except NotAdmitted as refused:
+            return _too_many(refused)
 
     chars = len(text)
     budget = _sync_budget(spec)
@@ -2982,12 +3218,16 @@ async def openai_speech(req: SpeechRequest) -> Response:
             if 0 < chars <= SYNC_MAX_CHARS
             and _compute_seconds(chars, spec.id) <= budget
             else None)
-    job_id = _enqueue(
-        segments=segments, text=text, language=params.get("language"),
-        controls=params, voice=voice_name, reference=reference, fmt=fmt,
-        spec=spec, model_requested=req.model,
-        engine_reason=resolved.engine_reason,
-        waiter=(asyncio.get_running_loop(), done) if done else None)
+    try:
+        job_id = _enqueue(
+            claims=claims,
+            segments=segments, text=text, language=params.get("language"),
+            controls=params, voice=voice_name, reference=reference, fmt=fmt,
+            spec=spec, model_requested=req.model,
+            engine_reason=resolved.engine_reason,
+            waiter=(asyncio.get_running_loop(), done) if done else None)
+    except NotAdmitted as refused:
+        return _too_many(refused)
 
     # `async def` and an asyncio wait, not a sync route blocking on a
     # threading.Event. A sync route holds one of AnyIO's 40 worker threads for
@@ -3108,10 +3348,11 @@ def _frame(payload: dict) -> str:
 
 def _sse_response(req: SpeechRequest, chosen: "Chosen",
                   segments: list[tuple[str, float]],
-                  text: str, fmt: str) -> StreamingResponse:
+                  text: str, fmt: str, claims: Claims) -> StreamingResponse:
     stream = Stream(loop=asyncio.get_running_loop())
     params = chosen.params
     job_id = _enqueue(
+        claims=claims,
         segments=segments, text=text, language=params.get("language"),
         controls=params, voice=chosen.voice, reference=chosen.reference,
         spec=chosen.spec, model_requested=req.model,

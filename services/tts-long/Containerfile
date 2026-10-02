@@ -106,10 +106,11 @@ ENV VOICE_TLS_PREFIX=TTS \
     TTS_OPENAI_SYNC_TIMEOUT=180 \
     PYTHONUNBUFFERED=1
 
-# TTS_API_KEYS, TTS_TLS_CERT and TTS_TLS_KEY are deliberately absent. Keys do
-# not belong baked into a published image, and a certificate path is only
-# meaningful once something is mounted at it. Unset means no auth and plain
-# HTTP, which is what this already did — the startup log says so at WARNING.
+# TTS_TLS_CERT and TTS_TLS_KEY are deliberately absent: a certificate path is
+# only meaningful once something is mounted at it, and unset means plain HTTP.
+# There is no setting for callers' keys. Every request but /health needs the
+# gateway's signed assertion, verified against the public key the gateway
+# writes to /run/calliope, a read-only volume compose mounts here.
 
 RUN useradd --create-home --uid 1000 tts \
  && mkdir -p /models /output \
@@ -118,9 +119,9 @@ RUN useradd --create-home --uid 1000 tts \
 VOLUME ["/models", "/output"]
 EXPOSE 8002
 
-# /health is exempt from API key auth precisely so a probe can call it, and it
-# is the check that would have caught /v1/audio/speech holding every AnyIO
-# worker thread while /health could not be served.
+# /health is the one path that needs no assertion, precisely so a probe can
+# call it, and it is the check that would have caught /v1/audio/speech holding
+# every AnyIO worker thread while /health could not be served.
 #
 # There is no HEALTHCHECK instruction, and the one that used to be here never
 # reached a published image: HEALTHCHECK is not a field in the OCI image spec,

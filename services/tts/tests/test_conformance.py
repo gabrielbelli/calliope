@@ -1,18 +1,18 @@
 """Run voice-common's shipped conformance suite against this service's own app.
 
-Sharing app/auth.py stops three copies of app/auth.py from drifting. It does
-nothing about the parts this repo still writes itself — its routes, its error
-paths, its health payload — and that is where the same class of defect
+Sharing the identity check stops each backend from writing its own verifier.
+It does nothing about the parts this repo still writes itself — its routes, its
+error paths, its health payload — and that is where the same class of defect
 reappears. So the package ships the assertions too and every consumer runs them
 against the app object it actually builds: a bad voice-common bump fails here,
-at this repo's build, rather than on orko port 8001.
+at this repo's build, rather than on a deployed service.
 
-Every test in that suite is named after a defect that was really found. Three
-of them were found in THIS repo:
-
-  * a non-ASCII TTS_API_KEYS value could never authenticate
-  * GET /health/ came back 401 the moment keys were configured
-  * TTS_API_KEYS=',' disabled authentication and logged it as unset
+What it asserts: every request but `/health` needs the gateway's assertion
+addressed to `tts`, so one for another service, an expired one or a forged one
+is a 401; `GET /health/` is not a 401, which it once was here the moment keys
+were configured; `/docs` and `/openapi.json` do not exist; no handler sees an
+`X-Calliope-*` header; a leftover `TTS_API_KEYS` is reported and never fatal;
+and every /v1 error carries all four envelope fields.
 
 The star import is deliberate. It puts those test functions in a module inside
 this repo's own tree, so this rootdir and any conftest here apply normally;
@@ -33,6 +33,6 @@ from voice_common.conformance import Service, module_app
 
 @pytest.fixture
 def voice_service() -> Service:
-    return Service(env_var="TTS_API_KEYS",
+    return Service(audience="tts",
                    build=module_app("app.main"),
                    v1_path="/v1/audio/speech")
