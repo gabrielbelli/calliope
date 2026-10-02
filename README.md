@@ -221,7 +221,7 @@ loopback and has not been measured on the NAS.
 
 Only `tts-long` carries torch; `stt` and `tts` run on ONNX Runtime and
 CTranslate2 instead. As written `compose.yaml` asks for 33 CPUs and about
-19.8 GB across the seven, which is the box it came from rather than a
+19.9 GB across the seven, which is the box it came from rather than a
 requirement.
 
 ### Transcription

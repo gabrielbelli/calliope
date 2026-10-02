@@ -879,7 +879,7 @@ boundary and must not be able to alter anything else. The lines that belong
 to the original machine, the sign-in settings every deployment has to choose,
 and what to do with each, are in the README's *Run it* table.
 
-As written it asks for **33 CPUs and about 19.8 GB** across the seven, which
+As written it asks for **33 CPUs and about 19.9 GB** across the seven, which
 is the box it came from rather than a requirement:
 
 | | `cpus` | `mem_limit` |
