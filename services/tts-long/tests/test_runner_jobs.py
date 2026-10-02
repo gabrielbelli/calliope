@@ -11,7 +11,9 @@ Every test is named after the mistake it prevents.
 
 from __future__ import annotations
 
+import importlib
 import random
+import re
 import time
 
 import numpy as np
@@ -203,6 +205,33 @@ def test_the_other_engine_unloads_the_first_before_it_loads(runner):
                    and f"{first} exit" in ls and ls)
     assert lines.index(f"{first} exit") < lines.index(f"{second} chatterbox-turbo turbo words")
     assert generated(runner.modules)[0].split(" ")[1] == "chatterbox"
+
+
+def test_smoke_measures_each_engine_after_the_last_has_left_the_card(
+        runner_modules, monkeypatch, capsys):
+    """MEASURED: smoke loaded Turbo with baseline still resident.
+
+    Every Synth's reaper thread holds it, so `del synth` freed nothing. On a
+    6 GB card Turbo's load failed before its figures printed; on a larger one
+    its peak included baseline's, and RUNNER_MIN_FREE_MIB is set from it.
+    """
+    monkeypatch.setenv("RUNNER_DEVICE", "cpu")
+    cli = importlib.import_module("app.runner.__main__")
+    assert cli.smoke([], factory="runner_fake:FakeSynth") == 0
+    out = capsys.readouterr().out
+    for service in ("chatterbox", "chatterbox-turbo"):
+        assert re.search(rf"^{service}: load 0\.0 s, realtime factor \d+\.\d{{3}}x$",
+                         out, re.M), out
+    pids: dict[str, set[str]] = {}
+    for line in generated(runner_modules):
+        pid, engine, _text = line.split(" ", 2)
+        pids.setdefault(engine, set()).add(pid)
+    (first,), (second,) = pids["chatterbox"], pids["chatterbox-turbo"]
+    assert first != second, "both engines were measured in one process"
+    lines = fake_synth_lines(runner_modules)
+    loaded = next(n for n, line in enumerate(lines) if line.startswith(f"{second} "))
+    assert lines.index(f"{first} exit") < loaded, \
+        "baseline was still resident when Turbo loaded"
 
 
 def test_an_idle_worker_is_stopped_and_the_vram_is_given_back(runner, monkeypatch):

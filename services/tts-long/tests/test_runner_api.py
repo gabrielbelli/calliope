@@ -213,7 +213,7 @@ def test_serve_refuses_a_missing_short_or_malformed_key_and_never_says_it(
 
 
 def test_importing_the_cli_does_nothing(runner_modules):
-    """spawn imports the parent's main module again; work there would serve twice."""
+    """The tests import it, and an import must start nothing."""
     from pathlib import Path
 
     source = Path(importlib.import_module("app.runner.__main__").__file__).read_text()

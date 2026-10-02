@@ -12,6 +12,8 @@ ONE SEGMENT PER CALL, through `Synth.speak_segments`, so the empty-text, token
 count and watermark behaviour are the CPU lane's exactly, and the cancel flag
 is checked between segments -- as fine as cancellation gets, because
 generate() has no interruption point.
+
+`measure` is `smoke`'s child: one engine per process, for the same reason.
 """
 
 from __future__ import annotations
@@ -68,6 +70,53 @@ def main(conn, engine: str, device: str,  # noqa: ANN001 - a multiprocessing Con
             return
         if end.get("fatal"):
             return
+
+
+def measure(conn, engine: str, device: str, texts: tuple[str, ...],  # noqa: ANN001
+            clip: str | None, factory: str = "app.synth:Synth") -> None:
+    """`smoke`'s figures for one engine, from a process of its own like main's.
+
+    A FRESH PROCESS PER ENGINE, so each peak is the one a worker reaches in
+    production: its own CUDA context and nothing else of ours on the card.
+    Measured in one process, the first engine was still resident while the
+    second loaded -- every Synth's reaper thread holds it, so `del` freed
+    nothing -- and on a 6 GB card the second load failed before it printed.
+    Here rather than in __main__.py, whose docstring says why.
+
+    Sends {load_seconds, audio_seconds, wall_seconds, peak_mib}. An exception
+    is left to print its traceback, and the closed pipe tells the parent.
+    """
+    from app.engines import ENGINES
+
+    spec = ENGINES[engine]
+    synth = _load(factory)(idle_timeout=float("inf"), threads=THREADS,
+                           spec=spec, device=device)
+    language = (spec.defaults.get("language")
+                if not spec.facts.language_from_voice and len(spec.languages) > 1
+                else None)
+    # The first call loads the model and is the warm-up; it is not timed.
+    synth.speak_segments([(texts[0], 0.0)], language, {}, clip)
+    cuda = device.startswith("cuda")
+    if cuda:
+        import torch
+
+        torch.cuda.reset_peak_memory_stats()
+    rate = spec.facts.native_sample_rate
+    audio = wall = 0.0
+    peak = 0
+    for text in texts:
+        started = time.monotonic()
+        spoken = synth.speak_segments([(text, 0.0)], language, {}, clip)
+        wall += time.monotonic() - started
+        audio += spoken.audio.size / rate
+        if cuda:
+            # THE WHOLE DEVICE, CUDA context and allocator reserve included,
+            # which max_memory_allocated() leaves out.
+            free, total = torch.cuda.mem_get_info()
+            peak = max(peak, total - free)
+    conn.send({"load_seconds": float(synth.load_seconds), "audio_seconds": audio,
+               "wall_seconds": wall, "peak_mib": (peak >> 20) if cuda else None})
+    conn.close()
 
 
 def run(synth, job: dict, device: str) -> dict:  # noqa: ANN001 - Synth or a fake

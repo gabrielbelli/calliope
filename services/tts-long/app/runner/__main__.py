@@ -1,9 +1,11 @@
 """python -m app.runner serve | fingerprint | smoke [clip]
 
 NOTHING HAPPENS ON IMPORT. Every command runs under the `__main__` guard at the
-bottom. The worker and the probe use multiprocessing's `spawn`, which imports
-the parent's main module again as `__mp_main__`; work at module level here
-would start a second server in every worker.
+bottom, so importing this module, as the tests do, starts nothing. The worker,
+the probe and `smoke`'s measurements run in processes started with
+multiprocessing's `spawn`, and their targets live in worker.py and gpu.py:
+spawn does not import a package's `__main__` again, so a function defined here
+could not be found in the child.
 
     serve        the runner: reads the key, mints or loads the certificate,
                  logs its fingerprint and listens on :47600 (TLS 1.3)
@@ -20,7 +22,6 @@ from __future__ import annotations
 import os
 import re
 import sys
-import time
 from pathlib import Path
 
 STATE_DIR = Path("/state")
@@ -131,13 +132,20 @@ def fingerprint() -> None:
     print(tls.fingerprint(cert))
 
 
-def smoke(args: list[str]) -> int:
+def smoke(args: list[str], factory: str = "app.synth:Synth") -> int:
     """Download the weights and measure every hosted engine on this device.
 
     HF_HUB_OFFLINE was turned off by `main` before anything was imported: the
     image runs offline so a load never asks Hugging Face for a revision, and
-    this is the one command that is meant to download.
+    this is the one command that is meant to download. The spawned measuring
+    process inherits that environment.
+
+    ONE ENGINE AT A TIME, EACH IN A PROCESS OF ITS OWN, and the next starts
+    only once the last has exited (worker.measure says why). `factory` is
+    the tests' seam, as it is the worker's.
     """
+    import multiprocessing
+
     from voice_common.logging import setup
 
     log = setup("tts-runner", "RUNNER")
@@ -145,49 +153,42 @@ def smoke(args: list[str]) -> int:
     clip = args[0] if args else None
 
     from app.engines import ENGINES
-    from app.synth import Synth
 
+    from . import worker
     from .gpu import probe_now
 
     ok, said = probe_now(device)
     print(said, flush=True)
     if not ok:
         return 1
-    cuda = device.startswith("cuda")
+    context = multiprocessing.get_context("spawn")
+    failed = False
     for service, spec in hosted(ENGINES, log).items():
-        import gc
-
-        synth = Synth(idle_timeout=float("inf"), threads=4, spec=spec, device=device)
-        language = (spec.defaults.get("language")
-                    if not spec.facts.language_from_voice and len(spec.languages) > 1
-                    else None)
-        # The first call loads the model and is the warm-up; it is not timed.
-        synth.speak_segments([(SMOKE_TEXT[0], 0.0)], language, {}, clip)
-        if cuda:
-            import torch
-
-            torch.cuda.reset_peak_memory_stats()
-        rate = spec.facts.native_sample_rate
-        audio = wall = 0.0
-        peak = 0
-        for text in SMOKE_TEXT:
-            started = time.monotonic()
-            spoken = synth.speak_segments([(text, 0.0)], language, {}, clip)
-            wall += time.monotonic() - started
-            audio += spoken.audio.size / rate
-            if cuda:
-                # THE WHOLE DEVICE, CUDA context and allocator reserve
-                # included, which max_memory_allocated() leaves out.
-                free, total = torch.cuda.mem_get_info()
-                peak = max(peak, total - free)
-        print(f"{service}: load {synth.load_seconds:.1f} s, realtime factor "
-              f"{audio / wall if wall else 0.0:.3f}x"
-              + (f", device peak {peak >> 20} MiB" if cuda else ""), flush=True)
-        del synth
-        gc.collect()
-        if cuda:
-            torch.cuda.empty_cache()
-    return 0
+        parent, child = context.Pipe(duplex=False)
+        process = context.Process(
+            target=worker.measure,
+            args=(child, spec.id, device, SMOKE_TEXT, clip, factory),
+            daemon=False, name=f"smoke-{spec.id}")
+        process.start()
+        child.close()
+        try:
+            figures = parent.recv()
+        except (EOFError, OSError):
+            figures = None
+        process.join()
+        parent.close()
+        if figures is None:
+            print(f"{service}: the measurement exited with code "
+                  f"{process.exitcode}; its error is above", flush=True)
+            failed = True
+            continue
+        wall = figures["wall_seconds"]
+        peak = figures["peak_mib"]
+        print(f"{service}: load {figures['load_seconds']:.1f} s, realtime factor "
+              f"{figures['audio_seconds'] / wall if wall else 0.0:.3f}x"
+              + (f", device peak {peak} MiB" if peak is not None else ""),
+              flush=True)
+    return 1 if failed else 0
 
 
 USAGE = "usage: python -m app.runner serve | fingerprint | smoke [clip]"
