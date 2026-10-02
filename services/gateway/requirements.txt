@@ -8,6 +8,10 @@
 fastapi==0.121.2
 uvicorn[standard]==0.38.0
 httpx==0.28.1
+# Argon2id, Ed25519, Fernet and HKDF, all from one wheel (D10). The pin is the
+# one packages/common declares; named here as well because this service calls
+# it directly, for passwords and the identity key.
+cryptography==50.0.1
 # The client half of the /satellites/ws relay. uvicorn[standard] already
 # installs it for the server half; pinned here because this module now imports
 # it.

@@ -16,7 +16,7 @@ import base64
 import json
 
 import pytest
-from conftest import MockBackend, Slow, Unreachable, gateway
+from conftest import MockBackend, Slow, Unreachable, bearer, gateway, make_key, make_user
 
 CHAT = "/v1/chat/completions"
 TRANSLATIONS = "/v1/audio/translations"
@@ -810,20 +810,20 @@ async def test_a_message_audio_field_is_refused_by_name(monkeypatch, backends):
 async def test_a_new_route_is_behind_the_key_like_every_other(monkeypatch,
                                                                backends, call):
     """The middleware protects by default and /health is the only exemption, so
-    this is a property of auth.py rather than of these routes -- asserted here
+    this is a property of authn.py rather than of these routes -- asserted here
     because a route added with its own dependency instead would pass every test
     in this file and open the door."""
     method, path, kwargs = call
     stt, tts, long = backends
     async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
-                       api_keys="sk-real") as (client, _):
+                       authenticate=False) as (client, _):
         refused = await client.request(method, path, **kwargs)
         # Checked INSIDE the context and before the authorised call, because a
         # 401 that still forwarded the body would be invisible afterwards.
         assert not stt.seen and not tts.seen and not long.seen, (
             "a request refused at the door still reached a backend")
         allowed = await client.request(
-            method, path, headers={"Authorization": "Bearer sk-real"}, **kwargs)
+            method, path, headers=bearer(make_key(make_user("ana"))), **kwargs)
 
     assert refused.status_code == 401
     assert refused.headers["www-authenticate"] == "Bearer"

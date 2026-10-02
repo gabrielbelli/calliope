@@ -20,7 +20,7 @@ import json
 
 import anyio
 import httpx
-from conftest import MockBackend, Router, reload_gateway
+from conftest import MockBackend, Router, admin_key, bearer, reload_gateway
 
 SPEECH = "/v1/audio/speech"
 
@@ -96,7 +96,8 @@ async def _drive(app, payload: bytes, watch=None) -> list[bytes]:
         "client": ("127.0.0.1", 12345), "server": ("gateway.test", 80),
         "headers": [(b"host", b"gateway.test"),
                     (b"content-type", b"application/json"),
-                    (b"content-length", str(len(payload)).encode())],
+                    (b"content-length", str(len(payload)).encode()),
+                    (b"authorization", f"Bearer {admin_key()}".encode())],
     }, receive, send)
     return delivered
 
@@ -161,8 +162,9 @@ async def test_the_instruction_not_to_buffer_survives_the_proxy(monkeypatch):
                 transport=httpx.ASGITransport(app=main.app),
                 base_url="http://gateway.test") as client:
             response = await client.post(
-                SPEECH, content=json.dumps({"model": "kokoro", "input": "One.",
-                                            "stream_format": "sse"}))
+                SPEECH, headers=bearer(admin_key()),
+                content=json.dumps({"model": "kokoro", "input": "One.",
+                                    "stream_format": "sse"}))
     assert response.headers["x-accel-buffering"] == "no"
     assert response.headers["cache-control"] == "no-cache"
     assert response.headers["content-type"] == "text/event-stream"
@@ -220,7 +222,8 @@ async def _upload(app, path: str, query: bytes, pieces: list[bytes],
         "query_string": query, "root_path": "", "client": ("127.0.0.1", 12345),
         "server": ("gateway.test", 80),
         "headers": [(b"host", b"gateway.test"), (b"content-type", b"audio/wav"),
-                    (b"transfer-encoding", b"chunked")],
+                    (b"transfer-encoding", b"chunked"),
+                    (b"authorization", f"Bearer {admin_key()}".encode())],
     }, receive, send)
     return status, answer
 
@@ -286,7 +289,7 @@ async def test_the_chunk_plan_survives_the_proxy_in_both_directions(monkeypatch)
                 transport=httpx.ASGITransport(app=main.app),
                 base_url="http://gateway.test") as client:
             response = await client.post(
-                SPEECH, headers={"X-Chunk-Plan": "1"},
+                SPEECH, headers={"X-Chunk-Plan": "1", **bearer(admin_key())},
                 content=json.dumps({"model": "kokoro", "input": "One.",
                                     "stream_format": "sse"}))
     assert response.headers["x-chunk-phonemes"] == "60,60,98,157"

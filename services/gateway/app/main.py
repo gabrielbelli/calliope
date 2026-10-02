@@ -20,21 +20,26 @@
 
     GET  /v1/models        answered here, from its own table, no backend call
     GET  /v1/models/{id}   the same table, one row, so the two cannot disagree
-    GET  /health           all three, fanned out, unauthenticated
-    everything else        404 in the OpenAI envelope
+    GET  /health           liveness for anyone; every backend's detail by scope
+    /login  /auth/*        signing in, sessions, keys (routes_auth.py)
+    /admin/*               users, roles, keys, audit (routes_admin.py)
+    everything else        404 in the OpenAI envelope, after authentication
 
 This is a router, not a framework. It exists for two reasons and no others.
 
-ONE AUTH BOUNDARY. The three backends used to carry a copy each of an auth
-module, and those three copies diverged and duplicated bugs between them; they
-share voice_common.auth now, which closed that gap but not this one — three
-processes each deciding for themselves is still three places a key can be
-misconfigured. Here the backends run open, only :8080 is published, and one
-file checks a token. That file is this service's own auth.py rather than the
-shared module: a different env var, and no health route of its own to exempt.
+ONE AUTH BOUNDARY. The gateway is the only process that checks a credential
+(D3): a session cookie or a stored API key, against the scope the route table
+gives each row (authn.py, routetable.py). A backend checks nothing itself; it
+receives a 60-second Ed25519 assertion of who is asking and with which scopes
+(X-Calliope-Identity, D4), and verifies it with the public key alone. Every
+route here has a scope or is one of the five public rows, and a route added
+without one stops the import (D48). Services call each other through the
+internal listener on :8081 with their own keys (internal.py, D6).
 
-ONE HEALTH ANSWER. Today, knowing whether the stack is up means polling three
-ports. GET /health here fans out and returns all three, unauthenticated.
+ONE HEALTH ANSWER. Knowing whether the stack is up used to mean polling three
+ports. GET /health here fans out to all of them; anyone gets "ok" or
+"degraded", and a key with health:read or health:detail gets the backends'
+bodies cut to an allowlist (healthview.py, D50).
 
 THE ROUTING KEY IS THE `model` STRING AND NOTHING ELSE. Not input length: that
 is a proxy for a quality decision, and escalating a 400-character paragraph on
@@ -69,7 +74,7 @@ going fast instead of being refused by a service that never held it. See
 LONG_MODELS and LONG_KNOWN below.
 
 NATIVE ROUTES MOUNT FLAT AND NOTHING IS REWRITTEN. The proxy below forwards
-`request.url.path` verbatim, which is why /jobs works: tts-long's own 202
+the path it was asked for unchanged, which is why /jobs works: tts-long's own 202
 answers with `Location: /jobs/{id}` and `audio_url: /jobs/{id}/audio`, both
 backend-relative. Mounted at the same path here they stay correct with no
 header rewriting at all. A prefixed design (/tts-long/jobs/…) would need a
@@ -92,6 +97,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, NamedTuple
 
@@ -99,17 +105,24 @@ import httpx
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import InvalidHandshake
 from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 
+from voice_common import errors
+from voice_common import scopes as scope_rules
 from voice_common.engines import CATALOGUE
 from voice_common.errors import (ApiError, error_response, http_error_response,
                                  install_errors, v1_path)
+from voice_common.identity import ASSERTION_HEADER, DELEGATION_HEADER
 
-from . import auth, chat
+from . import (authn, chat, healthview, routes_admin, routes_auth, routes_secrets,
+               routetable, runtime)
+from . import db as dbmod
+from .authn import client_ip_of, optional_principal, principal_of
 from .openai_api import model_list
+from .routetable import PUBLIC, WEBSOCKET, Reserved, Rule, rule
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("voice-gateway")
@@ -129,6 +142,7 @@ class Backend(NamedTuple):
     url: str             # no trailing slash; paths are appended verbatim
     read_timeout: float
     timeout_help: str    # the way out, quoted in the 504 body
+    audience: str        # the `aud` of the identity assertion it is sent (§3.8)
     # The clock on each write of an upload, when it is not read_timeout: only
     # the satellites' media route, whose answer may come long after its body.
     write_timeout: float | None = None
@@ -166,6 +180,7 @@ _LONG_WAY_OUT = (
 
 STT = Backend(
     name="stt-stack",
+    audience="stt",
     url=os.getenv("GATEWAY_STT_URL", "http://stt-stack:8000").rstrip("/"),
     # 900 s: at the measured 8.5-10.4x realtime, two hours of audio is ~847 s
     # of compute. openai-python's own 600 s default gives up first past about
@@ -177,6 +192,7 @@ STT = Backend(
 )
 TTS = Backend(
     name="tts-stack",
+    audience="tts",
     url=os.getenv("GATEWAY_TTS_URL", "http://tts-stack:8001").rstrip("/"),
     # 300 s: at the orko-measured 1.2x realtime that is ~360 s of speech,
     # about 900 words. This is a guard-rail, not a router — long input on the
@@ -193,6 +209,7 @@ TTS = Backend(
 )
 LONG = Backend(
     name="tts-long",
+    audience="tts-long",
     url=os.getenv("GATEWAY_TTS_LONG_URL", "http://tts-long:8002").rstrip("/"),
     # 240 s, chosen ONLY to sit above tts-long's own SYNC_TIMEOUT of 180 s so
     # the backend's honest 202 always wins the race. A gateway timing out at
@@ -272,11 +289,21 @@ HOP_BY_HOP = frozenset({
     "te", "trailer", "trailers", "transfer-encoding", "upgrade",
 })
 
-# `host` because httpx must set the backend's own. `authorization` because the
-# client's key is stripped and NOT replaced: forwarding it to three services
-# that run with their keys unset achieves nothing except copying the secret
-# into three more log streams.
-DROP_FROM_REQUEST = HOP_BY_HOP | {"host", "authorization"}
+# What never crosses to a backend (D51). `host` because httpx must set the
+# backend's own. `authorization` and `cookie` because a backend checks no
+# credential, and copying one would only put it in another log. Every
+# X-Calliope-* header because only this process may assert an identity, and
+# every forwarding header because only this process knows the client's
+# address: it sets its own X-Forwarded-For below, from clientaddr.py.
+DROP_FROM_REQUEST = HOP_BY_HOP | {"host", "authorization", "cookie", "forwarded"}
+DROP_PREFIXES = ("x-calliope-", "x-forwarded-")
+# And what never comes back: a backend has no business setting a cookie on
+# Calliope's origin, where the session cookie lives, and none may grant a
+# cross-origin read. The CSRF check skips Bearer requests only because no
+# browser is ever allowed to send one cross-site (D14), so an
+# Access-Control-Allow-* header from any backend would undo it.
+DROP_FROM_RESPONSE = HOP_BY_HOP | {"set-cookie"}
+DROP_RESPONSE_PREFIXES = ("access-control-",)
 
 state: dict[str, object] = {}
 
@@ -298,26 +325,41 @@ def new_client() -> httpx.AsyncClient:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """The runtime both listeners share, the connection pool, and :8081.
+
+    The internal listener runs in this process and on this event loop (D6):
+    a delegation token issued on :8080 is checked on :8081 against the same
+    use counts, and a key revoked here is revoked there. GATEWAY_INTERNAL_PORT
+    empty leaves it out, which is what the tests do.
+    """
+    rt = await runtime.start(runtime.Settings.from_env())
     state["client"] = new_client()
-    log.info("ready: stt=%s tts=%s tts-long=%s", STT.url, TTS.url, LONG.url)
-    yield
-    await state["client"].aclose()  # type: ignore[attr-defined]
-    state.clear()
+    state["health"] = healthview.ProbeCache(_probe_all)
+    from . import internal   # imports this module, so not at the top
+    listener = await internal.serve(rt.settings)
+    log.info("ready: stt=%s tts=%s tts-long=%s%s", STT.url, TTS.url, LONG.url,
+             " (LOCKED: %s)" % ", ".join(r for r, _ in rt.lock.reasons)
+             if rt.lock.active else "")
+    try:
+        yield
+    finally:
+        await internal.shutdown(listener)
+        await state["client"].aclose()  # type: ignore[attr-defined]
+        state.clear()
+        await runtime.stop()
 
 
 app = FastAPI(
     title="voice-gateway",
-    description="One port, one key, three speech services.",
+    description="One door, one login, every Calliope service behind it.",
     lifespan=lifespan,
-    # No /docs, /redoc or /openapi.json, and none proxied either. stt-stack
-    # deliberately put its own behind a key because FastAPI's default
-    # registrations were handing out a free map of the service; publishing an
-    # unauthenticated map of all three here would quietly undo that decision.
+    # No /docs, /redoc or /openapi.json, and none proxied either: a schema is
+    # a free map of every route, and this is the published port.
     openapi_url=None,
     docs_url=None,
     redoc_url=None,
 )
-auth.install(app)
+authn.install_public(app)
 
 # The shared /v1 handlers, which this service had none of. It was the only one
 # of the four with no `param` on any error and no envelope at all on an
@@ -400,7 +442,23 @@ async def _http_error(request: Request, exc: StarletteHTTPException) -> Response
 # MutableHeaders returns every pair rather than a deduplicated mapping.
 
 
-def _request_headers(request: Request) -> list[tuple[str, str]]:
+def _assertion(request: Request, audience: str) -> str:
+    """The identity this request is forwarded with (D4): who, with which scopes, for 60 s."""
+    principal = principal_of(request)
+    return runtime.get().keys.signer().assertion(
+        audience=audience, sub=principal.sub, kind=principal.assertion_kind,
+        scopes=principal.scopes, cred=principal.assertion_cred, now=dbmod.now())
+
+
+def _identity_headers(request: Request, backend: Backend) -> list[tuple[str, str]]:
+    headers = [(ASSERTION_HEADER, _assertion(request, backend.audience))]
+    ip = client_ip_of(request)
+    if ip:
+        headers.append(("x-forwarded-for", ip))
+    return headers
+
+
+def _request_headers(request: Request, backend: Backend) -> list[tuple[str, str]]:
     # content-length is kept deliberately. httpx only adds
     # `transfer-encoding: chunked` for an iterator body when content-length is
     # absent, so keeping it lets a streamed upload keep its known length.
@@ -408,8 +466,9 @@ def _request_headers(request: Request) -> list[tuple[str, str]]:
     # httpx replaces its own defaults (user-agent, accept-encoding) with what
     # is passed rather than appending to them, so forwarding a list does not
     # produce a doubled header.
-    return [(k, v) for k, v in request.headers.items()
-            if k.lower() not in DROP_FROM_REQUEST]
+    kept = [(k, v) for k, v in request.headers.items()
+            if k.lower() not in DROP_FROM_REQUEST and not k.lower().startswith(DROP_PREFIXES)]
+    return kept + _identity_headers(request, backend)
 
 
 def _response_headers(upstream: httpx.Response) -> MutableHeaders:
@@ -421,7 +480,8 @@ def _response_headers(upstream: httpx.Response) -> MutableHeaders:
     return MutableHeaders(raw=[
         (k.encode("latin-1"), v.encode("latin-1"))
         for k, v in upstream.headers.multi_items()
-        if k.lower() not in HOP_BY_HOP])
+        if k.lower() not in DROP_FROM_RESPONSE
+        and not k.lower().startswith(DROP_RESPONSE_PREFIXES)])
 
 
 def _log(*, request: Request, backend: str, model: str | None, status: object,
@@ -506,24 +566,68 @@ def _too_slow(backend: Backend) -> Response:
         type_="server_error", code="backend_timeout")
 
 
+def _audit_use(request: Request, status: int) -> None:
+    """The audit rows a forwarded request writes (§2.1).
+
+    A row whose rule names an action (opening a microphone, adopting a
+    satellite, changing routing) is a security event, with the satellite and
+    the outcome. A request that names another owner (`?owner=all`, `system`
+    or a user ID) is an `:all` read or write of someone else's data. The page
+    polls those, so the first in each minute per credential and owner filter
+    is a security event and every one of them is counted into that minute's
+    aggregated row, rather than one security event each.
+    """
+    rt = runtime.get()
+    principal = principal_of(request)
+    ip = client_ip_of(request)
+    matched = request.scope.get("route")
+    action = getattr(getattr(matched, routetable.RULE, None), "audit", None)
+    if action:
+        params = request.path_params
+        detail: dict[str, object] = {"status": status}
+        seconds = request.query_params.get("seconds")
+        if seconds is not None:
+            detail["seconds"] = seconds[:16]
+        rt.trail.record(action=action, outcome="ok" if status < 400 else "failed",
+                        actor=principal.actor, ip=ip,
+                        target=params.get("nid") or params.get("name")
+                        or params.get("sha256") or request.scope["path"], detail=detail)
+    owner = request.query_params.get("owner")
+    if owner and owner != "me" and owner != principal.sub:
+        try:
+            shown = scope_rules.check_owner_filter(owner)
+        except ValueError:
+            return   # the backend answers 400; there is nothing to record
+        action = "read_all" if request.method in ("GET", "HEAD") else "write_all"
+        outcome = "ok" if status < 400 else "failed"
+        if rt.trail.count("all", f"{principal.credential_id}|{shown}|{outcome}",
+                          path=request.scope["path"], action=action, ip=ip,
+                          actor=principal.actor, target=shown, outcome=outcome):
+            rt.trail.record(action=action, outcome=outcome, actor=principal.actor, ip=ip,
+                            target=shown, detail={"status": status})
+
+
 async def _proxy(request: Request, backend: Backend, *,
                  content: bytes | AsyncIterator[bytes] | None,
-                 model: str | None = None) -> Response:
+                 model: str | None = None,
+                 extra: tuple[tuple[str, str], ...] = ()) -> Response:
     """Forward this request to `backend` and stream the answer back.
 
-    The path is `request.url.path` verbatim — no prefixing and no rewriting
-    anywhere, which is the property that keeps tts-long's own /jobs URLs valid
-    through the gateway.
+    The path is the one the guard matched and authorised, escaped back into a
+    URL (authn.forwarded_path, recheck M-1), and the query is the client's,
+    byte for byte. No prefixing and no rewriting anywhere, which is the
+    property that keeps tts-long's own /jobs URLs valid through the gateway.
     """
     client: httpx.AsyncClient = state["client"]  # type: ignore[assignment]
-    url = backend.url + request.url.path
-    if request.url.query:
-        url = f"{url}?{request.url.query}"
+    url = backend.url + authn.forwarded_path(request.scope)
+    query = request.scope.get("query_string", b"")
+    if query:
+        url = f"{url}?{query.decode('latin-1')}"
     started = time.monotonic()
 
     upstream_request = client.build_request(
         request.method, url,
-        headers=_request_headers(request),
+        headers=_request_headers(request, backend) + list(extra),
         content=content,
         timeout=httpx.Timeout(backend.read_timeout, connect=CONNECT_TIMEOUT,
                               write=backend.write_timeout or backend.read_timeout),
@@ -571,6 +675,7 @@ async def _proxy(request: Request, backend: Backend, *,
             f"is not an error envelope: {raw[:200]!r}",
             type_="server_error", code="backend_error")
 
+    _audit_use(request, upstream.status_code)
     headers = _response_headers(upstream)
     if upstream.status_code == 503 and "retry-after" not in headers:
         # tts-stack answers 503 with code `model_loading` from /speak, /voices
@@ -588,6 +693,33 @@ async def _proxy(request: Request, backend: Backend, *,
     )
 
 
+# ------------------------------------------------------------- the table --
+#
+# EVERY ROW HAS A SCOPE (D48). A route is declared with its requirement beside
+# it, and routetable.bind() at the bottom of this module refuses to import an
+# app with a route that has none. The rows below are served by BOTH listeners
+# (§3.6): a person's session or key on :8080, a service key on :8081, the same
+# scope either way. Registration happens once every row is known, in
+# declaration order, which is the order the router matches in -- static
+# segments before parameters, so /satellites/telemetry is never read as
+# /satellites/{nid} (recheck M-1).
+
+SHARED: list[tuple[str, str, Callable[..., Awaitable[Response]], Rule]] = []
+
+
+def route(method: str, path: str, requirement: Rule):
+    def register(endpoint: Callable[..., Awaitable[Response]]):
+        SHARED.append((method, path, endpoint, requirement))
+        return endpoint
+    return register
+
+
+# The reserved home-assistant profile is reached with glossaries:ha or the
+# :all form, never with :own (D33, D34); stt enforces the same per request.
+GLOSSARY_WRITE = rule("glossaries:write:own", reserved=Reserved(
+    "name", "home-assistant", frozenset({"glossaries:ha", "glossaries:write:all"})))
+
+
 # ------------------------------------------------------------ speech-to-text --
 #
 # Both routes stream the request body straight through. An hour of wav is
@@ -601,8 +733,9 @@ async def _proxy(request: Request, backend: Backend, *,
 #: "STREAMED, SO IT COSTS NOTHING HERE" WAS ONLY TRUE OF HERE. The gateway
 #: hands the body straight through, so its own memory is flat whatever arrives
 #: -- and stt-stack at the other end reads the clip to decode it, inside a
-#: container with 6 GB. An unauthenticated POST on the only published port
-#: could take that container down, and with it every transcription in flight.
+#: container with 6 GB. One POST from any key holder on the only published
+#: port could take that container down, and with it every transcription in
+#: flight.
 #:
 #: 512 MB is about five hours of 16-bit mono wav, which is past any clip this
 #: is for and short of what hurts. Raise it with GATEWAY_UPLOAD_MAX_BYTES if a
@@ -653,12 +786,12 @@ async def _upload_to_stt(request: Request) -> Response:
         code="upload_too_large")
 
 
-@app.post("/v1/audio/transcriptions")
+@route("POST", "/v1/audio/transcriptions", rule("speech:transcribe"))
 async def transcriptions(request: Request) -> Response:
     return await _upload_to_stt(request)
 
 
-@app.post("/v1/audio/translations")
+@route("POST", "/v1/audio/translations", rule("speech:transcribe"))
 async def translations(request: Request) -> Response:
     """Speech in any language, English text out.
 
@@ -689,7 +822,7 @@ async def translations(request: Request) -> Response:
     return await _upload_to_stt(request)
 
 
-@app.post("/transcribe")
+@route("POST", "/transcribe", rule("speech:transcribe"))
 async def transcribe(request: Request) -> Response:
     return await _upload_to_stt(request)
 
@@ -697,7 +830,7 @@ async def transcribe(request: Request) -> Response:
 # ------------------------------------------------------------ text-to-speech --
 
 
-@app.post("/v1/audio/speech")
+@route("POST", "/v1/audio/speech", rule("speech:speak"))
 async def speech(request: Request) -> Response:
     """The one route with a decision in it.
 
@@ -755,6 +888,13 @@ async def speech(request: Request) -> Response:
 
     if key in LONG_MODELS:
         backend = LONG
+        # The GPU lane is its own scope (§1.5): a speak-only key that names
+        # chatterbox queues minutes of GPU work, which speech:speak alone
+        # does not cover.
+        if "speech:long" not in principal_of(request).scopes:
+            _log(request=request, backend="-", model=model, status="403-scope",
+                 started=started)
+            raise errors.insufficient_scope(["speech:long"])
     elif key in LONG_KNOWN:
         # A LONG-FORM NAME THIS DEPLOYMENT HAS NOT ENABLED IS A 404, NEVER
         # KOKORO. Falling through here would answer 200 with audio from the
@@ -843,6 +983,9 @@ async def _transcribe(audio: chat.Audio, *, model: str, request: Request,
             STT.url + "/v1/audio/transcriptions",
             files={"file": (audio.filename, audio.data, audio.content_type)},
             data={"model": model, "response_format": "json"},
+            # Built from nothing but the caller's identity: no inbound header
+            # crosses on a request this route synthesised (D65).
+            headers=_identity_headers(request, STT),
             timeout=httpx.Timeout(STT.read_timeout, connect=CONNECT_TIMEOUT))
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
         _log(request=request, backend=STT.name, model=model,
@@ -926,7 +1069,7 @@ async def _chat_body(request: Request) -> bytes | None:
     return b"".join(chunks)
 
 
-@app.post("/v1/chat/completions")
+@route("POST", "/v1/chat/completions", rule("speech:transcribe"))
 async def chat_completions(request: Request) -> Response:
     """Transcribe through the chat surface, or say what this stack is.
 
@@ -1016,13 +1159,13 @@ async def chat_completions(request: Request) -> Response:
         media_type="application/json", headers=headers)
 
 
-@app.post("/speak")
+@route("POST", "/speak", rule("speech:speak"))
 async def speak(request: Request) -> Response:
     # Native tts-stack route. No decision to make, so the body streams.
     return await _proxy(request, TTS, content=request.stream())
 
 
-@app.get("/voices")
+@route("GET", "/voices", rule("speech:speak"))
 async def voices(request: Request) -> Response:
     return await _proxy(request, TTS, content=None)
 
@@ -1034,28 +1177,30 @@ async def voices(request: Request) -> Response:
 # that does not exist. See docs/adr/0003.
 #
 # The PUT streams its body and carries the query string -- _proxy appends
-# request.url.query already, which matters here more than anywhere else on this
+# the client's query already, which matters here more than anywhere else on this
 # service: ?force=true is what lets a single-word left-hand side through, and
 # dropping it silently would make a `belly = Belli` rule unenterable through
 # the front door while appearing to work.
 
 
-@app.get("/glossaries")
+@route("GET", "/glossaries", rule("glossaries:read:own"))
 async def list_glossaries(request: Request) -> Response:
     return await _proxy(request, STT, content=None)
 
 
-@app.get("/glossaries/{name}")
+@route("GET", "/glossaries/{name}", rule(
+    "glossaries:read:own",
+    reserved=Reserved("name", "home-assistant", frozenset({"glossaries:ha", "glossaries:read:all"}))))
 async def get_glossary(request: Request, name: str) -> Response:
     return await _proxy(request, STT, content=None)
 
 
-@app.put("/glossaries/{name}")
+@route("PUT", "/glossaries/{name}", GLOSSARY_WRITE)
 async def put_glossary(request: Request, name: str) -> Response:
     return await _proxy(request, STT, content=request.stream())
 
 
-@app.delete("/glossaries/{name}")
+@route("DELETE", "/glossaries/{name}", GLOSSARY_WRITE)
 async def delete_glossary(request: Request, name: str) -> Response:
     return await _proxy(request, STT, content=None)
 
@@ -1069,16 +1214,17 @@ async def delete_glossary(request: Request, name: str) -> Response:
 #
 # EXPLICITLY LISTED, NOT A WILDCARD, for the reason _http_error already gives:
 # a catch-all would proxy /docs and /openapi.json to a service that deliberately
-# does not publish them. These are exactly voice-ui's own routes -- `/`, the
-# page, and the /ui/* family -- and nothing else reaches it.
+# does not publish them. These are exactly voice-ui's own routes -- the page
+# and the /ui/* family -- and nothing else reaches it.
 #
-# The UI's PROXIED table is NOT among them and must not be. It forwards /v1 and
-# the native routes, which this service already answers itself; routing them to
-# voice-ui would send a request out to the UI so it could send it back here.
-# The page reaches them under /ui/api/, which voice-ui strips before forwarding
-# -- one origin for the browser, and the container's key still applied.
+# THE PAGE CALLS THIS SERVICE'S PATHS DIRECTLY. It used to reach /v1, /jobs,
+# /glossaries and /satellites through a /ui/api/ mount that voice-ui forwarded
+# back here with a key of its own, so every person shared one credential. The
+# page is same-origin with this gateway, its session cookie authenticates it,
+# and the mount, its five methods and voice-ui's PROXIED table are gone.
 UI = Backend(
     name="voice-ui",
+    audience="ui",
     url=os.getenv("GATEWAY_UI_URL", "http://voice-ui:8090").rstrip("/"),
     # 900 s because /ui/fetch is on this path: it streams a finished download
     # from MeTube into the transcription route, and a two-hour podcast at the
@@ -1090,67 +1236,51 @@ UI = Backend(
                  "transcriptions -- roughly two hours of audio.",
 )
 
-UI_PATHS = (
-    ("GET", "/"),
-    ("GET", "/ui"),
+# Each tab, the scope that shows it, and the page it serves (§3.4). A page is
+# for a signed-in person, so every one is session-only; a navigation to a tab
+# the role lacks lands on /ui, which opens the first tab it may see.
+PAGE_TABS = (("transcribe", "speech:transcribe"), ("speak", "speech:speak"),
+             ("jobs", "jobs:read:own"), ("vocabulary", "glossaries:read:own"),
+             ("satellites", "satellites:read"), ("account", "keys:manage:own"),
+             ("admin", "users:manage"))
+
+UI_PATHS: tuple[tuple[str, str, Rule], ...] = (
+    ("GET", "/ui", rule(session_only=True)),
     # THE PAGE'S ADDRESSES. Each tail is under one literal tab name, and
     # voice-ui answers every path under it with the static page and nothing
-    # else -- so this is five closed doors to one file, not the wildcard the
-    # comment above forbids. /ui/nope and /ui/api/docs stay 404.
-    ("GET", "/ui/transcribe"), ("GET", "/ui/transcribe/{rest:path}"),
-    ("GET", "/ui/speak"), ("GET", "/ui/speak/{rest:path}"),
-    ("GET", "/ui/jobs"), ("GET", "/ui/jobs/{rest:path}"),
-    ("GET", "/ui/vocabulary"), ("GET", "/ui/vocabulary/{rest:path}"),
-    ("GET", "/ui/satellites"), ("GET", "/ui/satellites/{rest:path}"),
-    ("GET", "/ui/health"),
-    ("GET", "/ui/config"),
-    ("GET", "/ui/clips"),
-    ("POST", "/ui/clips"),
-    ("DELETE", "/ui/clips/{name}"),
+    # else -- so this is seven closed doors to one file, not the wildcard the
+    # comment above forbids. /ui/nope stays 404.
+    *(row for tab, scope in PAGE_TABS for row in (
+        ("GET", f"/ui/{tab}", rule(scope, session_only=True)),
+        ("GET", f"/ui/{tab}/{{rest:path}}", rule(scope, session_only=True)))),
+    # The minimum flags and limits the page starts with: any session.
+    ("GET", "/ui/config", rule(session_only=True)),
+    ("GET", "/ui/clips", rule("voices:read")),
+    ("POST", "/ui/clips", rule("voices:write:own")),
+    ("DELETE", "/ui/clips/{name}", rule("voices:write:own")),
     # Cloning from a link. Listed before the {name} route above would match it
     # -- Starlette takes the first match, and /ui/clips/from-link is a valid
     # {name} -- but that one is DELETE and this is POST, so they cannot
     # collide. Named here anyway rather than relying on that.
-    ("POST", "/ui/clips/from-link"),
-    ("POST", "/ui/resolve"),
-    ("POST", "/ui/commit"),
-    ("POST", "/ui/abandon"),
-    ("GET", "/ui/progress"),
-    ("POST", "/ui/fetch"),
+    ("POST", "/ui/clips/from-link", rule("voices:write:own", "ingest:links")),
+    ("POST", "/ui/resolve", rule("ingest:links")),
+    ("POST", "/ui/commit", rule("ingest:links")),
+    ("POST", "/ui/abandon", rule("ingest:links")),
+    ("GET", "/ui/progress", rule("ingest:links")),
+    # Link transcription: voice-ui is handed a delegation token to spend on
+    # the transcription route as this user (§3.7, D64).
+    ("POST", "/ui/fetch", rule("ingest:links", "speech:transcribe")),
     # A captions download is already a transcript, so it never reaches stt.
     # Absent here, the page 404s on it when served from the published port --
     # which is how DELETE /jobs/{id} stayed unreachable while tts-long had
     # implemented it all along.
-    ("POST", "/ui/captions"),
+    ("POST", "/ui/captions", rule("ingest:links")),
     # The media relay. Without it playback 404s from the published port, which
     # is the DELETE /jobs/{id} failure again -- implemented behind the gateway
-    # and unreachable through it. _proxy already relays Range and
-    # Content-Range: only hop-by-hop headers, host and authorization are
-    # dropped, so a byte range survives the hop untouched.
-    ("GET", "/ui/media"),
-    # The prefixed mount of voice-ui's own proxy. Everything under it is
-    # forwarded verbatim and voice-ui strips /ui/api before sending it back
-    # here with UI_GATEWAY_API_KEY attached. A path parameter rather than a
-    # list because the set it covers is voice-ui's PROXIED table, which is
-    # already an allowlist on that side; duplicating it here would be two
-    # lists to keep in step.
-    # THE PAGE'S OWN MOUNT, and every method it can arrive with. PUT was
-    # missing and nothing noticed until a profile was written against the
-    # deployed stack: the UI's allowlist had been extended for PUT and so had
-    # this service's own /glossaries routes, but the /ui/api PASSTHROUGH in
-    # between had not, so the page's save died here with 405
-    # method_not_supported before it reached either.
-    #
-    # The seam is easy to miss because it belongs to neither side. Whoever adds
-    # a method to the UI's PROXIED table has to add it here as well, and the
-    # test named after this defect is what says so.
-    ("POST", "/ui/api/{rest:path}"),
-    ("GET", "/ui/api/{rest:path}"),
-    ("PUT", "/ui/api/{rest:path}"),
-    ("DELETE", "/ui/api/{rest:path}"),
-    # PATCH arrived with the Satellites tab (PATCH /satellites/{id}, a
-    # satellite's settings).
-    ("PATCH", "/ui/api/{rest:path}"),
+    # and unreachable through it. _proxy relays Range and Content-Range: only
+    # hop-by-hop headers and the credentials are dropped, so a byte range
+    # survives the hop untouched.
+    ("GET", "/ui/media", rule("ingest:links")),
 )
 
 
@@ -1158,18 +1288,22 @@ async def _to_ui(request: Request) -> Response:
     """Everything the page needs, streamed from voice-ui.
 
     An upload body is streamed rather than read: POST /ui/clips carries a
-    reference clip and /ui/api/v1/audio/transcriptions carries whatever the
-    browser is transcribing, and buffering either here would put a file this
-    process has no reason to hold into a container limited to 512 MB.
+    reference clip, and buffering it here would put a file this process has
+    no reason to hold into a container limited to 512 MB.
     """
     streaming = request.method in ("POST", "PUT", "PATCH")
-    return await _proxy(request, UI,
-                        content=request.stream() if streaming else None)
+    extra: tuple[tuple[str, str], ...] = ()
+    if request.scope["path"] == "/ui/fetch":
+        principal = principal_of(request)
+        rt = runtime.get()
+        extra = ((DELEGATION_HEADER, rt.delegations.issue(
+            rt.keys.signer(), sub=principal.sub, cred=principal.delegation_cred)),)
+    return await _proxy(request, UI, content=request.stream() if streaming else None,
+                        extra=extra)
 
 
-for _method, _path in UI_PATHS:
-    app.add_api_route(_path, _to_ui, methods=[_method],
-                      include_in_schema=False)
+for _method, _path, _rule in UI_PATHS:
+    SHARED.append((_method, _path, _to_ui, _rule))
 
 
 # -------------------------------------------------------------- satellites --
@@ -1182,6 +1316,7 @@ for _method, _path in UI_PATHS:
 # socket is the one WebSocket this gateway relays.
 SATELLITES = Backend(
     name="voice-satellites",
+    audience="satellites",
     url=os.getenv("GATEWAY_SATELLITES_URL", "http://voice-satellites:8003").rstrip("/"),
     # 120 s: the slowest routes are /satellites/{id}/say, which waits for
     # Kokoro, /satellites/{id}/listen, which records for up to 60 s by design,
@@ -1206,59 +1341,72 @@ SATELLITES = Backend(
 # still ends then.
 SATELLITES_MEDIA_TIMEOUT = float(os.getenv("GATEWAY_SATELLITES_MEDIA_TIMEOUT", "300"))
 
-SATELLITES_PATHS = (
-    ("GET", "/satellites"),
-    ("GET", "/satellites/events"),
-    ("GET", "/satellites/firmware"),
-    ("POST", "/satellites/firmware"),
-    ("DELETE", "/satellites/firmware/{sha256}"),
-    ("POST", "/satellites/ota"),
-    # Above /satellites/{nid}, as in voice-satellites itself: here both would
-    # reach the same backend path, but PUT and the POST below have no
-    # /satellites/{nid} twin and would answer 405 if they were left to it.
-    ("GET", "/satellites/routing"),
-    ("PUT", "/satellites/routing"),
-    ("POST", "/satellites/routing/test"),
+ADMIN = rule("satellites:admin")
+
+# Every pair the hub answers, with its scope (§3.5). `audit` names the event a
+# use writes: opening a microphone and changing who the satellites are or
+# where their speech goes are security events (§2.1).
+SATELLITES_PATHS: tuple[tuple[str, str, Rule], ...] = (
+    ("GET", "/satellites", rule("satellites:read")),
+    # An event stream: capped at 15 minutes and closed on revocation (D54).
+    ("GET", "/satellites/events", rule("satellites:read")),
+    ("GET", "/satellites/firmware", rule("satellites:read")),
+    ("POST", "/satellites/firmware", rule("satellites:firmware", audit="firmware_uploaded")),
+    ("DELETE", "/satellites/firmware/{sha256}",
+     rule("satellites:firmware", audit="firmware_deleted")),
+    ("POST", "/satellites/ota", rule("satellites:update", audit="ota_started")),
+    # Above /satellites/{nid}, as in voice-satellites itself, and for a
+    # stronger reason than the 405 they used to avoid: matched as
+    # /satellites/{nid}, GET /satellites/routing would need only
+    # satellites:read (recheck M-1).
+    ("GET", "/satellites/routing", ADMIN),
+    ("PUT", "/satellites/routing", rule("satellites:admin", audit="routing_changed")),
+    ("POST", "/satellites/routing/test", rule("satellites:admin", audit="routing_tested")),
     # The wake words and the satellites each is assigned to: above
-    # /satellites/{nid} for the same reason, PUT again having no twin there.
-    ("GET", "/satellites/wake-words"),
-    ("PUT", "/satellites/wake-words"),
-    ("POST", "/satellites/wake-words/models"),
-    ("DELETE", "/satellites/wake-words/models/{name}"),
-    # Home Assistant's Assist pipelines, for the wake word's pipeline picker:
-    # above /satellites/{nid} too, a POST with no twin under that pattern.
-    ("POST", "/satellites/ha/pipelines"),
-    # An API key the hub holds for a language model word. The name and the
-    # value travel in the body, never the path, because _log records paths
-    # and never bodies. Above /satellites/{nid} too: PUT has no twin there.
-    ("PUT", "/satellites/secrets"),
-    # A language model word's picker (the ids its server lists) and its Test
-    # (one question to the form as it stands): POSTs with no /satellites/{nid}
-    # twin, so above it as well.
-    ("POST", "/satellites/llm/models"),
-    ("POST", "/satellites/llm/test"),
+    # /satellites/{nid} for the same reason. The hub redacts actions to name
+    # and type for a caller without satellites:admin.
+    ("GET", "/satellites/wake-words", rule("satellites:read")),
+    ("PUT", "/satellites/wake-words", rule("satellites:admin", audit="wake_words_changed")),
+    ("POST", "/satellites/wake-words/models",
+     rule("satellites:admin", audit="wake_word_model_added")),
+    ("DELETE", "/satellites/wake-words/models/{name}",
+     rule("satellites:admin", audit="wake_word_model_deleted")),
+    # Home Assistant's Assist pipelines, for the wake word's pipeline picker,
+    # and a language model word's picker and Test: each sends a stored secret
+    # to a host, so each is the admin's (D41).
+    ("POST", "/satellites/ha/pipelines", ADMIN),
+    ("POST", "/satellites/llm/models", ADMIN),
+    ("POST", "/satellites/llm/test", ADMIN),
     # Telemetry, off until turned on: its settings, its records and their
-    # summary. Above /satellites/{nid}: PUT and DELETE have no twin there.
-    # clips/{name} is the audio of a wake word the hub's double-check did not
-    # hear, kept at level full for retraining the word's model.
-    ("GET", "/satellites/telemetry"),
-    ("PUT", "/satellites/telemetry"),
-    ("DELETE", "/satellites/telemetry"),
-    ("GET", "/satellites/telemetry/records"),
-    ("GET", "/satellites/telemetry/summary"),
-    ("GET", "/satellites/telemetry/clips/{name}"),
-    ("GET", "/satellites/{nid}"),
-    ("PATCH", "/satellites/{nid}"),
+    # summary. clips/{name} is the audio of a wake word the hub's double-check
+    # did not hear, which is why downloading one is audited.
+    ("GET", "/satellites/telemetry", ADMIN),
+    ("PUT", "/satellites/telemetry", rule("satellites:admin", audit="telemetry_changed")),
+    ("DELETE", "/satellites/telemetry", rule("satellites:admin", audit="telemetry_changed")),
+    ("GET", "/satellites/telemetry/records", ADMIN),
+    ("GET", "/satellites/telemetry/summary", ADMIN),
+    ("GET", "/satellites/telemetry/clips/{name}",
+     rule("satellites:admin", audit="telemetry_clip_downloaded")),
+    ("GET", "/satellites/{nid}", rule("satellites:read")),
+    # The hub also requires satellites:admin for the config fields (name,
+    # button webhooks); control fields need only this.
+    ("PATCH", "/satellites/{nid}", rule("satellites:control")),
     # An AirPlay receiver's cover, and the phone's transport controls (play,
     # pause, next...), for its section on the Satellites tab and for Home
     # Assistant's media player.
-    ("GET", "/satellites/{nid}/airplay/artwork"),
-    ("POST", "/satellites/{nid}/airplay/{command}"),
-    ("GET", "/satellites/{nid}/listen"),
+    ("GET", "/satellites/{nid}/airplay/artwork", rule("satellites:read")),
+    ("POST", "/satellites/{nid}/airplay/{command}", rule("satellites:control")),
+    # A POST, not a GET: it opens a microphone, and a GET is what an <img>
+    # or a link on a sibling site can make a browser send (D15, H3).
+    ("POST", "/satellites/{nid}/listen", rule("satellites:listen", audit="listen")),
+    *(("POST", f"/satellites/{{nid}}/{action}",
+       rule("satellites:admin", audit=action.replace("-", "_")))
+      for action in ("adopt", "forget", "set-hub")),
     # inject is routed for scripts that verify the listening path with a
     # recorded clip, and ptt, media and media/stop for Home Assistant's
-    # integration, behind the same keys as everything else here; the page
-    # calls none of them (see NOT_ON_PAGE in tests/test_gateway.py).
+    # integration; the page calls none of them (see NOT_ON_PAGE in
+    # tests/test_gateway.py). inject plays a clip into the listening path,
+    # so it is a microphone's worth of trust and audited like one.
     #
     # media is Home Assistant's long upload: a WAV its ffmpeg is still
     # writing, played as it arrives and answered when it has played. It is
@@ -1267,9 +1415,10 @@ SATELLITES_PATHS = (
     # so music longer than GATEWAY_SATELLITES_TIMEOUT plays to its end; a
     # write to the hub that stalls for longer than that ends it. The read
     # timeout is its own, SATELLITES_MEDIA_TIMEOUT (_media_to_satellites).
-    *(("POST", f"/satellites/{{nid}}/{action}") for action in (
-        "adopt", "forget", "identify", "reboot", "lights", "tone", "say",
-        "flush", "set-hub", "inject", "ptt", "media", "media/stop")),
+    ("POST", "/satellites/{nid}/inject", rule("satellites:listen", audit="inject")),
+    *(("POST", f"/satellites/{{nid}}/{action}", rule("satellites:control"))
+      for action in ("identify", "reboot", "lights", "tone", "say", "flush", "ptt",
+                     "media", "media/stop")),
 )
 
 
@@ -1295,9 +1444,9 @@ async def _media_to_satellites(request: Request) -> Response:
     return await _proxy(request, backend, content=request.stream())
 
 
-for _method, _path in SATELLITES_PATHS:
-    app.add_api_route(_path, _media_to_satellites if _path == "/satellites/{nid}/media"
-                      else _to_satellites, methods=[_method], include_in_schema=False)
+for _method, _path, _rule in SATELLITES_PATHS:
+    SHARED.append((_method, _path, _media_to_satellites
+                   if _path == "/satellites/{nid}/media" else _to_satellites, _rule))
 
 
 # THE DEVICE SOCKET HAS TWO PATHS AND ONE HANDLER. The feature was called
@@ -1310,6 +1459,8 @@ for _method, _path in SATELLITES_PATHS:
 # reports firmware from before the rename.
 SATELLITES_SOCKET = "/satellites/ws"
 LEGACY_SATELLITES_SOCKET = "/nodes/ws"
+# Who the relay is, in the assertion the hub requires on the socket's upgrade.
+RELAY = "svc:gateway-relay"
 
 # The close codes RFC 6455 lets an endpoint put in a close frame (section
 # 7.4): the defined ones apart from 1004, 1005, 1006 and 1015, and the
@@ -1332,23 +1483,35 @@ def _close_code_for_device(code: int | None) -> int:
 async def satellites_socket(client: WebSocket) -> None:
     """Relay one device connection to voice-satellites, frame for frame.
 
-    NOT BEHIND GATEWAY_API_KEYS, deliberately, and the key middleware could not
-    see it anyway: it is an http middleware and this is a websocket scope. A
-    device is never given a gateway key -- one baked into firmware would be in
-    every flash dump -- so what a connection may do is decided by
-    voice-satellites, by the token it issued on adoption. An unadopted device
-    can say hello and be told "pending"; nothing else passes until someone
-    adopts it through the authenticated routes above.
+    PUBLIC HERE, AND NOT OPEN. A device is never given a credential of this
+    gateway -- one baked into firmware would be in every flash dump -- so what
+    a connection may do is decided by voice-satellites, by the token it issued
+    on adoption. An unadopted device can say hello and be told "pending";
+    nothing else passes until someone adopts it through the authenticated
+    routes above.
+
+    What the gateway adds (D53): the guard has already refused an upgrade
+    whose Origin is a web page's -- every browser sends one, the Pi client
+    sends none and the Korvo only its library's `file://` -- so no page can
+    open this door; and the hop to the hub
+    carries a relay assertion (sub svc:gateway-relay), which the hub requires,
+    so the hub's socket answers only connections this gateway relayed. The
+    hub trusts X-Forwarded-For only beside that assertion.
     """
     if not SATELLITES.url:
         await client.close(code=1013)
         return
     await client.accept()
-    peer = client.client.host if client.client else ""
+    peer = client.scope.get("state", {}).get(authn.CLIENT_IP) or (
+        client.client.host if client.client else "")
     target = SATELLITES.url.replace("http", "ws", 1) + SATELLITES_SOCKET
+    relay = runtime.get().keys.signer().assertion(
+        audience=SATELLITES.audience, sub=RELAY, kind="service", scopes=(), cred=RELAY,
+        now=dbmod.now())
     try:
         upstream = await ws_connect(
-            target, additional_headers={"X-Forwarded-For": peer},
+            target, additional_headers={"X-Forwarded-For": peer,
+                                        ASSERTION_HEADER: relay},
             open_timeout=CONNECT_TIMEOUT, max_size=2**20,
             # The device pings this socket and uvicorn answers; the hop to
             # voice-satellites is a container on the same network.
@@ -1408,7 +1571,7 @@ async def satellites_socket(client: WebSocket) -> None:
 # when it redeploys. tts-long already has all of that.
 
 
-@app.post("/jobs")
+@route("POST", "/jobs", rule("speech:long"))
 async def create_job(request: Request) -> Response:
     # A cold tts-long reports model_loaded:false for minutes (6.5 GB, lazy,
     # ~3 GB downloaded on the very first job ever) and accepts work anyway —
@@ -1419,17 +1582,17 @@ async def create_job(request: Request) -> Response:
     return await _proxy(request, LONG, content=request.stream())
 
 
-@app.get("/jobs")
+@route("GET", "/jobs", rule("jobs:read:own"))
 async def list_jobs(request: Request) -> Response:
     return await _proxy(request, LONG, content=None)
 
 
-@app.get("/jobs/{job_id}")
+@route("GET", "/jobs/{job_id}", rule("jobs:read:own"))
 async def get_job(request: Request, job_id: str) -> Response:
     return await _proxy(request, LONG, content=None)
 
 
-@app.delete("/jobs/{job_id}")
+@route("DELETE", "/jobs/{job_id}", rule("jobs:delete:own"))
 async def cancel_job(request: Request, job_id: str) -> Response:
     """Cancel a queued job, or discard a finished one.
 
@@ -1447,12 +1610,12 @@ async def cancel_job(request: Request, job_id: str) -> Response:
     return await _proxy(request, LONG, content=None)
 
 
-@app.get("/jobs/{job_id}/audio")
+@route("GET", "/jobs/{job_id}/audio", rule("jobs:read:own"))
 async def get_job_audio(request: Request, job_id: str) -> Response:
     return await _proxy(request, LONG, content=None)
 
 
-@app.delete("/jobs/{job_id}/audio")
+@route("DELETE", "/jobs/{job_id}/audio", rule("jobs:delete:own"))
 async def delete_job_audio(request: Request, job_id: str) -> Response:
     """Throw away the audio and keep the record of the job that made it.
 
@@ -1474,7 +1637,7 @@ async def delete_job_audio(request: Request, job_id: str) -> Response:
 # -------------------------------------------------------------- meta routes --
 
 
-@app.get("/v1/models")
+@route("GET", "/v1/models", rule("models:read"))
 async def models() -> Response:
     """The routing table, as OpenAI's model list. No backend is contacted.
 
@@ -1487,7 +1650,7 @@ async def models() -> Response:
                     media_type="application/json")
 
 
-@app.get("/v1/models/{model_id:path}")
+@route("GET", "/v1/models/{model_id:path}", rule("models:read"))
 async def model(model_id: str) -> Response:
     """Retrieve one model, off the same rows GET /v1/models publishes.
 
@@ -1532,9 +1695,9 @@ async def _probe(backend: Backend) -> dict[str, object]:
     client: httpx.AsyncClient = state["client"]  # type: ignore[assignment]
     result: dict[str, object] = {"url": backend.url}
     try:
-        # No Authorization header, deliberately: the backends' /health are
-        # unauthenticated for the same reason this one is, and a probe that
-        # needed a key would be a probe that stops working the day one is set.
+        # No credential, deliberately: a backend's /health is the one path
+        # voice_common.identity leaves open, inside the network only (D50),
+        # and a probe that needed an assertion would stop the day one expired.
         response = await client.get(
             backend.url + "/health",
             timeout=httpx.Timeout(HEALTH_TIMEOUT, connect=CONNECT_TIMEOUT))
@@ -1546,43 +1709,111 @@ async def _probe(backend: Backend) -> dict[str, object]:
     result["reachable"] = response.status_code == 200
     result["http_status"] = response.status_code
     try:
-        # The backend's own body, inlined rather than summarised. tts-stack
-        # says how many voices loaded, stt-stack names the model, tts-long
-        # reports model_loaded and the queue depth — all three are the answer
-        # to a different question an operator is about to ask.
+        # The backend's own body, kept whole here and cut to a tier's
+        # allowlist on the way out (healthview.py): what reaches a caller is
+        # chosen field by field, never passed through.
         result["health"] = response.json()
     except ValueError:
-        result["health"] = {"body": response.text[:200]}
+        result["health"] = {}
     return result
 
 
-@app.get("/health")
-async def health() -> Response:
-    """Every backend's health in one unauthenticated call.
-
-    This is the gateway's main justification beyond routing: today, knowing
-    the state of the stack means polling three ports.
-
-    It always answers 200, even when a backend is down. The TrueNAS healthcheck
-    for THIS container calls THIS endpoint, and a 503 here because a sibling is
-    restarting would have the orchestrator restart the gateway — a container
-    must not be killed for a sibling's fault. Read `status`, not the code.
-    Each container keeps its own healthcheck pointed at its own localhost
-    /health for exactly the same reason.
-    """
+async def _probe_all() -> dict[str, dict[str, object]]:
     # All at once, the hub with them: asked after the other three, a slow hub
     # and a slow backend took twice the one probe's worst case.
     probes = {"stt": STT, "tts": TTS, "tts_long": LONG}
     # The hub is optional; configured, it counts like any other backend.
     if SATELLITES.url:
         probes["satellites"] = SATELLITES
-    backends = dict(zip(probes, await asyncio.gather(*(_probe(b) for b in probes.values()))))
-    # `ok` only if every backend answered. A backend that answered 200 while
-    # still loading its model is still `ok` here — it answered, and its own
-    # body says "loading" for anyone reading past the first field.
-    everything = all(b["reachable"] for b in backends.values())
-    return Response(
-        content=json.dumps({"status": "ok" if everything else "degraded",
-                            "gateway": "ok",
-                            "backends": backends}),
-        media_type="application/json")
+    return dict(zip(probes, await asyncio.gather(*(_probe(b) for b in probes.values()))))
+
+
+@app.get("/health")
+async def health(request: Request) -> Response:
+    """Liveness for anyone; each backend's health for a caller holding the scope.
+
+    It always answers 200, even when a backend is down or the gateway is
+    locked. The TrueNAS healthcheck for THIS container calls THIS endpoint,
+    and a 503 here because a sibling is restarting would have the orchestrator
+    restart the gateway -- a container must not be killed for a sibling's
+    fault, and a locked gateway still relays every satellite (D63). Read
+    `status`, not the code. Each container keeps its own healthcheck pointed
+    at its own localhost /health for exactly the same reason.
+
+    Without a credential the body is `{"status": "ok"|"degraded"}` and
+    nothing else: which services run, where, and what they hold is topology,
+    and the internet can reach this path (D50). `ok` only if every backend
+    answered: one that answered 200 while still loading its model is still
+    `ok` here, and its own status says "loading" to a caller who may read it.
+    """
+    principal = optional_principal(request)
+    probes = await state["health"].get()  # type: ignore[attr-defined]
+    return JSONResponse(healthview.body(
+        probes, scopes=principal.scopes if principal else frozenset(),
+        locked=runtime.get().lock.reasons))
+
+
+# ------------------------------------------------------------- registration --
+#
+# Every shared row, in the order it was declared, then the gateway's own
+# routers. bind() is the default deny: a route the table does not name stops
+# the import, on this listener and on :8081 (internal.py binds its own).
+
+for _method, _path, _endpoint, _rule in SHARED:
+    app.add_api_route(_path, _endpoint, methods=[_method], include_in_schema=False)
+
+app.include_router(routes_auth.router)
+app.include_router(routes_admin.router)
+app.include_router(routes_secrets.admin_router)
+
+ONE_DOOR_RULES: dict[tuple[str, str], Rule] = {
+    # The five public rows (D49), and the device socket's two paths.
+    ("GET", "/health"): PUBLIC,
+    ("GET", "/login"): PUBLIC,
+    ("GET", "/"): PUBLIC,
+    ("POST", "/auth/login"): PUBLIC,
+    (WEBSOCKET, SATELLITES_SOCKET): PUBLIC,
+    (WEBSOCKET, LEGACY_SATELLITES_SOCKET): PUBLIC,
+    # The signed-in account (§3.1). A must-change session reaches only the
+    # three marked restricted, and /login (D21).
+    ("GET", "/auth/me"): rule(session_only=True, restricted=True),
+    ("POST", "/auth/password"): rule(session_only=True, restricted=True),
+    ("POST", "/auth/logout"): rule(session_only=True, restricted=True),
+    ("POST", "/auth/step-up"): rule(session_only=True),
+    ("GET", "/auth/sessions"): rule(session_only=True),
+    ("DELETE", "/auth/sessions"): rule(session_only=True),
+    ("DELETE", "/auth/sessions/{ref}"): rule(session_only=True),
+    # A key can never reach these, so a leaked key cannot mint more (D60).
+    ("GET", "/auth/keys"): rule("keys:manage:own", session_only=True),
+    ("POST", "/auth/keys"): rule("keys:manage:own", session_only=True),
+    ("DELETE", "/auth/keys/{key_id}"): rule("keys:manage:own", session_only=True),
+    # Admin (§3.2): session-only, and every change to a person needs step-up.
+    ("GET", "/admin/users"): rule("users:manage", session_only=True),
+    ("POST", "/admin/users"): rule("users:manage", session_only=True, step_up=True),
+    ("PATCH", "/admin/users/{user_id}"): rule("users:manage", session_only=True,
+                                              step_up=True),
+    ("POST", "/admin/users/{user_id}/reset-password"): rule(
+        "users:manage", session_only=True, step_up=True),
+    ("DELETE", "/admin/users/{user_id}"): rule("users:manage", session_only=True,
+                                               step_up=True),
+    ("GET", "/admin/roles"): rule("users:manage", session_only=True),
+    ("GET", "/admin/keys"): rule("keys:manage:all", session_only=True),
+    ("DELETE", "/admin/keys/{key_id}"): rule("keys:manage:all", session_only=True),
+    # The one admin read a key may hold (the monitor preset).
+    ("GET", "/admin/audit"): rule("audit:read"),
+    # Admin › Secrets, the routes routes_secrets.admin_router serves: any
+    # secret write, binding change or master rotation needs step-up (D13).
+    ("GET", "/admin/secrets"): rule("secrets:manage", session_only=True),
+    ("PUT", "/admin/secrets/{name}"): rule("secrets:manage", session_only=True,
+                                           step_up=True),
+    ("PATCH", "/admin/secrets/{name}"): rule("secrets:manage", session_only=True,
+                                             step_up=True),
+    ("DELETE", "/admin/secrets/{name}"): rule("secrets:manage", session_only=True,
+                                              step_up=True),
+    ("POST", "/admin/secrets/rotate-master"): rule("secrets:manage", session_only=True,
+                                                   step_up=True),
+}
+
+RULES = {**{(method, path): requirement for method, path, _, requirement in SHARED},
+         **ONE_DOOR_RULES}
+routetable.bind(app, RULES)

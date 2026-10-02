@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Sign in · Calliope</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1f; --muted: #5f6368;
+  --line: #d9d6cf; --accent: #2f5d8a; --accent-ink: #ffffff;
+  --bad: #a1271b; --bad-bg: #fbeae7; --warn-bg: #fff4d6; --warn-ink: #5c4400;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161616; --panel: #202020; --ink: #ececec; --muted: #a3a3a3;
+    --line: #3a3a3a; --accent: #7fb0e0; --accent-ink: #0d1b28;
+    --bad: #ffb4a8; --bad-bg: #3a1a16; --warn-bg: #3a3016; --warn-ink: #f3dfa2;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; display: grid; place-items: center;
+  background: var(--bg); color: var(--ink);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding: 16px;
+}
+main {
+  width: 100%; max-width: 380px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 14px; padding: 28px 24px;
+}
+h1 { font-size: 1.35rem; margin: 0 0 4px; }
+p.lead { margin: 0 0 20px; color: var(--muted); }
+label { display: block; font-weight: 600; margin: 14px 0 6px; }
+input {
+  width: 100%; font: inherit; color: inherit; background: transparent;
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+}
+input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+button {
+  margin-top: 20px; width: 100%; font: inherit; font-weight: 600;
+  border: 0; border-radius: 8px; padding: 11px; cursor: pointer;
+  background: var(--accent); color: var(--accent-ink);
+}
+button:disabled { opacity: 0.55; cursor: progress; }
+.note { margin-top: 16px; padding: 10px 12px; border-radius: 8px; }
+.error { background: var(--bad-bg); color: var(--bad); }
+.banner { background: var(--warn-bg); color: var(--warn-ink); margin: 0 0 18px; }
+.rules { color: var(--muted); font-size: 0.92rem; margin: 10px 0 0; padding-left: 18px; }
+code { font-size: 0.9em; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <div class="note banner" id="locked" role="alert" hidden></div>
+
+  <form id="signin" novalidate>
+    <h1>Sign in</h1>
+    <p class="lead">Calliope</p>
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username" autocapitalize="none"
+           spellcheck="false" required>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password"
+           required>
+    <button id="signin-button" type="submit">Sign in</button>
+    <div class="note error" id="signin-error" role="alert" hidden></div>
+  </form>
+
+  <form id="change" novalidate hidden>
+    <h1>Choose a new password</h1>
+    <p class="lead">You need a new password before you continue.</p>
+    <label for="new-password">New password</label>
+    <input id="new-password" type="password" autocomplete="new-password" required>
+    <label for="confirm-password">New password, again</label>
+    <input id="confirm-password" type="password" autocomplete="new-password" required>
+    <ul class="rules">
+      <li>15 to 128 characters</li>
+      <li>not a common password</li>
+      <li>not your username</li>
+    </ul>
+    <button id="change-button" type="submit">Save and continue</button>
+    <div class="note error" id="change-error" role="alert" hidden></div>
+  </form>
+</main>
+<script>
+"use strict";
+/* Self-contained: no other asset, no inline handler, and every server string
+   goes in with textContent. The CSP allows this script by its hash only. */
+const $ = (id) => document.getElementById(id);
+
+/* Mirrors the server's rule (D55): a relative path that starts with one "/",
+   with no "//", no backslash and no control character. The server checks it
+   again before handing it back. */
+function safeNext(value) {
+  if (!value) return "/ui";
+  let decoded = value;
+  try { decoded = decodeURIComponent(value); } catch (e) { return "/ui"; }
+  for (const text of [value, decoded]) {
+    if (!text.startsWith("/") || text.includes("//") || text.includes("\\")
+        || /[\u0000-\u001f\u007f]/.test(text)) return "/ui";
+  }
+  return value;
+}
+const NEXT = safeNext(new URLSearchParams(location.search).get("next"));
+
+const LOCKED = {
+  bootstrap_required: "Set CALLIOPE_ADMIN_PASSWORD and restart the gateway.",
+  bootstrap_data_lost: "The user database was lost. Run: docker exec -u 1000:1000 voice-gateway python -m app.admin reset-password admin",
+  admin_password_weak: "CALLIOPE_ADMIN_PASSWORD is too weak. Use 15 or more characters that are not a common password, then restart.",
+  argon2_selftest: "This image's OpenSSL cannot hash passwords with Argon2id. Use an image with OpenSSL 3.2 or later.",
+  removed_variable: "Remove the variable named below from the gateway's configuration and restart.",
+  public_origin_required: "Set CALLIOPE_PUBLIC_ORIGIN to Calliope's own https address and restart.",
+  dev_insecure_cookie: "CALLIOPE_DEV_INSECURE_COOKIE works only on a loopback address. Remove it and restart.",
+  keyring_unreadable: "The secret keyring cannot be read. Fix CALLIOPE_MASTER_KEY_FILE and restart.",
+};
+
+function show(id, text) {
+  const box = $(id);
+  box.textContent = text;
+  box.hidden = !text;
+}
+
+function showLocked(body) {
+  const reason = body && body.reason;
+  let text = "Calliope is locked. " + (LOCKED[reason] || "See the gateway's log.");
+  if (body && body.variable) text += " (" + body.variable + ")";
+  show("locked", text);
+}
+
+async function call(path, body) {
+  const response = await fetch(path, {
+    method: "POST", credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let payload = {};
+  try { payload = await response.json(); } catch (e) { /* 204 or not JSON */ }
+  return { response, payload };
+}
+
+function message(payload, fallback) {
+  return (payload && payload.error && payload.error.message) || fallback;
+}
+
+function changeView() {
+  $("signin").hidden = true;
+  $("change").hidden = false;
+  $("new-password").focus();
+}
+
+let countdown = null;
+function wait(seconds) {
+  const button = $("signin-button");
+  clearInterval(countdown);
+  let left = seconds;
+  button.disabled = true;
+  const tick = () => {
+    show("signin-error", "Too many attempts. Try again in " + left + " s.");
+    if (left-- <= 0) {
+      clearInterval(countdown);
+      button.disabled = false;
+      show("signin-error", "");
+    }
+  };
+  tick();
+  countdown = setInterval(tick, 1000);
+}
+
+$("signin").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = $("signin-button");
+  button.disabled = true;
+  show("signin-error", "");
+  try {
+    const { response, payload } = await call("/auth/login", {
+      username: $("username").value, password: $("password").value, next: NEXT,
+    });
+    $("password").value = "";
+    if (response.ok) {
+      if (payload.must_change) { changeView(); return; }
+      location.assign(safeNext(payload.next));
+      return;
+    }
+    if (response.status === 429) {
+      wait(parseInt(response.headers.get("Retry-After") || "1", 10));
+      return;
+    }
+    if (response.status === 503) { showLocked(payload); return; }
+    if (response.status === 403) {
+      show("signin-error", message(payload, "Reload the page and try again."));
+      return;
+    }
+    show("signin-error", "Incorrect username or password.");
+  } catch (e) {
+    show("signin-error", "Calliope is not answering. Try again in a moment.");
+  } finally {
+    if (!countdown) button.disabled = false;
+  }
+});
+
+$("change").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const first = $("new-password").value;
+  if (first !== $("confirm-password").value) {
+    show("change-error", "The two passwords are not the same.");
+    return;
+  }
+  const button = $("change-button");
+  button.disabled = true;
+  show("change-error", "");
+  try {
+    const { response, payload } = await call("/auth/password", {
+      new_password: first, next: NEXT,
+    });
+    if (response.ok) { location.assign(safeNext(payload.next)); return; }
+    if (response.status === 401) {
+      $("change").hidden = true;
+      $("signin").hidden = false;
+      show("signin-error", "That took too long. Sign in again.");
+      return;
+    }
+    show("change-error", message(payload, "That password was not accepted."));
+  } catch (e) {
+    show("change-error", "Calliope is not answering. Try again in a moment.");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+(async () => {
+  try {
+    const response = await fetch("/auth/me", { credentials: "same-origin" });
+    if (response.ok) {
+      const me = await response.json();
+      if (me.must_change) { changeView(); return; }
+      location.replace(NEXT);
+      return;
+    }
+    if (response.status === 503) showLocked(await response.json());
+  } catch (e) { /* not signed in, or not answering: the form is the answer */ }
+  $("username").focus();
+})();
+</script>
+</body>
+</html>

@@ -149,9 +149,9 @@ REFUSED_BECAUSE: dict[str, str] = {
         "annotates a stored completion, and nothing is stored here for it to "
         "annotate",
     "user":
-        "attributes a request for abuse tracking, and there is no per-user "
-        "accounting behind this gateway. One key opens the whole door; see "
-        "GATEWAY_API_KEYS",
+        "attributes a request for abuse tracking, and the gateway already "
+        "knows who is asking: the API key or the session that sent it, which "
+        "is what the run record is filed under",
     "service_tier":
         "selects a capacity pool, and this is one container with one queue in "
         "front of one GPU",

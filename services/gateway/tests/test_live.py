@@ -1,23 +1,27 @@
-"""The gateway against the three real services of a deployment, or nothing at all.
+"""The deployed gateway and the services behind it, or nothing at all.
 
 The mocked suite proves the routing rules. It cannot prove the two things that
-only a real backend can disagree about: that these paths exist on the far side
-with these shapes, and that streaming a real multipart upload and a real audio
-response through httpx produces the bytes the client asked for.
+only a real deployment can disagree about: that these paths exist on the far
+side with these shapes, and that streaming a real multipart upload and a real
+audio response produces the bytes the client asked for.
 
-So this runs the actual app in-process with its backend URLs pointed at the
-live containers, over real sockets. It is SKIPPED, not failed, when no host
-is named or it is unreachable — the usual case on a CI runner, on a train, or when the NAS is
-asleep — because a test suite that fails when someone's house is offline stops
-being read.
+This used to run the app in-process, pointed at the backends' own ports. It
+cannot any more, and should not: a backend now answers only requests carrying
+an assertion signed by ITS gateway's key, which this test does not have and
+must never be given. So it talks to the deployed gateway, as any client does,
+with a key from the Account page. It is SKIPPED, not failed, when no gateway
+is named or it is unreachable -- the usual case on a CI runner, on a train, or
+when the NAS is asleep -- because a test suite that fails when someone's house
+is offline stops being read.
 
 Nothing here queues a Chatterbox job. tts-long runs one job at a time on a
 6.5 GB model that takes minutes to load, and a test suite that enqueued work on
 a shared machine would be a test suite people learn to avoid running. The long
 path is exercised read-only, through GET /jobs.
 
-    GATEWAY_LIVE_HOST=nas.example.com   the host the three run on (unset: skipped)
-    GATEWAY_LIVE=0                            skip even when it is reachable
+    GATEWAY_LIVE_URL=https://calliope.example   the deployed gateway (unset: skipped)
+    GATEWAY_LIVE_KEY=calliope_…                 a key from the `speech` preset
+    GATEWAY_LIVE=0                              skip even when it is reachable
 """
 
 from __future__ import annotations
@@ -27,53 +31,39 @@ import os
 
 import httpx
 import pytest
-from conftest import gateway  # noqa: F401  (imported for the fixture's module)
 
-HOST = os.getenv("GATEWAY_LIVE_HOST", "")
-BACKENDS = {"stt": f"http://{HOST}:8000",
-            "tts": f"http://{HOST}:8001",
-            "tts_long": f"http://{HOST}:8002"}
+URL = os.getenv("GATEWAY_LIVE_URL", "").rstrip("/")
+KEY = os.getenv("GATEWAY_LIVE_KEY", "")
 
 
 def _reachable() -> str | None:
-    """None if all three answer /health, otherwise why not."""
+    """None if the gateway answers /health, otherwise why not."""
     if os.getenv("GATEWAY_LIVE") == "0":
         return "GATEWAY_LIVE=0"
-    if not HOST:
-        return "GATEWAY_LIVE_HOST is not set"
-    for name, url in BACKENDS.items():
-        try:
-            response = httpx.get(f"{url}/health", timeout=3.0)
-            response.raise_for_status()
-        except Exception as exc:  # noqa: BLE001 - any failure is a skip
-            return f"{name} at {url} is not reachable: {type(exc).__name__}"
+    if not URL or not KEY:
+        return "GATEWAY_LIVE_URL and GATEWAY_LIVE_KEY are not both set"
+    try:
+        httpx.get(f"{URL}/health", timeout=3.0).raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - any failure is a skip
+        return f"{URL} is not reachable: {type(exc).__name__}"
     return None
 
 
 _why = _reachable()
-pytestmark = pytest.mark.skipif(_why is not None, reason=f"live backends: {_why}")
+pytestmark = pytest.mark.skipif(_why is not None, reason=f"live gateway: {_why}")
 
 
 @pytest.fixture
-async def live(monkeypatch):
-    """The real app, real httpx, real sockets, pointed at the live containers."""
-    import importlib
-
-    monkeypatch.setenv("GATEWAY_STT_URL", BACKENDS["stt"])
-    monkeypatch.setenv("GATEWAY_TTS_URL", BACKENDS["tts"])
-    monkeypatch.setenv("GATEWAY_TTS_LONG_URL", BACKENDS["tts_long"])
-    monkeypatch.delenv("GATEWAY_API_KEYS", raising=False)
-    main = importlib.reload(importlib.import_module("app.main"))
-
-    async with main.app.router.lifespan_context(main.app):
-        async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=main.app),
-                base_url="http://gateway.test", timeout=60.0) as client:
-            yield client
+async def live():
+    """Real httpx, real sockets, the deployed gateway, and a person's key."""
+    async with httpx.AsyncClient(base_url=URL, timeout=60.0,
+                                 headers={"Authorization": f"Bearer {KEY}"}) as client:
+        yield client
 
 
 async def test_health_reports_all_three_live_backends(live):
-    """The call this component exists to make possible: one poll, three answers."""
+    """The call this component exists to make possible: one poll, every answer,
+    for a key holding health:read."""
     response = await live.get("/health")
 
     assert response.status_code == 200

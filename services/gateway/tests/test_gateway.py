@@ -14,7 +14,8 @@ from pathlib import Path
 
 import httpx
 import pytest
-from conftest import MockBackend, Slow, Unreachable, gateway, reload_gateway
+from conftest import (PUBLIC_ORIGIN, MockBackend, Slow, Unreachable, bearer, gateway,
+                      make_key, make_user, reload_gateway)
 from voice_common.conformance import assert_four_field_envelope
 from voice_common.engines import CATALOGUE
 
@@ -520,20 +521,24 @@ async def test_a_backend_envelope_is_never_rewrapped(monkeypatch, backends, stat
     assert response.json()["error"]["code"] == code
 
 
-async def test_the_clients_key_is_stripped_and_not_replaced(monkeypatch, backends):
-    """Forwarding it would copy the secret into three more log streams.
+async def test_the_clients_key_is_stripped_and_an_assertion_sent_in_its_place(
+        monkeypatch, backends):
+    """A backend checks no credential, so copying the key would only copy a
+    secret into another log stream. What it receives instead is the gateway's
+    signed statement of who asked and with which scopes (D4, D51)."""
+    from voice_common.identity import ASSERTION_HEADER, verify
 
-    The backends run with their own keys unset, so a relayed token buys
-    nothing at all.
-    """
     stt, tts, long = backends
-    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
-                       api_keys="sk-test") as (client, _):
-        response = await client.post(SPEECH, content=body(),
-                                     headers={"authorization": "Bearer sk-test"})
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, main):
+        response = await client.post(SPEECH, content=body())
+        keys = main.runtime.get().keys.published_keys()
 
     assert response.status_code == 200
-    assert "authorization" not in tts.last["headers"]
+    seen = tts.last["headers"]
+    assert "authorization" not in seen
+    claims = verify(seen[ASSERTION_HEADER.lower()], "tts", keys)
+    assert claims.kind == "user" and claims.cred.startswith("k_")
+    assert "speech:speak" in claims.scopes
 
 
 async def test_response_headers_survive_except_the_hop_by_hop_ones(monkeypatch, backends):
@@ -852,7 +857,7 @@ async def test_every_v1_error_carries_all_four_fields(monkeypatch, backends):
     """
     stt, tts, long = backends
     async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
-                       api_keys="sk-one") as (client, _):
+                       authenticate=False) as (client, _):
         assert_four_field_envelope(await client.get("/voices"))
 
     async with gateway(monkeypatch, stt=stt, tts=tts, long=Unreachable()) as (client, _):
@@ -865,61 +870,29 @@ async def test_every_v1_error_carries_all_four_fields(monkeypatch, backends):
 
 
 # --------------------------------------------------------------------- auth --
+#
+# The full matrix (sessions, keys, CSRF, locked mode, delegation) is in
+# test_auth.py and its siblings. These are the two rules every route here
+# depends on: nothing reaches a backend without a credential, and /health is
+# the one path that answers without one.
 
 
-async def test_unset_keys_means_open(monkeypatch, backends):
-    """Loudly open, not refusing to boot: the LAN it runs on has no keys today."""
-    stt, tts, long = backends
-    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
-        assert (await client.get("/voices")).status_code == 200
-
-
-async def test_a_missing_key_is_a_401_envelope_with_a_challenge(monkeypatch, backends):
+async def test_a_request_with_no_credential_never_reaches_a_backend(monkeypatch, backends):
+    """Default deny (D48): there is no setting under which a route is open."""
     stt, tts, long = backends
     async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
-                       api_keys="sk-one,sk-two") as (client, _):
+                       authenticate=False) as (client, _):
         response = await client.get("/voices")
 
     assert response.status_code == 401
     assert response.headers["www-authenticate"] == "Bearer"
-    assert response.json()["error"]["code"] == "invalid_api_key"
-    # Rejected before any backend was contacted.
+    assert response.json()["error"]["code"] == "unauthenticated"
     assert not tts.seen
-
-
-@pytest.mark.parametrize("key", ["sk-one", "sk-two"])
-async def test_every_configured_key_is_accepted(monkeypatch, backends, key):
-    stt, tts, long = backends
-    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
-                       api_keys="sk-one, sk-two") as (client, _):
-        response = await client.get("/voices",
-                                    headers={"authorization": f"Bearer {key}"})
-
-    assert response.status_code == 200
-
-
-async def test_a_non_ascii_key_authenticates(monkeypatch, backends):
-    """The bug tts-stack paid for once: latin-1 wire bytes against a UTF-8 key.
-
-    Re-encoding starlette's latin-1-decoded header as UTF-8 produced different
-    bytes for every non-ASCII key, so the correct key was rejected as
-    "Incorrect API key".
-    """
-    stt, tts, long = backends
-    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
-                       api_keys="sk-café") as (client, _):
-        # Bytes, not a str: this is what a client puts on the wire, and httpx
-        # refuses to guess an encoding for a non-ASCII header value — which is
-        # the same ambiguity the startup warning is about.
-        response = await client.get(
-            "/voices", headers={"authorization": "Bearer sk-café".encode()})
-
-    assert response.status_code == 200
 
 
 @pytest.mark.parametrize("path", ["/health", "/health/"])
 async def test_health_needs_no_key_with_or_without_the_slash(monkeypatch, backends, path):
-    """The other bug tts-stack paid for.
+    """The bug tts-stack paid for once.
 
     Middleware runs before routing, so /health/ never reached the 307 that
     would have normalised it, and a probe written that way went permanently
@@ -927,29 +900,20 @@ async def test_health_needs_no_key_with_or_without_the_slash(monkeypatch, backen
     """
     stt, tts, long = backends
     async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
-                       api_keys="sk-one") as (client, _):
+                       authenticate=False) as (client, _):
         response = await client.get(path, follow_redirects=True)
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
-
-
-@pytest.mark.parametrize("value", ["", ",", "  ", ",,  ,"])
-def test_keys_set_but_naming_none_refuses_to_start(monkeypatch, value):
-    """`-e GATEWAY_API_KEYS=$SECRET` with SECRET unset must not mean "open".
-
-    It matters more here than in a backend: this process is the only thing
-    checking a token for three services, so the accident opens all of them.
-    """
-    with pytest.raises(SystemExit):
-        reload_gateway(monkeypatch, api_keys=value)
+    assert response.json() == {"status": "ok"}
 
 
 # ------------------------------------------------------------------- health --
 
 
-async def test_health_reports_all_three_without_proxying_auth(monkeypatch, backends):
-    """One call, three answers, no key — the main justification beyond routing."""
+async def test_health_reports_every_backend_to_a_key_that_may_read_it(monkeypatch, backends):
+    """One call, every answer -- the main justification beyond routing -- for
+    a caller holding health:detail. The probes carry no credential: a
+    backend's /health is the one path its guard leaves open."""
     stt, tts, long = backends
     stt.reply = lambda r: (200, {"content-type": "application/json"},
                            b'{"status":"ok","model":"parakeet"}')
@@ -958,84 +922,101 @@ async def test_health_reports_all_three_without_proxying_auth(monkeypatch, backe
     long.reply = lambda r: (200, {"content-type": "application/json"},
                             b'{"status":"ok","model_loaded":false,"queued":0}')
 
-    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
-                       api_keys="sk-one") as (client, _):
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
         response = await client.get("/health")
 
     payload = response.json()
     assert payload["status"] == "ok"
-    assert payload["gateway"] == "ok"
-    # Each backend's own body, inlined rather than summarised.
+    assert payload["gateway"] == {"locked": []}
     assert payload["backends"]["stt"]["health"]["model"] == "parakeet"
     assert payload["backends"]["tts"]["health"]["voices"] == 54
     assert payload["backends"]["tts_long"]["health"]["model_loaded"] is False
-    # No key was forwarded, because the backends' /health want none either.
-    assert all("authorization" not in b.last["headers"] for b in (stt, tts, long))
+    assert all("authorization" not in b.last["headers"]
+               and "x-calliope-identity" not in b.last["headers"] for b in (stt, tts, long))
     assert [b.last["path"] for b in (stt, tts, long)] == ["/health"] * 3
 
 
-async def test_the_engine_detail_tts_long_publishes_reaches_the_caller_verbatim(
+async def test_the_engine_detail_the_voice_picker_reads_reaches_a_speech_user(
         monkeypatch, backends):
-    """THE VOICE PICKER'S ONLY SUPPLY LINE, AND IT RUNS THROUGH A ROUTE THAT
-    LOOKS LIKE AN OPERATOR'S STATUS PAGE.
+    """THE VOICE PICKER'S ONLY SUPPLY LINE RUNS THROUGH /health.
 
     An engine whose speakers are baked into its weights has a voice list, and
     there is no route to fetch it: tts-long's own `GET /voices` is deliberately
-    unrouted (NOT_ROUTED below says why — the /voices this gateway answers is
-    tts-stack's, and one path cannot serve two backends without a prefix and
-    the rewriting rule that follows it). So the names ride the health body,
-    which `_probe` inlines whole rather than summarising.
+    unrouted (NOT_ROUTED below says why). So the names ride the health body.
 
-    THE DEFECT THIS PREVENTS is silent in every way a defect can be. Nobody
-    would summarise the body on purpose; it happens the day someone adds a
-    field list to make /health cheaper, or trims it because tts-long's answer
-    grew. Then no route 404s, no allowlist changes, no log line differs, this
-    service's own status page still reads correctly — and an engine's group in
-    the browser renders empty, offering a shorter voice list than the stack
-    has. The tests around this one all assert FLAT keys, so every one of them
-    would stay green through it.
-
-    Asserted as EQUALITY against the whole document, not as a spot check on the
-    keys this quarter's engine happens to need. A field list here would be the
-    very thing being fenced against, one level up.
+    Health is an allowlist now (D50), which is exactly the change this test
+    used to fence against: a field list in front of tts-long's answer. So the
+    fence moves to the list itself. Everything a speech tab reads from an
+    engine -- label, default, languages, controls, voices, the sample rate and
+    each lane's readiness -- reaches a caller with health:read, and where the
+    runner is and how it is set up does not.
     """
     stt, tts, long = backends
-    # Shaped like tts-long's own /health.engines: nested objects, a list of
-    # objects, a null, a false and a zero — the four values a careless
-    # `if value:` filter eats without raising anywhere.
     detail = {
-        "status": "ok",
-        "model_loaded": False,
-        "queued": 0,
+        "status": "ok", "model_loaded": False, "queued": 0,
         "engines": {
-            "chatterbox": {"label": "Chatterbox", "default": True,
-                           "voices": None, "reference_audio": True,
-                           "native_sample_rate": 24000,
-                           "min_reference_seconds": 0.0,
-                           "runner": {"ready": False, "why": "spring is away",
-                                      "settings": {}}},
             "preset-engine": {"label": "Preset Engine", "default": False,
-                              "reference_audio": False,
-                              "native_sample_rate": 24000,
+                              "reference_audio": False, "native_sample_rate": 24000,
                               "languages": ["de", "pt"],
                               "controls": ["cfg_alpha", "flow_steps"],
                               "voices": [{"name": "de_female", "language": "de"},
                                          {"name": "pt_male", "language": "pt"}],
+                              "min_reference_seconds": 0.0,
+                              "local": {"ready": False, "why": "not here",
+                                        "resident": False},
                               "runner": {"ready": True, "why": None,
-                                         "settings": {"flow_steps": 32,
-                                                      "low_pass_hz": 0}}},
+                                         "service": "runner-host:9000",
+                                         "settings": {"flow_steps": 32}}},
         },
+        "runner": {"host": "runner-host"},
+        "brand_new_field": "nobody has decided which tier this is",
     }
     long.reply = lambda r: (200, {"content-type": "application/json"},
                             json.dumps(detail).encode())
 
-    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
-        payload = (await client.get("/health")).json()
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
+                       authenticate=False) as (client, main):
+        from conftest import bearer, make_key, make_user
+        reader = make_key(make_user("sam", role="speech"),
+                          scopes={"health:read", "models:read"})
+        shown = (await client.get("/health", headers=bearer(reader))).json()
+        operator = make_key(make_user("ana"), scopes={"health:detail"})
+        full = (await client.get("/health", headers=bearer(operator))).json()
 
-    assert payload["backends"]["tts_long"]["health"] == detail, (
-        "the gateway edited tts-long's health document on the way past; the "
-        "page reads its voice list out of that body and there is no other "
-        "route that carries it")
+    engine = shown["backends"]["tts_long"]["health"]["engines"]["preset-engine"]
+    expected = detail["engines"]["preset-engine"]
+    for field in ("label", "default", "languages", "controls", "voices",
+                  "native_sample_rate", "reference_audio", "min_reference_seconds"):
+        assert engine[field] == expected[field], field
+    assert engine["local"] == {"ready": False, "resident": False}
+    assert engine["runner"] == {"ready": True}
+    tts_long = shown["backends"]["tts_long"]
+    assert "runner" not in tts_long["health"] and "url" not in tts_long
+    assert "brand_new_field" not in json.dumps(shown)
+    # The operator's tier has the runner and the lane settings, and still
+    # nothing nobody has placed in a tier.
+    assert full["backends"]["tts_long"]["health"]["runner"] == {"host": "runner-host"}
+    assert full["backends"]["tts_long"]["health"]["engines"]["preset-engine"]["runner"][
+        "settings"] == {"flow_steps": 32}
+    assert "brand_new_field" not in json.dumps(full)
+
+
+async def test_a_speech_user_never_sees_the_home_assistant_glossary_in_health(
+        monkeypatch, backends):
+    """D34: only a caller stt would let use the profile is told it exists."""
+    stt, tts, long = backends
+    stt.reply = lambda r: (200, {"content-type": "application/json"}, json.dumps(
+        {"status": "ok", "glossaries": ["tech", "home-assistant"]}).encode())
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
+                       authenticate=False) as (client, main):
+        from conftest import bearer, make_key, make_user
+        speech = make_key(make_user("sam", role="speech"), scopes={"health:read"})
+        ha = make_key(make_user("ana"), scopes={"health:read", "glossaries:ha"})
+        hidden = (await client.get("/health", headers=bearer(speech))).json()
+        named = (await client.get("/health", headers=bearer(ha))).json()
+
+    assert hidden["backends"]["stt"]["health"]["glossaries"] == ["tech"]
+    assert named["backends"]["stt"]["health"]["glossaries"] == ["tech", "home-assistant"]
 
 
 async def test_health_answers_200_while_a_sibling_is_down(monkeypatch, backends):
@@ -1054,9 +1035,9 @@ async def test_health_answers_200_while_a_sibling_is_down(monkeypatch, backends)
     assert payload["status"] == "degraded"
     assert payload["backends"]["tts_long"]["reachable"] is False
     assert "ConnectError" in payload["backends"]["tts_long"]["error"]
-    # The two that are up are still reported in full.
+    # The two that are up are still reported.
     assert payload["backends"]["stt"]["reachable"] is True
-    assert payload["backends"]["tts"]["health"]["backend"] == "tts-stack"
+    assert payload["backends"]["tts"]["http_status"] == 200
 
 
 async def test_a_backend_that_is_loading_still_counts_as_answering(monkeypatch, backends):
@@ -1084,7 +1065,7 @@ async def test_health_survives_a_backend_answering_html(monkeypatch, backends):
 
     assert payload["status"] == "degraded"
     assert payload["backends"]["tts_long"]["http_status"] == 502
-    assert "bad gateway" in payload["backends"]["tts_long"]["health"]["body"]
+    assert payload["backends"]["tts_long"]["health"] == {}
 
 
 async def test_health_does_not_wait_forever_on_a_wedged_backend(monkeypatch, backends):
@@ -1157,7 +1138,9 @@ async def test_a_client_that_hangs_up_mid_upload_still_writes_its_line(monkeypat
     }
 
     with caplog.at_level("INFO", logger="voice-gateway"):
-        async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (_, main):
+        async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, main):
+            scope["headers"].append(
+                (b"authorization", client.headers["authorization"].encode()))
             await main.app(scope, receive, send)
 
     assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [499]
@@ -1172,22 +1155,19 @@ async def test_a_client_that_hangs_up_mid_upload_still_writes_its_line(monkeypat
 
 
 async def test_a_repeated_response_header_is_not_collapsed_into_one(monkeypatch, backends):
-    """Two Set-Cookies must stay two, not become `a=1, b=2`.
+    """Two Links must stay two, not become `<a>, <b>`.
 
     The proxy built its response headers with a dict comprehension over httpx's
     Headers.items(), which is a Mapping view: it joins duplicates with a comma.
     Measured — httpx.Headers([("set-cookie","a=1"),("set-cookie","b=2")])
-    .items() yields 'a=1, b=2', which is one malformed cookie rather than two
-    good ones.
-
-    No backend in this stack sends a duplicate header today, so this never bit
-    anyone. It is asserted because the day one starts to, the symptom is a
-    broken login somewhere else entirely and nothing points back here.
+    .items() yields 'a=1, b=2', which is one malformed value rather than two
+    good ones. (Set-Cookie was the example; a backend may no longer send one
+    at all, see the test below.)
     """
     stt, tts, long = backends
     tts.reply = lambda record: (200, [("content-type", "audio/mpeg"),
-                                      ("set-cookie", "a=1"),
-                                      ("set-cookie", "b=2"),
+                                      ("link", "</a>; rel=a"),
+                                      ("link", "</b>; rel=b"),
                                       ("vary", "accept"),
                                       ("vary", "origin")], b"ID3audio")
 
@@ -1197,10 +1177,10 @@ async def test_a_repeated_response_header_is_not_collapsed_into_one(monkeypatch,
     assert response.status_code == 200
     assert response.content == b"ID3audio"
     pairs = response.headers.multi_items()
-    assert ("set-cookie", "a=1") in pairs and ("set-cookie", "b=2") in pairs
+    assert ("link", "</a>; rel=a") in pairs and ("link", "</b>; rel=b") in pairs
     assert ("vary", "accept") in pairs and ("vary", "origin") in pairs
     # The failure this guards against, stated as the thing that must not appear.
-    assert not any(", " in v for k, v in pairs if k in ("set-cookie", "vary"))
+    assert not any(", " in v for k, v in pairs if k in ("link", "vary"))
 
 
 async def test_a_repeated_request_header_reaches_the_backend_intact(monkeypatch, backends):
@@ -1208,7 +1188,7 @@ async def test_a_repeated_request_header_reaches_the_backend_intact(monkeypatch,
 
     Starlette's Headers.items() yields every pair, so a dict comprehension did
     not comma-join here — it let the LAST duplicate overwrite the first and
-    dropped one silently. Two Cookie headers must arrive as two.
+    dropped one silently. Two Accept headers must arrive as two.
     """
     stt, tts, long = backends
 
@@ -1216,35 +1196,69 @@ async def test_a_repeated_request_header_reaches_the_backend_intact(monkeypatch,
         response = await client.post(
             SPEECH, content=body(),
             headers=[("content-type", "application/json"),
-                     ("cookie", "a=1"), ("cookie", "b=2")])
+                     ("accept", "audio/mpeg"), ("accept", "audio/wav")])
 
     assert response.status_code == 200
     assert len(tts.seen) == 1
-    cookies = [v for k, v in tts.last["raw_headers"] if k == "cookie"]
-    assert cookies == ["a=1", "b=2"]
+    accepted = [v for k, v in tts.last["raw_headers"] if k == "accept"]
+    assert accepted == ["audio/mpeg", "audio/wav"]
+
+
+async def test_credentials_and_forwarding_headers_never_cross_in_either_direction(
+        monkeypatch, backends):
+    """D51. A cookie or a caller's own X-Calliope-Identity or X-Forwarded-For
+    reaching a backend would be a credential in its log, or an identity and
+    an address the caller chose. And a backend has no business setting a
+    cookie on the origin the session cookie lives on."""
+    stt, tts, long = backends
+    tts.reply = lambda record: (200, [("content-type", "audio/mpeg"),
+                                      ("set-cookie", "planted=1; Path=/"),
+                                      ("access-control-allow-origin", "*")], b"ID3")
+
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
+        response = await client.post(
+            SPEECH, content=body(),
+            headers={"content-type": "application/json", "cookie": "a=1",
+                     "x-calliope-identity": "v1.1.forged.forged",
+                     "x-calliope-delegation": "forged", "x-forwarded-for": "203.0.113.9",
+                     "x-forwarded-host": "evil.example", "forwarded": "for=203.0.113.9"})
+
+    assert response.status_code == 200
+    assert "set-cookie" not in response.headers
+    assert "access-control-allow-origin" not in response.headers
+    seen = tts.last["raw_headers"]
+    names = [k for k, _ in seen]
+    for dropped in ("cookie", "x-calliope-delegation", "x-forwarded-host", "forwarded"):
+        assert dropped not in names, dropped
+    assert [v for k, v in seen if k == "x-forwarded-for"] == ["192.0.2.1"]
+    identities = [v for k, v in seen if k == "x-calliope-identity"]
+    assert len(identities) == 1 and "forged" not in identities[0]
 
 
 
 # ------------------------------------------------------------- the allowlists --
 #
-# THREE TABLES HAVE TO AGREE BEFORE ONE REQUEST ARRIVES, and no one of them can
-# see the other two:
+# TWO TABLES HAVE TO AGREE BEFORE ONE REQUEST ARRIVES, and neither can see the
+# other:
 #
-#   voice-ui's PROXIED           what the page may ask its own container for
-#   this service's UI_PATHS      what may reach voice-ui through the one door
-#   this service's own routes    what may reach a backend
+#   this service's routes        what may reach a backend, and with which scope
+#   each backend's own routes    what it answers
+#
+# and the page has to issue only requests the first one carries. (There was a
+# third: voice-ui's PROXIED, which forwarded the page's calls back here under
+# /ui/api/. The page now calls this service directly, with its session.)
 #
 # Every failure this section exists for has the same shape: a path already
-# present under one method, a second method added to two tables out of three,
-# and a 405 that shows up only against the deployed stack. It has now happened
-# twice -- PUT /glossaries/{name}, then DELETE /jobs/{job_id}/audio -- and the
-# test that was meant to catch the second could not, because it compared sets
-# of METHOD STRINGS: DELETE was already in both tables for another path, so the
-# missing pair added no method and the assertion stayed green through the whole
+# present under one method, a second method added to one table and not the
+# other, and a 405 that shows up only against the deployed stack. It happened
+# with PUT /glossaries/{name} and with DELETE /jobs/{job_id}/audio, and the
+# test meant to catch the second could not, because it compared sets of METHOD
+# STRINGS: DELETE was already in both tables for another path, so the missing
+# pair added no method and the assertion stayed green through the whole
 # failure.
 #
-# The three tests below compare PAIRS, and they come at the tables from all
-# three sides: what the page asks for, what the backends answer, and what the
+# The tests below compare PAIRS, and they come at the tables from all three
+# sides: what the page asks for, what the backends answer, and what the
 # tables claim exists.
 #
 # THEY ASSERT AND NEVER SKIP. The test they replace called pytest.skip when a
@@ -1288,14 +1302,21 @@ NOT_ROUTED: dict[tuple[str, str, str], str] = {
         "routed. Two backends answering the same path is why this table is "
         "keyed by service.",
     ("tts-long", "POST", "/runs"):
-        "service-to-service. tts and stt post a finished run record to "
-        "tts-long on the internal network; the browser must never be able to "
-        "write a row into the history it is reading.",
+        "service-to-service. stt and tts post a finished run record through "
+        "the gateway's internal listener, with runs:write (internal.py); the "
+        "browser must never be able to write a row into the history it is "
+        "reading.",
+    ("satellites", "GET", "/satellites/{nid}/listen"):
+        "opening a microphone is a POST (D15, H3): a GET is what an <img> or a "
+        "link on a sibling site can make a browser send. The gateway routes "
+        "the POST only.",
+    ("satellites", "PUT", "/satellites/secrets"):
+        "removed (D47): the Satellites tab's key boxes write to "
+        "PUT /admin/secrets/{name}, the one secret store.",
 }
 
-# Routes the gateway serves, behind its keys, that the page deliberately never
-# reaches: voice-ui's PROXIED leaves them out on purpose. Same rule as above,
-# every entry carries its reason.
+# Routes the gateway serves, behind their scopes, that the page deliberately
+# never calls. Same rule as above, every entry carries its reason.
 NOT_ON_PAGE: dict[tuple[str, str, str], str] = {
     ("satellites", "POST", "/satellites/{nid}/inject"):
         "a test hook: a recorded clip through a satellite's wake word, endpoint "
@@ -1409,53 +1430,6 @@ def _declared_routes(service: str) -> set[tuple[str, str]]:
     return routes
 
 
-UI_MAIN = SERVICES / "ui" / "app" / "main.py"
-
-
-def _proxied_table(source: Path = UI_MAIN) -> tuple[tuple[str, str], ...]:
-    """voice-ui's PROXIED, read from its source rather than imported.
-
-    Same reason as _declared_routes, plus one of its own: voice-ui's config
-    module reads the environment at import, so importing it here would make
-    this fence depend on how the shell that ran pytest was set up.
-
-    `source` is a parameter ONLY so the reader itself can be tested. It read an
-    empty table once -- see the AnnAssign note below -- and the fence went green
-    while comparing against nothing, which is a failure no amount of reading the
-    real file can reproduce on purpose. A test that hands it a file it wrote
-    can. Nothing in production passes it.
-    """
-    ui_main = source
-    assert ui_main.exists(), (
-        f"{ui_main} is missing from this checkout, so the table this service "
-        "has to agree with cannot be read.")
-    tree = ast.parse(ui_main.read_text(encoding="utf-8"))
-
-    pairs: list[tuple[str, str]] = []
-    for node in ast.walk(tree):
-        # AnnAssign as well as Assign: it is declared `PROXIED: tuple[...] = (`,
-        # and matching only Assign found nothing -- which the emptiness
-        # assertion below catches rather than let pass as "nothing missing".
-        if isinstance(node, ast.AnnAssign):
-            targets = [node.target]
-        elif isinstance(node, ast.Assign):
-            targets = list(node.targets)
-        else:
-            continue
-        if node.value is None:
-            continue
-        if not any(getattr(target, "id", "") == "PROXIED" for target in targets):
-            continue
-        for item in ast.walk(node.value):
-            if (isinstance(item, ast.Tuple) and len(item.elts) == 2
-                    and all(isinstance(element, ast.Constant)
-                            and isinstance(element.value, str)
-                            for element in item.elts)):
-                pairs.append((item.elts[0].value, item.elts[1].value))
-    assert pairs, "could not read voice-ui's PROXIED table"
-    return tuple(pairs)
-
-
 def _gateway_routes(module) -> set[tuple[str, str]]:
     """What this service routes to a backend, read off the live app.
 
@@ -1468,20 +1442,24 @@ def _gateway_routes(module) -> set[tuple[str, str]]:
     test_no_allowlist_entry_points_at_nothing checks them against voice-ui's
     own routes instead.
     """
-    to_ui = set(module.UI_PATHS)
+    to_ui = {(method, path) for method, path, _ in module.UI_PATHS}
     routes: set[tuple[str, str]] = set()
     for route in module.app.routes:
         for method in getattr(route, "methods", None) or ():
             if method in HTTP_METHODS and (method, route.path) not in to_ui:
                 routes.add((method, route.path))
-    # The same emptiness guard the two source readers above already carry, and
-    # it is the one that was missing. This reader is the only one of the three
-    # whose result feeds a comprehension that produces NOTHING when it goes
-    # blank -- test_no_allowlist_entry_points_at_nothing would report no
-    # dangling entries and pass, which is how a fence stops fencing without
-    # anybody being told.
+    # The emptiness guard every reader here carries. This one feeds a
+    # comprehension that produces NOTHING when it goes blank, which is how a
+    # fence stops fencing without anybody being told.
     assert routes, "read no routes at all off the gateway app"
     return routes
+
+
+def _everything_routed(module) -> set[tuple[str, str]]:
+    """Every (METHOD, pattern) a browser can reach through this service, /ui/* included."""
+    return {(method, _pattern(path)) for route in module.app.routes
+            for method in getattr(route, "methods", None) or ()
+            if method in HTTP_METHODS for path in (route.path,)}
 
 
 # ---------------------------------- reading the page's own requests -----------
@@ -1682,35 +1660,31 @@ def test_every_request_the_page_issues_has_a_route():
     """THE DEFECT THIS PREVENTS, reproduced against the deployed stack: the
     Jobs tab's "delete the audio" button died with 405 method_not_supported.
 
-    tts-long had answered DELETE /jobs/{id}/audio all along and both tables in
+    tts-long had answered DELETE /jobs/{id}/audio all along and the tables in
     front of it carried only the GET on that path. The test this replaces read
     the tables as sets of METHOD STRINGS, so the missing pair added no method
     they did not already hold and it stayed green.
 
     This one starts from the page instead: every call site in ui.html, the
-    method it sends and the route it can reach. It is the only assertion in the
-    estate that comes at the allowlists from the direction a person hits them,
-    and it fails in whichever table is short.
+    method it sends and the route it can reach. The page calls this service's
+    paths directly now, so every one of them must be a route here.
     """
+    from app import main as gateway_main
+
     page = _page_requests()
     assert page, "read no requests at all out of ui.html"
 
-    proxied = {(method, _pattern(path)) for method, path in _proxied_table()}
-    # voice-ui answers its own /ui/* family without forwarding anything, so
-    # those calls are allowed by its routes rather than by its allowlist.
-    own = {(method, _pattern(path)) for method, path in _declared_routes("ui")}
-
-    missing = sorted(page - proxied - own)
+    missing = sorted(page - _everything_routed(gateway_main))
     assert not missing, (
-        "the page issues these and no table lets them through, which is a 405 "
-        f"in the browser and a line in no log: {missing}")
+        "the page issues these and this service does not route them, which is "
+        f"a 404 or a 405 in the browser and a line in no log: {missing}")
 
 
 def test_every_backend_route_is_routed_or_named_as_unrouted():
     """A route a backend answers is either reachable or exempt on the record.
 
     The failure this prevents is the quiet one: tts-long grows a route, the
-    page grows a control for it, and the two tables in between get written by
+    page grows a control for it, and the table in between gets written by
     whoever remembers. Everything a backend answers has to be accounted for
     here, and an exemption has to say why in NOT_ROUTED -- so "we never routed
     it" stops being something you find out from a 405.
@@ -1719,7 +1693,7 @@ def test_every_backend_route_is_routed_or_named_as_unrouted():
 
     gateway = {(method, _pattern(path))
                for method, path in _gateway_routes(gateway_main)}
-    proxied = {(method, _pattern(path)) for method, path in _proxied_table()}
+    page = _page_requests()
 
     unreachable: list[str] = []
     for service in ("stt", "tts", "tts-long", "satellites"):
@@ -1731,18 +1705,13 @@ def test_every_backend_route_is_routed_or_named_as_unrouted():
                 unreachable.append(
                     f"{service} answers {method} {path} and this service does "
                     "not route it")
-            elif (service, method, path) in NOT_ON_PAGE:
-                if pair in proxied:
-                    unreachable.append(
-                        f"{service} answers {method} {path}, which NOT_ON_PAGE "
-                        "keeps off the page, and voice-ui's PROXIED lists it")
-            elif pair not in proxied:
+            elif (service, method, path) in NOT_ON_PAGE and pair in page:
                 unreachable.append(
-                    f"{service} answers {method} {path} and voice-ui's PROXIED "
-                    "does not list it, so the page cannot reach it")
+                    f"{service} answers {method} {path}, which NOT_ON_PAGE "
+                    "keeps off the page, and ui.html calls it")
     assert not unreachable, "\n".join(unreachable) + (
-        "\n\nRoute it in both tables, or name it in NOT_ROUTED with the reason "
-        "it never reaches a browser.")
+        "\n\nRoute it here with its scope, or name it in NOT_ROUTED with the "
+        "reason it never reaches a browser.")
 
 
 def test_no_allowlist_entry_points_at_nothing():
@@ -1762,46 +1731,33 @@ def test_no_allowlist_entry_points_at_nothing():
                 for method, path in _declared_routes(service)}
     voice_ui = {(method, _pattern(path))
                 for method, path in _declared_routes("ui")}
-    answered = {(method, _pattern(path)) for method, path in ANSWERED_HERE}
+    # Signing in, the account and the admin views are this service's own.
+    answered = {(method, _pattern(path)) for method, path in ANSWERED_HERE} | {
+        (method, _pattern(route.path))
+        for router in (gateway_main.routes_auth.router, gateway_main.routes_admin.router,
+                       gateway_main.routes_secrets.admin_router)
+        for route in router.routes for method in route.methods}
 
     dangling = [f"this service routes {method} {path} and no backend answers it"
                 for method, path in sorted(_gateway_routes(gateway_main))
                 if (method, _pattern(path)) not in backends | answered]
-    dangling += [f"voice-ui proxies {method} {path} and no backend answers it"
-                 for method, path in sorted(_proxied_table())
-                 if (method, _pattern(path)) not in backends | answered]
-    # /ui/api is excluded by path: it is the prefixed mount of PROXIED, checked
-    # on the lines above, and voice-ui declares no route by that name because
-    # it strips the prefix before matching its own allowlist.
     dangling += [f"UI_PATHS carries {method} {path} and voice-ui answers no "
                  "such route"
-                 for method, path in sorted(gateway_main.UI_PATHS)
-                 if not path.startswith("/ui/api/")
-                 and (method, _pattern(path)) not in voice_ui]
+                 for method, path, _ in sorted(gateway_main.UI_PATHS)
+                 if (method, _pattern(path)) not in voice_ui]
     assert not dangling, "\n".join(dangling)
 
 
 def test_the_fence_is_reading_the_real_services_and_not_an_empty_set():
-    """THE FENCE'S OWN FAILURE MODE, WHICH IS SILENCE, AND BOTH INSTANCES OF IT.
+    """THE FENCE'S OWN FAILURE MODE, WHICH IS SILENCE.
 
     Every assertion in this section is of the form "nothing is missing", and
-    that sentence is also what a reader that found nothing at all says. Two
-    readers here have already gone blind that way and neither cost a red test:
-
-      * the path level. `SERVICES` is `parents[2]`; the version this replaced
-        pointed one level off, could not find a sibling service, and called
-        `pytest.skip` -- which reads as a pass in every report and asserts
-        nothing. It is asserted here rather than left to the readers' own
-        guards, because a skip is the outcome nobody reads.
-      * the assignment node. PROXIED is declared `PROXIED: tuple[...] = (`,
-        which is an ast.AnnAssign; a reader matching only ast.Assign walked the
-        whole file, found no table, and compared the page's requests against an
-        empty set. Everything passed.
-
-    The second half is exercised against a file written here rather than against
-    voice-ui's own, because the point is the SHAPE of the declaration: pointing
-    the reader at the real file cannot demonstrate that the annotated form is
-    what it handles, only that today's file happens to parse.
+    that sentence is also what a reader that found nothing at all says.
+    `SERVICES` is `parents[2]`; the version this replaced pointed one level
+    off, could not find a sibling service, and called `pytest.skip` -- which
+    reads as a pass in every report and asserts nothing. It is asserted here
+    rather than left to the readers' own guards, because a skip is the outcome
+    nobody reads.
     """
     assert SERVICES.name == "services", (
         f"SERVICES resolved to {SERVICES}, which is not the services directory. "
@@ -1810,30 +1766,6 @@ def test_the_fence_is_reading_the_real_services_and_not_an_empty_set():
     for service in ("gateway", "stt", "tts", "tts-long", "ui"):
         assert (SERVICES / service / "app").is_dir(), (
             f"services/{service}/app is not where this fence is looking")
-
-
-def test_the_proxied_reader_handles_an_annotated_assignment(tmp_path):
-    """The AnnAssign defect, reproducible on demand. See the test above."""
-    annotated = tmp_path / "annotated.py"
-    annotated.write_text(
-        'PROXIED: tuple[tuple[str, str], ...] = (\n'
-        '    ("POST", "/v1/audio/transcriptions"),\n'
-        '    ("DELETE", "/jobs/{job_id}/audio"),\n'
-        ')\n', encoding="utf-8")
-    assert _proxied_table(annotated) == (
-        ("POST", "/v1/audio/transcriptions"),
-        ("DELETE", "/jobs/{job_id}/audio"))
-
-    plain = tmp_path / "plain.py"
-    plain.write_text('PROXIED = (("GET", "/voices"),)\n', encoding="utf-8")
-    assert _proxied_table(plain) == (("GET", "/voices"),)
-
-    # And a file with no table at all fails loudly rather than returning (),
-    # which is the whole difference between a fence and a formality.
-    empty = tmp_path / "empty.py"
-    empty.write_text("SOMETHING_ELSE = ()\n", encoding="utf-8")
-    with pytest.raises(AssertionError):
-        _proxied_table(empty)
 
 
 def test_the_route_reader_follows_an_apirouter_whatever_it_is_called():
@@ -1949,8 +1881,9 @@ def test_health_asks_the_hub_alongside_the_other_backends(monkeypatch):
         out[0] -= 1
         return {"reachable": True}
     monkeypatch.setattr(main, "_probe", probe)
-    with TestClient(main.app) as client:
-        body = client.get("/health").json()
+    with TestClient(main.app, base_url=PUBLIC_ORIGIN) as client:
+        key = make_key(make_user("ana"), scopes={"health:read"})
+        body = client.get("/health", headers=bearer(key)).json()
     assert set(body["backends"]) == {"stt", "tts", "tts_long", "satellites"}
     assert most[0] == 4, "the probes were not asked together"
 
@@ -2084,11 +2017,11 @@ def test_a_route_the_backend_answers_is_in_every_table_in_front_of_it(
         method, path):
     """The pair-wise check for the routes added with this change, from both ends.
 
-    THREE TABLES AND THE BACKEND HAVE TO AGREE. POST /v1/audio/translations was
-    the third instance of one defect: the backend implements it, and the two
-    tables in front of it do not carry the pair -- which is a 404 or a 405 that
-    reproduces only against the deployed stack. It is asserted on the PAIR
-    rather than on the path, because the two earlier instances (PUT
+    THE TABLE AND THE BACKEND HAVE TO AGREE. POST /v1/audio/translations was
+    the third instance of one defect: the backend implements it, and the
+    tables in front of it did not carry the pair -- which is a 404 or a 405
+    that reproduces only against the deployed stack. It is asserted on the
+    PAIR rather than on the path, because the two earlier instances (PUT
     /glossaries/{name}, DELETE /jobs/{id}/audio) both added a method to a path
     that was already listed.
     """
@@ -2102,53 +2035,16 @@ def test_a_route_the_backend_answers_is_in_every_table_in_front_of_it(
     assert pair in {(m, _pattern(p))
                     for m, p in _gateway_routes(gateway_main)}, (
         f"this service does not route {method} {path}")
-    assert pair in {(m, _pattern(p)) for m, p in _proxied_table()}, (
-        f"voice-ui's PROXIED does not carry {method} {path}")
 
 
-def test_a_proxied_upload_route_is_also_capped():
-    """voice-ui's PROXIED and its UPLOAD_PATHS are a second pair of tables that
-    have to agree, and they are easy to add apart.
-
-    UPLOAD_PATHS is where the only Content-Length ceiling on an upload lives --
-    services/stt/app/main.py:168 is a bare `file.file.read()` on an UploadFile
-    and services/stt/app/openai_api.py:1001 is `await file.read()`, so an
-    oversized upload is an OOM kill in a 6 GB container rather than a message. A
-    route that carries audio through that table without a line in this one
-    restores that failure for one path.
-    """
-    source = UI_MAIN.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    capped: set[str] = set()
-    for node in ast.walk(tree):
-        targets = ([node.target] if isinstance(node, ast.AnnAssign)
-                   else list(node.targets) if isinstance(node, ast.Assign)
-                   else [])
-        if not any(getattr(target, "id", "") == "UPLOAD_PATHS"
-                   for target in targets) or node.value is None:
-            continue
-        capped |= {item.value for item in ast.walk(node.value)
-                   if isinstance(item, ast.Constant)
-                   and isinstance(item.value, str)}
-    assert capped, "could not read voice-ui's UPLOAD_PATHS"
-
-    carries_audio = {"/v1/audio/transcriptions", "/v1/audio/translations",
-                     "/transcribe"}
-    proxied = {path for _, path in _proxied_table()}
-    missing = sorted(carries_audio & proxied - capped)
-    assert not missing, (
-        "voice-ui proxies these and UPLOAD_PATHS does not cap them, so an "
-        f"oversized upload is an OOM kill rather than a 413: {missing}")
-
-
-def test_a_second_model_string_adds_no_row_to_any_of_the_three_tables():
+def test_a_second_model_string_adds_no_row_to_the_route_table():
     """The claim the routing package makes and must not simply assert in prose.
 
-    Selecting an engine is a REQUEST FIELD, not a route. All three allowlists
-    are keyed on (METHOD, path), so a second model string is invisible to every
-    one of them -- and the three speech paths it can arrive on are already
-    listed. That is the whole reason this change reaches the page without a
-    voice-ui deploy.
+    Selecting an engine is a REQUEST FIELD, not a route. The table is keyed on
+    (METHOD, path), so a second model string is invisible to it -- and the
+    three speech paths it can arrive on are already listed, each with its
+    scope. That is the whole reason a new engine reaches the page without a
+    new row or a new scope.
 
     It is asserted rather than believed because the opposite mistake is the one
     this estate keeps making: the two live bugs this week were both a surface
@@ -2156,13 +2052,15 @@ def test_a_second_model_string_adds_no_row_to_any_of_the_three_tables():
     -- a /v1/audio/speech/{engine}, a per-engine job route -- this fails and
     says which table to write in.
     """
-    raw = _proxied_table()
-    proxied = {(method, _pattern(path)) for method, path in raw}
+    from app import main as gateway_main
+
+    raw = sorted(_gateway_routes(gateway_main))
+    routed = {(method, _pattern(path)) for method, path in raw}
     for pair in (("POST", "/v1/audio/speech"), ("POST", "/jobs"),
                  ("GET", "/voices")):
-        assert pair in proxied, (
+        assert pair in routed, (
             f"the page reaches the engine selector through {pair[0]} {pair[1]} "
-            "and voice-ui's PROXIED does not carry it")
+            "and this service does not route it")
 
     # READ OFF THE RAW PATHS, NOT THE PATTERNED ONES, and the first draft of
     # this test got that wrong in a way that proves the point of writing it.
@@ -2176,27 +2074,29 @@ def test_a_second_model_string_adds_no_row_to_any_of_the_three_tables():
     offenders = sorted(
         f"{method} {path}" for method, path in raw
         # A path parameter named for an engine or a model: the engine promoted
-        # out of the body and into the URL. `/v1/models` is not that and must
-        # not be caught -- it is the meta route that publishes the names, and
-        # it carries no parameter at all.
-        if re.search(r"\{[^{}]*(?:engine|model)[^{}]*\}", path)
+        # out of the body and into the URL. `/v1/models/{model_id}` is not
+        # that and must not be caught -- it is the meta route that publishes
+        # the names, not one that chooses between them.
+        if not path.startswith("/v1/models")
+        and re.search(r"\{[^{}]*(?:engine|model)[^{}]*\}", path)
         # Or a new segment hung off one of the two speech routes, which is what
         # a per-engine variant would look like without a parameter:
         # /v1/audio/speech/turbo. /jobs is excluded because /jobs/{id} and
         # /jobs/{id}/audio are legitimate and already listed.
         or path.startswith(("/v1/audio/speech/", "/speak/")))
     assert not offenders, (
-        "an engine-shaped PATH appeared in voice-ui's PROXIED: the engine is a "
-        "request field, and a path is three tables' worth of work -- this one, "
-        f"the gateway's routes, and the backend's: {offenders}")
+        "an engine-shaped PATH appeared in this service's routes: the engine is "
+        "a request field, and a path is a row, a scope and a backend route's "
+        f"worth of work: {offenders}")
 
 
 async def test_an_upload_has_a_ceiling(monkeypatch, backends):
     """"STREAMED, SO IT COSTS NOTHING HERE" WAS ONLY TRUE OF HERE. The gateway
     hands the body straight to stt-stack, so its own memory stays flat whatever
     arrives -- and the service at the other end reads the clip to decode it,
-    inside a container with 6 GB. An unauthenticated POST on the only published
-    port could take that container down, and every transcription with it.
+    inside a container with 6 GB. One POST from any key holder on the only
+    published port could take that container down, and every transcription
+    with it.
 
     This route's own 413 message used to say so, in the chat route's refusal:
     "streams it through this gateway rather than holding it, and has no ceiling
