@@ -34,8 +34,8 @@ adoption tokens.
 
 ## The page
 
-Seven tabs, one HTML file, no build step. A speech user sees the first five
-below; an admin sees all seven.
+Seven tabs, one HTML file, no build step. A `user-jobs` user sees the first
+five below, a `user` the same without Jobs, and an admin all seven.
 
 **Speak.** Type, choose one of 54 voices, listen. Kokoro answers immediately
 and returns `mp3`, `opus`, `aac`, `flac`, `wav` or headerless `pcm`.
@@ -150,7 +150,7 @@ request carrying audio is transcribed, and one without gets a fixed reply.
 /glossaries`, and `GET`, `PUT`, `DELETE` on `/glossaries/{name}`; `POST` and
 `GET /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/audio`, `DELETE` on both.
 
-Every route needs a key with the right scope; a preset such as `speech`,
+Every route needs a key with the right scope; a preset such as `user-jobs`,
 `transcribe-only` or `speak-only` gives a key exactly what one client needs.
 `GET /health` answers without one, with `ok` or `degraded` and nothing more.
 

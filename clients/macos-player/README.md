@@ -125,7 +125,8 @@ alone. The fields commit on Return or on leaving them — there is nothing else 
 **The key is required.** A Calliope server answers nothing but its liveness without one. Make
 it in Calliope under *Account* → *API keys* → *New key* with the preset `speak-only`: model
 listing, speech on both lanes, and reading your own jobs, because a long-form voice answers
-with a job to poll. The `speech` preset works too, and holds more than the player uses. An
+with a job to poll. The `user-jobs` preset works too, and holds more than the player uses.
+Both need an account with the `user-jobs` role: a `user` has no long-form voices to offer. An
 address without a key is not used: the settings say a key is required, and `server.py`
 started with `CALLIOPE_URL` but no `CALLIOPE_KEY` says so once and forwards nothing.
 

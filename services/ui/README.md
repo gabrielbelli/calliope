@@ -17,8 +17,8 @@ itself.
 ```
 
 Seven tabs: **Transcribe**, **Speak**, **Jobs**, **Vocabulary**,
-**Satellites**, **Account** and **Admin**. A speech user sees the first four
-and Account; an admin sees all seven. The speech tabs have an easy mode that
+**Satellites**, **Account** and **Admin**. A `user-jobs` user sees the first
+four and Account, a `user` the same without Jobs, and an admin all seven. The speech tabs have an easy mode that
 needs no manual, and an *Expert* `<details>` panel at the foot holding the
 real knobs beneath the controls already on screen. Opening one does not swap
 pages or lose what you typed. The Satellites tab is the satellite hub's page,
@@ -1069,7 +1069,7 @@ session: no API key can reach them.
 
 | Section | What it does |
 |---|---|
-| **Users** | Create a user (a username and a role; the temporary password is shown once, and they choose their own at first sign-in), change a role, disable or enable, reset a password ("Also revoke this user's API keys" is ticked by default), delete. Nobody can delete, demote or disable themselves, and the last admin cannot be either |
+| **Users** | Create a user (a username and a role, `admin`, `user` or `user-jobs`, with `user` chosen to start with; the temporary password is shown once, and they choose their own at first sign-in), change a role (a change to one that holds less asks first, and says what goes), disable or enable, reset a password ("Also revoke this user's API keys" is ticked by default), delete. Nobody can delete, demote or disable themselves, and the last admin cannot be either |
 | **Keys** | Everyone's keys, by user, with when each was last used and from where; revoke. An admin never sees a key |
 | **Roles** | The roles and presets against every scope, read-only, with the session-only scopes marked. They are code, not settings |
 | **Secrets** | The secret store ([ADR 0023](../../docs/adr/0023-one-secret-store.md)): each secret's name, kind, description, consumers, allowed hosts, who changed it and who last read it. Set or replace a value (a password box, never filled in), clear it, edit its consumers and hosts, **Confirm** an imported one. **Rotate master key** for a generated keyring. Read-only rows for the TLS certificate's expiry, the GPU runner's key file and the firmware signing key |
@@ -1107,6 +1107,17 @@ One wrapper handles every refusal the same way, wherever it comes from:
 ---
 
 ## What the page hides, and why each one is right
+
+- **Jobs, for a `user`.** The `user` role holds no `speech:long`, no job
+  scope and no `voices:write:own`: each of those runs on the GPU or follows
+  something that did ([ADR 0022](../../docs/adr/0022-everything-behind-a-login.md)).
+  For that account the page draws no Jobs tab, no Chatterbox or other
+  long-form voice in the picker, no **+ Clone a new voice**, and no language
+  only a long-form engine speaks. It never asks for `/jobs` or `/ui/clips`,
+  and a stream that ends early says what was kept without pointing at a tab
+  the account does not have. The gateway refuses every one of those routes
+  to the role anyway; the page only stops offering a press it knows will be
+  refused. The key form offers it the `user` and `transcribe-only` presets.
 
 - **`language`, in either mode.** It is a 400 `unsupported_parameter` on `/v1`
   under Parakeet and silently ignored on `/transcribe`
@@ -1234,8 +1245,8 @@ array on the second**. Nothing in the page reads either field: the counts it
 shows come from `terms`, which is an integer on both.
 
 The page calls `/glossaries` on the gateway with the person's session.
-**Each person's profiles are their own**: a speech user lists and edits only
-theirs and reads the built-ins. An admin sees every profile grouped by owner
+**Each person's profiles are their own**: a `user` or `user-jobs` account
+lists and edits only theirs and reads the built-ins. An admin sees every profile grouped by owner
 (System first) and edits another person's with `?owner=<user id>`.
 `home-assistant` belongs to the system and is listed only for an account
 holding `glossaries:ha` or a glossaries `:all` scope. The ceiling is stt's own: 64 KB, a validated name, 500 terms,
@@ -1334,8 +1345,9 @@ resolved it), `tests/test_clips.py` (clip namespaces), `tests/test_delegation.py
 (`/ui/fetch` sends the delegation and this service's key and nothing else)
 and `tests/test_probe.py` (no private destination reaches yt-dlp).
 `tests/test_account.py` runs the page's session layer in Node: the sign-in
-redirect, the step-up prompt, a missing scope, locked mode, and the key form
-against `voice_common.scopes`.
+redirect, the step-up prompt, a missing scope, locked mode, and the key form,
+the roles Admin › Users offers and the scopes the page asks before drawing a
+job against `voice_common.scopes`.
 
 `tests/test_escaping.py` and `tests/test_playback.py` are static and
 parser-based: what they assert about `ui.html` — which value reaches

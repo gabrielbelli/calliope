@@ -19,7 +19,7 @@ import pytest
 from voice_common.conformance import assert_four_field_envelope
 from voice_common.identity import ASSERTION_HEADER, DELEGATION_HEADER
 
-from conftest import ALICE, SPEECH
+from conftest import ALICE, USER_JOBS
 
 # Every route this service answers, as the gateway's UI_PATHS forwards them
 # (§3.4), with one concrete path each. /health is the one exception and is
@@ -84,8 +84,8 @@ def test_every_route_refuses_an_assertion_meant_for_another_service(client, sign
                                                                     calliope_gateway,
                                                                     method, path):
     api, _, _ = client()
-    for forged in (calliope_gateway.assertion("tts", sub=ALICE, scopes=SPEECH),
-                   calliope_gateway.assertion("ui", sub=ALICE, scopes=SPEECH,
+    for forged in (calliope_gateway.assertion("tts", sub=ALICE, scopes=USER_JOBS),
+                   calliope_gateway.assertion("ui", sub=ALICE, scopes=USER_JOBS,
                                               now=time.time() - 300),
                    "v1.1.e30.e30"):
         response = _send(api, method, path, headers={**sign(), ASSERTION_HEADER: forged})

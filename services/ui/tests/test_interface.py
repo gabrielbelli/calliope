@@ -182,8 +182,8 @@ def test_the_page_scales_with_the_readers_text_setting():
     assert rule(".masthead{").count("var(--measure)") == 1
     # The dock is the one thing on the page deliberately NOT on the measure: it
     # is a fixed object sized to the thumb, not to the text column.
-    # As wide as the tabs this session may open: 82px a tab, five for a
-    # speech account and seven for an admin.
+    # As wide as the tabs this session may open: 82px a tab, four for a user,
+    # five for a user-jobs account and seven for an admin.
     assert "width:min(calc(82px * var(--tabs,5))," in rule(".dock{")
 
 

@@ -67,6 +67,9 @@ const schedule = delay => scheduled.push(delay);
 const panels = { "tab-jobs": { hidden: false } };
 const $ = id => panels[id];
 const document = { hidden: false };
+// What the session holds; a scenario may take jobs:read:own away.
+const held = new Set(["jobs:read:own"]);
+const holds = scope => held.has(scope);
 
 eval(SECTION + "\n;(async () => {\n" + SCENARIO + "\n})().catch(e => { console.error(e); process.exit(2); });");
 """
@@ -196,6 +199,20 @@ def test_a_stale_mark_asks_even_with_the_jobs_tab_closed(tmp_path):
       console.log(JSON.stringify({ before, stale, scheduled, live, after: jobsDue() }));
     """)
     assert got == {"before": False, "stale": True, "scheduled": [0], "live": True, "after": False}, got
+
+
+def test_a_session_that_may_not_read_jobs_is_never_due_to_ask(tmp_path):
+    """The user role holds no jobs scope: not the tab, not a live job this
+    browser remembers, not a queue that moved, is a reason to ask /jobs."""
+    got = run(tmp_path, """
+      held.delete("jobs:read:own");
+      const shown = jobsDue();
+      jobs.set("running", job("running", "running"));
+      const live = jobsDue();
+      jobsStale();
+      console.log(JSON.stringify({ shown, live, stale: jobsDue(), asked: out.length }));
+    """)
+    assert got == {"shown": False, "live": False, "stale": False, "asked": 0}, got
 
 
 def test_a_hidden_page_with_nothing_live_asks_for_no_jobs(tmp_path):

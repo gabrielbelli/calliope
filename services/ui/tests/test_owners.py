@@ -24,7 +24,7 @@ URL = "https://media.example/watch?v=abcdef"
 
 @pytest.fixture
 def alice_resolved(client, sign):
-    """Alice has resolved URL; Bob is signed in as a second speech user."""
+    """Alice has resolved URL; Bob is signed in as a second user-jobs user."""
     api, gateway, tube = client()
     assert api.post("/ui/resolve", json={"url": URL}).status_code == 200
     return api, gateway, tube, sign(sub=BOB)

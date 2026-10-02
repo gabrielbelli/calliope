@@ -79,8 +79,10 @@ The session's first act is the deployment's first sign-in, through `/login`:
 of the session's own on the forced change. What that sign-in showed and sent is
 kept for `test_auth.py`, because it can happen only once per gateway. Then the
 harness, with the admin's session, mints an admin key for itself (the password
-again first, as any admin key needs), and the admin creates the speech user
-`sam`, who signs in for the first time through `/login` too. Every page a test
+again first, as any admin key needs), and the admin creates the user-jobs
+user `sam`, who signs in for the first time through `/login` too. `una`, a
+user (the role without jobs), and `robin`, a second user-jobs user, are
+created and signed in the same way the first time a test asks for them. Every page a test
 opens starts from the cookie of one of those sign-ins and nothing else.
 
 Every password and key is made up per session, and the gateway's data, keys
@@ -97,7 +99,7 @@ refused before the password is read (CSRF, wrong host). Its budget is 16 in
 any ten minutes, four under the gateway's limit
 (`stack.SIGN_IN_BUDGET`). The test that spends the seventeenth fails and says
 so, and so does a test that meets a 429. A full run spends about a dozen in
-its first ten minutes: the first sign-ins of `admin`, `sam` and `robin`, the
+its first ten minutes: the first sign-ins of `admin`, `sam`, `robin` and `una`, the
 harness's step-up, and the tests in `test_admin.py` and `test_auth.py` that
 sign in or are asked for the password again.
 
@@ -160,8 +162,9 @@ def test_a_new_glossary_is_saved_and_listed(page, goto, fake, browser_log, scree
 | Fixture | What it is |
 |---|---|
 | `page`, `admin_page` | A Playwright `Page`, 1440 x 900, light, in a new context, signed in as the admin. |
-| `speech_page` | The same, signed in as `sam`, a person with the speech role (`conftest.SPEECH`). |
-| `new_page(viewport="desktop", scheme="light", mobile=None, reduced_motion="no-preference", notifications="denied", user="admin")` | Another page in its own context. `viewport` is `"desktop"`, `"mobile"` (390 x 844, touch, 2x pixels) or `(w, h)`. `user` is `"admin"`, `SPEECH`, `OTHER` (a second speech user, `robin`), any other username (created and signed in on first use), or `None` for nobody. `notifications="granted"` makes `Notification.permission` read `"granted"` (the headless shell itself answers `"denied"` whatever the context grants); the default makes it `"denied"` and `requestPermission()` answer `"denied"`, so queueing a job never waits on a prompt nobody can see. All of them are closed when the test ends. |
+| `user_jobs_page` | The same, signed in as `sam`, a person with the user-jobs role (`conftest.USER_JOBS`). |
+| `user_page` | The same, signed in as `una`, a person with the user role, which has no jobs (`conftest.USER`). |
+| `new_page(viewport="desktop", scheme="light", mobile=None, reduced_motion="no-preference", notifications="denied", user="admin")` | Another page in its own context. `viewport` is `"desktop"`, `"mobile"` (390 x 844, touch, 2x pixels) or `(w, h)`. `user` is `"admin"`, `USER_JOBS`, `USER`, `OTHER` (a second user-jobs user, `robin`), any other username (created as a user-jobs user and signed in on first use), or `None` for nobody. `notifications="granted"` makes `Notification.permission` read `"granted"` (the headless shell itself answers `"denied"` whatever the context grants); the default makes it `"denied"` and `requestPermission()` answer `"denied"`, so queueing a job never waits on a prompt nobody can see. All of them are closed when the test ends. |
 | `people(username)` | That person's `stack.Account`: username, role, ID, the password they chose and their signed-in cookie. |
 | `api_key(preset, user="admin")` | A key of that preset, made by that person with their own session, as the Account tab makes one; once per session. |
 | `first_sign_in` | What the session's first sign-in showed and sent: every answer's text, the markup and every field's value at the forced change and once signed in, and the bootstrap value to search them for. |

@@ -108,7 +108,7 @@ def list_users(settings: Settings) -> list[str]:
         flags = [flag for flag, on in (("disabled", row["disabled_at"]),
                                        ("deleted", row["deleted_at"]),
                                        ("must-change", row["must_change"])) if on]
-        lines.append(f"{row['id']}  {row['username']:<24} {row['role']:<7} "
+        lines.append(f"{row['id']}  {row['username']:<24} {row['role']:<9} "
                      f"{' '.join(flags)}".rstrip())
     return lines
 

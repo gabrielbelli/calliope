@@ -6,7 +6,10 @@
 
 **Constants, not database rows** (D2). They are reviewed with the code that
 checks them, the gateway and every backend read this one copy, and adding a
-scope needs no migration. The Admin › Roles view shows them read-only.
+scope needs no migration. The Admin › Roles view shows them read-only. Only a
+role's NAME is stored (users.role, and a key's informational preset), so
+renaming a role or a preset is a gateway migration: 0002 made `speech` into
+`user-jobs`.
 
 **`:all` implies `:own`, on both sides of every comparison** (D29). A role or a
 key that holds `jobs:read:all` also holds `jobs:read:own`, so `expand` runs on
@@ -34,7 +37,7 @@ from types import MappingProxyType
 from .auth import REMOVED_VARIABLES
 
 __all__ = [
-    "SCOPE", "SCOPES", "SESSION_ONLY", "SERVICE_ONLY", "ADMIN_ONLY",
+    "SCOPE", "SCOPES", "SESSION_ONLY", "SERVICE_ONLY", "ADMIN_ONLY", "JOBS_ONLY",
     "EXPIRY_CAPPED", "ROLES", "PRESETS", "Preset", "SERVICE_PRINCIPALS",
     "KEY_EXPIRY_DAYS", "DEFAULT_KEY_EXPIRY_DAYS", "CAPPED_KEY_EXPIRY_DAYS",
     "ADMIN_KEY_EXPIRY_DAYS",
@@ -100,21 +103,35 @@ SESSION_ONLY = frozenset({"users:manage", "secrets:manage",
 SERVICE_ONLY = frozenset({"runs:write", "secrets:fetch", "secrets:import",
                           "speech:delegate"})
 
+# What the `user` role does not hold and `user-jobs` does: everything that
+# queues work on the GPU lane or reads it back. Compute is the one reason to
+# hold a person back, so this is the whole difference between the two. A
+# cloned voice is spoken only on that lane, so saving one goes with it.
+JOBS_ONLY = frozenset({"speech:long", "jobs:read:own", "jobs:delete:own",
+                       "voices:write:own"})
+
+_USER_JOBS = frozenset({
+    "models:read", "health:read", "speech:transcribe", "speech:speak",
+    "speech:long", "ingest:links", "jobs:read:own", "jobs:delete:own",
+    "glossaries:read:own", "glossaries:write:own", "voices:read",
+    "voices:write:own", "keys:manage:own",
+})
+
 ROLES: Mapping[str, frozenset[str]] = MappingProxyType({
     # Every non-service scope, both forms of each, session-only included: a
     # signed-in admin can do everything a person can do.
     "admin": frozenset(SCOPES) - SERVICE_ONLY,
-    "speech": frozenset({
-        "models:read", "health:read", "speech:transcribe", "speech:speak",
-        "speech:long", "ingest:links", "jobs:read:own", "jobs:delete:own",
-        "glossaries:read:own", "glossaries:write:own", "voices:read",
-        "voices:write:own", "keys:manage:own",
-    }),
+    # Fast transcription and fast speech, links, their own vocabulary and
+    # their own keys. No jobs: nothing this role does runs on the GPU.
+    "user": _USER_JOBS - JOBS_ONLY,
+    # The user role, and jobs: the GPU lane, their own jobs and run records,
+    # and their own voice clips.
+    "user-jobs": _USER_JOBS,
 })
 
 # What only the admin role holds. Granting any of these to a key needs a
 # step-up (D13): an admin's session left open must not quietly become a key.
-ADMIN_ONLY = ROLES["admin"] - ROLES["speech"]
+ADMIN_ONLY = ROLES["admin"] - ROLES["user-jobs"]
 
 # What caps a key at 90 days (D28). Named explicitly rather than derived from
 # ADMIN_ONLY, because the home-assistant preset holds admin-only scopes and
@@ -145,8 +162,11 @@ class Preset:
 PRESETS: Mapping[str, Preset] = MappingProxyType({
     "admin": Preset(ROLES["admin"] - SESSION_ONLY,
                     "everything a key may hold; at most 90 days"),
-    "speech": Preset(ROLES["speech"] - {"ingest:links", "keys:manage:own"},
-                     "speech, jobs, glossaries and voices"),
+    # One preset per person role, holding everything that role may give a key.
+    "user": Preset(ROLES["user"] - SESSION_ONLY,
+                   "fast transcription and speech, links and glossaries"),
+    "user-jobs": Preset(ROLES["user-jobs"] - SESSION_ONLY,
+                        "the user preset, with jobs, the GPU lane and voices"),
     "transcribe-only": Preset(frozenset({"models:read", "speech:transcribe"}),
                               "transcription only"),
     # jobs:read:own because a long request answers 202 and has to be polled.

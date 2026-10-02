@@ -484,7 +484,7 @@ async def test_a_session_used_through_a_key_only_route_is_refused(monkeypatch):
 
 async def test_a_key_reaches_what_its_scopes_name_and_nothing_else(monkeypatch):
     async with gateway(monkeypatch, authenticate=False) as (client, _):
-        key = make_key(make_user("sam", role="speech"),
+        key = make_key(make_user("sam", role="user-jobs"),
                        scopes={"models:read", "speech:transcribe"})
         models = await client.get("/v1/models", headers=bearer(key))
         voices = await client.get("/voices", headers=bearer(key))

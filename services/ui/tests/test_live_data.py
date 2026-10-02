@@ -151,7 +151,7 @@ def test_the_stream_is_opened_at_start_without_the_satellites_tab(tmp_path):
 
 
 def test_a_session_that_may_not_read_the_satellites_never_asks_the_hub(tmp_path):
-    """A speech account holds no satellites:read. The stream and its list
+    """Neither person role holds satellites:read. The stream and its list
     read would each be a 403 the reader never asked for, at load, after a
     return to the page and on every rung of the retry ladder; health naming
     a reachable hub changes nothing."""

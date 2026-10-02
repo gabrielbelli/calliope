@@ -35,14 +35,19 @@ AUDIT_PAGE = 100
 AUDIT_PAGE_MAX = 500
 
 
+# users.ROLES, written out because a Literal takes its values from the source.
+# test_admin.py fails when the two part.
+Role = Literal["admin", "user", "user-jobs"]
+
+
 class NewUser(_Body):
     username: str = Field(min_length=1, max_length=64)
-    role: Literal["admin", "speech"]
+    role: Role
     display_name: str | None = Field(default=None, max_length=users.MAX_DISPLAY_NAME)
 
 
 class UserChange(_Body):
-    role: Literal["admin", "speech"] | None = None
+    role: Role | None = None
     disabled: bool | None = None
     display_name: str | None = Field(default=None, max_length=users.MAX_DISPLAY_NAME)
 

@@ -100,8 +100,9 @@ holds exactly what the integration uses:
 | `satellites:control` | switches, numbers, selects, the media player, announcements and the actions |
 | `satellites:update` | firmware updates |
 
-The satellite scopes are not in the speech role, so only an account with the
-admin role can make this key, and Calliope asks for the password again first.
+The satellite scopes are in neither the `user` nor the `user-jobs` role, so
+only an account with the admin role can make this key, and Calliope asks for
+the password again first.
 The key may live up to 365 days; because it can push firmware, it cannot be
 made to never expire. Calliope never shows a key
 again; to replace one, make a new key and enter it with *Reconfigure*.

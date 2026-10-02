@@ -74,20 +74,52 @@ class Database:
     # ── migrations ────────────────────────────────────────────────────────────
 
     def migrate(self) -> int:
-        """Apply every migrations/NNNN_*.sql above PRAGMA user_version, in order."""
+        """Apply every migrations/NNNN_*.sql above PRAGMA user_version, in order.
+
+        Each in one transaction that sets user_version as it commits, and
+        rolls the whole script back if any statement in it fails.
+
+        FOREIGN KEYS ARE OFF WHILE A MIGRATION RUNS, AND CHECKED BEFORE IT
+        COMMITS. SQLite cannot alter a CHECK, so changing one means rebuilding
+        the table (sqlite.org/lang_altertable.html#otheralter), and with foreign
+        keys on, dropping the old `users` would cascade and take every session
+        and key with it. The pragma does nothing inside a transaction, so it is
+        set around it; any row foreign_key_check finds rolls the migration
+        back.
+        """
         with self._lock:
             current = self.connection.execute("PRAGMA user_version").fetchone()[0]
-            for script in sorted(MIGRATIONS.glob("[0-9][0-9][0-9][0-9]_*.sql")):
-                version = int(script.name[:4])
-                if version <= current:
-                    continue
-                sql = script.read_text(encoding="utf-8")
-                # executescript commits whatever is open first, so the
-                # transaction is spelled inside the script it runs.
-                self.connection.executescript(
-                    f"BEGIN IMMEDIATE;\n{sql}\nPRAGMA user_version = {version};\nCOMMIT;")
-                current = version
+            pending = [(int(script.name[:4]), script) for script in
+                       sorted(MIGRATIONS.glob("[0-9][0-9][0-9][0-9]_*.sql"))
+                       if int(script.name[:4]) > current]
+            if not pending:
+                return current
+            self.connection.execute("PRAGMA foreign_keys=OFF")
+            try:
+                for version, script in pending:
+                    self._apply(script, version)
+                    current = version
+            finally:
+                self.connection.execute("PRAGMA foreign_keys=ON")
             return current
+
+    def _apply(self, script: Path, version: int) -> None:
+        sql = script.read_text(encoding="utf-8")
+        try:
+            # executescript commits whatever is open first, so the transaction
+            # is begun inside the script it runs, and ended here.
+            self.connection.executescript(f"BEGIN IMMEDIATE;\n{sql}\n")
+            broken = self.connection.execute("PRAGMA foreign_key_check").fetchall()
+            if broken:
+                raise sqlite3.IntegrityError(
+                    f"{script.name} leaves {len(broken)} row(s) whose foreign key "
+                    f"points nowhere, first in {broken[0][0]}")
+            self.connection.execute(f"PRAGMA user_version = {version}")
+            self.connection.execute("COMMIT")
+        except BaseException:
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
 
     # ── statements ────────────────────────────────────────────────────────────
 

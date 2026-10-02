@@ -103,8 +103,8 @@ reserved to the system namespace: writing it needs `glossaries:ha` or
 `glossaries:write:all`, and a profile a person makes under that name is
 never loaded. Naming it on a transcription (`/v1/audio/*`, `/transcribe`)
 needs `glossaries:ha`, `glossaries:read:all` or `glossaries:write:all`;
-without one it is an unknown profile, and a speech user's listing never shows
-it. The `home-assistant` key preset holds `glossaries:ha`, so the integration
+without one it is an unknown profile, and a `user` or `user-jobs` account's
+listing never shows it. The `home-assistant` key preset holds `glossaries:ha`, so the integration
 writes and names it as before. The hub names it as its own service
 principal, `svc:satellites`, so that principal must hold `glossaries:ha` too,
 or the hub transcribes without the names, which the hub logs. stt-stack

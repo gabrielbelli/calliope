@@ -31,7 +31,7 @@ ALICE = "u_alicealicealicea"
 BOB = "u_bobbobbobbobbobb"
 
 
-def as_user(gateway, sub, role="speech", cred="session"):
+def as_user(gateway, sub, role="user-jobs", cred="session"):
     """The header the gateway forwards for this person's signed-in session."""
     return gateway.headers(AUDIENCE, sub=sub, scopes=session_scopes(role),
                            cred=cred)

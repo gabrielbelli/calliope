@@ -81,11 +81,19 @@ volume, `calliope-svc-<name>`, which the service mounts read-only at
 | Session-only | `users:manage`, `secrets:manage` and both `keys:manage` scopes are never granted to a key, and every step-up route refuses a key with 403 `session_required`, so a leaked key can mint nothing that outlives its own revocation |
 | Must change | Any account with a temporary password (the first admin, a new user, a reset) signs in to a restricted session of 15 minutes that can only change the password |
 
-Two roles, `admin` and `speech`. A speech user has the speech routes, their
-own jobs, profiles and voices, link ingestion, and their own keys. Key
-presets narrow a key further: `speech`, `transcribe-only`, `speak-only`,
-`read-only`, and for admins `monitor`, `home-assistant` and
-`firmware-release`. A key holding a scope in `EXPIRY_CAPPED` (satellite admin,
+Three roles, `admin`, `user` and `user-jobs`. A `user` has fast
+transcription and fast speech, link ingestion, their own vocabulary profiles
+and their own keys. A `user-jobs` user also has the GPU lane: long-form
+speech and voice cloning, which run as jobs, and their own jobs and voices.
+Compute is the only reason to hold a person back, so jobs are the only
+difference between the two, and the page does not show a `user` any control
+that needs them. `user-jobs` was first called `speech`, a name that said
+nothing about what the role could not do; gateway migration 0002 renamed it
+and every key preset of that name, with the same scopes. Key presets narrow a
+key further: `user` and `user-jobs`, each everything its role may give a key,
+`transcribe-only`, `speak-only`, `read-only`, and for admins `monitor`,
+`home-assistant` and `firmware-release`. A person is offered only the presets
+that fit their role, so a `user` sees `user` and `transcribe-only`. A key holding a scope in `EXPIRY_CAPPED` (satellite admin,
 listen and firmware, audit, full health, and every `:all`) lives at most 90
 days. The `home-assistant` preset is outside that set and may live a year or
 never expire, so Assist does not stop every quarter.

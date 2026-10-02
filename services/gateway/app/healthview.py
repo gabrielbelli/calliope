@@ -40,8 +40,8 @@ _ENGINE_ROW = frozenset({"label", "default", "languages", "controls",
                          "loudness_lufs"})
 _VOICE_ROW = frozenset({"name", "language"})
 # stt lists its reserved profile with the shared ones, and the hub needs to see
-# it there; a speech user never does (D34), so it is named only to a caller who
-# may use it, with the scopes stt itself checks.
+# it there; a `user` or `user-jobs` account never does (D34), so it is named
+# only to a caller who may use it, with the scopes stt itself checks.
 RESERVED_GLOSSARY = "home-assistant"
 RESERVED_GLOSSARY_SCOPES = frozenset({"glossaries:ha", "glossaries:read:all",
                                       "glossaries:write:all"})

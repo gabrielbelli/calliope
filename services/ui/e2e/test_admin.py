@@ -67,12 +67,13 @@ def test_a_new_user_signs_in_with_the_temporary_password_and_must_choose_their_o
     goto("/ui/admin/users")
     settled(page)
     page.locator("#user-name").fill("casey")
-    page.locator("#user-role").select_option("speech")
+    page.locator("#user-role").select_option("user-jobs")
     page.locator("#user-create").click()
     shown = page.locator("#userreset .secretonce")
     password_if_asked(page, stack.admin.password, shown)
     temporary = shown.inner_text()
     expect(page.locator("#users")).to_contain_text("casey")
+    expect(page.get_by_label("Role of casey")).to_have_value("user-jobs")
     page.locator("#userreset").get_by_role("button", name="Done").click()
     assert temporary not in page.content(), "Done left the temporary password in the page"
 
@@ -93,6 +94,42 @@ def test_a_new_user_signs_in_with_the_temporary_password_and_must_choose_their_o
     theirs.locator("#change-button").click()
     theirs.wait_for_url(f"{stack.url}/ui", timeout=SIGN_IN_MS)
     expect(theirs.locator("#who-name")).to_have_text("casey")
+
+
+def test_the_role_pickers_offer_the_three_roles_and_a_narrower_one_asks_first(page, goto, stack, dialogs):
+    """admin, user and user-jobs, with user chosen for a new person; moving
+    someone from user-jobs to user says what they lose before it is sent, and
+    the row and the gateway then both say user."""
+    stack.create_person("dana", "user-jobs")
+    goto("/ui/admin/users")
+    settled(page)
+    roles = "els => els.map(e => e.value)"
+    assert page.locator("#user-role option").evaluate_all(roles) == ["admin", "user", "user-jobs"]
+    expect(page.locator("#user-role")).to_have_value("user")
+    row = page.get_by_label("Role of dana")
+    expect(row).to_have_value("user-jobs")
+    assert row.locator("option").evaluate_all(roles) == ["admin", "user", "user-jobs"]
+    dialogs()
+    row.select_option("user")
+
+    def role_of_dana() -> str:
+        with stack.person(stack.admin) as http:
+            return next(u["role"] for u in http.get("/admin/users").json()["users"]
+                        if u["username"] == "dana")
+
+    prompt = page.locator("#stepup")
+    for _ in range(150):
+        if role_of_dana() == "user":
+            break
+        if prompt.is_visible():
+            page.locator("#stepup-password").fill(stack.admin.password)
+            page.locator("#stepup-ok").click()
+            prompt.wait_for(state="hidden", timeout=SIGN_IN_MS)
+        page.wait_for_timeout(100)
+    assert role_of_dana() == "user"
+    assert dialogs.seen == [("confirm", "Give dana the user role?\n\nTheir sessions and keys lose "
+                                        "jobs, the long-form engines and voice cloning at once.")]
+    expect(page.get_by_label("Role of dana")).to_have_value("user")
 
 
 def test_the_password_is_asked_again_before_a_user_is_created(new_page, goto, stack, browser_log):

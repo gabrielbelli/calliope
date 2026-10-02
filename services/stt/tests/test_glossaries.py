@@ -732,7 +732,7 @@ def test_a_json_body_without_text_is_refused_by_name(
 #
 # Every test above signs as an admin, who holds the `:all` scopes and so works
 # in the system namespace, which is the single-tenant deployment those tests
-# were written against. These sign as the household: two speech users, the
+# were written against. These sign as the household: two user-jobs users, the
 # Home Assistant key and the satellite hub.
 
 ALICE = "u_bbbbbbbbbbbbbbbb"
@@ -740,7 +740,7 @@ BOB = "u_cccccccccccccccc"
 ADMIN = FakeGateway.USER
 
 
-def as_user(gateway: FakeGateway, sub: str, role: str = "speech") -> dict[str, str]:
+def as_user(gateway: FakeGateway, sub: str, role: str = "user-jobs") -> dict[str, str]:
     """A signed-in user of `role`, as the gateway forwards their session."""
     return gateway.headers(AUDIENCE, sub=sub, scopes=session_scopes(role))
 
@@ -895,7 +895,7 @@ def test_home_assistant_is_writable_only_with_glossaries_ha_or_write_all(
     """
     text = "made a comet = made a commit\n"
     for name in ("home-assistant", "Home-Assistant", "HOME-ASSISTANT "):
-        for headers in (as_user(gateway, ALICE), as_key(gateway, "speech")):
+        for headers in (as_user(gateway, ALICE), as_key(gateway, "user-jobs")):
             refused = writable.put(f"/glossaries/{name}", headers=headers,
                                    content=text)
             assert refused.status_code == 403, (name, refused.text)
@@ -936,7 +936,7 @@ def test_the_home_assistant_key_transcribes_with_its_glossary(
     """M3: without `glossaries:ha` resolving the name, HA's key got a 400 and
     the integration fell back to transcribing with no glossary at all.
 
-    A speech user naming it gets the same "unknown profile" as a typo, listing
+    A user-jobs user naming it gets the same "unknown profile" as a typo, listing
     only their own names and the built-ins.
     """
     writable.put("/glossaries/home-assistant", content="made a comet = made a commit\n")

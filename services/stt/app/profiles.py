@@ -67,7 +67,7 @@ role (M1), so an admin's narrowed key sees what any user's would.
 and only a caller holding `glossaries:ha` or a glossaries `:all` scope can
 name it, a service included: being a service is not a scope. The Home
 Assistant integration transcribes with it, and its key holds `glossaries:ha`
-without being an admin; a speech user never sees it.
+without being an admin; a `user` or `user-jobs` account never sees it.
 
 Compiled rules are cached by (owner, name), so two users' `mine` are compiled
 separately and one is never served to the other. A request selects at most

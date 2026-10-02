@@ -33,11 +33,11 @@ async def test_a_key_is_shown_once_and_stored_only_as_a_hash(monkeypatch):
     from app import tokens
 
     async with gateway(monkeypatch, authenticate=False) as (client, main):
-        make_user("sam", role="speech")
+        make_user("sam", role="user-jobs")
         await sign_in(client, "sam")
         client.headers.update(SAME_ORIGIN)
         created = await client.post("/auth/keys", json={"name": "laptop",
-                                                        "preset": "speech"})
+                                                        "preset": "user-jobs"})
         listed = await client.get("/auth/keys")
         row = main.runtime.get().db.one("SELECT * FROM api_keys")
 
@@ -110,7 +110,7 @@ async def test_a_key_can_do_only_what_its_owner_can_do_now(monkeypatch):
         owner = make_user("ana")
         key = make_key(owner)
         before = await client.get("/satellites", headers=bearer(key))
-        users.update(rt.db, actor_id=None, user_id=owner["id"], role="speech")
+        users.update(rt.db, actor_id=None, user_id=owner["id"], role="user-jobs")
         demoted = await client.get("/satellites", headers=bearer(key))
         still = await client.get("/v1/models", headers=bearer(key))
         users.update(rt.db, actor_id=None, user_id=owner["id"], disabled=True)
@@ -168,9 +168,10 @@ async def test_no_session_only_scope_can_be_granted_to_a_key(monkeypatch, scope)
     assert scope in response.json()["error"]["message"]
 
 
-async def test_a_speech_user_cannot_give_a_key_the_power_to_make_keys(monkeypatch):
+@pytest.mark.parametrize("role", ["user", "user-jobs"])
+async def test_a_person_cannot_give_a_key_the_power_to_make_keys(monkeypatch, role):
     async with gateway(monkeypatch, authenticate=False) as (client, _):
-        make_user("sam", role="speech")
+        make_user("sam", role=role)
         await sign_in(client, "sam")
         client.headers.update(SAME_ORIGIN)
         response = await client.post("/auth/keys", json={
@@ -276,13 +277,68 @@ async def test_the_home_assistant_preset_may_live_a_year_but_not_forever_and_a_m
 
 async def test_a_preset_outside_the_role_is_refused(monkeypatch):
     async with gateway(monkeypatch, authenticate=False) as (client, _):
-        make_user("sam", role="speech")
+        make_user("sam", role="user-jobs")
         await sign_in(client, "sam")
         client.headers.update(SAME_ORIGIN)
         response = await client.post("/auth/keys", json={"name": "x", "preset": "monitor"})
 
     assert response.status_code == 400
     assert response.json()["error"]["param"] == "preset"
+
+
+async def person_page(client, role: str) -> None:
+    make_user("sam", role=role)
+    await sign_in(client, "sam")
+    client.headers.update(SAME_ORIGIN)
+
+
+@pytest.mark.parametrize("role,presets", [
+    ("user", ["user", "transcribe-only"]),
+    ("user-jobs", ["user", "user-jobs", "transcribe-only", "speak-only", "read-only"])])
+async def test_the_account_is_told_the_presets_its_role_may_use(monkeypatch, role, presets):
+    async with gateway(monkeypatch, authenticate=False) as (client, _):
+        await person_page(client, role)
+        me = (await client.get("/auth/me")).json()
+
+    assert me["role"] == role
+    assert me["presets"] == presets
+    assert set(me["scopes"]) == scope_rules.session_scopes(role)
+
+
+@pytest.mark.parametrize("role", ["user", "user-jobs"])
+async def test_each_role_can_make_a_key_from_its_own_preset(monkeypatch, role):
+    async with gateway(monkeypatch, authenticate=False) as (client, main):
+        await person_page(client, role)
+        created = await client.post("/auth/keys", json={"name": "x", "preset": role})
+        row = main.runtime.get().db.one("SELECT preset, scopes FROM api_keys")
+
+    assert created.status_code == 201, created.text
+    assert row["preset"] == role
+    assert set(json.loads(row["scopes"])) == scope_rules.PRESETS[role].scopes
+
+
+@pytest.mark.parametrize("preset", ["user-jobs", "speak-only", "read-only", "speech"])
+async def test_a_user_cannot_make_a_key_from_a_preset_that_holds_jobs(monkeypatch, preset):
+    async with gateway(monkeypatch, authenticate=False) as (client, main):
+        await person_page(client, "user")
+        response = await client.post("/auth/keys", json={"name": "x", "preset": preset})
+        made = main.runtime.get().db.one("SELECT COUNT(*) AS n FROM api_keys")["n"]
+
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "preset"
+    assert made == 0
+
+
+@pytest.mark.parametrize("scope", sorted(scope_rules.JOBS_ONLY))
+async def test_a_user_cannot_tick_a_scope_that_runs_or_reads_a_job(monkeypatch, scope):
+    async with gateway(monkeypatch, authenticate=False) as (client, _):
+        await person_page(client, "user")
+        response = await client.post("/auth/keys", json={
+            "name": "x", "scopes": ["speech:speak", scope]})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "scope_not_grantable"
+    assert scope in response.json()["error"]["message"]
 
 
 async def test_an_unrecognised_scope_is_refused_and_never_repeated(monkeypatch):
@@ -300,7 +356,7 @@ async def test_the_long_lane_needs_its_own_scope(monkeypatch):
     /v1/audio/speech with a long-form model needs speech:long (§1.5)."""
     long = MockBackend("tts-long")
     async with gateway(monkeypatch, long=long, authenticate=False) as (client, _):
-        key = make_key(make_user("sam", role="speech"),
+        key = make_key(make_user("sam", role="user-jobs"),
                        scopes={"speech:speak", "models:read"})
         fast = await client.post("/v1/audio/speech", headers=bearer(key),
                                  json={"model": "kokoro", "input": "Hi."})
@@ -309,5 +365,22 @@ async def test_the_long_lane_needs_its_own_scope(monkeypatch):
 
     assert fast.status_code == 200
     assert slow.status_code == 403
+    assert slow.headers["www-authenticate"].endswith('scope="speech:long"')
+    assert not long.seen
+
+
+async def test_a_user_speaks_on_the_fast_lane_and_is_refused_the_long_one(monkeypatch):
+    """The user role's own session, as the Speak tab sends it: Kokoro is
+    answered, a long-form model never reaches tts-long."""
+    long = MockBackend("tts-long")
+    async with gateway(monkeypatch, long=long, authenticate=False) as (client, _):
+        await person_page(client, "user")
+        fast = await client.post("/v1/audio/speech", json={"model": "kokoro", "input": "Hi."})
+        speak = await client.post("/speak", json={"voice": "bm_george", "text": "Hi."})
+        slow = await client.post("/v1/audio/speech", json={"model": "chatterbox", "input": "Hi."})
+        queued = await client.post("/jobs", json={"voice": "default", "text": "Hi."})
+
+    assert fast.status_code == speak.status_code == 200
+    assert slow.status_code == queued.status_code == 403
     assert slow.headers["www-authenticate"].endswith('scope="speech:long"')
     assert not long.seen

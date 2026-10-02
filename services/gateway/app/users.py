@@ -1,4 +1,4 @@
-"""People: the users table, its two roles, and the rules that prevent lock-out.
+"""People: the users table, its three roles, and the rules that prevent lock-out.
 
 **The ID is stable and is never the username** (§2.1). Jobs, glossaries and
 clips are owned by `u_…`, so renaming nothing ever moves data, and a deleted
@@ -19,11 +19,17 @@ import re
 import sqlite3
 import unicodedata
 
+from voice_common import scopes as scope_rules
+
 from . import db as dbmod
 from .db import Database, iso
 from .tokens import identifier
 
-ROLES = ("admin", "speech")
+# The roles a person can have, from the one copy every service reads, in the
+# order Admin › Users offers them. The CHECK in migration 0002 names the same
+# three, so a fourth needs a migration as well as a line in scopes.py.
+ROLES = tuple(scope_rules.ROLES)
+ROLES_SAID = ", ".join(ROLES[:-1]) + " or " + ROLES[-1]
 USERNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_DISPLAY_NAME = 128
 
@@ -83,7 +89,7 @@ def create(database: Database, *, username: str, role: str, password_hash: str |
         raise Refused("invalid_username", "A username is 1 to 64 letters, digits, "
                                           "dots, dashes or underscores.")
     if role not in ROLES:
-        raise Refused("invalid_role", "The role is admin or speech.")
+        raise Refused("invalid_role", f"The role is {ROLES_SAID}.")
     stamp = iso(dbmod.now())
     user_id = identifier("u_", 16)
     try:
@@ -131,7 +137,7 @@ def update(database: Database, *, actor_id: str | None, user_id: str,
         if row is None or row["deleted_at"] is not None:
             raise LookupError(user_id)
         if role is not None and role not in ROLES:
-            raise Refused("invalid_role", "The role is admin or speech.")
+            raise Refused("invalid_role", f"The role is {ROLES_SAID}.")
         demoting = role is not None and row["role"] == "admin" and role != "admin"
         disabling = disabled is True and row["disabled_at"] is None
         if demoting and actor_id == user_id:

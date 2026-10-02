@@ -59,8 +59,9 @@ The gateway is the only process that checks a credential
 ([ADR 0022](adr/0022-everything-behind-a-login.md)). People sign in at
 `/login` and get a session cookie; clients use API keys a person creates, each
 with its own scopes; services use keys the gateway writes onto their own
-volumes, accepted only on `:8081`. Two roles (`admin`, `speech`) and the key
-presets are code constants in `voice_common.scopes`. The gateway finds each
+volumes, accepted only on `:8081`. Three roles (`admin`, `user`, and
+`user-jobs`, which is `user` with jobs and the GPU lane) and the key presets
+are code constants in `voice_common.scopes`. The gateway finds each
 route's scope with the router's own match, refuses or forwards, and signs
 what it forwards with Ed25519. The services verify that assertion with the
 public key alone, decide nothing about access, and keep each person's data
@@ -955,7 +956,7 @@ is locked, so read `status` and not the status code. How much it says depends
 on who asks:
 
 - **Anyone:** `{"status": "ok"}` or `"degraded"`, and nothing else.
-- **`health:read`**, which the speech role and most presets hold: per backend,
+- **`health:read`**, which every role and most presets hold: per backend,
   whether it was reachable and the fields the page draws from. From `stt`,
   the loaded recogniser and engines, whether it accepts a vocabulary,
   translates or streams, the system and built-in glossary names and VAD

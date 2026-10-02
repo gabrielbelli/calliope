@@ -2,7 +2,7 @@
 
 Two halves. The first reads ui.html against the code it restates -- the
 gateway's tab table and voice_common's scopes and presets -- so neither side
-can move alone: a speech account cannot read /admin/roles, so the New key form
+can move alone: only an admin can read /admin/roles, so the New key form
 carries its own copy of what a key may hold. The second runs the page's
 session layer (the source between "the session" and "state" markers) in Node
 with a fake fetch and a fake dialog, and asks what each refusal does. Without
@@ -85,6 +85,28 @@ def test_the_key_presets_are_the_gateways_presets():
     assert 'Object.keys(KEY_SCOPES).filter(s => !SESSION_ONLY_SCOPES.includes(s))' in found.group(1)
     page["admin"] = (set(scopes.SCOPES) - scopes.SERVICE_ONLY) - scopes.SESSION_ONLY
     assert page == {name: set(preset.scopes) for name, preset in scopes.PRESETS.items()}
+
+
+def test_the_roles_offered_are_the_gateways_roles_in_its_order():
+    """Admin › Users offers admin, user and user-jobs, both when making a
+    person and on each row; `speech` is gone (gateway migration 0002)."""
+    assert page_list("ROLE_NAMES") == list(scopes.ROLES) == ["admin", "user", "user-jobs"]
+    picker = re.search(r'<select id="user-role">(.*?)</select>', HTML, re.S).group(1)
+    assert re.findall(r'<option value="([^"]+)"', picker) == list(scopes.ROLES)
+    # A new person gets the role that holds least unless the admin says otherwise.
+    assert re.findall(r'<option value="([^"]+)" selected>', picker) == ["user"]
+    assert "ROLE_NAMES.map(name => new Option(name, name))" in page_function("usersDraw")
+    assert '"speech"' not in page_function("userRole")
+
+
+def test_what_the_page_asks_before_drawing_a_job_is_what_the_user_role_lacks():
+    """The long-form engines, cloning and everything after a job are drawn
+    only for a session holding these, and the user role holds none of them."""
+    gates = set(re.findall(r'holds\("([a-z:]+)"\)',
+                           page_function("mayQueue") + page_function("mayClone")))
+    assert gates == {"speech:long", "jobs:read:own", "voices:write:own"}
+    assert gates <= scopes.JOBS_ONLY <= scopes.ROLES["user-jobs"]
+    assert not scopes.session_scopes("user") & scopes.JOBS_ONLY
 
 
 def test_a_scope_that_caps_a_key_takes_the_year_and_never_off_the_form():
@@ -425,7 +447,7 @@ def test_a_gateway_that_does_not_answer_at_start_covers_the_page_and_is_asked_ag
       hurry = true;
       answer("/auth/me", 502, null);
       answer("/auth/me", 500, { error: { code: "internal", message: "Something broke." } });
-      answer("/auth/me", 200, { user: { id: "u_aaaaaaaaaaaaaaaa", username: "ana" }, role: "speech",
+      answer("/auth/me", 200, { user: { id: "u_aaaaaaaaaaaaaaaa", username: "ana" }, role: "user",
                                 scopes: ["speech:speak"], must_change: false });
       const covers = [];
       const watch = global.setInterval(() => covers.push([$("lockout").hidden, $("lockout-title").textContent,

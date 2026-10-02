@@ -20,7 +20,7 @@ a shared machine would be a test suite people learn to avoid running. The long
 path is exercised read-only, through GET /jobs.
 
     GATEWAY_LIVE_URL=https://calliope.example   the deployed gateway (unset: skipped)
-    GATEWAY_LIVE_KEY=calliope_…                 a key from the `speech` preset
+    GATEWAY_LIVE_KEY=calliope_…                 a key from the `user-jobs` preset
     GATEWAY_LIVE=0                              skip even when it is reachable
 """
 

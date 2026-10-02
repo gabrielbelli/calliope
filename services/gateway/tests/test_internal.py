@@ -113,11 +113,13 @@ async def _spend(token: str, *, key: str | None = None) -> httpx.Response:
                                             DELEGATION_HEADER: token})
 
 
-async def test_a_delegation_works_twice_and_fails_the_third_time(monkeypatch):
-    """One retry, never a replay (D64)."""
+@pytest.mark.parametrize("role", ["user", "user-jobs"])
+async def test_a_delegation_works_twice_and_fails_the_third_time(monkeypatch, role):
+    """One retry, never a replay (D64). A link transcription is fast
+    Transcribe, so the user role has it as well as user-jobs."""
     ui, stt = MockBackend("voice-ui"), MockBackend("stt-stack")
     async with gateway(monkeypatch, ui=ui, stt=stt, authenticate=False) as (client, main):
-        user = make_user("ana", role="speech")
+        user = make_user("ana", role=role)
         await sign_in(client, "ana")
         token = await _fetch_token(client, ui)
         uses = [await _spend(token) for _ in range(3)]
@@ -133,7 +135,7 @@ async def test_a_delegation_works_twice_and_fails_the_third_time(monkeypatch):
 async def test_ui_fetch_carries_the_delegation_and_no_inbound_calliope_header(monkeypatch):
     ui = MockBackend("voice-ui")
     async with gateway(monkeypatch, ui=ui, authenticate=False) as (client, _):
-        make_user("ana", role="speech")
+        make_user("ana", role="user-jobs")
         await sign_in(client, "ana")
         await _fetch_token(client, ui, **{"x-calliope-delegation": "forged"})
 
@@ -149,7 +151,7 @@ async def test_a_delegation_ends_when_the_session_or_user_does(monkeypatch, revo
 
     ui = MockBackend("voice-ui")
     async with gateway(monkeypatch, ui=ui, authenticate=False) as (client, _):
-        user = make_user("ana", role="speech")
+        user = make_user("ana", role="user-jobs")
         make_user("root")
         await sign_in(client, "ana")
         token = await _fetch_token(client, ui)
@@ -172,7 +174,7 @@ async def test_a_delegation_through_a_key_ends_when_the_key_is_revoked(monkeypat
 
     ui = MockBackend("voice-ui")
     async with gateway(monkeypatch, ui=ui, authenticate=False) as (client, _):
-        owner = make_user("ana", role="speech")
+        owner = make_user("ana", role="user-jobs")
         key = make_key(owner, scopes={"ingest:links", "speech:transcribe"})
         token = await _fetch_token(client, ui, **bearer(key))
         first = await _spend(token)
@@ -203,7 +205,7 @@ async def test_logout_or_revoking_the_key_ends_a_delegated_transcription_in_flig
     session or key it came from, so ending that credential ends it (D54)."""
     ui, stt = MockBackend("voice-ui"), SlowTranscription()
     async with gateway(monkeypatch, ui=ui, stt=stt, authenticate=False) as (client, main):
-        owner = make_user("ana", role="speech")
+        owner = make_user("ana", role="user-jobs")
         await sign_in(client, "ana")
         key = make_key(owner, scopes={"ingest:links", "speech:transcribe"})
         token = await _fetch_token(client, ui, **(bearer(key) if revoke == "key_revoked"
@@ -241,7 +243,7 @@ async def test_the_delegation_header_is_honoured_on_one_row_from_one_scope(
     identity (recheck L3)."""
     ui = MockBackend("voice-ui")
     async with gateway(monkeypatch, ui=ui, authenticate=False) as (client, _):
-        make_user("ana", role="speech")
+        make_user("ana", role="user-jobs")
         await sign_in(client, "ana")
         token = await _fetch_token(client, ui)
         async with internal_client() as internal:

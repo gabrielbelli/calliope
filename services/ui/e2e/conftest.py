@@ -39,7 +39,7 @@ SIGNED IN ONCE, THROUGH THE PAGE. The session's first act is the deployment's
 first sign-in: admin, with the CALLIOPE_ADMIN_PASSWORD the stack made up, on
 /login, then a password of the session's choosing on the forced change (D21).
 What that sign-in showed and sent is kept for test_auth.py, because it can
-happen only once per gateway. The speech user is created by the admin and
+happen only once per gateway. The user-jobs user is created by the admin and
 signs in for the first time the same way. Every test's page then starts from
 the cookie of that sign-in and nothing else, so a test is signed in without
 spending a sign-in: the gateway allows twenty attempts per address per ten
@@ -143,9 +143,13 @@ class Monitor(threading.Thread):
 # ---- the session ---------------------------------------------------------------------
 
 
-# The people a test can be, besides the admin: the speech user every role
-# test reads, and a second one for what one person must not see of another's.
-SPEECH, OTHER = "sam", "robin"
+# The people a test can be, besides the admin: the user-jobs user most tests
+# read, a user (the role without jobs, signed in the first time a test asks
+# for them), and a second user-jobs user for what one person must not see of
+# another's.
+USER_JOBS, USER, OTHER = "sam", "una", "robin"
+# Each one's role. Anybody else a test names is made a user-jobs user.
+ROLE_OF = {USER_JOBS: "user-jobs", USER: "user", OTHER: "user-jobs"}
 # How long a step that checks or sets a password may take, in ms. Argon2id is
 # slow on purpose (64 MiB, three passes, D17) and the gateway runs two at a
 # time, so on a machine busy with other work one sign-in has taken over ten
@@ -179,7 +183,7 @@ class E2ESession:
         self.monitor.start()
         self.first_sign_in(self.stack.admin, record=self.bootstrap)
         self.stack.provision()
-        self.person(SPEECH)
+        self.person(USER_JOBS)
 
     # -- people --
 
@@ -272,7 +276,7 @@ class E2ESession:
         in through the page the first time they are asked for."""
         known = self.stack.people.get(username)
         if known is None or known.state is None:
-            known = known or self.stack.create_person(username)
+            known = known or self.stack.create_person(username, ROLE_OF.get(username, "user-jobs"))
             self.first_sign_in(known)
         return known
 
@@ -484,8 +488,9 @@ class Pages:
     def new(self, viewport: str | tuple[int, int] = "desktop", *, scheme: str = "light",
             mobile: bool | None = None, reduced_motion: str = "no-preference",
             notifications: str = "denied", user: str | None = "admin", **options: Any):
-        """A page signed in as `user` (the admin by default, SPEECH, OTHER, or
-        any username, created on first use), or as nobody with user=None."""
+        """A page signed in as `user` (the admin by default, USER_JOBS, USER,
+        OTHER, or any username, created on first use), or as nobody with
+        user=None."""
         context = self.session.new_context(
             viewport, scheme=scheme, mobile=mobile, reduced_motion=reduced_motion,
             notifications=notifications, state=self.session.state(user), **options)
@@ -566,7 +571,7 @@ def browser_log() -> BrowserLog:
 def new_page(e2e, browser_log):
     """new_page(viewport="desktop"|"mobile"|(w, h), scheme="light"|"dark",
     mobile=None, reduced_motion="no-preference", notifications="denied"|"granted",
-    user="admin"|SPEECH|OTHER|None) -> a Page in a new context, signed in as
+    user="admin"|USER_JOBS|USER|OTHER|None) -> a Page in a new context, signed in as
     `user`, or as nobody with None."""
     pages = Pages(e2e, browser_log)
     yield pages.new
@@ -588,15 +593,23 @@ def admin_page(page):
 
 
 @pytest.fixture
-def speech_page(new_page):
-    """A desktop page signed in as SPEECH, a person with the speech role."""
-    return new_page(user=SPEECH)
+def user_jobs_page(new_page):
+    """A desktop page signed in as USER_JOBS, a person with the user-jobs role."""
+    return new_page(user=USER_JOBS)
+
+
+@pytest.fixture
+def user_page(new_page):
+    """A desktop page signed in as USER, a person with the user role: fast
+    Transcribe and Speak, and no jobs."""
+    return new_page(user=USER)
 
 
 @pytest.fixture
 def people(e2e) -> Callable[[str], st.Account]:
     """people(username) -> the Account, created and signed in on first use:
-    the admin as "admin", the speech users as SPEECH and OTHER."""
+    the admin as "admin", the user-jobs users as USER_JOBS and OTHER, and the
+    user as USER."""
     return e2e.person
 
 

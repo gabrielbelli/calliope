@@ -468,10 +468,15 @@ this section is how it behaves.
 
 ### People and sessions
 
-- **Two roles, `admin` and `speech`.** A speech user can transcribe, speak,
-  run long jobs, ingest links, and read and change their own jobs,
-  vocabulary profiles, voice clips and keys. An admin can do everything a
-  person can do, including the Satellites tab and Admin.
+- **Three roles, `admin`, `user` and `user-jobs`.** A `user` can transcribe
+  and speak on the fast lanes, ingest links, and read and change their own
+  vocabulary profiles and keys. They cannot queue a job, use a long-form
+  engine, save a voice clip or read a job, because each of those uses the
+  GPU. A `user-jobs` user can do all of that as well: run long jobs and
+  read and delete their own jobs and voice clips. An admin can do everything
+  a person can do, including the Satellites tab and Admin. `user-jobs` is
+  the role that was called `speech`, with the same scopes; migration 0002
+  renamed every `speech` account and key preset.
 - **A session is an opaque cookie**, `__Host-calliope_session`
   (`Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`), of which only the SHA-256
   is stored. It lasts a year, or 30 days unused. Signing out, a password
@@ -499,15 +504,18 @@ worked out on every request: its scopes, cut to its owner's current role. A
 demotion narrows every key at once. Disabling an account revokes its sessions
 and keys, so enabling it again does not bring back a stolen cookie or key.
 
-The page offers presets, which only fill in the scope boxes:
+The page offers the presets the person's role can use, which only fill in
+the scope boxes. A `user` is offered `user` and `transcribe-only`, because
+every other preset holds a job scope:
 
 | Preset | Scopes | For |
 |---|---|---|
 | `admin` | everything a key may hold; at most 90 days | an admin's own scripts |
-| `speech` | the speech role, without link ingestion and keys | a client of the speech API |
+| `user` | the `user` role, without keys | a client of the fast lanes |
+| `user-jobs` | the `user-jobs` role, without keys | a client of the speech API, long jobs included |
 | `transcribe-only` | `models:read`, `speech:transcribe` | a dictation client |
 | `speak-only` | `models:read`, `speech:speak`, `speech:long`, `jobs:read:own` | the macOS player; a long request answers `202` and is polled |
-| `read-only` | `models:read`, `health:read`, `jobs:read:own`, `glossaries:read:own`, `voices:read` | anyone |
+| `read-only` | `models:read`, `health:read`, `jobs:read:own`, `glossaries:read:own`, `voices:read` | anyone whose role has jobs |
 | `monitor` | `models:read`, `health:read`, `health:detail`, `jobs:read:all`, `glossaries:read:all`, `satellites:read`, `audit:read` | dashboards and alerts (admins) |
 | `home-assistant` | `models:read`, `health:read`, `speech:transcribe`, `speech:speak`, `glossaries:ha`, `satellites:read`, `satellites:control`, `satellites:update` | the Home Assistant integration (admins); may last a year, never longer |
 | `firmware-release` | `satellites:read`, `satellites:firmware`, `satellites:update` | `upload_via_hub.py` and release scripts (admins) |
@@ -950,6 +958,14 @@ variable, mount the file and restart, and every row is re-encrypted under it.
 too**: a backup of `gateway-data` taken earlier was encrypted under the old
 key.
 
+**The database upgrades itself when the gateway starts.** Each
+`app/migrations/NNNN_*.sql` above the file's `user_version` runs once, in one
+transaction. A migration that fails, or that leaves a session or key whose
+user is gone, is rolled back whole and the gateway does not start. `0002`
+renamed the `speech` role and key preset to `user-jobs`. There is no way
+back: an older image does not know `user-jobs`, and its holders would sign in
+to nothing. Keep the `gateway-data` backup from before an upgrade.
+
 ### Upgrading to sign-in
 
 For a stack that ran before sign-in. Nothing here locks the satellites out:
@@ -1016,7 +1032,8 @@ each has a key, so do steps 5 to 7 straight away.
 
 8. Create keys for the macOS player (`speak-only`), for firmware uploads
    (`firmware-release`) and for any OpenAI or curl client. Create the
-   household's speech users.
+   household's people: `user-jobs` for anyone who runs long jobs or clones
+   voices, and `user` for everyone else.
 
 9. Remove `CALLIOPE_ADMIN_PASSWORD`, and every variable the Secrets banners
    name (`SATELLITES_HA_TOKEN`, `SATELLITES_*_API_KEY`, the password in
@@ -1035,7 +1052,7 @@ curl -s -o /dev/null -w '%{http_code}\n' https://<host>/satellites/x/listen   # 
 - The satellites show online.
 - A Home Assistant Assist command is transcribed, with the `home-assistant`
   vocabulary applied.
-- A speech user's Jobs tab holds none of the household's satellite speech.
+- A `user-jobs` user's Jobs tab holds none of the household's satellite speech.
 - `GET /satellites` with the Home Assistant key has no `buttons` field.
 
 **If something goes wrong**
@@ -1101,10 +1118,12 @@ The suites for sign-in are named for what they cover: `test_auth.py`
 listeners, and each is checked against a credential with and without its
 scope), `test_internal.py`, `test_clientaddr.py` (forwarded addresses and
 PROXY protocol, over real sockets), `test_locked.py`, `test_secrets.py`,
-`test_signer.py`, `test_streams.py` and `test_audit.py`.
+`test_signer.py`, `test_streams.py`, `test_audit.py` and `test_migrations.py`
+(each migration from the database the one before it left, and the runner's
+rollback).
 
 `tests/test_live.py` runs against a deployed gateway, named by
-`GATEWAY_LIVE_URL` with a `speech` key in `GATEWAY_LIVE_KEY`, over real
+`GATEWAY_LIVE_URL` with a `user-jobs` key in `GATEWAY_LIVE_KEY`, over real
 sockets, and **skips itself** when either is unset or the gateway does not
 answer, which from a CI runner it should not. It queues no Chatterbox work: tts-long runs one job at a time on a 6.5 GB
 model, so the long path is exercised read-only through `GET /jobs`.

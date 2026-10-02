@@ -717,8 +717,8 @@ Every custom profile has an owner, and a request sees only some of them.
   spelling a request uses, and is named only with `glossaries:ha` (the
   `home-assistant` key preset and the satellite hub hold it) or a glossaries
   `:all` scope. Being a service is not enough. The Home Assistant integration
-  and the hub transcribe with `glossary=home-assistant`; a speech user never
-  sees it.
+  and the hub transcribe with `glossary=home-assistant`; a `user` or
+  `user-jobs` account never sees it.
 - Existing profiles stay where they are and become the system's, so nothing
   moves on upgrade.
 - Compiled rules are cached by owner and name, so two users' `mine` never mix.

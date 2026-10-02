@@ -706,7 +706,7 @@ class Stack:
         self._seed_voices(self.admin.id)
         self._connect_satellites()
 
-    def create_person(self, username: str, role: str = "speech") -> Account:
+    def create_person(self, username: str, role: str = "user-jobs") -> Account:
         """A person an admin created, with the temporary password they were
         shown (D25). The first sign-in is the caller's, through the page."""
         with self.person(self.admin) as http:

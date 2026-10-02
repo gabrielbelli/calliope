@@ -9,8 +9,8 @@ mapping are the real ones -- only the wire is fake.
 WHO IS ASKING comes from voice_common.conformance's FakeGateway, which writes
 identity.pub and service.key where this service reads them and signs
 assertions with the matching key, exactly as the real gateway does. Every
-request a test sends carries one; the default is ALICE, a speech user, so a
-test that needs more than a speech user says so.
+request a test sends carries one; the default is ALICE, a user-jobs user, so a
+test that needs more than a user-jobs user says so.
 
 The app is reloaded per test because its configuration is read at import,
 exactly as it is in the container, where the process is the unit of
@@ -43,7 +43,8 @@ INTERNAL_HOST = "voice-gateway"
 
 ALICE = "u_aaaaaaaaaaaaaaaa"
 BOB = "u_bbbbbbbbbbbbbbbb"
-SPEECH = session_scopes("speech")
+USER_JOBS = session_scopes("user-jobs")
+USER = session_scopes("user")
 ADMIN = session_scopes("admin")
 
 
@@ -332,7 +333,7 @@ def sign(calliope_gateway) -> Callable[..., dict[str, str]]:
     one only to /ui/fetch and this service reads it only there; carrying it
     everywhere proves the second half.
     """
-    def headers(sub: str = ALICE, scopes: Iterable[str] = SPEECH,
+    def headers(sub: str = ALICE, scopes: Iterable[str] = USER_JOBS,
                 **assertion: object) -> dict[str, str]:
         return {ASSERTION_HEADER: calliope_gateway.assertion(
                     "ui", sub=sub, scopes=scopes, **assertion),

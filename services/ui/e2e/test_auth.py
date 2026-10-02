@@ -3,7 +3,7 @@
 The admin's first sign-in happens once per gateway, so the session makes it
 before any test runs (conftest.E2ESession.first_sign_in) and keeps what the
 browser was shown and sent; the first test here reads that record. Every other
-test that signs in does so in a page of its own, as SPEECH, and never touches
+test that signs in does so in a page of its own, as USER_JOBS, and never touches
 the session the rest of the suite shares: signing out ends only the session it
 is pressed in.
 
@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 import stack as st
-from conftest import SIGN_IN_MS, SPEECH
+from conftest import SIGN_IN_MS, USER_JOBS
 from playwright.sync_api import expect
 
 INCORRECT = "Incorrect username or password."
@@ -94,11 +94,11 @@ def test_a_wrong_password_is_told_in_the_one_sentence_every_failure_gets(new_pag
     which accounts there are (D19); and no session either way."""
     page = new_page(user=None)
     goto("/login", target=page)
-    person = people(SPEECH)
+    person = people(USER_JOBS)
     answers = []
     for username in (person.username, "nobody"):
         with page.expect_response(f"{stack.url}/auth/login", timeout=SIGN_IN_MS) as answered:
-            sign_in(page, st.Account(username, "speech", "not " + person.password))
+            sign_in(page, st.Account(username, "user-jobs", "not " + person.password))
         answers.append((answered.value.status, answered.value.json()))
         expect(page.locator("#signin-error")).to_have_text(INCORRECT)
         expect(page.locator("#password")).to_have_value("")
@@ -119,7 +119,7 @@ def test_signing_out_ends_that_session_and_no_other(new_page, goto, stack, peopl
     """Sign out revokes the session it is pressed in: its cookie is gone,
     and the value it held authenticates nothing afterwards (D11). The
     person's other session, which the rest of the suite is using, stays."""
-    person = people(SPEECH)
+    person = people(USER_JOBS)
     page = new_page(user=None)
     goto("/ui/jobs", target=page)
     sign_in(page, person)
@@ -146,7 +146,7 @@ def test_a_session_that_ends_while_the_page_is_open_signs_in_again_and_comes_bac
     device, which signs out one session -- the page finds out at its next
     request, sends the reader to sign in, and after it lands where they were
     (§4.3, D55)."""
-    person = people(SPEECH)
+    person = people(USER_JOBS)
     page = new_page(user=None)
     goto("/ui/jobs", target=page)
     sign_in(page, person)
@@ -174,7 +174,7 @@ def test_another_sites_form_cannot_sign_the_browser_in(new_page, stack, fake, pe
     transcribe and save would be the attacker's to read (login CSRF, D14,
     D61). A sibling on the same host name is a different origin of the same
     site, which is why same-site earns no exception."""
-    attacker = people(SPEECH)
+    attacker = people(USER_JOBS)
     page = new_page(user=None)
     with page.expect_response(f"{stack.url}/auth/login") as answered:
         page.goto(fake.elsewhere(f"{stack.url}/auth/login", attacker.username, attacker.password,

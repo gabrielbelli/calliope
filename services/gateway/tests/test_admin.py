@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from conftest import PASSWORD, SAME_ORIGIN, bearer, gateway, make_key, make_user, sign_in
+from conftest import (PASSWORD, SAME_ORIGIN, MockBackend, bearer, gateway, make_key, make_user,
+                      sign_in)
 
 
 async def admin_page(client):
@@ -22,7 +23,7 @@ async def test_changing_a_user_needs_a_fresh_password(monkeypatch):
         client.headers.update(SAME_ORIGIN)
         listed = await client.get("/admin/users")
         refused = await client.post("/admin/users", json={"username": "ben",
-                                                          "role": "speech"})
+                                                          "role": "user-jobs"})
 
     assert listed.status_code == 200
     assert refused.status_code == 403
@@ -33,7 +34,7 @@ async def test_a_new_user_gets_a_temporary_password_shown_once(monkeypatch):
     async with gateway(monkeypatch, authenticate=False) as (client, main):
         await admin_page(client)
         created = await client.post("/admin/users", json={"username": "ben",
-                                                          "role": "speech"})
+                                                          "role": "user-jobs"})
         listing = await client.get("/admin/users")
         import httpx
         ben = httpx.AsyncClient(transport=client._transport, base_url=str(client.base_url))
@@ -52,7 +53,7 @@ async def test_a_reset_ends_every_session_and_by_default_every_key(monkeypatch):
     import httpx
     async with gateway(monkeypatch, authenticate=False) as (client, _):
         await admin_page(client)
-        ben = make_user("ben", role="speech")
+        ben = make_user("ben", role="user-jobs")
         key = make_key(ben, scopes={"models:read"})
         browser = httpx.AsyncClient(transport=client._transport, base_url=str(client.base_url),
                                     headers=SAME_ORIGIN)
@@ -75,7 +76,7 @@ async def test_enabling_a_disabled_user_again_does_not_bring_back_their_sessions
     import httpx
     async with gateway(monkeypatch, authenticate=False) as (client, _):
         await admin_page(client)
-        ben = make_user("ben", role="speech")
+        ben = make_user("ben", role="user-jobs")
         key = make_key(ben, scopes={"models:read"})
         browser = httpx.AsyncClient(transport=client._transport, base_url=str(client.base_url),
                                     headers=SAME_ORIGIN)
@@ -95,7 +96,7 @@ async def test_enabling_a_disabled_user_again_does_not_bring_back_their_sessions
 async def test_a_reset_can_keep_the_keys(monkeypatch):
     async with gateway(monkeypatch, authenticate=False) as (client, _):
         await admin_page(client)
-        ben = make_user("ben", role="speech")
+        ben = make_user("ben", role="user-jobs")
         key = make_key(ben, scopes={"models:read"})
         await client.post(f"/admin/users/{ben['id']}/reset-password",
                           json={"revoke_keys": False})
@@ -114,7 +115,7 @@ async def test_deleting_a_user_is_soft_and_the_audit_still_names_the_actor(monke
         key = make_key(ben)
         deleted = await client.delete(f"/admin/users/{ben['id']}")
         again = await client.post("/admin/users", json={"username": "ben",
-                                                        "role": "speech"})
+                                                        "role": "user-jobs"})
         row = rt.db.one("SELECT * FROM users WHERE id = ?", (ben["id"],))
         named = rt.db.one("SELECT COUNT(*) AS n FROM audit WHERE actor_id = ?", (ben["id"],))
         key_after = await client.get("/v1/models", headers=bearer(key))
@@ -134,14 +135,14 @@ async def test_the_last_admin_cannot_be_removed_and_nobody_demotes_themselves(mo
                       "WHERE username = 'admin'")
         await admin_page(client)
         me = (await client.get("/auth/me")).json()["user"]["id"]
-        demote_self = await client.patch(f"/admin/users/{me}", json={"role": "speech"})
+        demote_self = await client.patch(f"/admin/users/{me}", json={"role": "user-jobs"})
         disable_self = await client.patch(f"/admin/users/{me}", json={"disabled": True})
         delete_self = await client.delete(f"/admin/users/{me}")
         ben = make_user("ben")
         demote_other = await client.patch(f"/admin/users/{ben['id']}",
-                                          json={"role": "speech"})
+                                          json={"role": "user-jobs"})
         demote_ben_again = await client.patch(f"/admin/users/{ben['id']}",
-                                              json={"role": "speech"})
+                                              json={"role": "user-jobs"})
 
     assert [r.status_code for r in (demote_self, disable_self, delete_self)] == [409] * 3
     assert demote_self.json()["error"]["code"] == "self"
@@ -157,7 +158,7 @@ async def test_the_last_active_admin_cannot_be_demoted_by_another(monkeypatch):
         db.execute("UPDATE users SET disabled_at = '2026-01-01T00:00:00Z'")
         last = make_user("ana")
         with pytest.raises(users.Refused) as refused:
-            users.update(db, actor_id=None, user_id=last["id"], role="speech")
+            users.update(db, actor_id=None, user_id=last["id"], role="user-jobs")
     assert refused.value.code == "last_admin"
 
 
@@ -172,13 +173,17 @@ async def test_roles_are_the_code_constants_with_session_only_scopes_marked(monk
     assert roles["presets"]["home-assistant"]["max_expiry_days"] == 365
     assert roles["presets"]["admin"]["max_expiry_days"] == 90
     assert roles["presets"]["monitor"]["roles"] == ["admin"]
-    assert "speech" in roles["presets"]["read-only"]["roles"]
+    assert list(roles["roles"]) == ["admin", "user", "user-jobs"]
+    assert roles["presets"]["read-only"]["roles"] == ["admin", "user-jobs"]
+    assert roles["presets"]["user"]["roles"] == ["admin", "user", "user-jobs"]
+    assert roles["presets"]["user-jobs"]["roles"] == ["admin", "user-jobs"]
+    assert "speech" not in roles["roles"] and "speech" not in roles["presets"]
 
 
 async def test_an_admin_sees_every_key_but_never_a_plaintext(monkeypatch):
     async with gateway(monkeypatch, authenticate=False) as (client, _):
         await admin_page(client)
-        ben = make_user("ben", role="speech")
+        ben = make_user("ben", role="user-jobs")
         plaintext = make_key(ben, scopes={"models:read"})
         listed = await client.get("/admin/keys")
         mine = await client.get(f"/admin/keys?user={ben['id']}")
@@ -193,15 +198,89 @@ async def test_an_admin_sees_every_key_but_never_a_plaintext(monkeypatch):
     assert revoked.status_code == 204 and after.status_code == 401
 
 
-async def test_a_monitor_key_reads_the_audit_and_a_speech_key_does_not(monkeypatch):
+async def test_a_monitor_key_reads_the_audit_and_a_persons_key_does_not(monkeypatch):
     async with gateway(monkeypatch, authenticate=False) as (client, _):
         monitor = make_key(make_user("ana"), scopes=scope_rules_preset("monitor"))
-        speech = make_key(make_user("sam", role="speech"), scopes={"models:read"})
+        persons = make_key(make_user("sam", role="user-jobs"), scopes={"models:read"})
         allowed = await client.get("/admin/audit", headers=bearer(monitor))
-        refused = await client.get("/admin/audit", headers=bearer(speech))
+        refused = await client.get("/admin/audit", headers=bearer(persons))
 
     assert allowed.status_code == 200 and "rows" in allowed.json()
     assert refused.status_code == 403
+
+
+# ── the three roles ───────────────────────────────────────────────────────────
+
+
+def test_the_roles_the_api_takes_are_the_roles_in_scopes_py():
+    """routes_admin spells them out for pydantic; users.py reads scopes.py."""
+    from typing import get_args
+
+    from voice_common import scopes as scope_rules
+
+    from app import routes_admin, users
+
+    assert get_args(routes_admin.Role) == users.ROLES == tuple(scope_rules.ROLES) \
+        == ("admin", "user", "user-jobs")
+
+
+@pytest.mark.parametrize("role", ["admin", "user", "user-jobs"])
+async def test_an_admin_can_make_a_person_of_each_role(monkeypatch, role):
+    async with gateway(monkeypatch, authenticate=False) as (client, _):
+        await admin_page(client)
+        created = await client.post("/admin/users", json={"username": "ben", "role": role})
+        listed = (await client.get("/admin/users")).json()["users"]
+
+    assert created.status_code == 201
+    assert created.json()["user"]["role"] == role
+    assert [u["role"] for u in listed if u["username"] == "ben"] == [role]
+
+
+@pytest.mark.parametrize("role", ["speech", "jobs", ""])
+async def test_a_role_that_is_not_one_of_the_three_is_refused(monkeypatch, role):
+    """`speech` is gone (migration 0002), and is refused like any typo."""
+    async with gateway(monkeypatch, authenticate=False) as (client, _):
+        await admin_page(client)
+        ben = make_user("ben", role="user-jobs")
+        created = await client.post("/admin/users", json={"username": "cal", "role": role})
+        changed = await client.patch(f"/admin/users/{ben['id']}", json={"role": role})
+        after = (await client.get("/admin/users")).json()["users"]
+
+    assert created.status_code == changed.status_code == 422, (created.text, changed.text)
+    assert "'admin', 'user' or 'user-jobs'" in created.text
+    assert [u["role"] for u in after if u["username"] == "ben"] == ["user-jobs"]
+    assert not [u for u in after if u["username"] == "cal"]
+
+
+async def test_the_model_layer_refuses_an_unknown_role_naming_the_three(monkeypatch):
+    from app import users
+
+    async with gateway(monkeypatch, authenticate=False) as (_, main):
+        db = main.runtime.get().db
+        with pytest.raises(users.Refused) as refused:
+            users.create(db, username="cal", role="speech", password_hash=None,
+                         must_change=False, created_by=None)
+    assert refused.value.code == "invalid_role"
+    assert refused.value.message == "The role is admin, user or user-jobs."
+
+
+async def test_moving_a_person_to_user_takes_the_jobs_off_their_keys_at_once(monkeypatch):
+    """The key is intersected with the owner's role on every request (D29)."""
+    long = MockBackend("tts-long")
+    async with gateway(monkeypatch, long=long, authenticate=False) as (client, _):
+        await admin_page(client)
+        ben = make_user("ben", role="user-jobs")
+        key = make_key(ben, scopes=scope_rules_preset("user-jobs"))
+        before = await client.get("/jobs", headers=bearer(key))
+        moved = await client.patch(f"/admin/users/{ben['id']}", json={"role": "user"})
+        after = await client.get("/jobs", headers=bearer(key))
+        models = await client.get("/v1/models", headers=bearer(key))
+
+    assert before.status_code == 200
+    assert moved.status_code == 200 and moved.json()["user"]["role"] == "user"
+    assert after.status_code == 403
+    assert after.json()["error"]["code"] == "insufficient_scope"
+    assert models.status_code == 200
 
 
 def scope_rules_preset(name: str) -> frozenset[str]:
@@ -216,7 +295,7 @@ async def test_the_cli_reset_prints_a_password_that_must_be_changed(monkeypatch,
     from app import admin
 
     async with gateway(monkeypatch, authenticate=False) as (client, main):
-        ben = make_user("ben", role="speech")
+        ben = make_user("ben", role="user-jobs")
         key = make_key(ben, scopes={"models:read"})
         admin.main(["reset-password", "ben", "--revoke-keys"])
         printed = capsys.readouterr().out

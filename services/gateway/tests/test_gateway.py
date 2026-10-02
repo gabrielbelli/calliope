@@ -977,7 +977,7 @@ async def test_the_engine_detail_the_voice_picker_reads_reaches_a_speech_user(
     async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
                        authenticate=False) as (client, main):
         from conftest import bearer, make_key, make_user
-        reader = make_key(make_user("sam", role="speech"),
+        reader = make_key(make_user("sam", role="user-jobs"),
                           scopes={"health:read", "models:read"})
         shown = (await client.get("/health", headers=bearer(reader))).json()
         operator = make_key(make_user("ana"), scopes={"health:detail"})
@@ -1001,7 +1001,7 @@ async def test_the_engine_detail_the_voice_picker_reads_reaches_a_speech_user(
     assert "brand_new_field" not in json.dumps(full)
 
 
-async def test_a_speech_user_never_sees_the_home_assistant_glossary_in_health(
+async def test_a_person_never_sees_the_home_assistant_glossary_in_health(
         monkeypatch, backends):
     """D34: only a caller stt would let use the profile is told it exists."""
     stt, tts, long = backends
@@ -1010,9 +1010,9 @@ async def test_a_speech_user_never_sees_the_home_assistant_glossary_in_health(
     async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
                        authenticate=False) as (client, main):
         from conftest import bearer, make_key, make_user
-        speech = make_key(make_user("sam", role="speech"), scopes={"health:read"})
+        persons = make_key(make_user("sam", role="user-jobs"), scopes={"health:read"})
         ha = make_key(make_user("ana"), scopes={"health:read", "glossaries:ha"})
-        hidden = (await client.get("/health", headers=bearer(speech))).json()
+        hidden = (await client.get("/health", headers=bearer(persons))).json()
         named = (await client.get("/health", headers=bearer(ha))).json()
 
     assert hidden["backends"]["stt"]["health"]["glossaries"] == ["tech"]

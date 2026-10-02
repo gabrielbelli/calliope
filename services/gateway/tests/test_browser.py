@@ -290,14 +290,22 @@ async def test_a_page_navigation_without_a_session_goes_to_login_with_next(monke
     assert api.status_code == 401
 
 
-async def test_a_tab_the_role_lacks_lands_on_ui(monkeypatch):
+@pytest.mark.parametrize("role,jobs_tab", [("user-jobs", True), ("user", False)])
+async def test_a_tab_the_role_lacks_lands_on_ui(monkeypatch, role, jobs_tab):
     async with gateway(monkeypatch, authenticate=False) as (client, _):
-        await signed_in(client, role="speech")
+        await signed_in(client, role=role)
         satellites = await client.get("/ui/satellites", headers=navigation("same-origin"))
         jobs = await client.get("/ui/jobs", headers=navigation("same-origin"))
+        job = await client.get("/ui/jobs/abc", headers=navigation("same-origin"))
+        speak = await client.get("/ui/speak", headers=navigation("same-origin"))
 
     assert satellites.status_code == 303 and satellites.headers["location"] == "/ui"
-    assert jobs.status_code == 200
+    if jobs_tab:
+        assert jobs.status_code == job.status_code == 200
+    else:
+        assert jobs.status_code == job.status_code == 303
+        assert jobs.headers["location"] == job.headers["location"] == "/ui"
+    assert speak.status_code == 200
 
 
 async def test_the_root_sends_a_person_to_the_page_or_to_login(monkeypatch):

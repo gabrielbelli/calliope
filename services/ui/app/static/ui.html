@@ -3096,7 +3096,7 @@ fieldset.sat-fs>.row+.row{margin-top:var(--s3)}
         <div><label for="user-display">Name (optional)</label>
           <input type="text" id="user-display" maxlength="128" autocomplete="off"></div>
         <div class="tight"><label for="user-role">Role</label>
-          <select id="user-role"><option value="speech" selected>speech</option><option value="admin">admin</option></select></div>
+          <select id="user-role"><option value="admin">admin</option><option value="user" selected>user</option><option value="user-jobs">user-jobs</option></select></div>
         <button class="primary small tight" type="button" id="user-create">Add the user</button>
       </div>
       <div id="userreset" class="stack" hidden></div>
@@ -3464,6 +3464,15 @@ function failure(status) {
    hiding a control is wayfinding, never the check. */
 const ME = { user: null, role: "", scopes: new Set(), presets: [] };
 function holds(scope) { return ME.scopes.has(scope); }
+/* WHAT RUNS ON THE GPU, AND WHO MAY ASK FOR IT. A voice that queues is a
+   POST /jobs (speech:long) whose audio is collected from the Jobs tab
+   (jobs:read:own), and a cloned voice is a clip saved (voices:write:own) to be
+   read on that lane and no other. The user role holds none of the three, so
+   for it the long-form engines, cloning and everything that follows a job are
+   not drawn at all: a control shown and then refused is a question the page
+   already knew the answer to. */
+function mayQueue() { return holds("speech:long") && holds("jobs:read:own"); }
+function mayClone() { return mayQueue() && holds("voices:write:own"); }
 /* WHICH TABS THIS SESSION MAY OPEN: the scope each needs, the same as the
    gateway's PAGE_TABS (§3.4). A tab whose scope is missing is not drawn, and
    the gateway answers its address with /ui either way. */
@@ -4452,9 +4461,10 @@ if (DOCK) {
 /* ---------------------------------------------------------------- boot --- */
 /* THE TABS THIS SESSION MAY OPEN, BEFORE THE FIRST PAINT. voice-ui writes the
    session's scopes on <html> from the gateway's assertion, so an admin's dock
-   is drawn with seven tabs from the first frame and a speech account's with
-   five. Drawn from the markup's default and corrected when /auth/me answered,
-   the bar grew under the reader and every icon moved. /auth/me still decides
+   is drawn with seven tabs from the first frame, a user-jobs account's with
+   five and a user account's with four. Drawn from the markup's default and
+   corrected when /auth/me answered, the bar grew under the reader and every
+   icon moved. /auth/me still decides
    (sessionShow); this only draws its answer early. */
 const FIRST_SCOPES = new Set((document.documentElement.dataset.scopes || "").split(" ")
   .filter(scope => /^[a-z]+:[a-z]+(:own|:all)?$/.test(scope)));
@@ -5253,7 +5263,9 @@ function navAtSpeak(route, ready) {
       navPickVoice(option.value);
       query.voice = option.value;
     } else {
-      note($("speak-note"), "flat", `That link names a voice this server does not have: ${v}.`);
+      note($("speak-note"), "flat", !mayQueue() && !v.startsWith("k:")
+        ? `That link names a voice that runs as a job, and this account cannot run jobs: ${v}.`
+        : `That link names a voice this server does not have: ${v}.`);
       /* Held as a run's last word is, or the picker's next redraw (estimate(),
          on every voice change) would clear it before it was read. */
       speakHeld = true;
@@ -5261,7 +5273,7 @@ function navAtSpeak(route, ready) {
     }
   }
   if (parts[0] === "clone") {
-    if (!CONFIG.cloning) parts = [];
+    if (!CONFIG.cloning || !mayClone()) parts = [];
     else {
       navPickVoice("new");
       return { route: { ...route, parts, query: {} }, place: [], target: $("clone"), focus: $("clipname") };
@@ -12898,7 +12910,9 @@ function populateLanguages() {
      and the hyphen rule files them as two. */
   const seen = new Set();
   const merged = [];
-  for (const [code, name] of [...KOKORO_LANGS, ...CHATTERBOX_LANGS]) {
+  /* Kokoro's alone for a session that may not queue: a language only the
+     long-form engines speak would filter its picker down to nothing. */
+  for (const [code, name] of [...KOKORO_LANGS, ...(mayQueue() ? CHATTERBOX_LANGS : [])]) {
     const stem = isoStem(code);
     if (seen.has(stem)) continue;
     seen.add(stem);
@@ -13086,8 +13100,10 @@ async function loadVoices() {
      all, because a failed clip listing is an empty list and must not take the
      Kokoro voices down with it, which is what the two separate catches said. */
   const asked = ++VOICES_SEQ.asked, writes = VOICES_SEQ.writes;
+  /* A CLIP IS SPOKEN ONLY ON THE GPU LANE, so a session that may not queue
+     has no use for the list and does not ask for it. */
   const [listed, clips] = await Promise.allSettled(
-    [json("/voices"), json("/ui/clips")]);
+    [json("/voices"), mayQueue() ? json("/ui/clips") : Promise.resolve({ voices: [] })]);
   if (asked < VOICES_SEQ.applied || writes !== VOICES_SEQ.writes) return;
   VOICES_SEQ.applied = asked;
   if (listed.status === "fulfilled") kokoro = listed.value;
@@ -13208,7 +13224,9 @@ function renderVoices() {
      engine block gets: the value this page has always written, the one stored
      jobs and remembered selections are keyed on, and the one currentVoice
      still reads. */
-  html += `<optgroup label="Chatterbox, slow: ${factor}queued as a job">` +
+  /* ...AND NOT AT ALL FOR A SESSION THAT MAY NOT QUEUE (mayQueue): every
+     voice below this line is a job. */
+  if (mayQueue()) html += `<optgroup label="Chatterbox, slow: ${factor}queued as a job">` +
     `<option value="${esc(clipValue("default"))}">default (no clip needed)</option>` +
     clones.map(c => `<option value="${esc(clipValue(c.name))}">${esc(c.name)}</option>`).join("") +
     "</optgroup>";
@@ -13231,7 +13249,7 @@ function renderVoices() {
      which was invisible for its entire life because nothing ever painted it.
      A reader who cannot see it cannot be told that one command on the other
      machine brings it back. */
-  for (const id of engineIds()) {
+  for (const id of mayQueue() ? engineIds() : []) {
     const listed = presetVoicesForLanguage(id, chosenLang);
     if (!presetVoices(id) || !listed.length) continue;
     const spec = engineSpec(id) || {};
@@ -13246,7 +13264,7 @@ function renderVoices() {
       listed.map(v => `<option value="${esc(id)}:${esc(v.name)}">${esc(v.name)}</option>`)
         .join("") + "</optgroup>";
   }
-  html += `<option value="new">+ Clone a new voice (Chatterbox)…</option>`;
+  if (mayClone()) html += `<option value="new">+ Clone a new voice (Chatterbox)…</option>`;
   const previous = select.value;
   select.innerHTML = html;
   /* bm_george is TTS_VOICE on this deployment, so it is what the service would
@@ -13260,13 +13278,15 @@ function renderVoices() {
      select.options -- so `options[0]` could land the page on a voice the
      reader is not allowed to pick, with every control below it configured for
      an engine that cannot run. */
+  /* AND THERE MAY BE NONE. Without the Chatterbox group, a Kokoro that did
+     not answer leaves the picker empty, and the page says why (loadVoices). */
   const first = [...select.options].find(o =>
-    !o.disabled && !(o.parentElement && o.parentElement.disabled));
+    !o.disabled && !(o.parentElement && o.parentElement.disabled)) || select.options[0];
   const kept = voiceOption(previous);
   select.value = kept
     ? kept.value
     : (all.includes("bm_george") && (!chosenLang || chosenLang === "auto")
-        ? "k:bm_george" : (first || select.options[0]).value);
+        ? "k:bm_george" : first ? first.value : "");
   onVoiceChange();
 }
 
@@ -13912,7 +13932,7 @@ function estimate() {
      buttons do nothing". Both states are visible from here, so both are on the
      button rather than behind it. */
   const job = isJob(voice);
-  const idle = speaking || voice.kind === "new"
+  const idle = speaking || voice.kind === "new" || !$("voice").value
              || !(text.trim() || segments());
   $("go-tts").disabled = idle;
   $("go-tts-quiet").disabled = idle;
@@ -14920,7 +14940,9 @@ async function speakNow(voice, text, listen) {
         let kept = 0;
         for (const piece of err.chunks) kept += piece.length;
         const seconds = format === "pcm" ? Math.round(kept / 2 / PCM_RATE) : 0;
-        const jobId = response.headers.get("x-job-id");
+        /* Only for a session that can open the Jobs tab: anyone else is told
+           what was kept and nothing about a tab they do not have. */
+        const jobId = holds("jobs:read:own") ? response.headers.get("x-job-id") : null;
         speakHeld = true;
         note($("speak-note"), "warn", `The stream ended early.${seconds
           ? " " + seconds + " s were kept." : " What arrived was kept."}${jobId
@@ -14937,7 +14959,7 @@ async function speakNow(voice, text, listen) {
          a .wav. This should not happen on the Kokoro path, and if it does the
          honest thing is to say so rather than play it. */
       const payload = await response.json();
-      if (payload.id) { adopt(payload.id); throw new Error(
+      if (payload.id && holds("jobs:read:own")) { adopt(payload.id); throw new Error(
         "That came back as a job. Open the Jobs tab."); }
       throw new Error(reason(payload, "The speech service answered with something this page cannot play."));
     } else {
@@ -16304,6 +16326,11 @@ async function copyTranscript(id, button) {
 }
 
 async function refreshJobs() {
+  /* NOTHING IS ASKED FOR A SESSION THAT MAY NOT READ JOBS. Every path to the
+     job listing comes through here -- boot, the ladder, a health answer that
+     saw the queue move, an action's follow-up -- so this is the one place
+     that keeps a user-role page off /jobs entirely. */
+  if (!holds("jobs:read:own")) { navSettle("jobs"); return; }
   /* NEVER LEAVE THE CARD BLANK. #joblist starts empty in the markup, so
      anything that throws between here and the innerHTML write leaves a card
      with no rows AND no explanation, which is what a reader saw while the
@@ -16332,6 +16359,7 @@ async function refreshJobs() {
    the job's own record does. Only a 404 means gone, and anything else (the
    service restarting, the gateway down) is not known. */
 async function jobLookup(id) {
+  if (!holds("jobs:read:own")) return "unknown";
   try { await json(`/jobs/${encodeURIComponent(id)}${jobAs(id)}`); return "there"; }
   catch (err) { return err.status === 404 ? "gone" : "unknown"; }
 }
@@ -16355,6 +16383,7 @@ function jobsStale() { JOBS_STALE = true; schedule(0); }
    whatever tab is open), or when it is known to be stale. Nothing else: a
    hidden page with nothing running asks for nothing. */
 function jobsDue() {
+  if (!holds("jobs:read:own")) return false;
   if (JOBS_STALE) return true;
   if ([...jobs.values()].some(j => j.status === "queued" || j.status === "running")) return true;
   return !$("tab-jobs").hidden && !document.hidden;
@@ -17251,9 +17280,9 @@ $("sessions-others").addEventListener("click", async ev => {
 
 /* ---- API keys ---- */
 /* WHAT A KEY MAY HOLD, AND THE PRESETS, AS voice_common/scopes.py HAS THEM.
-   A speech account cannot read /admin/roles, so the page carries its own
-   copy; test_account.py reads both and fails when they part. Service scopes
-   are not here: no person's key may hold one. */
+   Only an admin can read /admin/roles, so the page carries its own copy;
+   test_account.py reads both and fails when they part. Service scopes are
+   not here: no person's key may hold one. */
 const KEY_SCOPES = {
   "models:read": "GET /v1/models",
   "health:read": "/health with per-service status, engines and models",
@@ -17301,9 +17330,11 @@ const ADMIN_ONLY_SCOPES = ["audit:read", "glossaries:ha", "glossaries:read:all",
   "satellites:read", "satellites:update", "secrets:manage", "users:manage", "voices:write:all"];
 const KEY_PRESETS = {
   "admin": Object.keys(KEY_SCOPES).filter(s => !SESSION_ONLY_SCOPES.includes(s)),
-  "speech": ["glossaries:read:own", "glossaries:write:own", "health:read", "jobs:delete:own",
-             "jobs:read:own", "models:read", "speech:long", "speech:speak", "speech:transcribe",
-             "voices:read", "voices:write:own"],
+  "user": ["glossaries:read:own", "glossaries:write:own", "health:read", "ingest:links",
+           "models:read", "speech:speak", "speech:transcribe", "voices:read"],
+  "user-jobs": ["glossaries:read:own", "glossaries:write:own", "health:read", "ingest:links",
+                "jobs:delete:own", "jobs:read:own", "models:read", "speech:long", "speech:speak",
+                "speech:transcribe", "voices:read", "voices:write:own"],
   "transcribe-only": ["models:read", "speech:transcribe"],
   "speak-only": ["jobs:read:own", "models:read", "speech:long", "speech:speak"],
   "read-only": ["glossaries:read:own", "health:read", "jobs:read:own", "models:read", "voices:read"],
@@ -17314,6 +17345,8 @@ const KEY_PRESETS = {
   "firmware-release": ["satellites:firmware", "satellites:read", "satellites:update"],
 };
 const KEY_EXPIRY_WARNING_DAYS = 14;
+/* THE ROLES, in the order Admin › Users offers them (scopes.ROLES). */
+const ROLE_NAMES = ["admin", "user", "user-jobs"];
 
 /* What a key is now, from its own row. */
 function keyState(key) {
@@ -17554,7 +17587,7 @@ function usersDraw() {
     users.map(u => {
       const self = ME.user && u.id === ME.user.id;
       const role = make("select", { class: "tight", "aria-label": `Role of ${u.username}`, disabled: self || u.deleted },
-        new Option("admin", "admin"), new Option("speech", "speech"));
+        ...ROLE_NAMES.map(name => new Option(name, name)));
       role.value = u.role;
       role.addEventListener("change", () => userRole(u, role));
       const acts = u.deleted ? "" : make("span", { class: "acts" },
@@ -17579,9 +17612,15 @@ async function userChange(u, change, button, label) {
   finally { undo(); }
   usersLoad();
 }
+/* A ROLE THAT HOLDS LESS IS ASKED ABOUT FIRST, and says what goes: every
+   session and key of theirs is cut to the new role on its next request (D29).
+   user-jobs to user takes the jobs, not just a name. */
 function userRole(u, select) {
   const to = select.value;
-  if (to === "speech" && !confirm(`Make ${u.username} a speech user?\n\nTheir sessions and keys lose every admin scope at once.`)) {
+  const loses = [u.role === "admin" && to !== "admin" ? "every admin scope" : "",
+                 to === "user" && u.role !== "user" ? "jobs, the long-form engines and voice cloning" : ""]
+    .filter(Boolean).join(", and ");
+  if (loses && !confirm(`Give ${u.username} the ${to} role?\n\nTheir sessions and keys lose ${loses} at once.`)) {
     select.value = u.role; return;
   }
   userChange(u, { role: to }, null);
@@ -18201,7 +18240,7 @@ function liveFresh(what, maxAge) {
 (async function boot() {
   /* WHO, BEFORE ANYTHING ELSE. Every read below is one this session may or
      may not make, and a page that asked first and found out after would
-     greet a speech account with a row of refusals. Nothing is read at all
+     greet a user account with a row of refusals. Nothing is read at all
      when the session has ended or the gateway is locked. */
   if (!(await whoAmI())) return;
   try { CONFIG = Object.assign(CONFIG, await json("/ui/config")); } catch {}
@@ -18253,7 +18292,7 @@ function liveFresh(what, maxAge) {
 
      It is six requests either way and the same load on the NAS; they now
      overlap instead of queueing. */
-  for (const seen of remembered()) if (!jobs.has(seen.id)) jobs.set(seen.id,
+  if (holds("jobs:read:own")) for (const seen of remembered()) if (!jobs.has(seen.id)) jobs.set(seen.id,
     { id: seen.id, status: "queued", created_at: seen.at, mine: true });
   /* WHOSE IS WHOSE, for an admin: the owner column in Jobs and Vocabulary
      and the clips list name people, not IDs. Nobody else is shown an owner. */

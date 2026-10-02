@@ -37,7 +37,15 @@ def rows(*, session_only: bool) -> list[tuple[str, str, routetable.Rule]]:
 
 KEY_ROWS = rows(session_only=False)
 ADMIN_SESSION_ROWS = [row for row in rows(session_only=True)
-                      if not row[2].scopes <= scope_rules.ROLES["speech"]]
+                      if not row[2].scopes <= scope_rules.ROLES["user-jobs"]]
+# Every row that needs a scope user-jobs holds and user does not: the GPU
+# lane, the job routes, the Jobs tab's addresses and saving a voice clip.
+JOBS_ROWS = [row for row in rows(session_only=False) + rows(session_only=True)
+             if row[2].scopes & scope_rules.JOBS_ONLY]
+# Every row a user's session may use, which is what fast Transcribe and fast
+# Speak are made of.
+USER_ROWS = [row for row in rows(session_only=False) + rows(session_only=True)
+             if row[2].scopes <= scope_rules.ROLES["user"] and not row[2].step_up]
 
 
 # ── the table itself ──────────────────────────────────────────────────────────
@@ -119,10 +127,10 @@ async def test_a_key_row_refuses_a_key_without_its_scope_and_admits_one_with_it(
 
 @pytest.mark.parametrize("method,path,rule", ADMIN_SESSION_ROWS,
                          ids=[f"{m} {p}" for m, p, _ in ADMIN_SESSION_ROWS])
-async def test_an_admin_only_session_row_refuses_a_speech_user(monkeypatch, method, path,
-                                                                rule):
+async def test_an_admin_only_session_row_refuses_a_user_jobs_user(monkeypatch, method, path,
+                                                                   rule):
     async with gateway(monkeypatch, authenticate=False) as (client, _):
-        make_user("sam", role="speech")
+        make_user("sam", role="user-jobs")
         await sign_in(client, "sam")
         client.headers.update(SAME_ORIGIN)
         await client.post("/auth/step-up", json={"password": PASSWORD})
@@ -130,6 +138,49 @@ async def test_an_admin_only_session_row_refuses_a_speech_user(monkeypatch, meth
 
     assert refused.status_code == 403
     assert refused.json()["error"]["code"] == "insufficient_scope"
+
+
+def test_the_rows_a_user_is_refused_are_the_jobs_the_gpu_lane_and_clips():
+    assert {(m, p) for m, p, _ in JOBS_ROWS} == {
+        ("POST", "/jobs"), ("GET", "/jobs"), ("GET", "/jobs/{job_id}"),
+        ("DELETE", "/jobs/{job_id}"), ("GET", "/jobs/{job_id}/audio"),
+        ("DELETE", "/jobs/{job_id}/audio"), ("GET", "/ui/jobs"), ("GET", "/ui/jobs/{rest:path}"),
+        ("POST", "/ui/clips"), ("DELETE", "/ui/clips/{name}"), ("POST", "/ui/clips/from-link")}
+    assert {(m, p) for m, p, _ in USER_ROWS} >= {
+        ("POST", "/v1/audio/transcriptions"), ("POST", "/transcribe"), ("POST", "/speak"),
+        ("POST", "/v1/audio/speech"), ("GET", "/voices"),
+        ("POST", "/ui/fetch"), ("GET", "/ui/media"), ("GET", "/ui/clips"),
+        ("GET", "/glossaries"), ("PUT", "/glossaries/{name}"), ("GET", "/ui/speak"),
+        ("GET", "/ui/transcribe"), ("GET", "/ui/account")}
+
+
+async def user_session(client) -> None:
+    make_user("una", role="user")
+    await sign_in(client, "una")
+    client.headers.update(SAME_ORIGIN)
+
+
+@pytest.mark.parametrize("method,path,rule", JOBS_ROWS,
+                         ids=[f"{m} {p}" for m, p, _ in JOBS_ROWS])
+async def test_a_user_session_is_refused_every_row_that_runs_or_reads_a_job(
+        monkeypatch, method, path, rule):
+    async with gateway(monkeypatch, authenticate=False) as (client, _):
+        await user_session(client)
+        refused = await client.request(method, concrete(path), json={})
+
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["error"]["code"] == "insufficient_scope"
+
+
+@pytest.mark.parametrize("method,path,rule", USER_ROWS,
+                         ids=[f"{m} {p}" for m, p, _ in USER_ROWS])
+async def test_a_user_session_is_admitted_to_every_row_its_role_holds(
+        monkeypatch, method, path, rule):
+    async with gateway(monkeypatch, authenticate=False) as (client, _):
+        await user_session(client)
+        admitted = await client.request(method, concrete(path), json={})
+
+    assert admitted.status_code not in (401, 403), admitted.text
 
 
 async def test_the_reserved_glossary_takes_glossaries_ha_and_never_own(monkeypatch):
