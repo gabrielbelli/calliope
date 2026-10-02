@@ -9,6 +9,7 @@ by a credential that lacks its scope, once by one that holds exactly it.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 from conftest import (PASSWORD, SAME_ORIGIN, bearer, gateway, internal_client, make_key,
@@ -145,7 +146,7 @@ def test_the_rows_a_user_is_refused_are_the_jobs_the_gpu_lane_and_clips():
         ("POST", "/jobs"), ("GET", "/jobs"), ("GET", "/jobs/{job_id}"),
         ("DELETE", "/jobs/{job_id}"), ("GET", "/jobs/{job_id}/audio"),
         ("DELETE", "/jobs/{job_id}/audio"), ("GET", "/ui/jobs"), ("GET", "/ui/jobs/{rest:path}"),
-        ("POST", "/ui/clips"), ("DELETE", "/ui/clips/{name}"), ("POST", "/ui/clips/from-link")}
+        ("POST", "/ui/clips"), ("DELETE", "/ui/clips/{name}")}
     assert {(m, p) for m, p, _ in USER_ROWS} >= {
         ("POST", "/v1/audio/transcriptions"), ("POST", "/transcribe"), ("POST", "/speak"),
         ("POST", "/v1/audio/speech"), ("GET", "/voices"),
@@ -435,3 +436,24 @@ async def test_a_plain_get_on_the_socket_path_is_not_public(monkeypatch):
     async with gateway(monkeypatch, authenticate=False) as (client, _):
         response = await client.get("/satellites/ws")
     assert response.status_code == 401
+
+
+def test_the_access_log_never_carries_a_pasted_link():
+    """The page polls /ui/progress?token=<the link> once a second, and uvicorn
+    wrote every poll to the access log. A /ui/ path loses its query string
+    there; any other path keeps it."""
+    access = logging.getLogger("uvicorn.access")
+
+    def line(path: str) -> str:
+        record = logging.LogRecord(
+            "uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d',
+            ("192.0.2.7:50000", "GET", path, "1.1", 200), None)
+        assert access.filter(record)
+        return record.getMessage()
+
+    polled = line("/ui/progress?token=https://media.example/watch?v=abc")
+    assert "media.example" not in polled and "token" not in polled
+    assert '"GET /ui/progress HTTP/1.1" 200' in polled
+    assert "/jobs?status=done" in line("/jobs?status=done")
+    assert len([f for f in access.filters
+                if type(f).__name__ == "_NoLinkInTheAccessLog"]) == 1, "added once per import"

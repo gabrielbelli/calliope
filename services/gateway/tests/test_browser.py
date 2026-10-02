@@ -178,8 +178,8 @@ async def test_no_response_carries_a_cors_header(monkeypatch):
 @pytest.mark.parametrize("site", ["same-site", "cross-site", "none"])
 async def test_a_cookie_cannot_open_a_microphone_from_anywhere_but_the_page(
         monkeypatch, site):
-    """A sibling page on the NAS (MeTube with an attacker's title) is
-    same-site, and SameSite=Lax lets the cookie ride. Only the page itself may
+    """A sibling page on the NAS (another app on the NAS with an attacker's
+    title) is same-site, and SameSite=Lax lets the cookie ride. Only the page itself may
     open a microphone (D15, H3)."""
     hub = MockBackend("voice-satellites")
     async with gateway(monkeypatch, satellites=hub, authenticate=False) as (client, _):

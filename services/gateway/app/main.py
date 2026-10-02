@@ -135,6 +135,30 @@ log = logging.getLogger("voice-gateway")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
+class _NoLinkInTheAccessLog(logging.Filter):
+    """uvicorn's access line for a /ui/ path, without its query string.
+
+    The page polls /ui/progress?token=<the link> once a second while a link
+    downloads, and /ui/media is asked for by the same token, so every poll
+    wrote the link a person pasted into this log. The path stays; what
+    follows `?` goes. record.args is (client, method, path, version, status).
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if (isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str)
+                and args[2].startswith("/ui/") and "?" in args[2]):
+            record.args = (*args[:2], args[2].split("?", 1)[0], *args[3:])
+        return True
+
+
+_access = logging.getLogger("uvicorn.access")
+# Replaced rather than added again when this module is reloaded, as the tests do.
+for _old in [f for f in _access.filters if type(f).__name__ == "_NoLinkInTheAccessLog"]:
+    _access.removeFilter(_old)
+_access.addFilter(_NoLinkInTheAccessLog())
+
+
 class Backend(NamedTuple):
     """A backend, its clock, and what to tell the caller when the clock wins."""
 
@@ -1227,8 +1251,8 @@ UI = Backend(
     audience="ui",
     url=os.getenv("GATEWAY_UI_URL", "http://voice-ui:8090").rstrip("/"),
     # 900 s because /ui/fetch is on this path: it streams a finished download
-    # from MeTube into the transcription route, and a two-hour podcast at the
-    # measured 8.5-10.4x realtime is ~847 s of compute inside that one request.
+    # into the transcription route, and a two-hour podcast at the measured
+    # 8.5-10.4x realtime is ~847 s of compute inside that one request.
     # Anything shorter would 504 a transcription that is still working.
     read_timeout=float(os.getenv("GATEWAY_UI_TIMEOUT", "900")),
     timeout_help="The page's own routes are quick; /ui/fetch is not, because "
@@ -1258,11 +1282,6 @@ UI_PATHS: tuple[tuple[str, str, Rule], ...] = (
     ("GET", "/ui/clips", rule("voices:read")),
     ("POST", "/ui/clips", rule("voices:write:own")),
     ("DELETE", "/ui/clips/{name}", rule("voices:write:own")),
-    # Cloning from a link. Listed before the {name} route above would match it
-    # -- Starlette takes the first match, and /ui/clips/from-link is a valid
-    # {name} -- but that one is DELETE and this is POST, so they cannot
-    # collide. Named here anyway rather than relying on that.
-    ("POST", "/ui/clips/from-link", rule("voices:write:own", "ingest:links")),
     ("POST", "/ui/resolve", rule("ingest:links")),
     ("POST", "/ui/commit", rule("ingest:links")),
     ("POST", "/ui/abandon", rule("ingest:links")),

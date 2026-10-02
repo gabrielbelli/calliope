@@ -212,7 +212,7 @@ does not name. The five public rows are `GET /health`, `GET /login`,
 | `/ui`, `/ui/<tab>`, `/ui/config` | a session, never a key; each tab also needs its own scope: `speech:transcribe`, `speech:speak`, `jobs:read:own`, `glossaries:read:own`, `satellites:read`, `keys:manage:own`, `users:manage` |
 | `/ui/resolve`, `/commit`, `/abandon`, `/progress`, `/captions`, `/media` | `ingest:links` |
 | `/ui/fetch` | `ingest:links` and `speech:transcribe`, with a delegation ([Link transcription](#link-transcription)) |
-| `/ui/clips` | `voices:read` to list, `voices:write:own` to add and delete; `/ui/clips/from-link` needs `ingest:links` as well |
+| `/ui/clips` | `voices:read` to list, `voices:write:own` to add and delete |
 | `/satellites`, its events, firmware list and artwork | `satellites:read` (a satellite's `config.buttons` only with `satellites:admin`) |
 | A satellite's controls: lights, tone, say, flush, ptt, media, AirPlay, identify, and `PATCH` of control fields | `satellites:control` |
 | `POST /satellites/{id}/listen`, `/inject` | `satellites:listen`, audited |
@@ -850,8 +850,10 @@ the traffic.
 
 httpx's own per-request log line is silenced — in a proxy it is exactly one
 duplicate per request, carrying neither the model nor the duration. uvicorn's
-access line is left alone; pass `--no-access-log` if one line per request is
-meant literally.
+access line is left alone, except that a `/ui/` path loses its query string
+there: the page polls `/ui/progress?token=<the link>` once a second while a
+link downloads, and a pasted link is not the log's business. Pass
+`--no-access-log` if one line per request is meant literally.
 
 ## Deploying
 
@@ -1212,10 +1214,9 @@ is 190-240 ms of recognition at the measured 8.5-10.4x, and a feature that adds
 - **What lives in memory is lost on a restart**: sign-in delays, delegation
   use counts and open streams. A link transcription in flight fails and has
   to be started again.
-- **Link ingestion is checked at the first hop only.** voice-ui refuses an
-  address that resolves to a private range before yt-dlp starts, but
-  redirects inside yt-dlp, DNS rebinding and MeTube's own fetches are not
-  covered by anything here.
+- **voice-ui's downloader checks every connection it makes against the same
+  rules**; a native network stack would bypass it, and the image carries
+  none (ADR 0024).
 
 ## Licence
 
