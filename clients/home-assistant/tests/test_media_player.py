@@ -9,7 +9,6 @@ from urllib.parse import urlsplit
 
 import pytest
 from homeassistant.components.media_player import MediaPlayerEntityFeature as F
-from homeassistant.const import CONF_API_KEY
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -124,10 +123,6 @@ async def test_the_cover_is_fetched_with_the_integrations_key(
 ) -> None:
     """Home Assistant's own image fetch sends no key: the cover comes
     through the integration's client, with the key, by its SHA-256."""
-    fake.api_key = "sk-home"
-    hass.config_entries.async_update_entry(
-        entry, data={**entry.data, CONF_API_KEY: "sk-home"}
-    )
     assert await hass.config_entries.async_setup(entry.entry_id)
     await until(hass, lambda: entry.runtime_data.coordinator.connected)
     _airplay(fake, airplay_playing())
@@ -141,7 +136,7 @@ async def test_the_cover_is_fetched_with_the_integrations_key(
     assert await resp.read() == COVER
     assert resp.content_type == "image/jpeg"
     [asked] = fake.calls("GET", f"/satellites/{LOUNGE_ID}/airplay/artwork")
-    assert asked == {"v": COVER_SHA, "authorization": "Bearer sk-home"}
+    assert asked == {"v": COVER_SHA, "authorization": f"Bearer {fake.api_key}"}
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
 

@@ -16,11 +16,11 @@ four things:
   the stack serves, and Kokoro for text-to-speech, can be chosen in any
   Assist pipeline.
 
-It talks to the gateway only (`https://host:30080`). It holds one long-lived
-connection to the hub's event stream, and reads a satellite again only when
-an event says its record changed. The one thing it polls is `GET /health`,
-every 5 minutes (every 30 seconds while the stack loads its models), to see
-which speech-to-text engines the stack serves.
+It talks to the gateway only, with an API key made in Calliope. It holds one
+long-lived connection to the hub's event stream, and reads a satellite again
+only when an event says its record changed. The one thing it polls is
+`GET /health`, every 5 minutes (every 30 seconds while the stack loads its
+models), to see which speech-to-text engines the stack serves.
 
 Built and tested against Home Assistant **2026.8.1**.
 
@@ -57,18 +57,66 @@ and choose **Calliope**.
 | Field | |
 |---|---|
 | URL | The gateway: the address that serves both the API and the page, e.g. `https://calliope.example.com`, or a proxy in front of it |
-| API key | Only if the gateway sets `GATEWAY_API_KEYS`. Leave it empty for a keyless gateway |
+| API key | **Required.** A key made in Calliope with the `home-assistant` preset (below) |
 | Verify the TLS certificate | On. Turn it off only for a self-signed certificate |
 
-The flow checks `GET /health`, which never needs a key, and then
-`GET /v1/models`, which the gateway answers itself behind the key.
+The flow checks the key's shape first: a Calliope key starts with `calliope_`
+and is 45 characters long, ending in a checksum, so a key pasted short or with
+a typo is refused before the gateway is asked. Then it asks the gateway:
+
+| Request | Refused with | The form says |
+|---|---|---|
+| `GET /health` | no answer, or not Calliope's | Calliope did not answer, or it is not a Calliope gateway |
+| `GET /v1/models` | 401 | Calliope refused the key: unknown, revoked or expired |
+| `GET /health` | an answer without the backends | the key lacks `health:read` (`/health` never answers 403) |
+| `GET /v1/models`, `GET /voices`, `POST /v1/audio/transcriptions` (with no audio), `GET /glossaries/home-assistant` | 403 | the key lacks the scopes it names (from the `WWW-Authenticate` challenge) |
+| `GET /satellites` | 403 | a warning: the entry is saved, speech works, and the satellites stay out of reach |
+
+One answer names every scope the key lacks for speech, so one new key fixes
+it. Only scope names with Calliope's grammar are shown: a challenge that names
+none says only that the key lacks a scope of the preset.
+
 *Reconfigure* on the integration's menu changes the same three fields later,
 and the entry reloads. Moving the entry to a gateway that is set up already is
-refused. If the gateway starts refusing the key, Home Assistant asks for a new
-one.
+refused.
 
 A gateway deployed without the satellite hub still works: speech-to-text and
 text-to-speech are there, and there are no satellites.
+
+### The API key
+
+In Calliope open *Account* → *API keys* → *New key*, choose the preset
+**`home-assistant`**, and copy the key: Calliope shows it once. The preset
+holds exactly what the integration uses:
+
+| Scope | For |
+|---|---|
+| `models:read` | the key check (`GET /v1/models`) |
+| `health:read` | the speech-to-text engines in `GET /health`; without it `/health` answers only whether the stack is up |
+| `speech:transcribe` | speech-to-text |
+| `speech:speak` | text-to-speech and the voice list |
+| `glossaries:ha` | writing the `home-assistant` vocabulary, and naming it when transcribing |
+| `satellites:read` | the satellites, their events, wake words and AirPlay covers |
+| `satellites:control` | switches, numbers, selects, the media player, announcements and the actions |
+| `satellites:update` | firmware updates |
+
+The satellite scopes are not in the speech role, so only an account with the
+admin role can make this key, and Calliope asks for the password again first.
+The key may live up to 365 days; because it can push firmware, it cannot be
+made to never expire. Calliope never shows a key
+again; to replace one, make a new key and enter it with *Reconfigure*.
+
+While the integration runs:
+
+- **401** (the key was revoked, has expired, or its account was disabled):
+  Home Assistant shows *Reauthentication required* and asks for a new key.
+- **403** (the key lacks a scope a route needs): a repair issue names the
+  scopes and points to the `home-assistant` preset. One issue per entry lists
+  every scope refused; it is a warning when only satellite scopes are missing
+  and an error otherwise, and it goes when the entry is set up again with a
+  new key. A key that cannot reach the satellites at setup still loads speech;
+  one that lacks `models:read`, `health:read` or `speech:speak` fails setup
+  until it is replaced, because retrying cannot give a key a scope.
 
 ## What each satellite gets
 
@@ -129,7 +177,10 @@ starts on) shows what the satellite reports.
 While a satellite is offline, its settings still take changes: the hub keeps
 them and sends them at the next connect. Wi-Fi signal, Identify and the media
 player are unavailable. While the event stream itself is down, every entity
-is unavailable, because Home Assistant cannot know their state.
+is unavailable, because Home Assistant cannot know their state. The gateway
+ends the stream every 15 minutes so that the key is checked again; that is
+routine, and the integration opens a new one at once without the entities
+going unavailable. They do only if the new stream is refused.
 
 The device follows the hub too: a rename on the Satellites page, a new
 firmware after an update, the maker (Espressif for a Korvo, Raspberry Pi for
@@ -468,14 +519,32 @@ python3.14 -m venv .venv
 which pins `homeassistant==2026.8.1`, and the requirements of the core
 components the tests load. The tests run a fake Calliope gateway on
 127.0.0.1 with the routes and event shapes of the real services, and a Korvo
-and a Pi with their live caps. They cover the config, reconfigure and reauth
-flows (the reconfigure flow replaced the options flow in 0.2), the event
+and a Pi with their live caps. The fake holds a key as the gateway does: 401
+without it, and 403 for a route whose scope it lacks. Its key starts with the
+`home-assistant` preset, held to the real one in `packages/common`, so the
+suite passing means the integration needs nothing outside that preset. The
+tests cover the key's local check against the gateway's own key format; the
+config, reconfigure and reauth flows (the reconfigure flow replaced the
+options flow in 0.2) and the entry migration; 401 and 403 at setup and at
+runtime, and the repair issue; the event
 stream and its reconnects, the entities each satellite's caps give it and the
 registry pruning when they change, the media player, announcements and
 firmware updates, device triggers firing real automations, the STT and TTS
 engines through Home Assistant's own components, a whole Assist pipeline with
 both engines, the actions, and diagnostics. No test runs ffmpeg on the
 integration's behalf, and nothing plays.
+
+## Upgrading from 0.2
+
+- **A key is required.** Calliope no longer answers anything but liveness
+  without one. An entry saved without a key asks for one as soon as Home
+  Assistant starts (*Reauthentication required*): make a `home-assistant` key
+  ([The API key](#the-api-key)) and paste it. Until then Assist has no
+  Calliope speech; the satellites themselves keep working.
+- The entry's version goes from 1 to 2. Going back to 0.2 cannot load it.
+- The vocabulary needs `glossaries:ha`, which the preset holds. The
+  reauthentication refuses a key without it; a key that loses it later gets a
+  repair issue, and transcriptions go without the profile.
 
 ## Upgrading from 0.1
 

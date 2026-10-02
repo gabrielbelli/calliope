@@ -234,8 +234,13 @@ minutes without a network.
 ```bash
 python3 scripts/build_bundle.py
 curl -X POST "https://calliope.example.com/satellites/firmware?model=raspberry-pi&version=<version>&signature=$(cat dist/calliope-pi-<version>.tar.gz.sig)" \
+  -H "Authorization: Bearer $CALLIOPE_API_KEY" \
   --data-binary @dist/calliope-pi-<version>.tar.gz
 ```
+
+`CALLIOPE_API_KEY` is a Calliope API key with the `firmware-release` preset
+(*Account* → *API keys* → *New key*); the gateway refuses the upload without
+one.
 
 Then **Update** on the Satellites tab (Firmware), as for the ESP32. The hub
 sends the bundle over the satellite's socket. The satellite:

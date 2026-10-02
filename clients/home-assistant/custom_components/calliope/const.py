@@ -84,6 +84,13 @@ BACKOFF_MAX: Final = 60.0
 # The hub sends a keepalive comment every 15 s; three missed means the
 # connection is dead even if TCP has not noticed.
 SSE_READ_TIMEOUT: Final = 45.0
+# The gateway ends every event stream after 15 minutes, so that the key is
+# checked again. A stream that ends cleanly after at least this many seconds
+# is taken for that and opened again at once, with the entities left as they
+# are. One that ends sooner is taken for an outage and retried with backoff,
+# so a proxy that closes each stream as soon as it opens is not asked again
+# in a tight loop.
+STREAM_ROUTINE_AFTER: Final = 60.0
 
 # Parakeet TDT 0.6B v3's 25 European languages (ISO 639-1). It detects the
 # language itself and refuses a `language` field, so these are declared to

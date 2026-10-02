@@ -75,6 +75,7 @@ curl -fsS --data-binary @"$BIN" -H 'Content-Type: application/octet-stream' \
 # then POST /satellites/ota with the sha256 it returns, or use the Satellites tab
 ```
 
-Leave out the `Authorization` line for a gateway without `GATEWAY_API_KEYS`.
+`CALLIOPE_API_KEY` is a key with the `firmware-release` preset: the gateway
+refuses the upload without one.
 The version must be the one the build stamped, because the Satellites tab
 compares it with what each satellite reports.

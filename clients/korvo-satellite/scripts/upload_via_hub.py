@@ -11,6 +11,7 @@ import json
 import os
 import ssl
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -24,10 +25,18 @@ import firmware_signing  # noqa: E402
 def call(url, data, key, content_type):
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", content_type)
-    if key:
-        req.add_header("Authorization", f"Bearer {key}")
-    with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=60) as r:
-        return json.loads(r.read() or b"{}")
+    req.add_header("Authorization", f"Bearer {key}")
+    try:
+        with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=60) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        # The gateway's own reason rather than a traceback: a 401 is the key
+        # itself, and a 403 names the scope the key lacks.
+        try:
+            reason = json.loads(e.read())["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            reason = e.reason
+        sys.exit(f"{urllib.parse.urlsplit(url).path}: {e.code} {reason}")
 
 
 def fw_version(env):
@@ -47,6 +56,9 @@ def upload(source, target, env):
     key = os.environ.get("CALLIOPE_API_KEY")
     if not satellite:
         sys.exit("CALLIOPE_SATELLITE is not set: a satellite id, its name, or 'all'")
+    if not key:
+        sys.exit("CALLIOPE_API_KEY is not set: a Calliope API key with the "
+                 "firmware-release preset (Account > API keys > New key)")
     version = fw_version(env)
     with open(str(source[0]), "rb") as f:
         image = f.read()

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from homeassistant.const import CONF_URL, CONF_VERIFY_SSL
+from homeassistant.const import CONF_API_KEY, CONF_URL, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -55,15 +55,17 @@ async def fake(
 
 @pytest.fixture
 async def entry(hass: HomeAssistant, fake: FakeCalliope) -> MockConfigEntry:
-    """An entry pointed at the fake, not yet set up. Home Assistant's own
-    core component is set up first, as it always is outside tests: the Assist
-    satellite platform needs conversation, which needs its exposed entities."""
+    """An entry pointed at the fake, with its key, not yet set up. Home
+    Assistant's own core component is set up first, as it always is outside
+    tests: the Assist satellite platform needs conversation, which needs its
+    exposed entities."""
     assert await async_setup_component(hass, "homeassistant", {})
     config_entry = MockConfigEntry(
         domain=DOMAIN,
         title="127.0.0.1",
         unique_id=fake.url.split("//", 1)[1],
-        data={CONF_URL: fake.url, CONF_VERIFY_SSL: True},
+        version=2,
+        data={CONF_URL: fake.url, CONF_API_KEY: fake.api_key, CONF_VERIFY_SSL: True},
     )
     config_entry.add_to_hass(hass)
     return config_entry

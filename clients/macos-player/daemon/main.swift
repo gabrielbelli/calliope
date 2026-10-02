@@ -238,7 +238,10 @@ enum Calliope {
         set { settings.set(newValue, forKey: onKey) }
     }
 
-    static var isConfigured: Bool { isOn && !url.isEmpty }
+    /// THE KEY IS PART OF THE ADDRESS. The gateway answers nothing but its
+    /// liveness without one, so a URL alone is not a remote: handed on, it
+    /// would list models the server can never reach.
+    static var isConfigured: Bool { isOn && !url.isEmpty && !key.isEmpty }
 
     static var key: String {
         get {
@@ -865,7 +868,7 @@ final class Daemon: NSObject, NSApplicationDelegate {
         fields.addArrangedSubview(urlField)
 
         let keyField = NSSecureTextField(string: Calliope.key)
-        keyField.placeholderString = "API key, if the server asks for one"
+        keyField.placeholderString = "API key: Account › API keys, preset speak-only"
         keyField.widthAnchor.constraint(equalToConstant: 380).isActive = true
         keyField.target = self
         keyField.action = #selector(saveCalliope)
@@ -1017,8 +1020,14 @@ final class Daemon: NSObject, NSApplicationDelegate {
         server.restart()
 
         guard Calliope.isConfigured else {
-            calliopeResult?.stringValue = Calliope.isOn ? ""
-                : "Off. Everything runs on this Mac."
+            if !Calliope.isOn {
+                calliopeResult?.stringValue = "Off. Everything runs on this Mac."
+            } else if !Calliope.url.isEmpty {
+                calliopeResult?.stringValue = "A key is required. In Calliope: Account › "
+                    + "API keys › New key, preset speak-only."
+            } else {
+                calliopeResult?.stringValue = ""
+            }
             return
         }
         calliopeResult?.stringValue = "Connecting…"

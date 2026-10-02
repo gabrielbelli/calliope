@@ -81,7 +81,7 @@ def remote_model_names(fresh=False):
     try:
         request = urllib.request.Request(
             CALLIOPE_URL + "/v1/models",
-            headers={"authorization": "Bearer " + CALLIOPE_KEY} if CALLIOPE_KEY else {})
+            headers={"authorization": "Bearer " + CALLIOPE_KEY})
         with urllib.request.urlopen(request, timeout=5, context=tls_for(CALLIOPE_URL)) as answer:
             listing = json.loads(answer.read())
         names = [row["id"] for row in listing.get("data", [])
@@ -116,7 +116,7 @@ def remote_voice_names(fresh=False):
     try:
         request = urllib.request.Request(
             CALLIOPE_URL + "/voices",
-            headers={"authorization": "Bearer " + CALLIOPE_KEY} if CALLIOPE_KEY else {})
+            headers={"authorization": "Bearer " + CALLIOPE_KEY})
         with urllib.request.urlopen(request, timeout=5, context=tls_for(CALLIOPE_URL)) as answer:
             names = list(json.loads(answer.read()).get("voices", []))
     except Exception as error:
@@ -168,6 +168,14 @@ IDLE_SECONDS = int(os.environ.get("CALLIOPE_IDLE_SECONDS", 15 * 60))
 # correct default for a path nobody configured.
 CALLIOPE_URL = os.environ.get("CALLIOPE_URL", "").rstrip("/")
 CALLIOPE_KEY = os.environ.get("CALLIOPE_KEY", "")
+# AN ADDRESS WITHOUT A KEY IS NO REMOTE AT ALL. The gateway answers nothing but
+# its liveness without one, so the address alone would list models it can never
+# reach and forward requests only to have each one refused. Said once, here,
+# rather than as a 401 per request.
+if CALLIOPE_URL and not CALLIOPE_KEY:
+    print("warning: CALLIOPE_URL is set without CALLIOPE_KEY, and the Calliope server "
+          "requires a key; nothing is forwarded", flush=True)
+    CALLIOPE_URL = ""
 
 # What this machine can say without asking anybody.
 LOCAL_MODELS = ("kokoro", "tts-1", "tts-1-hd")
@@ -347,6 +355,13 @@ class Handler(BaseHTTPRequestHandler):
         real name, not a typo. That costs one request, only on the path that was
         about to fail anyway.
         """
+        # Before the listing, which has no server to ask: an address set
+        # without its key is dropped at startup, and this is where it shows.
+        if not CALLIOPE_URL:
+            return self.refuse(404, "no_such_model",
+                               "%r is not one of this machine's models (%s), and no Calliope "
+                               "server, an address with its key, is configured to ask."
+                               % (model, ", ".join(LOCAL_MODELS)))
         known = remote_model_names()
         if model not in known:
             known = remote_model_names(fresh=True)
@@ -355,15 +370,11 @@ class Handler(BaseHTTPRequestHandler):
                                "%r is not a model here (%s) or on the Calliope server at %s (%s)"
                                % (model, ", ".join(LOCAL_MODELS), CALLIOPE_URL,
                                   ", ".join(known) or "nothing it would name"))
-        if not CALLIOPE_URL:
-            return self.refuse(404, "no_such_model",
-                               "%r is not one of this machine's models (%s), and no Calliope "
-                               "server is configured to ask." % (model, ", ".join(LOCAL_MODELS)))
         request = urllib.request.Request(
             CALLIOPE_URL + "/v1/audio/speech",
             data=json.dumps(body).encode(),
             headers={"content-type": "application/json",
-                     **({"authorization": "Bearer " + CALLIOPE_KEY} if CALLIOPE_KEY else {})},
+                     "authorization": "Bearer " + CALLIOPE_KEY},
             method="POST")
         try:
             # LONGER THAN FEELS REASONABLE, ON PURPOSE. Chatterbox is slower

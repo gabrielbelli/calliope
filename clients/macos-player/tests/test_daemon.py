@@ -286,6 +286,16 @@ def test_the_calliope_fields_reach_the_process_that_reads_them():
         "the two sides disagree about how a forwarded model is labelled"
 
 
+def test_the_daemon_hands_on_an_address_only_with_its_key():
+    """THE GATEWAY ANSWERS NOTHING WITHOUT A KEY, so a URL passed on alone
+    would make a remote that lists models it can never reach. The address and
+    the key go to server.py together or not at all, and the settings say a key
+    is required where it is typed (tests/test_remote.py runs the server half)."""
+    assert "isConfigured: Bool { isOn && !url.isEmpty && !key.isEmpty }" in DAEMON_CODE
+    assert '"A key is required.' in DAEMON_CODE
+    assert "preset speak-only" in DAEMON_CODE
+
+
 def test_the_key_is_not_handed_to_an_unverified_connection():
     """A CREDENTIAL TRAVELS ON THIS CONNECTION, which is what makes certificate
     verification load-bearing rather than tidy: an unverified TLS session is one

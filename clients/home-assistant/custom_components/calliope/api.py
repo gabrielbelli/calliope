@@ -1,8 +1,18 @@
 """A small client for the Calliope gateway: HTTP routes and the event stream.
 
-Everything goes to one base URL, the gateway (https://host:30080). The only
-route that never needs a key is /health, so a key is checked against
-/v1/models, which the gateway answers itself.
+Everything goes to one base URL, the gateway, and every request carries the
+key. /health is the one route that answers without it, and then says only
+whether the stack is up: the engines Assist offers are in the answer only for
+a key that holds health:read. So a key is checked against /v1/models, which
+the gateway answers itself.
+
+A key the gateway refuses is a 401 (CalliopeAuthError: Home Assistant asks for
+a new one). A key it knows but that lacks a route's scope is a 403 that names
+the scopes in its WWW-Authenticate challenge (CalliopeScopeError), and the
+client hands it to `on_missing_scope` before raising, so every route reports a
+missing scope the same way without each caller doing it. /health is the
+exception: it never refuses, and answers a key without health:read with its
+status alone (lacks_health_read).
 """
 
 from __future__ import annotations
@@ -10,14 +20,17 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
+import string
 import wave
-from collections.abc import AsyncIterator
+import zlib
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
 import aiohttp
 
-from .const import SSE_READ_TIMEOUT
+from .const import GLOSSARY_PROFILE, SSE_READ_TIMEOUT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,6 +69,71 @@ class CalliopeApiError(CalliopeError):
         self.message = message
 
 
+class CalliopeScopeError(CalliopeApiError):
+    """The gateway knows the key, and it lacks the scope a route needs (403)."""
+
+    def __init__(self, message: str, scopes: tuple[str, ...]) -> None:
+        """`scopes`: what the route needs, as the challenge names them."""
+        super().__init__(403, message, "insufficient_scope")
+        self.scopes = scopes
+
+    @property
+    def lacking(self) -> tuple[str, ...]:
+        """What to tell the user the key lacks: the challenge's scopes, or a
+        fixed phrase for a challenge that names none. Never the server's
+        message: it is free text, and this goes into a repair issue and a
+        form, which Home Assistant renders as Markdown."""
+        return self.scopes or (UNNAMED_SCOPE,)
+
+
+# The gateway's key format (services/gateway/app/tokens.py): the prefix, 30
+# random base62 characters and a CRC32 of the prefix and those 30, as six
+# base62 digits. Checked here so a key pasted short, or with one character
+# wrong, is refused in the form rather than as "Calliope refused the key". A
+# service key (calliope_svc_) does not match: it belongs to a service, not to
+# Home Assistant.
+KEY_PREFIX = "calliope_"
+_KEY = re.compile(r"calliope_([0-9A-Za-z]{30})([0-9A-Za-z]{6})")
+_BASE62 = string.digits + string.ascii_uppercase + string.ascii_lowercase
+# Bearer error="insufficient_scope", scope="models:read speech:speak"
+_CHALLENGE_SCOPE = re.compile(r'scope="([^"]*)"')
+# The gateway's scope grammar (packages/common/voice_common/scopes.py), which
+# its challenge always keeps to. Only names of this shape are taken from a
+# challenge: a server that is not the gateway, or an answer changed on its way
+# over plain http://, could otherwise put a link in front of the user where
+# they are told what to do about their key.
+SCOPE = re.compile(r"^[a-z]+:[a-z]+(:own|:all)?$")
+# What a refusal is said to lack when its challenge names no such scope.
+UNNAMED_SCOPE = "a scope the home-assistant preset holds"
+
+
+def _checksum(body: str) -> str:
+    number = zlib.crc32((KEY_PREFIX + body).encode("ascii"))
+    digits = []
+    for _ in range(6):
+        number, rest = divmod(number, 62)
+        digits.append(_BASE62[rest])
+    return "".join(reversed(digits))
+
+
+def well_formed_key(key: str) -> bool:
+    """Whether `key` has a Calliope API key's shape and its checksum matches."""
+    match = _KEY.fullmatch(key)
+    return match is not None and match[2] == _checksum(match[1])
+
+
+HEALTH_READ = "health:read"
+
+
+def lacks_health_read(health: Any) -> bool:
+    """Whether a /health answer is the one a key without health:read gets:
+    the status and no backends. Liveness is public, so /health never refuses
+    with 403 and this is the only sign of the missing scope. A key the gateway
+    does not know gets the same answer, so this means the scope is missing
+    only once the key is known to be accepted."""
+    return isinstance(health, dict) and "status" in health and "backends" not in health
+
+
 def wav_bytes(pcm: bytes, rate: int, channels: int = 1, width: int = 2) -> bytes:
     """Headerless PCM in a WAV container."""
     buf = io.BytesIO()
@@ -77,7 +155,7 @@ def _error_from(status: int, body: str) -> tuple[str, str | None]:
     if isinstance(data, dict):
         err = data.get("error")
         if isinstance(err, dict):
-            return str(err.get("message") or f"HTTP {status}"), err.get("code")
+            return str(err.get("message") or f"HTTP {status}")[:300], err.get("code")
         detail = data.get("detail")
         if detail is not None:
             return str(detail)[:300], None
@@ -88,12 +166,18 @@ class CalliopeClient:
     """The gateway's routes that the integration uses."""
 
     def __init__(
-        self, session: aiohttp.ClientSession, url: str, api_key: str | None = None
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        api_key: str,
+        *,
+        on_missing_scope: Callable[[CalliopeScopeError], None] | None = None,
     ) -> None:
         """Keep the session Home Assistant owns; nothing here closes it."""
         self._session = session
         self.url = url.rstrip("/")
-        self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._headers = {"Authorization": f"Bearer {api_key}"}
+        self._on_missing_scope = on_missing_scope
 
     async def _check(self, resp: aiohttp.ClientResponse) -> None:
         if resp.status < 400:
@@ -102,6 +186,15 @@ class CalliopeClient:
         message, code = _error_from(resp.status, body)
         if resp.status == 401:
             raise CalliopeAuthError(message)
+        if resp.status == 403 and code == "insufficient_scope":
+            challenge = _CHALLENGE_SCOPE.search(resp.headers.get("WWW-Authenticate", ""))
+            named = challenge[1].split() if challenge else []
+            err = CalliopeScopeError(
+                message, tuple(scope for scope in named if SCOPE.fullmatch(scope))
+            )
+            if self._on_missing_scope is not None:
+                self._on_missing_scope(err)
+            raise err
         raise CalliopeApiError(resp.status, message, code)
 
     @asynccontextmanager
@@ -168,12 +261,26 @@ class CalliopeClient:
     # -- the stack -------------------------------------------------------------
 
     async def health(self) -> dict[str, Any]:
-        """GET /health: never needs a key, always 200; read `status`."""
+        """GET /health: always 200 and `status`; the backends' detail only
+        when the key holds health:read."""
         return await self._request("GET", "/health")
 
     async def check_key(self) -> None:
         """GET /v1/models, answered by the gateway itself and behind the key."""
         await self._request("GET", "/v1/models")
+
+    async def check_transcribe(self) -> None:
+        """POST /v1/audio/transcriptions without audio: the gateway checks the
+        key's scope before the stack sees the request, so only a key without
+        speech:transcribe gets a 403. One with it gets the stack's refusal of
+        a request that has no file, and nothing is transcribed."""
+        await self._request("POST", "/v1/audio/transcriptions", data=aiohttp.FormData())
+
+    async def check_glossary(self) -> None:
+        """GET /glossaries/home-assistant: only a key without glossaries:ha
+        gets a 403. One with it gets the profile, or a 404 before Home
+        Assistant has first written it."""
+        await self._request("GET", f"/glossaries/{GLOSSARY_PROFILE}", raw=True)
 
     async def voices(self) -> dict[str, Any]:
         """GET /voices: Kokoro's voices."""

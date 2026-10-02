@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from homeassistant.core import HomeAssistant
+import asyncio
+import logging
+
+import pytest
+from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNAVAILABLE
+from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import (
@@ -18,6 +23,15 @@ from .fake_calliope import BEDROOM_ID, KITCHEN_ID, LOUNGE_ID, FakeCalliope, korv
 
 def _state(hass: HomeAssistant, entity_id: str) -> str:
     return hass.states.get(entity_id).state
+
+
+def _unavailable(changes: list[Event]) -> list[str]:
+    """The entities that became unavailable, from captured state changes."""
+    return [
+        change.data["entity_id"]
+        for change in changes
+        if (new := change.data["new_state"]) is not None and new.state == STATE_UNAVAILABLE
+    ]
 
 
 async def test_wake_word(
@@ -346,6 +360,87 @@ async def test_reconnect_reads_what_was_missed(
     await until(hass, lambda: _state(hass, "number.kitchen_ring_brightness") == "35.0")
     assert len(fake.calls("GET", "/satellites")) > reads
     assert _state(hass, "switch.kitchen_microphone") == "on"
+
+
+@pytest.fixture
+def routine_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every clean end of the stream is taken for the gateway's 15-minute
+    limit, not only one after STREAM_ROUTINE_AFTER."""
+    monkeypatch.setattr("custom_components.calliope.coordinator.STREAM_ROUTINE_AFTER", 0)
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and record.name.startswith("custom_components.calliope")
+    ]
+
+
+@pytest.mark.usefixtures("routine_at_once")
+async def test_the_gateways_15_minute_end_of_the_stream_leaves_every_entity_available(
+    hass: HomeAssistant,
+    fake: FakeCalliope,
+    loaded: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The gateway ends every event stream after 15 minutes so the key is
+    checked again. One new stream opens at once and what changed meanwhile is
+    read, while no entity goes unavailable and nothing is logged as lost."""
+    changes = async_capture_events(hass, EVENT_STATE_CHANGED)
+    caplog.clear()
+    reads = len(fake.calls("GET", "/satellites"))
+    fake.satellites[KITCHEN_ID]["config"]["brightness"] = 35
+    fake.drop_streams()
+    await fake.wait_streams(2)
+    await until(hass, lambda: _state(hass, "number.kitchen_ring_brightness") == "35.0")
+    assert len(fake.calls("GET", "/satellites")) > reads
+    await asyncio.sleep(0.1)
+    await hass.async_block_till_done()
+    assert fake.stream_count == 2
+    assert _unavailable(changes) == []
+    assert loaded.runtime_data.coordinator.connected
+    assert _warnings(caplog) == []
+
+
+@pytest.mark.usefixtures("routine_at_once")
+async def test_after_the_15_minute_end_entities_go_unavailable_only_if_the_stream_cannot_reopen(
+    hass: HomeAssistant,
+    fake: FakeCalliope,
+    loaded: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A new stream refused (the hub went down meanwhile) is an outage: the
+    entities go unavailable, it is logged once, and they come back with the
+    stream."""
+    caplog.clear()
+    fake.events_status = 503
+    fake.drop_streams()
+    await until(hass, lambda: _state(hass, "switch.kitchen_microphone") == "unavailable")
+    [lost] = _warnings(caplog)
+    assert lost.startswith("Lost the Calliope event stream")
+    fake.events_status = None
+    await until(hass, lambda: _state(hass, "switch.kitchen_microphone") == "on")
+
+
+async def test_a_stream_that_ends_soon_after_it_opened_is_taken_for_an_outage(
+    hass: HomeAssistant,
+    fake: FakeCalliope,
+    loaded: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Reopened at once, a stream that a proxy closes as soon as it opens
+    would be asked for again in a tight loop. One that ends before
+    STREAM_ROUTINE_AFTER is retried with backoff, and logged as lost."""
+    changes = async_capture_events(hass, EVENT_STATE_CHANGED)
+    caplog.clear()
+    fake.drop_streams()
+    await fake.wait_streams(2)
+    await until(hass, lambda: _state(hass, "switch.kitchen_microphone") == "on")
+    assert "switch.kitchen_microphone" in _unavailable(changes)
+    [lost] = _warnings(caplog)
+    assert lost.startswith("Lost the Calliope event stream")
 
 
 async def test_adopted_later_and_forgotten(

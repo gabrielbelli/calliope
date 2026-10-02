@@ -26,10 +26,9 @@ async def test_diagnostics_redact_addresses_urls_titles_and_webhooks_but_keep_ca
     """The key, the gateway's address, the stack's URLs, an LLM's prompt,
     a satellite's address, the phone and its track are redacted; a webhook
     keeps its kind and loses its URL; the buttons a board has are kept."""
-    fake.api_key = "sk-secret"
-    hass.config_entries.async_update_entry(
-        entry, data={**entry.data, CONF_API_KEY: "sk-secret"}
-    )
+    # An admin's key is also told the backends' addresses (health:detail) and
+    # what each button does (satellites:admin); neither belongs in a report.
+    fake.scopes |= {"health:detail", "satellites:admin"}
     fake.words.append(
         {
             "name": "hey_grok",
@@ -49,7 +48,7 @@ async def test_diagnostics_redact_addresses_urls_titles_and_webhooks_but_keep_ca
     diag = await async_get_config_entry_diagnostics(hass, entry)
     text = str(diag)
     for secret in (
-        "sk-secret",
+        fake.api_key,
         fake.url.split("//", 1)[1],
         "http://stt-stack:8000",
         "llm.example.com",
@@ -94,6 +93,8 @@ async def test_device_diagnostics(
     assert diag["event_stream_connected"] is True
     assert diag["satellite"]["id"] == LOUNGE_ID
     assert diag["satellite"]["address"] == REDACTED
+    # The home-assistant key is never told the button actions.
+    assert "buttons" not in diag["satellite"]["config"]
     assert "airplay_name" in diag["wanted"]
     assert "lights" not in diag["wanted"]
     assert "text.lounge_airplay_name" in diag["entities"]

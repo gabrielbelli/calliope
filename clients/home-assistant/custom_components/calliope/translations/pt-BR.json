@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Conectar ao Calliope",
-        "description": "O endereço do gateway do Calliope: a porta que serve a API e a página.",
+        "description": "O endereço do gateway do Calliope, que serve a API e a página, e uma chave de API criada no Calliope.",
         "data": {
           "url": "URL",
           "api_key": "Chave de API",
@@ -11,18 +11,18 @@
         },
         "data_description": {
           "url": "Por exemplo {example_url}",
-          "api_key": "Só se o gateway definir GATEWAY_API_KEYS. Deixe vazio para um gateway sem chave.",
+          "api_key": "Obrigatória. No Calliope, abra Account › API keys › New key e escolha o preset home-assistant.",
           "verify_ssl": "Desative só para um certificado autoassinado."
         }
       },
       "reauth_confirm": {
-        "title": "O Calliope recusou a chave de API",
-        "description": "Informe uma chave aceita pelo GATEWAY_API_KEYS do gateway.",
+        "title": "O Calliope precisa de uma chave de API",
+        "description": "O Calliope recusou a chave, ou esta entrada não tem nenhuma: o Calliope agora exige uma. No Calliope, abra Account › API keys › New key, escolha o preset home-assistant e cole a chave aqui.",
         "data": {
           "api_key": "Chave de API"
         },
         "data_description": {
-          "api_key": "A nova chave. Deixe vazio se o gateway não exigir mais uma."
+          "api_key": "A nova chave. Ela começa com calliope_."
         }
       },
       "reconfigure": {
@@ -35,21 +35,28 @@
         },
         "data_description": {
           "url": "Por exemplo {example_url}",
-          "api_key": "Só se o gateway definir GATEWAY_API_KEYS. Deixe vazio para um gateway sem chave.",
+          "api_key": "Obrigatória. No Calliope, abra Account › API keys › New key e escolha o preset home-assistant.",
           "verify_ssl": "Desative só para um certificado autoassinado."
         }
       }
     },
     "error": {
       "cannot_connect": "O Calliope não respondeu nesse endereço.",
-      "invalid_auth": "O Calliope recusou a chave de API.",
+      "invalid_auth": "O Calliope recusou a chave de API: ela é desconhecida, foi revogada ou expirou.",
       "invalid_url": "Informe uma URL que comece com http:// ou https://.",
+      "malformed_key": "Isso não é uma chave de API do Calliope. Uma chave começa com calliope_ e tem 45 caracteres: cole-a inteira.",
+      "missing_scopes": "O Calliope aceitou a chave, mas falta a ela {scopes}. Crie uma chave com o preset home-assistant.",
       "not_calliope": "Algo respondeu, mas não é um gateway do Calliope."
     },
     "abort": {
       "already_configured": "Este gateway do Calliope já está configurado.",
       "reauth_successful": "A nova chave funciona.",
-      "reconfigure_successful": "A conexão foi atualizada."
+      "reconfigure_successful": "A conexão foi atualizada.",
+      "reauth_without_satellites": "A nova chave funciona, mas não alcança os satélites: falta a ela satellites:read. A fala funciona. Para os satélites, crie uma chave com o preset home-assistant.",
+      "reconfigure_without_satellites": "A conexão foi atualizada, mas esta chave não alcança os satélites: falta a ela satellites:read. A fala funciona. Para os satélites, crie uma chave com o preset home-assistant."
+    },
+    "create_entry": {
+      "no_satellites": "O Calliope está configurado, mas esta chave não alcança os satélites: falta a ela {scopes}. A fala funciona. Para os satélites, crie uma chave com o preset home-assistant e informe-a em Reconfigurar."
     }
   },
   "device_automation": {
@@ -230,6 +237,12 @@
     },
     "update_skipped": {
       "message": "O hub não iniciou a atualização: {reason}"
+    }
+  },
+  "issues": {
+    "missing_scope": {
+      "title": "Falta um escopo à chave de API do Calliope",
+      "description": "O Calliope em {entry} recusou um pedido porque falta à chave de API da integração {scopes}. No Calliope, abra Account › API keys › New key e escolha o preset home-assistant, que tem todos os escopos que esta integração usa. Depois abra Configurações › Dispositivos e serviços › Calliope › Reconfigurar e informe a nova chave."
     }
   },
   "services": {

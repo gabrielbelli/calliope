@@ -122,6 +122,13 @@ Menu bar icon → **Settings…** → **Use a Calliope server**. Off is the rest
 looks like one line; on reveals an address and a key, and turning it back off leaves both
 alone. The fields commit on Return or on leaving them — there is nothing else to press.
 
+**The key is required.** A Calliope server answers nothing but its liveness without one. Make
+it in Calliope under *Account* → *API keys* → *New key* with the preset `speak-only`: model
+listing, speech on both lanes, and reading your own jobs, because a long-form voice answers
+with a job to poll. The `speech` preset works too, and holds more than the player uses. An
+address without a key is not used: the settings say a key is required, and `server.py`
+started with `CALLIOPE_URL` but no `CALLIOPE_KEY` says so once and forwards nothing.
+
 Filled in, `server.py` becomes a proxy: `kokoro`, `tts-1` and `tts-1-hd` are answered on this
 Mac as before, and anything else is forwarded to the Calliope gateway. `GET /v1/models` lists
 both, with `owned_by` saying which side each comes from, so one address covers every engine

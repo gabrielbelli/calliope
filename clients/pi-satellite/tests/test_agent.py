@@ -205,6 +205,19 @@ async def test_a_new_satellite_says_what_it_is_waits_and_is_adopted(fake):
     assert state.load().token == "t0k"
 
 
+async def test_the_socket_upgrade_carries_no_origin_header(fake):
+    """The gateway refuses a device socket that names a web origin, since a
+    browser always sends one: a page must not open the device door. So the
+    Pi's upgrade request sends no Origin at all."""
+    a = agent_with(hub="ws://x")
+
+    async def hub(ws, got):
+        got.append({"origin": ws.request.headers.get("Origin")})
+        await recv(ws, got, "hello")
+    got = await talk(a, hub)
+    assert got[0] == {"origin": None}
+
+
 async def test_a_microphone_is_offered_with_the_output_as_its_reference_channel(fake):
     fake["devices"] = pipewire.Devices((SINK,), (MIC,), SINK.name, MIC.name)
     a = agent_with(hub="ws://x")

@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to Calliope",
-        "description": "The address of the Calliope gateway: the port that serves both the API and the page.",
+        "description": "The address of the Calliope gateway, which serves both the API and the page, and an API key made in Calliope.",
         "data": {
           "url": "URL",
           "api_key": "API key",
@@ -11,18 +11,18 @@
         },
         "data_description": {
           "url": "For example {example_url}",
-          "api_key": "Only if the gateway sets GATEWAY_API_KEYS. Leave empty for a keyless gateway.",
+          "api_key": "Required. In Calliope open Account › API keys › New key and choose the home-assistant preset.",
           "verify_ssl": "Turn off only for a self-signed certificate."
         }
       },
       "reauth_confirm": {
-        "title": "Calliope refused the API key",
-        "description": "Enter a key that the gateway's GATEWAY_API_KEYS accepts.",
+        "title": "Calliope needs an API key",
+        "description": "Calliope refused the key, or this entry has none: Calliope now requires one. In Calliope open Account › API keys › New key, choose the home-assistant preset, and paste the key here.",
         "data": {
           "api_key": "API key"
         },
         "data_description": {
-          "api_key": "The new key. Leave it empty if the gateway no longer needs one."
+          "api_key": "The new key. It starts with calliope_."
         }
       },
       "reconfigure": {
@@ -35,21 +35,28 @@
         },
         "data_description": {
           "url": "For example {example_url}",
-          "api_key": "Only if the gateway sets GATEWAY_API_KEYS. Leave empty for a keyless gateway.",
+          "api_key": "Required. In Calliope open Account › API keys › New key and choose the home-assistant preset.",
           "verify_ssl": "Turn off only for a self-signed certificate."
         }
       }
     },
     "error": {
       "cannot_connect": "Calliope did not answer at that address.",
-      "invalid_auth": "Calliope refused the API key.",
+      "invalid_auth": "Calliope refused the API key: it is unknown, revoked or expired.",
       "invalid_url": "Enter a URL that starts with http:// or https://.",
+      "malformed_key": "That is not a Calliope API key. A key starts with calliope_ and is 45 characters long: paste all of it.",
+      "missing_scopes": "Calliope accepted the key, but it lacks {scopes}. Make a key with the home-assistant preset.",
       "not_calliope": "Something answered, but it is not a Calliope gateway."
     },
     "abort": {
       "already_configured": "This Calliope gateway is already set up.",
       "reauth_successful": "The new key works.",
-      "reconfigure_successful": "The connection is updated."
+      "reconfigure_successful": "The connection is updated.",
+      "reauth_without_satellites": "The new key works, but it cannot reach the satellites: it lacks satellites:read. Speech works. For the satellites, make a key with the home-assistant preset.",
+      "reconfigure_without_satellites": "The connection is updated, but this key cannot reach the satellites: it lacks satellites:read. Speech works. For the satellites, make a key with the home-assistant preset."
+    },
+    "create_entry": {
+      "no_satellites": "Calliope is set up, but this key cannot reach the satellites: it lacks {scopes}. Speech works. For the satellites, make a key with the home-assistant preset and enter it with Reconfigure."
     }
   },
   "device_automation": {
@@ -230,6 +237,12 @@
     },
     "update_skipped": {
       "message": "The hub did not start the update: {reason}"
+    }
+  },
+  "issues": {
+    "missing_scope": {
+      "title": "The Calliope API key lacks a scope",
+      "description": "Calliope at {entry} refused a request because the integration's API key lacks {scopes}. In Calliope open Account › API keys › New key and choose the home-assistant preset, which holds every scope this integration uses. Then open Settings › Devices & services › Calliope › Reconfigure and enter the new key."
     }
   },
   "services": {

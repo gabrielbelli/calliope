@@ -4,6 +4,12 @@ Shapes are copied from the real services (services/satellites/app/main.py,
 services/gateway/README.md, services/tts and services/stt READMEs), including
 the OpenAI error envelope and the event stream's ": connected" and keepalive
 comments.
+
+It holds a key as the gateway does: every route but /health answers 401
+without it, and 403 insufficient_scope, with the RFC 6750 challenge, for a
+route whose scope the key lacks. The key starts with the home-assistant
+preset's scopes, so the whole suite proves the integration needs nothing
+outside that preset.
 """
 
 from __future__ import annotations
@@ -12,10 +18,14 @@ import asyncio
 import copy
 import hashlib
 import json
+import secrets
+import string
 from typing import Any
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+
+from custom_components.calliope.api import KEY_PREFIX, _checksum
 
 KITCHEN_ID = "020000000001"  # an ESP32-Korvo
 LOUNGE_ID = "020000000002"  # a Raspberry Pi
@@ -83,6 +93,91 @@ PI_SOURCES = [
 ]
 COVER = b"\xff\xd8\xff\xe0 a jpeg"
 COVER_SHA = hashlib.sha256(COVER).hexdigest()
+
+# The home-assistant key preset, as packages/common/voice_common/scopes.py has
+# it (test_key.py holds the two together).
+HOME_ASSISTANT_PRESET = frozenset(
+    {
+        "models:read",
+        "health:read",
+        "speech:transcribe",
+        "speech:speak",
+        "glossaries:ha",
+        "satellites:read",
+        "satellites:control",
+        "satellites:update",
+    }
+)
+
+# What each route needs, as the gateway's route table has it: any one scope of
+# the set is enough. A route missing here answers 500, so a route added to the
+# fake without its scope fails every test that uses it. The satellite actions
+# are one row each, as the gateway has them, so an action the integration
+# starts to use is checked against its own scope rather than a broad one.
+SATELLITE_CONTROL = frozenset({"satellites:control"})
+ROUTE_SCOPES: dict[tuple[str, str], frozenset[str]] = {
+    ("GET", "/v1/models"): frozenset({"models:read"}),
+    ("GET", "/voices"): frozenset({"speech:speak"}),
+    ("POST", "/v1/audio/transcriptions"): frozenset({"speech:transcribe"}),
+    ("POST", "/v1/audio/speech"): frozenset({"speech:speak"}),
+    ("GET", "/glossaries/{name}"): frozenset({"glossaries:read:own"}),
+    ("PUT", "/glossaries/{name}"): frozenset({"glossaries:write:own"}),
+    ("GET", "/satellites"): frozenset({"satellites:read"}),
+    ("GET", "/satellites/events"): frozenset({"satellites:read"}),
+    ("GET", "/satellites/wake-words"): frozenset({"satellites:read"}),
+    ("GET", "/satellites/firmware"): frozenset({"satellites:read"}),
+    ("POST", "/satellites/ota"): frozenset({"satellites:update"}),
+    ("GET", "/satellites/{sid}"): frozenset({"satellites:read"}),
+    # Control fields only: anything else needs satellites:admin as well,
+    # which the hub checks (FakeCalliope._patch).
+    ("PATCH", "/satellites/{sid}"): SATELLITE_CONTROL,
+    ("GET", "/satellites/{sid}/airplay/artwork"): frozenset({"satellites:read"}),
+    ("POST", "/satellites/{sid}/airplay/{command}"): SATELLITE_CONTROL,
+    ("POST", "/satellites/{sid}/media/stop"): SATELLITE_CONTROL,
+    ("POST", "/satellites/{sid}/media"): SATELLITE_CONTROL,
+    **{
+        ("POST", f"/satellites/{{sid}}/{action}"): SATELLITE_CONTROL
+        for action in ("identify", "reboot", "lights", "tone", "say", "flush", "ptt")
+    },
+    ("POST", "/satellites/{sid}/listen"): frozenset({"satellites:listen"}),
+    ("POST", "/satellites/{sid}/inject"): frozenset({"satellites:listen"}),
+    **{
+        ("POST", f"/satellites/{{sid}}/{action}"): frozenset({"satellites:admin"})
+        for action in ("adopt", "forget", "set-hub")
+    },
+}
+# The reserved profile: reached with these, never with :own (the gateway's
+# Reserved rule).
+HOME_ASSISTANT_GLOSSARY: dict[str, frozenset[str]] = {
+    "GET": frozenset({"glossaries:ha", "glossaries:read:all"}),
+    "PUT": frozenset({"glossaries:ha", "glossaries:write:all"}),
+}
+# What PATCH /satellites/{id} takes with satellites:control alone, as the hub
+# has it (services/satellites/app/main.py; test_key.py holds the two together).
+CONTROL_FIELDS = frozenset(
+    {
+        "volume",
+        "mic_gain_db",
+        "mic_enabled",
+        "speaker_enabled",
+        "lights_enabled",
+        "brightness",
+        "audio_sink",
+        "audio_source",
+        "echo_reference",
+        "output_satellite",
+        "airplay_enabled",
+        "airplay_name",
+    }
+)
+
+
+def new_key() -> str:
+    """A key in the gateway's format, as Account › API keys hands one out."""
+    body = "".join(
+        secrets.choice(string.ascii_letters + string.digits) for _ in range(30)
+    )
+    return KEY_PREFIX + body + _checksum(body)
 
 
 def airplay_idle() -> dict[str, Any]:
@@ -257,7 +352,23 @@ def pi(sid: str, name: str, *, mic: bool = True, **kwargs: Any) -> dict[str, Any
     return sat
 
 
-def envelope(status: int, message: str, code: str | None = None) -> web.Response:
+def lacks_scope(listed: str, message: str | None = None) -> web.Response:
+    """The gateway's 403 for a key without the scopes `listed` names, with
+    the RFC 6750 challenge that names them."""
+    return envelope(
+        403,
+        message or f"This credential lacks the scope it needs: {listed}.",
+        "insufficient_scope",
+        {"WWW-Authenticate": f'Bearer error="insufficient_scope", scope="{listed}"'},
+    )
+
+
+def envelope(
+    status: int,
+    message: str,
+    code: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> web.Response:
     """The OpenAI-shaped error every Calliope route answers with."""
     return web.json_response(
         {
@@ -269,6 +380,7 @@ def envelope(status: int, message: str, code: str | None = None) -> web.Response
             }
         },
         status=status,
+        headers=headers,
     )
 
 
@@ -278,7 +390,14 @@ class FakeCalliope:
     def __init__(self) -> None:
         """A Korvo in the kitchen and a Pi in the lounge (both adopted), and
         one waiting to be adopted."""
-        self.api_key: str | None = None
+        self.api_key = new_key()
+        # What the key holds; a test takes scopes away to see a 403.
+        self.scopes: set[str] = set(HOME_ASSISTANT_PRESET)
+        # (scope list, message) a 403 names instead of the route's scopes, to
+        # play a server that is not the gateway.
+        self.hostile_refusal: tuple[str, str] | None = None
+        # Every request, (method, path), whatever it was answered.
+        self.hits: list[tuple[str, str]] = []
         self.satellites: dict[str, dict[str, Any]] = {
             KITCHEN_ID: korvo(KITCHEN_ID, "kitchen", lights_enabled=False),
             LOUNGE_ID: pi(LOUNGE_ID, "lounge"),
@@ -367,6 +486,7 @@ class FakeCalliope:
         r.add_get("/voices", self._voices)
         r.add_post("/v1/audio/transcriptions", self._transcribe)
         r.add_post("/v1/audio/speech", self._speech)
+        r.add_get("/glossaries/{name}", self._get_glossary)
         r.add_put("/glossaries/{name}", self._put_glossary)
         r.add_get("/satellites", self._list)
         r.add_get("/satellites/events", self._events)
@@ -401,7 +521,8 @@ class FakeCalliope:
             q.put_nowait(event)
 
     def drop_streams(self) -> None:
-        """End every open event stream, as a hub restart would."""
+        """End every open event stream cleanly, as a hub restart would, or
+        the gateway's 15-minute limit on an event stream."""
         for q in list(self._queues):
             q.put_nowait(None)
 
@@ -435,62 +556,86 @@ class FakeCalliope:
         }
 
     def describe(self, sat: dict[str, Any]) -> dict[str, Any]:
-        """A satellite as the hub answers for it."""
+        """A satellite as the hub answers for it: config.buttons only to a key
+        holding satellites:admin, because a webhook action names a secret."""
         out = copy.deepcopy(sat)
         out.pop("playing", None)
+        if "satellites:admin" not in self.scopes:
+            (out.get("config") or {}).pop("buttons", None)
         if self.media_route:
             out["media"] = self.media_view(sat["id"])
         return out
 
     # -- routes --------------------------------------------------------------
 
+    def _keyed(self, request: web.Request) -> bool:
+        return request.headers.get("Authorization") == f"Bearer {self.api_key}"
+
+    def _holds(self, request: web.Request, scope: str) -> bool:
+        return self._keyed(request) and scope in self.scopes
+
     @web.middleware
     async def _auth(self, request: web.Request, handler: Any) -> web.StreamResponse:
-        if (
-            self.api_key
-            and request.path != "/health"
-            and request.headers.get("Authorization") != f"Bearer {self.api_key}"
-        ):
-            return envelope(401, "Invalid API key", "invalid_api_key")
+        self.hits.append((request.method, request.path))
+        if request.path == "/health":
+            return await handler(request)
+        if "Authorization" not in request.headers:
+            return envelope(
+                401,
+                "Authentication required.",
+                "unauthenticated",
+                {"WWW-Authenticate": "Bearer"},
+            )
+        if not self._keyed(request):
+            return envelope(
+                401,
+                "Incorrect API key provided.",
+                "invalid_api_key",
+                {"WWW-Authenticate": 'Bearer error="invalid_token"'},
+            )
+        method = "GET" if request.method == "HEAD" else request.method
+        resource = request.match_info.route.resource
+        route = resource.canonical if resource is not None else request.path
+        if "action" in request.match_info:
+            route = route.replace("{action}", request.match_info["action"])
+        needed = ROUTE_SCOPES.get((method, route))
+        if needed is None:
+            return envelope(500, f"no scope declared for {method} {request.path}")
+        if request.match_info.get("name") == "home-assistant":
+            needed = HOME_ASSISTANT_GLOSSARY[method]
+        if not needed & self.scopes:
+            return lacks_scope(*(self.hostile_refusal or (" ".join(sorted(needed)),)))
         return await handler(request)
 
     async def _health(self, request: web.Request) -> web.Response:
+        """Liveness for anyone; the backends for a key with health:read, and
+        their addresses and threads only with health:detail."""
         if self.health_body is not None:
             return web.json_response(self.health_body)
-        return web.json_response(
-            {
-                "status": "ok",
-                "gateway": "ok",
-                "backends": {
-                    "stt": {
-                        "url": "http://stt-stack:8000",
-                        "reachable": True,
-                        "http_status": 200,
-                        "health": {
-                            "status": self.stt_status,
-                            "model": self.stt_model,
-                            "threads": 8,
-                            "hotwords": self.stt_hotwords,
-                        }
-                        | (
-                            {}
-                            if self.stt_models is None
-                            else {"models": self.stt_models}
-                        ),
-                    },
-                    "tts": {
-                        "url": "http://tts-stack:8001",
-                        "reachable": True,
-                        "http_status": 200,
-                        "health": {
-                            "status": "ok",
-                            "voices": len(self.voices),
-                            "default_voice": "bm_george",
-                        },
-                    },
+        if not self._holds(request, "health:read"):
+            return web.json_response({"status": "ok"})
+        detail = self._holds(request, "health:detail")
+        stt = {
+            "status": self.stt_status,
+            "model": self.stt_model,
+            "hotwords": self.stt_hotwords,
+        } | ({} if self.stt_models is None else {"models": self.stt_models})
+        backends = {
+            "stt": {"reachable": True, "health": stt},
+            "tts": {
+                "reachable": True,
+                "health": {
+                    "status": "ok",
+                    "voices": len(self.voices),
+                    "default_voice": "bm_george",
                 },
-            }
-        )
+            },
+        }
+        if detail:
+            stt["threads"] = 8
+            backends["stt"] |= {"url": "http://stt-stack:8000", "http_status": 200}
+            backends["tts"] |= {"url": "http://tts-stack:8001", "http_status": 200}
+        return web.json_response({"status": "ok", "backends": backends})
 
     async def _models(self, request: web.Request) -> web.Response:
         return web.json_response(
@@ -505,13 +650,23 @@ class FakeCalliope:
         fields = {
             k: (v if isinstance(v, str) else v.file.read()) for k, v in form.items()
         }
+        if "file" not in fields:
+            # The stack's refusal, which the config flow's scope check meets.
+            return envelope(400, "file: Field required", "missing_required_parameter")
         self.requests.append(("POST", "/v1/audio/transcriptions", fields))
         name = fields.get("glossary")
-        if name and name not in self.glossaries:
+        # The reserved profile resolves only for a key that may select it.
+        hidden = (
+            set()
+            if {"glossaries:ha", "glossaries:read:all"} & self.scopes
+            else {"home-assistant"}
+        )
+        if name and (name not in self.glossaries or name in hidden):
             return envelope(
                 400,
                 f"Unknown glossary profile {name!r}. This deployment has: "
-                f"{', '.join(self.glossaries) or 'none'}. See GET /glossaries.",
+                f"{', '.join(sorted(set(self.glossaries) - hidden)) or 'none'}. "
+                "See GET /glossaries.",
                 "invalid_value",
             )
         unspellable = sorted(
@@ -553,6 +708,12 @@ class FakeCalliope:
         return web.json_response(
             {"text": self.transcript}, headers={"x-stt-engine": self.stt_model}
         )
+
+    async def _get_glossary(self, request: web.Request) -> web.Response:
+        name = request.match_info["name"]
+        if name not in self.glossaries:
+            return envelope(404, f"Unknown glossary profile {name!r}.", "glossary_not_found")
+        return web.Response(text=self.glossaries[name])
 
     async def _put_glossary(self, request: web.Request) -> web.Response:
         name = request.match_info["name"]
@@ -643,6 +804,8 @@ class FakeCalliope:
         sat = self._find(sid)
         if sat is None or not sat["adopted"]:
             return envelope(404, "no adopted satellite with that id")
+        if "satellites:admin" not in self.scopes and set(body) - CONTROL_FIELDS:
+            return lacks_scope("satellites:admin")
         if self.patch_refusal is not None:
             return envelope(*self.patch_refusal)
         if "name" in body:
@@ -754,7 +917,8 @@ class FakeCalliope:
         body = await request.json() if request.can_read_body else None
         self.requests.append(("POST", f"/satellites/{sid}/{action}", body))
         if action not in ("identify", "say", "tone", "flush", "ptt", "reboot"):
-            return envelope(404, "Invalid URL", "unknown_url")
+            # Scoped, but not something this fake plays.
+            return envelope(500, f"the fake does not answer {action}")
         sat, refused = self._playable(sid)
         if refused is not None:
             return refused

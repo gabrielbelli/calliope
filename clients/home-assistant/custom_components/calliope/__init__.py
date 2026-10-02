@@ -6,16 +6,29 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_API_KEY, CONF_URL, CONF_VERIFY_SSL, Platform
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryError,
+    ConfigEntryNotReady,
+)
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 
-from .api import CalliopeAuthError, CalliopeClient, CalliopeError
+from . import issues
+from .api import (
+    HEALTH_READ,
+    CalliopeAuthError,
+    CalliopeClient,
+    CalliopeError,
+    CalliopeScopeError,
+    lacks_health_read,
+)
 from .const import DOMAIN
 from .coordinator import (
     CalliopeConfigEntry,
@@ -64,18 +77,52 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Version 2: Calliope requires a key. An entry from version 1 is kept as
+    it is, with or without one: setup refuses an entry without a key before
+    it sends anything, and that starts reauth at once."""
+    if entry.version > 2:
+        # Written by a newer integration; this one cannot know its shape.
+        return False
+    if entry.version == 1:
+        hass.config_entries.async_update_entry(entry, version=2)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: CalliopeConfigEntry) -> bool:
     """Connect to the gateway, read the satellites, open the event stream."""
+    # A new key, or the same key after its owner's role changed: what it
+    # lacked before is found again rather than remembered.
+    issues.clear(hass, entry)
+    if not entry.data.get(CONF_API_KEY):
+        raise ConfigEntryAuthFailed("Calliope requires an API key")
     session = async_get_clientsession(
         hass, verify_ssl=entry.data.get(CONF_VERIFY_SSL, True)
     )
-    client = CalliopeClient(session, entry.data[CONF_URL], entry.data.get(CONF_API_KEY))
+    report = issues.reporter(hass, entry)
+    client = CalliopeClient(
+        session, entry.data[CONF_URL], entry.data[CONF_API_KEY], on_missing_scope=report
+    )
     try:
         health = await client.health()
         await client.check_key()
+        if lacks_health_read(health):
+            # The key is known, so this is the answer to a key without
+            # health:read, which /health gives rather than a 403. Without the
+            # engines, Assist would be offered a guess, and the stack polled
+            # for ever for engines it never lists.
+            refused = CalliopeScopeError(
+                f"This credential lacks the scope it needs: {HEALTH_READ}.", (HEALTH_READ,)
+            )
+            report(refused)
+            raise refused
         voices = list((await client.voices()).get("voices") or [])
     except CalliopeAuthError as err:
         raise ConfigEntryAuthFailed(str(err)) from err
+    except CalliopeScopeError as err:
+        # Retrying cannot give a key a scope: the repair issue says which
+        # key to make instead.
+        raise ConfigEntryError(str(err)) from err
     except CalliopeError as err:
         raise ConfigEntryNotReady(f"Calliope is not ready: {err}") from err
 
@@ -143,8 +190,18 @@ def _watch_engines(
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: CalliopeConfigEntry) -> bool:
-    """Close the stream (a background task of the entry) and the platforms."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    """Close the stream (a background task of the entry), the platforms, and
+    the issue about what its key lacks."""
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        issues.clear(hass, entry)
+    return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """An entry whose setup failed for a missing scope was never unloaded,
+    and keeps its issue until it is set up again or removed."""
+    issues.clear(hass, entry)
 
 
 async def async_remove_config_entry_device(

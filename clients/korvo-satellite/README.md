@@ -72,7 +72,7 @@ The build and the over-the-air upload read these from the environment:
 | `CALLIOPE_FIRMWARE_PUBKEY` | every build | The firmware signing public key to compile in. Else `~/.config/calliope/firmware-signing.pub.pem`, else `keys/firmware-signing.pub.pem`. None found: an unsigned build, with a warning ([keys/README.md](keys/README.md)) |
 | `CALLIOPE_URL` | `-e ota -t upload` | **Required.** The hub's base URL, which is the gateway's, such as `https://calliope.example.com`. The upload stops without it |
 | `CALLIOPE_SATELLITE` | `-e ota -t upload` | **Required.** A satellite's id, its name, or `all` |
-| `CALLIOPE_API_KEY` | `-e ota -t upload` | A gateway key, sent as `Authorization: Bearer`. Needed when the gateway sets `GATEWAY_API_KEYS` |
+| `CALLIOPE_API_KEY` | `-e ota -t upload` | **Required.** A Calliope API key with the `firmware-release` preset (`satellites:read`, `satellites:firmware`, `satellites:update`; at most 90 days), made under *Account* → *API keys* → *New key*. Sent as `Authorization: Bearer`. The upload stops without it |
 | `CALLIOPE_SIGNING_KEY` | `-e ota -t upload` | The private key that signs the image. Default `~/.config/calliope/firmware-signing.pem` |
 
 `DEV_HUB` is a compiler flag, not a variable: set it through
@@ -83,6 +83,7 @@ certificate against the computer's own CA store.
 
 ```bash
 export CALLIOPE_URL=https://calliope.example.com
+export CALLIOPE_API_KEY=calliope_...   # firmware-release preset
 CALLIOPE_SATELLITE=kitchen pio run -e ota -t upload     # or CALLIOPE_SATELLITE=all
 ```
 

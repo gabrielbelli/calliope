@@ -4,7 +4,9 @@ One long-lived GET /satellites/events per config entry. GET /satellites is
 read when the stream opens (at start and after every reconnect), so nothing is
 missed while it was down; after that every change arrives as an event, and
 one satellite is read again (GET /satellites/{id}) when an event says its
-record changed.
+record changed. The gateway ends every event stream after 15 minutes so that
+the key is checked again; that end is routine, and the stream is opened again
+without the entities going unavailable.
 
 Each satellite has a revision, bumped whenever anything about it changes. An
 entity writes its state only when its satellite's revision (or the stream's
@@ -17,11 +19,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.debounce import Debouncer
@@ -49,6 +53,7 @@ from .const import (
     KIND_TRIGGER_WORD,
     KIND_WAKE_WORD,
     QUIET_HUB_EVENTS,
+    STREAM_ROUTINE_AFTER,
 )
 from .vocabulary import Vocabulary
 
@@ -165,13 +170,16 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
         try:
             listed = await self.client.satellites()
         except CalliopeAuthError as err:
-            raise UpdateFailed(f"Calliope refused the API key: {err}") from err
+            # The coordinator turns this into a reauth: a revoked or expired
+            # key will not come back by retrying.
+            raise ConfigEntryAuthFailed(f"Calliope refused the API key: {err}") from err
         except CalliopeApiError as err:
-            if err.status in (404, 503):
-                # A gateway deployed without the satellite hub: speech works,
-                # there are just no satellites.
+            if err.status in (403, 404, 503):
+                # A gateway deployed without the satellite hub, or a key that
+                # may not see it (the client has raised a repair issue for
+                # that): speech works, there are just no satellites.
                 if self.has_hub:
-                    _LOGGER.info("Calliope has no satellite hub (%s)", err)
+                    _LOGGER.info("Calliope's satellites are out of reach (%s)", err)
                 self.has_hub = False
                 return {}
             raise UpdateFailed(str(err)) from err
@@ -323,6 +331,7 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
                     await self.async_refresh()
                     if not self.last_update_success:
                         raise CalliopeConnectionError("could not read the satellites")
+                    healthy_since = time.monotonic()
                     async for event in stream:
                         try:
                             self._on_event(event)
@@ -331,6 +340,18 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
                                 "Could not handle a Calliope %s event",
                                 event.get("type"),
                             )
+                lasted = time.monotonic() - healthy_since
+                if lasted >= STREAM_ROUTINE_AFTER:
+                    # The gateway's 15-minute limit, which makes the key be
+                    # checked again. Opened again at once, and the entities
+                    # stay as they are: they go unavailable only if that
+                    # fails, which is how a hub that restarted is found, and
+                    # a 401 then still asks for a new key.
+                    _LOGGER.debug(
+                        "Calliope ended the event stream after %.0f s; reopening it",
+                        lasted,
+                    )
+                    continue
                 reason = "the hub closed the event stream"
             except CalliopeAuthError as err:
                 reason = f"the API key was refused ({err})"
@@ -338,8 +359,9 @@ class CalliopeCoordinator(DataUpdateCoordinator[Satellites]):
                 self.config_entry.async_start_reauth(self.hass)
             except CalliopeApiError as err:
                 reason = str(err)
-                if err.status in (404, 503):
-                    self._backoff = BACKOFF_MAX  # no hub behind the gateway
+                if err.status in (403, 404, 503):
+                    # No hub behind the gateway, or none this key may see.
+                    self._backoff = BACKOFF_MAX
             except CalliopeError as err:
                 reason = str(err)
             if self.connected:
