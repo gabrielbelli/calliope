@@ -358,16 +358,18 @@ jobs:
       # Like the gateway and unlike the three model services, this one is
       # assertable in milliseconds: every rule it implements — which paths are
       # forwarded, that an oversized upload never reaches stt-stack, that our
-      # SSRF pre-filter refuses a name resolving into RFC 1918, that abandoning
-      # a declined link actually reaps MeTube's pending record — is a unit test
-      # against mock backends. It cannot run the shared conformance suite whole
+      # SSRF pre-filter refuses a name resolving into RFC 1918, that one
+      # person's link is a 404 to another — is a unit test against mock
+      # backends. It cannot run the shared conformance suite whole
       # either: it publishes no /openapi.json and has no auth module of its
       # own. It calls the one assertion that does describe it,
       # conformance.assert_four_field_envelope, from its own tests.
       #
       # NOTHING HERE STARTS A SERVER, and nothing may: the suite is
-      # fastapi.testclient over an httpx MockTransport, and yt-dlp is never
-      # spawned — app.probe.run is replaced.
+      # fastapi.testclient over an httpx MockTransport, and the downloader
+      # child is a stub (tests/fake_fetcher.py) that never opens a socket.
+      # The real app/fetcher.py runs only against loopback, and its guard is
+      # tested on refusals that happen before a packet leaves.
       - name: Install
         run: pip install -r services/ui/requirements-dev.txt
 
@@ -499,16 +501,15 @@ jobs:
       # compiled — plus two of this image's own. python-multipart is what
       # UploadFile needs and its absence is a RuntimeError at the first upload
       # rather than at import, so it is imported explicitly here. And yt-dlp is
-      # checked as a BINARY on PATH, not only as a module: app/probe.py spawns
-      # `yt-dlp`, so an install that shipped the package without its console
-      # script would build cleanly and degrade every confirm card to a title.
+      # imported beside the two modules that run it: app/fetcher.py imports it
+      # as a library in a child process, and app/downloads.py spawns that.
       - name: Check the runtime imports on this architecture (ui)
         if: matrix.service == 'ui'
         run: |
           buildah run --user root "$(buildah from localhost/build:ui-${{ matrix.arch }})" -- \
             python -c 'import app.main, voice_common.errors, httpx, fastapi, uvicorn, multipart; print("ok", httpx.__version__, fastapi.__version__)'
           buildah run --user root "$(buildah from localhost/build:ui-${{ matrix.arch }})" -- \
-            sh -c 'command -v yt-dlp && yt-dlp --version'
+            python -c 'import yt_dlp, app.fetcher, app.downloads; print(yt_dlp.version.__version__)'
 
       # onnxruntime, scipy, scikit-learn and webrtcvad all ship compiled
       # per-architecture wheels, and openwakeword is installed --no-deps, so a

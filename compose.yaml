@@ -13,7 +13,7 @@
 # scope, then forwards the request with a signed identity assertion that each
 # service verifies before it answers anything. The page is at
 # https://<host>/ui and calls the gateway's own paths with its session cookie;
-# voice-ui serves the page and talks to MeTube by host address for links.
+# voice-ui serves the page and fetches pasted links itself.
 # docs/adr/0022-everything-behind-a-login.md is the whole design.
 #
 # A SECOND LISTENER, voice-gateway:8081, IS NEVER PUBLISHED. It takes the
@@ -29,8 +29,8 @@
 # gateway and the other four. voice-ui runs yt-dlp on addresses people paste,
 # so it shares no network with a backend: the gateway is the only Calliope
 # service it can reach. Neither network is `internal: true`, because the hub
-# calls Home Assistant and language models, tts-long its GPU runner and
-# voice-ui MeTube.
+# calls Home Assistant and language models, tts-long its GPU runner, and
+# voice-ui fetches links from the internet.
 #
 # WHAT CHANGED WHEN THE FIVE REPOSITORIES BECAME ONE. The image names, and
 # nothing else:
@@ -115,7 +115,7 @@ services:
       # other three containers running and this one merely `created`.
       #
       # 30080 also matches the convention every other app on that box already
-      # follows -- rackula 30323, metube 30097, gitea 30008, unifi 30072-75,
+      # follows -- rackula 30323, gitea 30008, unifi 30072-75,
       # convertx 30154. The CONTAINER port stays 8080: nothing inside the image
       # or in the healthcheck below needs to know about the host mapping.
       #
@@ -195,8 +195,9 @@ services:
       # THE PUBLIC ORIGIN, AND IT IS REQUIRED: scheme://host[:port], the address
       # people type, on a host name that serves Calliope and nothing else on
       # ANY port. A browser ties a cookie to a host name, not to a port, so
-      # another HTTPS service under the same name (MeTube, Gitea, the NAS's own
-      # pages) could hand a reader's browser a session of its choosing. A
+      # another HTTPS service under the same name (another app on the same
+      # host, or the NAS's own pages) could hand a reader's browser a session of
+      # its choosing. A
       # session is honoured on this host only, so the NAS's own address on
       # 30080 still serves API keys and never a cookie.
       #
@@ -886,7 +887,8 @@ services:
   # one thing: transcribing a download for the person who asked, with the
   # short-lived delegation token the gateway gave for that request beside it.
   # That matters because this is the container that runs yt-dlp on addresses
-  # people paste.
+  # people paste: in a child process that checks every connection it makes,
+  # downloading into the ui-cache volume, and needing nothing on the LAN.
   voice-ui:
     container_name: voice-ui
     image: ghcr.io/gabrielbelli/calliope-ui:v0.1.2
@@ -903,55 +905,20 @@ services:
     networks:
       - edge
     environment:
-      # MeTube, by HOST ADDRESS. It is a separate TrueNAS app
-      # (ix-metube-metube-1) with host_network:false and its web port published
-      # on 30097, so it shares no DNS with this app — there is no `metube` name
-      # to resolve, and `host.docker.internal` is absent without an explicit
-      # extra_hosts entry. Put the NAS's LAN IP here.
-      #
-      # DELIBERATELY LEFT UNSET in a fresh copy, like CALLIOPE_PUBLIC_ORIGIN
-      # above and for the same reason: an address invented in a file that
-      # gets deployed is how a
-      # placeholder becomes production configuration. Unset means the link box
-      # is not rendered at all and the page says "link ingestion not
-      # configured". File upload and both TTS paths never depend on it.
-      #
-      # BEFORE SETTING THIS, READ services/ui/README.md's security section.
-      # MeTube has NO authentication of any kind — no auth, user, password or
-      # token key exists in its configuration, and an unauthenticated GET
-      # /history from off-NAS answers 200. Our path sits behind a sign-in, and
-      # a link answers only the person who pasted it, so this does not widen
-      # that hole, but it does make it load-bearing, and the fix is a
-      # deployment one: unpublish 30097 or firewall it to the NAS and reach it
-      # by LAN IP.
-      #
-      # SET, and by LAN IP rather than through the reverse proxy. This call
-      # never leaves the NAS: sending it to ytdl.gabrielbelli.com would go out
-      # to the router on 192.168.1.1 and hairpin straight back to this machine,
-      # adding HAProxy and a TLS handshake as failure modes for a hop between
-      # two containers on the same box. That proxy is also, at the time of
-      # writing, returning HAProxy's "No server is available" 503 for that
-      # hostname while MeTube answers 200 on 30097 — a backend pointing at
-      # MeTube's DOCUMENTED default port 8081, which TrueNAS does not publish:
-      # `docker port ix-metube-metube-1` shows 30097/tcp -> 0.0.0.0:30097 and
-      # nothing on 8081.
-      UI_METUBE_URL: http://192.168.1.111:30097
-
-      # Ingest files land here rather than in the middle of the user's music
-      # library. MeTube's AUDIO_DOWNLOAD_DIR defaults to %%DOWNLOAD_DIR and is
-      # unset on this deployment, so /download/ and /audio_download/ are the
-      # SAME directory; CUSTOM_DIRS and CREATE_CUSTOM_DIRS both default true,
-      # so MeTube creates it for us.
-      UI_METUBE_FOLDER: stt-ingest
       UI_VOICE_DIR: /voices
-    # 1 CPU and 384 MB. This process serves one HTML file, streams bytes
-    # between two sockets and occasionally spawns a yt-dlp probe that reads a
-    # page of JSON. Nothing is buffered: the ingest path streams MeTube's file
-    # straight into a multipart POST rather than holding 131 MB of podcast, and
-    # audio decoding happens in the browser. The image has no torch, no numpy
-    # and no ffmpeg.
+    # 1 CPU and 512 MB. This process serves one HTML file, streams bytes
+    # between two sockets, and runs up to five yt-dlp children (three
+    # downloads, two probes) at about 70 MB each. Each child's data is capped
+    # at 256 MiB and its OOM score raised, so the kernel kills a child before
+    # the server. Nothing is buffered: a download streams from the cache into
+    # a multipart POST, and audio decoding happens in the browser. The image
+    # has no torch, no numpy and no ffmpeg.
     cpus: 1
-    mem_limit: 384m
+    mem_limit: 512m
+    # Room for the server's threads and five children, and no fork bomb.
+    pids_limit: 128
+    # Nothing in here gains a privilege by exec'ing a setuid binary.
+    security_opt: ["no-new-privileges:true"]
     volumes:
       # This service's key and the gateway's public key, read-only.
       - calliope-svc-ui:/run/calliope:ro
@@ -962,6 +929,9 @@ services:
       # person's clips are under users/<user id>/; the top level is the
       # system's.
       - voices:/voices
+      # Finished link downloads, pruned by voice-ui itself. Deleting the
+      # volume costs re-downloads and nothing else.
+      - ui-cache:/cache
     healthcheck:
       # Its OWN localhost, like every service here. This endpoint answers from
       # this process alone and asks nothing of the gateway or a backend: a UI
@@ -1162,6 +1132,8 @@ volumes:
   tts-long-models:
   tts-long-out:
   voices:
+  # voice-ui's link cache. See the voice-ui block.
+  ui-cache:
   # The satellite hub's adoptions, wake words, firmware store and wake word
   # models.
   # Named for the feature's old name, which is also what the deployed volume is
@@ -1199,6 +1171,11 @@ volumes:
 # is on `edge` alone, so the container that runs yt-dlp on pasted addresses
 # can reach no backend directly. Neither is `internal: true`; each service
 # still needs the way out it always had.
+#
+# voice-ui needs nothing on the LAN, so an egress rule may block private
+# ranges for it with no exception. It should also block the home's WAN address
+# and public IPv6 prefix: a router with NAT loopback hands those to the
+# reverse proxy, often with a LAN source address.
 networks:
   edge:
   core:

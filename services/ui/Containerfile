@@ -2,13 +2,14 @@
 #
 #   :8090  ->  /ui                      one HTML file, no build step
 #              /ui/resolve /commit
-#              /abandon /fetch          MeTube ingestion, behind the gateway's key
+#              /abandon /fetch /media   link ingestion: yt-dlp in a child process
 #              /ui/clips                the reference-clip store for voice cloning
 #              everything else in the
 #              forwarding table         -> voice-gateway:8080
 #
-# THIS SERVICE TALKS TO THE GATEWAY AND TO METUBE, AND TO NOTHING ELSE. Not
-# stt-stack:8000, not tts-stack:8001, not tts-long:8002 — those three have no
+# THIS SERVICE TALKS TO THE GATEWAY, AND THROUGH ITS DOWNLOADER TO PUBLIC
+# ADDRESSES ON PORTS 80 AND 443, AND TO NOTHING ELSE. Not stt-stack:8000, not
+# tts-stack:8001, not tts-long:8002 — those three have no
 # `ports` entry in compose.yaml, and a UI that addressed them would work on a
 # laptop running all five containers and fail on the NAS. The gateway stays the
 # single auth boundary: this process holds no key list and compares no token,
@@ -31,8 +32,8 @@
 # Run (on the network the gateway shares):
 #   docker run -p 30081:8090 \
 #     -e UI_GATEWAY_URL=http://voice-gateway:8080 \
-#     -e UI_METUBE_URL=http://192.0.2.10:30097 \
 #     -v voices:/voices \
+#     -v ui-cache:/cache \
 #     calliope-ui
 
 FROM python:3.13-slim-trixie
@@ -42,9 +43,8 @@ FROM python:3.13-slim-trixie
 # silently remove it, and `command -v` fails the build rather than the
 # container if it ever does.
 #
-# Nothing else is installed. In particular no ffmpeg: yt-dlp is used here ONLY
-# with --skip-download, so it never post-processes anything and never needs a
-# muxer. MeTube has its own ffmpeg and does the actual fetching.
+# Nothing else is installed. In particular no ffmpeg: yt-dlp downloads native
+# single-file streams only, and nothing is merged, converted or trimmed.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends util-linux \
  && rm -rf /var/lib/apt/lists/* \
@@ -61,18 +61,17 @@ COPY packages/common/ ./packages/common/
 COPY services/ui/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# NO NATIVE NETWORK STACK, and the build fails if one arrives. app/fetcher.py
+# checks every connection yt-dlp makes by patching Python's socket module;
+# ffmpeg, aria2c and curl_cffi resolve and connect in C, where that patch
+# cannot see them. A dependency that pulls one in has to be a decision.
+RUN ! command -v ffmpeg && ! command -v ffprobe && ! command -v aria2c \
+ && python -c "import importlib.util as u, sys; sys.exit(u.find_spec('curl_cffi') is not None)"
+
 COPY services/ui/app/ ./app/
 
 # Named here rather than left to the application's defaults so `docker inspect`
-# shows what this container will talk to.
-#
-# UI_METUBE_URL is deliberately absent: it is a HOST address, not a compose
-# service name — MeTube is a separate TrueNAS app with host_network:false and
-# its port published at 30097, so it shares no DNS with this app's internal
-# network — and an address baked into a published image would be wrong for
-# every deployment but one. Unset means the link box is not rendered at all and
-# the page says "link ingestion not configured". Uploads and TTS never depend
-# on it.
+# shows what this container will talk to and where it keeps what it fetches.
 #
 # VOICE_CHOWN_DIRS and VOICE_TLS_PREFIX drive the SHARED voice-entrypoint.sh,
 # which packages/common installs onto PATH. This service used to carry its own
@@ -84,16 +83,17 @@ COPY services/ui/app/ ./app/
 # header records three copies drifting into three different holes.
 ENV UI_GATEWAY_URL=http://voice-gateway:8080 \
     UI_VOICE_DIR=/voices \
-    VOICE_CHOWN_DIRS=/voices \
+    UI_CACHE_DIR=/cache \
+    VOICE_CHOWN_DIRS="/voices /cache" \
     VOICE_TLS_PREFIX=UI \
     PYTHONUNBUFFERED=1
 
 # uid 1000, created rather than reused: the slim base has no non-root account.
 # There is no USER instruction, for the same reason as in the four siblings —
 # the entrypoint starts as root so it can take ownership of the mounted voices
-# volume, then drops to uid 1000 before uvicorn runs. Nothing here ever serves
-# as root, and the yt-dlp subprocess inherits the dropped uid.
-RUN useradd --create-home --uid 1000 ui
+# volumes, then drops to uid 1000 before uvicorn runs. Nothing here ever serves
+# as root, and the yt-dlp child inherits the dropped uid.
+RUN useradd --create-home --uid 1000 ui && install -d -o 1000 -g 1000 -m 0700 /cache
 
 # The reference-clip store, shared read-only with tts-long. Declared so that a
 # `docker run` with no -v still starts and still writes somewhere — into an
@@ -102,6 +102,10 @@ RUN useradd --create-home --uid 1000 ui
 # volume every cloned voice dies on the next restart, which would be the worst
 # possible version of this feature.
 VOLUME ["/voices"]
+
+# The link cache: finished downloads, pruned by voice-ui itself. Losing it
+# costs re-downloads and nothing else.
+VOLUME ["/cache"]
 
 # 8090, not 8080. The gateway's container port is 8080 and these two are on the
 # same network; picking a different one means a compose file that maps both can
@@ -123,4 +127,6 @@ EXPOSE 8090
 # moment someone wanted to open the page and find out why.
 
 ENTRYPOINT ["voice-entrypoint.sh"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090"]
+# --no-access-log: every line would carry the link a person pasted, which the
+# page polls /ui/progress with once a second. voice-ui's own lines stay.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090", "--no-access-log"]

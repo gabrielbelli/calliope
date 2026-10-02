@@ -507,8 +507,8 @@ def _gateway_internal(root) -> str:
     raise AssertionError("voice_common/identity.py no longer defines GATEWAY_INTERNAL")
 
 
-def _image_chown_dirs(root) -> list[str]:
-    text = (root / "services/gateway/Containerfile").read_text(encoding="utf-8")
+def _image_chown_dirs(root, service: str = "gateway") -> list[str]:
+    text = (root / f"services/{service}/Containerfile").read_text(encoding="utf-8")
     m = re.search(r'VOICE_CHOWN_DIRS="([^"]*)"', text)
     return m.group(1).split() if m else []
 
@@ -663,3 +663,29 @@ def test_voice_ui_shares_no_network_with_a_backend(compose):
     internal = sorted(name for name, net in (compose.get("networks") or {}).items()
                       if (net or {}).get("internal"))
     assert not internal, f"{internal} are internal, and every service needs a way out"
+
+
+def test_voice_ui_takes_ownership_of_every_volume_it_writes(compose, env_of, root):
+    """voice-ui runs as uid 1000 and writes /voices and /cache.
+
+    A named volume mounted where the image has a directory takes that
+    directory's owner, but a bind mount or a dataset arrives owned by whoever
+    made it, and the entrypoint takes ownership only of what VOICE_CHOWN_DIRS
+    names. A /cache it cannot write switches link ingestion off.
+    """
+    chown = (env_of("voice-ui").get("VOICE_CHOWN_DIRS") or "").split() \
+        or _image_chown_dirs(root, "ui")
+    targets = [target for source, target, _ in _mounts(compose, "voice-ui")
+               if not target.startswith("/run/calliope")]
+    missing = sorted(t for t in targets if t not in chown)
+    assert targets and not missing, (
+        f"voice-ui mounts {missing} and VOICE_CHOWN_DIRS ({' '.join(chown)}) does "
+        f"not name them")
+
+
+def test_voice_ui_is_hardened_for_its_downloader(compose):
+    """The container that runs yt-dlp on pasted links gains no privilege by
+    exec, and cannot be made to fork without bound."""
+    ui = compose["services"]["voice-ui"]
+    assert "no-new-privileges:true" in (ui.get("security_opt") or [])
+    assert isinstance(ui.get("pids_limit"), int) and ui["pids_limit"] > 0
