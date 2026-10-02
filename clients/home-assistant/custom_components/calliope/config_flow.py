@@ -15,7 +15,10 @@ without asking the gateway. Then the gateway is asked, in this order:
 
 A scope missing for speech is an error that names every such scope, so one
 new key fixes it. One missing for /satellites is a warning: the hub is
-optional, and speech works without it.
+optional, and speech works without it. Anything else that goes wrong is
+logged and shown as "unknown", rather than as a form that fails to load.
+
+The key field is a password field: the key is a bearer secret.
 """
 
 from __future__ import annotations
@@ -31,6 +34,11 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_API_KEY, CONF_URL, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
 from .api import (
     HEALTH_READ,
@@ -45,6 +53,9 @@ from .const import CONF_LEGACY_STT, DOMAIN, EXAMPLE_URL
 
 _LOGGER = logging.getLogger(__name__)
 
+# A password field: the key is not shown on screen as it is typed or pasted.
+_KEY_FIELD = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+
 
 def _schema(defaults: Mapping[str, Any]) -> vol.Schema:
     return vol.Schema(
@@ -54,7 +65,7 @@ def _schema(defaults: Mapping[str, Any]) -> vol.Schema:
             vol.Required(
                 CONF_API_KEY,
                 description={"suggested_value": defaults.get(CONF_API_KEY)},
-            ): str,
+            ): _KEY_FIELD,
             vol.Required(
                 CONF_VERIFY_SSL, default=defaults.get(CONF_VERIFY_SSL, True)
             ): bool,
@@ -83,6 +94,17 @@ class _Checked:
 
 
 async def _validate(hass: HomeAssistant, data: Mapping[str, Any]) -> _Checked:
+    """What asking the gateway found. A failure nobody foresaw is logged, and
+    the form says "unknown" rather than failing to load."""
+    try:
+        return await _ask(hass, data)
+    except Exception:
+        _LOGGER.exception("Unexpected error while checking Calliope at %s", data[CONF_URL])
+        return _Checked("unknown")
+
+
+async def _ask(hass: HomeAssistant, data: Mapping[str, Any]) -> _Checked:
+    """The URL and the key's shape, then the gateway, in the order above."""
     parts = urlsplit(data[CONF_URL])
     if parts.scheme not in ("http", "https") or not parts.netloc:
         return _Checked("invalid_url")
@@ -193,7 +215,7 @@ class CalliopeConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=vol.Schema({vol.Required(CONF_API_KEY): str}),
+            data_schema=vol.Schema({vol.Required(CONF_API_KEY): _KEY_FIELD}),
             errors=_errors(checked),
             description_placeholders={"scopes": checked.missing},
         )

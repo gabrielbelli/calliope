@@ -10,6 +10,13 @@ DOMAIN: Final = "calliope"
 # address is each deployment's own.
 EXAMPLE_URL: Final = "https://calliope.example.com"
 
+# The README's section on the API key: which preset, where to make it and
+# what each scope is for. The repair issue for a missing scope links to it.
+KEY_DOCS_URL: Final = (
+    "https://github.com/gabrielbelli/calliope/tree/main/clients/home-assistant"
+    "#the-api-key"
+)
+
 # The one bus event every satellite event is fired as, for YAML automations.
 # Its data is the hub's own event plus "device_id", "satellite_name" and
 # "kind" (see KIND_* below).

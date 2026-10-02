@@ -2,9 +2,9 @@
 
 Calliope answers a route the key may not use with 403 and names the scopes
 that route needs. Home Assistant cannot fix that by itself: a key's scopes are
-chosen in Calliope when the key is made. So the issue names them, and says
+chosen in Calliope when the key is made. So the issue names them, says
 that a key made with the home-assistant preset holds every one the
-integration uses.
+integration uses, and links to the README's section on the key.
 
 One issue per entry lists every scope refused since the entry was set up. It
 goes when the entry is set up again, which is what entering a new key does
@@ -22,7 +22,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 
 from .api import CalliopeScopeError
-from .const import DOMAIN
+from .const import DOMAIN, KEY_DOCS_URL
 
 
 def _issue_id(entry: ConfigEntry) -> str:
@@ -51,6 +51,7 @@ def reporter(
             DOMAIN,
             _issue_id(entry),
             is_fixable=False,
+            learn_more_url=KEY_DOCS_URL,
             severity=ir.IssueSeverity.WARNING
             if satellites_only
             else ir.IssueSeverity.ERROR,

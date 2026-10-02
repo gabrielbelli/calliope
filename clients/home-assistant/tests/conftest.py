@@ -10,13 +10,14 @@ from typing import Any
 import pytest
 from homeassistant.const import CONF_API_KEY, CONF_URL, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.calliope.api import wav_bytes
 from custom_components.calliope.const import DOMAIN
 
-from .fake_calliope import FakeCalliope
+from .fake_calliope import KITCHEN_ID, FakeCalliope
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +70,21 @@ async def entry(hass: HomeAssistant, fake: FakeCalliope) -> MockConfigEntry:
     )
     config_entry.add_to_hass(hass)
     return config_entry
+
+
+@pytest.fixture
+def kitchen_wifi_signal(hass: HomeAssistant, entry: MockConfigEntry) -> str:
+    """The kitchen's Wi-Fi signal turned on before setup, as someone who
+    watches it would have it: it is off by default, and these tests read the
+    satellite's status through it."""
+    er.async_get(hass).async_get_or_create(
+        "sensor",
+        DOMAIN,
+        f"{KITCHEN_ID}_rssi",
+        suggested_object_id="kitchen_wi_fi_signal",
+        config_entry=entry,
+    )
+    return "sensor.kitchen_wi_fi_signal"
 
 
 @pytest.fixture

@@ -235,6 +235,7 @@ async def test_the_voice_event_has_no_button_types(
     assert _state(hass, "event.kitchen_voice") == "unknown"
 
 
+@pytest.mark.usefixtures("kitchen_wifi_signal")
 async def test_quiet_and_injected_events(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:
@@ -267,6 +268,7 @@ async def test_quiet_and_injected_events(
     assert _state(hass, "event.kitchen_voice") == "unknown"
 
 
+@pytest.mark.usefixtures("kitchen_wifi_signal")
 async def test_offline_and_online(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:

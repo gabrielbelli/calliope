@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Conectar ao Calliope",
-        "description": "O endereço do gateway do Calliope, que serve a API e a página, e uma chave de API criada no Calliope.",
+        "description": "O endereço do gateway do Calliope, que serve a API e a página, e uma chave de API criada no Calliope para o Home Assistant.",
         "data": {
           "url": "URL",
           "api_key": "Chave de API",
@@ -11,23 +11,23 @@
         },
         "data_description": {
           "url": "Por exemplo {example_url}",
-          "api_key": "Obrigatória. No Calliope, abra Account › API keys › New key e escolha o preset home-assistant.",
+          "api_key": "Crie-a no Calliope: Account › API keys › New key, com o preset home-assistant. Só uma conta de administrador vê esse preset, e o Calliope mostra a chave uma única vez.",
           "verify_ssl": "Desative só para um certificado autoassinado."
         }
       },
       "reauth_confirm": {
-        "title": "O Calliope precisa de uma chave de API",
-        "description": "O Calliope recusou a chave, ou esta entrada não tem nenhuma: o Calliope agora exige uma. No Calliope, abra Account › API keys › New key, escolha o preset home-assistant e cole a chave aqui.",
+        "title": "O Calliope precisa de uma nova chave de API",
+        "description": "O Calliope recusou a chave: ela foi revogada ou expirou, ou a conta dona da chave foi desativada. Uma entrada criada antes da versão 0.3 não tem chave nenhuma, e agora o Calliope exige uma. No Calliope, abra Account › API keys › New key, escolha o preset home-assistant (só uma conta de administrador vê esse preset), crie a chave e cole-a aqui.",
         "data": {
           "api_key": "Chave de API"
         },
         "data_description": {
-          "api_key": "A nova chave. Ela começa com calliope_."
+          "api_key": "A nova chave. Ela começa com calliope_, e o Calliope a mostra uma única vez."
         }
       },
       "reconfigure": {
         "title": "Conexão com o Calliope",
-        "description": "Altere o endereço do gateway, a chave ou a verificação de TLS. A integração é recarregada com eles.",
+        "description": "Altere o endereço do gateway, a chave de API ou a verificação de TLS. A integração é recarregada com eles.",
         "data": {
           "url": "URL",
           "api_key": "Chave de API",
@@ -35,7 +35,7 @@
         },
         "data_description": {
           "url": "Por exemplo {example_url}",
-          "api_key": "Obrigatória. No Calliope, abra Account › API keys › New key e escolha o preset home-assistant.",
+          "api_key": "Crie-a no Calliope: Account › API keys › New key, com o preset home-assistant. Só uma conta de administrador vê esse preset, e o Calliope mostra a chave uma única vez.",
           "verify_ssl": "Desative só para um certificado autoassinado."
         }
       }
@@ -45,18 +45,20 @@
       "invalid_auth": "O Calliope recusou a chave de API: ela é desconhecida, foi revogada ou expirou.",
       "invalid_url": "Informe uma URL que comece com http:// ou https://.",
       "malformed_key": "Isso não é uma chave de API do Calliope. Uma chave começa com calliope_ e tem 45 caracteres: cole-a inteira.",
-      "missing_scopes": "O Calliope aceitou a chave, mas falta a ela {scopes}. Crie uma chave com o preset home-assistant.",
-      "not_calliope": "Algo respondeu, mas não é um gateway do Calliope."
+      "missing_scopes": "O Calliope aceitou a chave, mas ela não tem {scopes}. Os escopos de uma chave não podem ser alterados: crie uma nova chave com o preset home-assistant, que tem todos os escopos que esta integração usa.",
+      "not_calliope": "Algo respondeu, mas não é um gateway do Calliope.",
+      "unknown": "Algo inesperado deu errado. O log do Home Assistant tem os detalhes."
     },
     "abort": {
       "already_configured": "Este gateway do Calliope já está configurado.",
+      "already_in_progress": "Este gateway do Calliope já está sendo configurado.",
       "reauth_successful": "A nova chave funciona.",
       "reconfigure_successful": "A conexão foi atualizada.",
-      "reauth_without_satellites": "A nova chave funciona, mas não alcança os satélites: falta a ela satellites:read. A fala funciona. Para os satélites, crie uma chave com o preset home-assistant.",
-      "reconfigure_without_satellites": "A conexão foi atualizada, mas esta chave não alcança os satélites: falta a ela satellites:read. A fala funciona. Para os satélites, crie uma chave com o preset home-assistant."
+      "reauth_without_satellites": "A nova chave funciona, mas não alcança os satélites: ela não tem satellites:read. A fala funciona. Para os satélites, crie uma chave com o preset home-assistant.",
+      "reconfigure_without_satellites": "A conexão foi atualizada, mas esta chave não alcança os satélites: ela não tem satellites:read. A fala funciona. Para os satélites, crie uma chave com o preset home-assistant."
     },
     "create_entry": {
-      "no_satellites": "O Calliope está configurado, mas esta chave não alcança os satélites: falta a ela {scopes}. A fala funciona. Para os satélites, crie uma chave com o preset home-assistant e informe-a em Reconfigurar."
+      "no_satellites": "O Calliope está configurado, mas esta chave não alcança os satélites: ela não tem {scopes}. A fala funciona. Para os satélites, crie uma chave com o preset home-assistant e informe-a em Reconfigurar."
     }
   },
   "device_automation": {
@@ -241,8 +243,8 @@
   },
   "issues": {
     "missing_scope": {
-      "title": "Falta um escopo à chave de API do Calliope",
-      "description": "O Calliope em {entry} recusou um pedido porque falta à chave de API da integração {scopes}. No Calliope, abra Account › API keys › New key e escolha o preset home-assistant, que tem todos os escopos que esta integração usa. Depois abra Configurações › Dispositivos e serviços › Calliope › Reconfigurar e informe a nova chave."
+      "title": "Falta um escopo na chave de API do Calliope",
+      "description": "O Calliope em {entry} recusou uma requisição porque a chave de API da integração não tem {scopes}. Os escopos de uma chave não podem ser alterados, então crie uma nova: no Calliope, abra Account › API keys › New key, escolha o preset home-assistant, que tem todos os escopos que esta integração usa (só uma conta de administrador vê esse preset), e crie a chave. Depois abra Configurações › Dispositivos e serviços › Calliope, escolha Reconfigurar no menu da entrada e cole a nova chave."
     }
   },
   "services": {
@@ -280,7 +282,7 @@
       "fields": {
         "wake_word": {
           "name": "Palavra de ativação",
-          "description": "Ouve como se esta palavra de ativação tivesse sido dita, para valer o modo e a ação dela. Vazio usa os do apertar para falar."
+          "description": "Escuta como se esta palavra de ativação tivesse sido dita, para que valham o modo e a ação dela. Vazio usa o modo e a ação do próprio apertar para falar."
         }
       }
     }

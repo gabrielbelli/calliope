@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -16,8 +17,8 @@ from custom_components.calliope.const import DOMAIN
 from .conftest import until
 from .fake_calliope import KITCHEN_ID, LOUNGE_ID, FakeCalliope, pi
 
-ALWAYS = {"binary_sensor.{n}_online", "sensor.{n}_wi_fi_signal", "update.{n}_firmware"}
-ALWAYS_OFF = {"sensor.{n}_uptime", "button.{n}_restart"}
+ALWAYS = {"binary_sensor.{n}_online", "update.{n}_firmware"}
+ALWAYS_OFF = {"sensor.{n}_wi_fi_signal", "sensor.{n}_uptime", "button.{n}_restart"}
 KORVO_BUTTONS = {
     "event.kitchen_play_button",
     "event.kitchen_set_button",
@@ -102,7 +103,8 @@ async def test_a_korvo_gets_what_it_has(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:
     """Its speaker, microphone, ring, privacy mute and seven buttons: 25
-    entities, the uptime, restart and buttons off by default."""
+    entities, the Wi-Fi signal, uptime, restart and buttons off by
+    default."""
     entities = _entities(hass, KITCHEN_ID)
     enabled = {e for e, on in entities.items() if on}
     disabled = {e for e, on in entities.items() if not on}
@@ -303,6 +305,7 @@ async def test_device_info_follows_the_hub(
     await until(hass, lambda: _device(hass, KITCHEN_ID).sw_version == "v0.1.3")
 
 
+@pytest.mark.usefixtures("kitchen_wifi_signal")
 async def test_a_status_writes_only_its_own_satellites_entities(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:

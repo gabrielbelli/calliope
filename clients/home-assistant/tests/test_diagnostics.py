@@ -24,7 +24,7 @@ async def test_diagnostics_redact_addresses_urls_titles_and_webhooks_but_keep_ca
     hass: HomeAssistant, fake: FakeCalliope, entry: MockConfigEntry
 ) -> None:
     """The key, the gateway's address, the stack's URLs, an LLM's prompt,
-    a satellite's address, the phone and its track are redacted; a webhook
+    a satellite's address and token, the phone and its track are redacted; a webhook
     keeps its kind and loses its URL; the buttons a board has are kept."""
     # An admin's key is also told the backends' addresses (health:detail) and
     # what each button does (satellites:admin); neither belongs in a report.
@@ -42,6 +42,8 @@ async def test_diagnostics_redact_addresses_urls_titles_and_webhooks_but_keep_ca
         }
     )
     fake.satellites[LOUNGE_ID]["status"]["airplay"] = airplay_playing()
+    # The hub sends no satellite's token today; one that did must not leak.
+    fake.satellites[KITCHEN_ID]["token"] = "satellite-adoption-token"
     assert await hass.config_entries.async_setup(entry.entry_id)
     await until(hass, lambda: entry.runtime_data.coordinator.connected)
 
@@ -49,6 +51,7 @@ async def test_diagnostics_redact_addresses_urls_titles_and_webhooks_but_keep_ca
     text = str(diag)
     for secret in (
         fake.api_key,
+        "satellite-adoption-token",
         fake.url.split("//", 1)[1],
         "http://stt-stack:8000",
         "llm.example.com",
@@ -67,6 +70,7 @@ async def test_diagnostics_redact_addresses_urls_titles_and_webhooks_but_keep_ca
     assert diag["wake_words"][-1]["destination"]["system"] == REDACTED
     kitchen = diag["satellites"][KITCHEN_ID]
     assert kitchen["address"] == REDACTED
+    assert kitchen["token"] == REDACTED
     assert kitchen["caps"]["buttons"] == fake.satellites[KITCHEN_ID]["caps"]["buttons"]
     assert kitchen["config"]["buttons"] == {
         "play": {"press": "ptt"},

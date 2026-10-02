@@ -249,6 +249,7 @@ async def test_privacy_mute_and_under_voltage(
     )
 
 
+@pytest.mark.usefixtures("kitchen_wifi_signal")
 async def test_uptime_is_when_the_satellite_started_and_moves_only_on_a_restart(
     hass: HomeAssistant, fake: FakeCalliope, entry: MockConfigEntry
 ) -> None:

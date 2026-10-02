@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Generator
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -14,7 +16,12 @@ from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.calliope.api import UNNAMED_SCOPE
-from custom_components.calliope.const import CONF_LEGACY_STT, DOMAIN, EXAMPLE_URL
+from custom_components.calliope.const import (
+    CONF_LEGACY_STT,
+    DOMAIN,
+    EXAMPLE_URL,
+    KEY_DOCS_URL,
+)
 
 from .fake_calliope import FakeCalliope, new_key
 
@@ -51,6 +58,21 @@ async def test_the_form_suggests_no_address_and_shows_a_neutral_example(hass: Ho
     assert not (url.description or {}).get("suggested_value")
     assert result["description_placeholders"]["example_url"] == EXAMPLE_URL
     assert "example.com" in EXAMPLE_URL
+
+
+@pytest.mark.usefixtures("no_setup")
+async def test_the_key_field_hides_what_is_typed(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    """The key is a bearer secret: setup, reconfigure and reauth take it in a
+    password field."""
+    for result in (
+        await _start(hass),
+        await entry.start_reconfigure_flow(hass),
+        await entry.start_reauth_flow(hass),
+    ):
+        field = result["data_schema"].schema[CONF_API_KEY]
+        assert field.config["type"] == "password", result["step_id"]
 
 
 @pytest.mark.usefixtures("no_setup")
@@ -207,6 +229,22 @@ async def test_not_calliope(hass: HomeAssistant, fake: FakeCalliope) -> None:
     assert result["errors"] == {"base": "not_calliope"}
 
 
+async def test_an_unforeseen_failure_is_logged_and_shown_as_unknown(
+    hass: HomeAssistant, fake: FakeCalliope, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The form says something went wrong and the log has the traceback,
+    rather than the form failing to load."""
+    with patch(
+        "custom_components.calliope.config_flow.CalliopeClient.health",
+        side_effect=RuntimeError("a bug"),
+    ):
+        result = await _submit(hass, fake, fake.api_key)
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "unknown"}
+    assert "Unexpected error while checking Calliope" in caplog.text
+    assert "RuntimeError: a bug" in caplog.text
+
+
 async def test_invalid_url(hass: HomeAssistant, fake: FakeCalliope) -> None:
     """No scheme, no request."""
     result = await _start(hass)
@@ -342,5 +380,21 @@ async def test_reauth_with_a_key_that_cannot_reach_the_satellites_says_so(
     assert issue is not None
     assert issue.severity is ir.IssueSeverity.WARNING
     assert issue.translation_placeholders["scopes"] == "satellites:read"
+    assert issue.learn_more_url == KEY_DOCS_URL
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
+
+
+def test_the_issues_link_names_a_section_of_the_readme() -> None:
+    """The repair issue's Learn more opens the README at the key's section:
+    GitHub's anchor for a heading is its text, lower case, hyphens for
+    spaces and no punctuation."""
+    readme = (Path(__file__).parents[1] / "README.md").read_text()
+    anchors = {
+        re.sub(r"[^\w\- ]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+        for line in readme.splitlines()
+        if line.startswith("#")
+    }
+    url, _, anchor = KEY_DOCS_URL.partition("#")
+    assert url.endswith("/clients/home-assistant")
+    assert anchor in anchors

@@ -66,7 +66,6 @@ async def test_setup_exposes_adopted_satellites_only(
         "select.kitchen_plays_through",
         "sensor.kitchen_last_command",
         "sensor.kitchen_last_wake_word",
-        "sensor.kitchen_wi_fi_signal",
         "switch.kitchen_lights",
         "switch.kitchen_microphone",
         "switch.kitchen_speaker",
@@ -77,6 +76,7 @@ async def test_setup_exposes_adopted_satellites_only(
     assert hass.states.get("tts.calliope_kokoro") is not None
 
 
+@pytest.mark.usefixtures("kitchen_wifi_signal")
 async def test_states_from_the_hub(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:

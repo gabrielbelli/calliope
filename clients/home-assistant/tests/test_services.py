@@ -187,6 +187,7 @@ async def test_restart_button(
     await hass.async_block_till_done()
 
 
+@pytest.mark.usefixtures("kitchen_wifi_signal")
 async def test_pending_satellites_cause_no_reads(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:

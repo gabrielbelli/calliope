@@ -80,6 +80,10 @@ a typo is refused before the gateway is asked. Then it asks the gateway:
 | `GET /v1/models`, `GET /voices`, `POST /v1/audio/transcriptions` (with no audio), `GET /glossaries/home-assistant` | 403 | the key lacks the scopes it names (from the `WWW-Authenticate` challenge) |
 | `GET /satellites` | 403 | a warning: the entry is saved, speech works, and the satellites stay out of reach |
 
+Anything else that goes wrong while the gateway is asked is written to Home
+Assistant's log with its traceback, and the form says an unexpected error
+happened.
+
 One answer names every scope the key lacks for speech, so one new key fixes
 it. Only scope names with Calliope's grammar are shown: a challenge that names
 none says only that the key lacks a scope of the preset.
@@ -94,8 +98,8 @@ text-to-speech are there, and there are no satellites.
 ### The API key
 
 In Calliope open *Account* → *API keys* → *New key*, choose the preset
-**`home-assistant`**, and copy the key: Calliope shows it once. The preset
-holds exactly what the integration uses:
+**`home-assistant`**, select *Create the key*, and copy the key: Calliope
+shows it once. The preset holds exactly what the integration uses:
 
 | Scope | For |
 |---|---|
@@ -120,10 +124,10 @@ While the integration runs:
 - **401** (the key was revoked, has expired, or its account was disabled):
   Home Assistant shows *Reauthentication required* and asks for a new key.
 - **403** (the key lacks a scope a route needs): a repair issue names the
-  scopes and points to the `home-assistant` preset. One issue per entry lists
-  every scope refused; it is a warning when only satellite scopes are missing
-  and an error otherwise, and it goes when the entry is set up again with a
-  new key. A key that cannot reach the satellites at setup still loads speech;
+  scopes, points to the `home-assistant` preset, and links to this section.
+  One issue per entry lists every scope refused; it is a warning when only
+  satellite scopes are missing and an error otherwise, and it goes when the
+  entry is set up again with a new key. A key that cannot reach the satellites at setup still loads speech;
   one that lacks `models:read`, `health:read` or `speech:speak` fails setup
   until it is replaced, because retrying cannot give a key a scope.
 
@@ -140,7 +144,7 @@ name decides nothing.
 | Entity | When | Shows or does |
 |---|---|---|
 | Online | always | Connectivity: on while the satellite holds its socket to the hub. Diagnostic |
-| Wi-Fi signal | always | RSSI in dBm, from its status every 10 s. Diagnostic |
+| Wi-Fi signal | always | RSSI in dBm, from its status every 10 s. Diagnostic, off by default |
 | Uptime | always | When it last started. Diagnostic, off by default |
 | Restart | always | `POST /satellites/{id}/reboot`. Off by default |
 | Firmware | always | The firmware it runs and the update the hub would send it. See [Firmware updates](#firmware-updates) |
@@ -162,7 +166,7 @@ name decides nothing.
 | AirPlay, AirPlay name | an AirPlay receiver (a Pi) | The receiver on or off, and the name phones show (empty: the satellite's name) |
 | CPU temperature, Under-voltage | a Pi's health | Diagnostic |
 
-For the live boards that is 25 entities on a Korvo, 9 of them off by default,
+For the live boards that is 25 entities on a Korvo, 10 of them off by default,
 and 22 on a Pi with a USB microphone, with no lights, buttons or privacy mute.
 
 **Caps that are not known yet.** A satellite the hub has never seen connected
@@ -535,13 +539,22 @@ suite passing means the integration needs nothing outside that preset. The
 tests cover the key's local check against the gateway's own key format; the
 config, reconfigure and reauth flows (the reconfigure flow replaced the
 options flow in 0.2) and the entry migration; 401 and 403 at setup and at
-runtime, and the repair issue; the event
+runtime, and the repair issue and its link; the event
 stream and its reconnects, the entities each satellite's caps give it and the
 registry pruning when they change, the media player, announcements and
 firmware updates, device triggers firing real automations, the STT and TTS
 engines through Home Assistant's own components, a whole Assist pipeline with
-both engines, the actions, and diagnostics. No test runs ffmpeg on the
-integration's behalf, and nothing plays.
+both engines, the actions, and diagnostics. They also check the brand images
+Home Assistant serves, and that English and Brazilian Portuguese hold the same
+strings and placeholders, each one a key the code uses, and an icon for every
+entity without a device class. No test runs ffmpeg on the integration's
+behalf, and nothing plays.
+
+## Upgrading from 0.3.0
+
+- **Wi-Fi signal** is off by default for a satellite added from now on: it
+  changes with every status, every 10 s. A satellite that has it already keeps
+  it as it is.
 
 ## Upgrading from 0.2
 

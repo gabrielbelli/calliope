@@ -60,12 +60,16 @@ async def async_setup_entry(
 
 
 class CalliopeRssi(CalliopeSatelliteEntity, SensorEntity):
-    """RSSI from the satellite's status, every 10 s."""
+    """RSSI from the satellite's status, every 10 s. Off by default, as
+    signal strength sensors are: it moves by a dB or two with every status,
+    and each move is a recorder row, while it matters only when chasing a
+    satellite that drops off the network."""
 
     _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
     _attr_translation_key = "wifi_signal"
 
     @property

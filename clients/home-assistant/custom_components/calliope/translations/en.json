@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to Calliope",
-        "description": "The address of the Calliope gateway, which serves both the API and the page, and an API key made in Calliope.",
+        "description": "The address of the Calliope gateway, which serves both the API and the page, and an API key made in Calliope for Home Assistant.",
         "data": {
           "url": "URL",
           "api_key": "API key",
@@ -11,23 +11,23 @@
         },
         "data_description": {
           "url": "For example {example_url}",
-          "api_key": "Required. In Calliope open Account › API keys › New key and choose the home-assistant preset.",
+          "api_key": "Make it in Calliope: Account › API keys › New key, with the preset home-assistant. Only an admin account is offered that preset, and Calliope shows the key once.",
           "verify_ssl": "Turn off only for a self-signed certificate."
         }
       },
       "reauth_confirm": {
-        "title": "Calliope needs an API key",
-        "description": "Calliope refused the key, or this entry has none: Calliope now requires one. In Calliope open Account › API keys › New key, choose the home-assistant preset, and paste the key here.",
+        "title": "Calliope needs a new API key",
+        "description": "Calliope refused the key: it was revoked or has expired, or its account was disabled. An entry made before version 0.3 has no key at all, and Calliope now requires one. In Calliope open Account › API keys › New key, choose the preset home-assistant (only an admin account is offered it), create the key and paste it here.",
         "data": {
           "api_key": "API key"
         },
         "data_description": {
-          "api_key": "The new key. It starts with calliope_."
+          "api_key": "The new key. It starts with calliope_, and Calliope shows it once."
         }
       },
       "reconfigure": {
         "title": "Calliope connection",
-        "description": "Change the gateway's address, the key or TLS checking. The integration reloads with them.",
+        "description": "Change the gateway's address, the API key or TLS checking. The integration reloads with them.",
         "data": {
           "url": "URL",
           "api_key": "API key",
@@ -35,7 +35,7 @@
         },
         "data_description": {
           "url": "For example {example_url}",
-          "api_key": "Required. In Calliope open Account › API keys › New key and choose the home-assistant preset.",
+          "api_key": "Make it in Calliope: Account › API keys › New key, with the preset home-assistant. Only an admin account is offered that preset, and Calliope shows the key once.",
           "verify_ssl": "Turn off only for a self-signed certificate."
         }
       }
@@ -45,11 +45,13 @@
       "invalid_auth": "Calliope refused the API key: it is unknown, revoked or expired.",
       "invalid_url": "Enter a URL that starts with http:// or https://.",
       "malformed_key": "That is not a Calliope API key. A key starts with calliope_ and is 45 characters long: paste all of it.",
-      "missing_scopes": "Calliope accepted the key, but it lacks {scopes}. Make a key with the home-assistant preset.",
-      "not_calliope": "Something answered, but it is not a Calliope gateway."
+      "missing_scopes": "Calliope accepted the key, but it lacks {scopes}. A key's scopes cannot be changed: make a new key with the preset home-assistant, which holds every scope this integration uses.",
+      "not_calliope": "Something answered, but it is not a Calliope gateway.",
+      "unknown": "Something unexpected went wrong. Home Assistant's log has the details."
     },
     "abort": {
       "already_configured": "This Calliope gateway is already set up.",
+      "already_in_progress": "This Calliope gateway is already being set up.",
       "reauth_successful": "The new key works.",
       "reconfigure_successful": "The connection is updated.",
       "reauth_without_satellites": "The new key works, but it cannot reach the satellites: it lacks satellites:read. Speech works. For the satellites, make a key with the home-assistant preset.",
@@ -242,7 +244,7 @@
   "issues": {
     "missing_scope": {
       "title": "The Calliope API key lacks a scope",
-      "description": "Calliope at {entry} refused a request because the integration's API key lacks {scopes}. In Calliope open Account › API keys › New key and choose the home-assistant preset, which holds every scope this integration uses. Then open Settings › Devices & services › Calliope › Reconfigure and enter the new key."
+      "description": "Calliope at {entry} refused a request because the integration's API key lacks {scopes}. A key's scopes cannot be changed, so make a new key: in Calliope open Account › API keys › New key, choose the preset home-assistant, which holds every scope this integration uses (only an admin account is offered it), and create the key. Then open Settings › Devices & services › Calliope, choose Reconfigure on the entry's menu and paste the new key."
     }
   },
   "services": {
