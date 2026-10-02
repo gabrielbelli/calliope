@@ -110,7 +110,7 @@ services:
     pull_policy: always
     restart: unless-stopped
     ports:
-      # 30080 on the host, not 8080. Port 8080 on orko is already bound by an
+      # 30080 on the host, not 8080. Port 8080 on the NAS is already bound by an
       # unrelated app (ix-rickroll), and docker refuses the bind rather than
       # sharing it: "Bind for 0.0.0.0:8080 failed: port is already allocated",
       # which fails the whole `up` and leaves the app in DEPLOYING with the
@@ -176,8 +176,8 @@ services:
       # copies the pair to a private directory owned by uid 1000 while it is
       # still root, on every start, so a RENEWED certificate is picked up by a
       # restart rather than going stale in a copy someone made by hand.
-      GATEWAY_TLS_CERT: /certs/cert-gabrielbelli_com.crt
-      GATEWAY_TLS_KEY: /certs/cert-gabrielbelli_com.key
+      GATEWAY_TLS_CERT: /certs/cert-example_com.crt
+      GATEWAY_TLS_KEY: /certs/cert-example_com.key
 
       # --------------------------------------------------- who may come in --
       #
@@ -371,7 +371,7 @@ services:
       # platform.node(), which inside a container is a random hex id that
       # changes on every recreate -- so the listing would show a new machine
       # every deploy. Set it here, once, next to the container it names.
-      AIV_HOST_LABEL: orko
+      AIV_HOST_LABEL: nas
     cpus: 10
     mem_limit: 6g
     networks:
@@ -451,7 +451,7 @@ services:
       # platform.node(), which inside a container is a random hex id that
       # changes on every recreate -- so the listing would show a new machine
       # every deploy. Set it here, once, next to the container it names.
-      AIV_HOST_LABEL: orko
+      AIV_HOST_LABEL: nas
     # 8, MATCHING TTS_THREADS ABOVE, and both halves are required. ONNX Runtime
     # sizes its pool from the HOST core count, not the cgroup, so a limit on its
     # own leaves the threads fighting for a slice they are not allowed: more
@@ -663,14 +663,14 @@ services:
       #
       # THIS DEPLOYMENT'S RUNNER. Everything here is this machine's, and the
       # commented block above is what a stranger reads instead.
-      TTS_RUNNER_HOST: "192.168.1.117"
+      TTS_RUNNER_HOST: "192.0.2.17"
       TTS_RUNNER_PORT: "47600"
       # THE TRUST ROOT, and the only one. Verified from this host against the
       # live listener before it was written down: openssl s_client reported
       # the same SHA-256 that `offpeak fingerprint` prints on the runner. It
       # changes if the certificate is ever reminted, and a mismatch is a
       # refused connection rather than a warning.
-      TTS_RUNNER_FINGERPRINT: "db3493bff0fd794d9aca37fd0091d86822cf568ed10ac86b579f2735bea5badc"
+      TTS_RUNNER_FINGERPRINT: "0000000000000000000000000000000000000000000000000000000000000000"
       # A FILE, NOT A VALUE. This file is committed and published; the key is
       # not in it. Mounted read-only below, mode 0400, owned by the uid this
       # container runs as.
@@ -813,9 +813,9 @@ services:
       # is not going to be one.
       TTS_REALTIME_FACTOR_RUNNER_CHATTERBOX_TURBO: "1.54"
       # 0.45 IS THE ONE NUMBER IN THIS BLOCK THAT NOBODY MEASURED ON THIS BOX.
-      # Turbo on a CPU has never been run on orko. It measured 0.53-0.55 on an
+      # Turbo on a CPU has never been run on the NAS. It measured 0.53-0.55 on an
       # M-series laptop, and turbo is 3.0-3.2x baseline on the same CPU with
-      # the same threads and the same clip, which puts orko somewhere around
+      # the same threads and the same clip, which puts the NAS somewhere around
       # 0.5-0.7. Seeded at the bottom of that range ON PURPOSE: a pessimistic
       # rate defers to a 202 rather than promising a synchronous answer this
       # container cannot deliver. `engine_observations` will publish 0 beside
@@ -868,7 +868,7 @@ services:
       # because this file is published; the path is not a secret and the file
       # is 0400 owned by the uid this container runs as. Since the secret
       # store, only the one-time import and the fallback read it.
-      - /mnt/tank/apps/stt-stack/runner-key:/run/secrets/runner-key:ro
+      - /mnt/pool/apps/calliope/runner-key:/run/secrets/runner-key:ro
       # READ-ONLY, and shared with voice-ui, which is the only writer. One
       # writer means there is no case where two processes race on the same
       # clip, and it means a compromise of the heaviest container in the estate
