@@ -1,18 +1,23 @@
-"""app/fetcher.py itself: the guard, the argv, the formats, the facts and one real fetch.
+"""app/fetcher.py itself: the guard, the argv, the formats, the facts and real fetches.
 
 The guard patches the socket module for the whole process, so every case that
 installs it runs in a `python -c` of its own. Nothing here reaches past
-127.0.0.1: the refusals happen before a packet leaves, and the one real fetch
-is from an http.server on loopback, with the guard not installed.
+loopback: the refusals happen before a packet leaves, and the real fetches are
+from http.servers on 127.0.0.1 and ::1. Where they go through yt-dlp with the
+guard in, a stand-in rule allows 127.0.0.1 and refuses ::1, so a second hop
+has somewhere to be refused, and somewhere to be counted if it is not.
 """
 
 from __future__ import annotations
 
+import errno
+import gzip
 import http.server
 import importlib.util
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import textwrap
@@ -124,6 +129,125 @@ def test_a_probe_of_a_loopback_link_is_refused_and_writes_nothing(tmp_path):
     assert json.loads(line) == {"error": "refusing to fetch: 127.0.0.1: 127.0.0.1 is loopback",
                                 "code": "refused"}
     assert list(tmp_path.iterdir()) == []
+
+
+class _V6Server(http.server.ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+@pytest.fixture
+def two_hosts():
+    """127.0.0.1, which the stand-in rule allows, and ::1, which it refuses.
+
+    127.0.0.1 answers /redirect with a 302 to ::1, and /page with a page whose
+    <video> is on ::1. ::1 serves anything and records every request.
+    """
+    reached: list[str] = []
+    ports: dict[str, int] = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.server.address_family == socket.AF_INET6:
+                reached.append(self.path)
+            elsewhere = f"http://[::1]:{ports['v6']}"
+            if self.path == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", f"{elsewhere}/tone.wav")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if self.path == "/page":
+                body = (f'<html><head><title>t</title></head><body>'
+                        f'<video src="{elsewhere}/tone.mp4"></video></body></html>').encode()
+                kind = "text/html"
+            else:
+                body, kind = tone(), "audio/wav"
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_HEAD = do_GET
+
+        def log_message(self, *args):
+            pass
+
+    try:
+        v6 = _V6Server(("::1", 0), Handler)
+    except OSError:
+        pytest.skip("this machine has no IPv6 loopback")
+    v4 = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    ports.update(v4=v4.server_address[1], v6=v6.server_address[1])
+    for server in (v4, v6):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield ports, reached
+    for server in (v4, v6):
+        server.shutdown()
+
+
+THROUGH_YT_DLP = """
+    import os
+    rule = (lambda address: None) if {open_!r} else (
+        lambda address: None if address == "127.0.0.1" else guard._forbidden(address))
+    fetcher.install_guard(rule, {{{v4}, {v6}}})
+    os.chdir({cwd!r})
+    url = "http://127.0.0.1:{v4}/{path}"
+    try:
+        if {mode!r} == "probe":
+            fetcher.probe(url)
+        else:
+            fetcher.fetch("audio", 10 * 2**20, "-", url)
+    except BaseException as exc:
+        fetcher.say(**fetcher.failure(exc, 10 * 2**20))
+"""
+
+
+@pytest.mark.parametrize("path,mode", [("redirect", "probe"), ("redirect", "fetch"),
+                                       ("page", "fetch")])
+def test_the_guard_refuses_a_second_hop_that_yt_dlp_itself_makes(two_hosts, tmp_path,
+                                                                  path, mode):
+    """A redirect, or a media URL found inside a page, through yt-dlp's own
+    HTTP stack: the request it makes on its own is refused before a packet
+    leaves. This is what a yt-dlp bump with a network stack of its own breaks.
+    A probe takes a page's facts without fetching its media, so it has no
+    second hop to refuse there."""
+    ports, reached = two_hosts
+    out = child(THROUGH_YT_DLP.format(open_=False, cwd=str(tmp_path), path=path, mode=mode,
+                                      **ports))
+    assert out == {"error": "refusing to fetch: ::1: ::1 is loopback", "code": "refused"}
+    assert reached == [], "a request reached the address the rule refuses"
+    assert not list(tmp_path.glob("media.*"))
+
+
+def test_without_the_rule_the_second_hop_is_made(two_hosts, tmp_path):
+    """The control for the test above: the refusal is the guard's, not the setup's."""
+    ports, reached = two_hosts
+    out = child(THROUGH_YT_DLP.format(open_=True, cwd=str(tmp_path), path="page",
+                                      mode="fetch", **ports))
+    assert out["ok"] is True, out
+    assert reached == ["/tone.mp4"]
+
+
+def test_a_child_cannot_write_past_its_cap(tmp_path):
+    """RLIMIT_FSIZE, with SIGXFSZ ignored: the write fails with EFBIG and the
+    process goes on to say so, where the default action would kill it silently."""
+    target = tmp_path / "media.wav"
+    out = child(f"""
+        import resource
+        fetcher.prepare(1000)
+        limit = resource.getrlimit(resource.RLIMIT_FSIZE)
+        try:
+            with open({str(target)!r}, "wb") as out:
+                out.write(b"x" * 2000)
+            failed = None
+        except OSError as exc:
+            failed = exc.errno
+        print(json.dumps({{"limit": limit, "errno": failed}}))
+    """)
+    assert out["limit"] == [1000, 1000]
+    assert out["errno"] == errno.EFBIG
+    assert target.stat().st_size <= 1000
 
 
 # -------------------------------------------------------------------- argv --
@@ -364,6 +488,60 @@ def test_a_real_fetch_over_the_cap_writes_nothing_and_says_so(served, tmp_path, 
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert lines[-1]["code"] in ("failed", "too_big")
     assert not list(tmp_path.glob("media.*"))
+
+
+@pytest.fixture
+def unsized():
+    """200 kB that max_filesize cannot see coming: chunked with no Content-Length,
+    or gzipped with the Content-Length of the 200 bytes that cross the wire."""
+    body = tone() + bytes(200_000)
+    packed = gzip.compress(body)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Connection", "close")
+            if self.path.startswith("/chunked"):
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                for start in range(0, len(body), 8192):
+                    piece = body[start:start + 8192]
+                    self.wfile.write(f"{len(piece):x}\r\n".encode() + piece + b"\r\n")
+                self.wfile.write(b"0\r\n\r\n")
+            else:
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Content-Length", str(len(packed)))
+                self.end_headers()
+                self.wfile.write(packed)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", len(packed)
+    server.shutdown()
+
+
+@pytest.mark.parametrize("path", ["chunked.wav", "gzip.wav"])
+def test_a_body_with_no_size_up_front_is_stopped_by_the_progress_hook(unsized, path, tmp_path,
+                                                                      monkeypatch, capsys):
+    """max_filesize reads Content-Length and nothing else. Past the cap, the
+    progress hook is what stops these, and too_big says it was the hook."""
+    base, packed = unsized
+    assert packed < 1000, "the gzipped body must look small on the wire"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(fetcher, "TOO_BIG", [])
+    try:
+        fetcher.fetch("audio", 1000, "-", f"{base}/{path}")
+    except Exception as exc:  # noqa: BLE001 - as main() does
+        fetcher.say(**fetcher.failure(exc, 1000))
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert lines[-1]["code"] == "too_big", lines[-1]
+    assert not (tmp_path / "media.wav").exists()
 
 
 # ---------------------------------------------------------------- memory --

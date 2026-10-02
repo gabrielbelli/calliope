@@ -8,7 +8,9 @@ which is what touch() does too: atime is the last use, mtime never changes.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import signal
 import sys
 import time
 from collections import namedtuple
@@ -349,14 +351,19 @@ def test_a_download_that_would_not_fit_on_the_disk_fails_and_says_so(client, mon
 
 
 def test_a_download_past_the_time_limit_is_killed_with_its_process_group(client, monkeypatch):
+    """The child's own child too, which proc.kill() alone would leave running."""
     api, _, fetches = client()
     from app import downloads
     monkeypatch.setattr(downloads, "DOWNLOAD_SECONDS", 1)
-    state = fetched(api, "https://media.example/hang")
+    state = fetched(api, "https://media.example/grandchild-hang")
     assert state["status"] == "error" and state["error"] == downloads.TOO_LONG
     [call] = fetches.calls()
-    with pytest.raises(ProcessLookupError):
-        os.kill(call["pid"], 0)
+    try:
+        assert gone(call["pid"]), "the child outlived its time limit"
+        assert gone(call["grandchild"]), "the child's own child outlived it"
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(call["grandchild"], signal.SIGKILL)
 
 
 def test_a_child_is_killed_whatever_ends_its_download(client, monkeypatch):

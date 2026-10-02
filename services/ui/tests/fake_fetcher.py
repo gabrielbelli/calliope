@@ -37,6 +37,8 @@ card can be reached without the network.
                          two files; media.wav a symlink to /etc/hosts;
                          media.exe; a 0-byte media.wav. Each still says ok
             hang         sleeps an hour
+            grandchild   starts a process of its own that sleeps an hour, in
+                         its process group, and logs its pid as "grandchild"
             stall        one progress line, then sleeps an hour
             flood        one line of 70,000 characters
             silent       exits 0 and prints nothing
@@ -58,6 +60,7 @@ import json
 import math
 import os
 import struct
+import subprocess
 import sys
 import time
 import wave
@@ -132,10 +135,16 @@ def probe(url: str) -> int:
 
 
 def fetch(kind: str, url: str) -> int:
+    extra = {}
+    if "grandchild" in url:
+        extra["grandchild"] = subprocess.Popen(
+            [sys.executable, "-I", "-c", "import time; time.sleep(3600)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL).pid
     with open(Path("..", "..", "fetches.log"), "a") as log:
         log.write(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ),
                               "cwd": os.getcwd(), "pid": os.getpid(),
-                              "isolated": bool(sys.flags.isolated)}) + "\n")
+                              "isolated": bool(sys.flags.isolated), **extra}) + "\n")
     if "hang" in url:
         time.sleep(3600)
     if "flood" in url:

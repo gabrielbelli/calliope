@@ -17,6 +17,7 @@ audible here and inaudible in production until somebody reads a waveform.
 from __future__ import annotations
 
 import ast
+import json
 import re
 
 import pytest
@@ -689,3 +690,18 @@ def test_voice_ui_is_hardened_for_its_downloader(compose):
     ui = compose["services"]["voice-ui"]
     assert "no-new-privileges:true" in (ui.get("security_opt") or [])
     assert isinstance(ui.get("pids_limit"), int) and ui["pids_limit"] > 0
+
+
+def test_voice_ui_writes_no_access_log(root, compose):
+    """Every access line would carry the link a person pasted: the page polls
+    /ui/progress?token=<the link> once a second while it downloads. The image's
+    command turns uvicorn's access log off, and compose must not replace that
+    command with one that turns it back on."""
+    containerfile = (root / "services/ui/Containerfile").read_text(encoding="utf-8")
+    cmd = re.search(r"^CMD (\[.*\])$", containerfile, re.M)
+    assert cmd, "the voice-ui Containerfile has no CMD in exec form"
+    assert "--no-access-log" in json.loads(cmd.group(1))
+    command = compose["services"]["voice-ui"].get("command")
+    if command is not None:
+        words = command if isinstance(command, list) else command.split()
+        assert "--no-access-log" in words, "compose replaces the command and logs every link"
