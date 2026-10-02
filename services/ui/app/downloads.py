@@ -333,8 +333,7 @@ def drop(sub: str, url: str) -> None:
     job = JOBS.get((sub, url))
     if job is not None:
         _discard(job)
-    with contextlib.suppress(OSError):
-        sweep()
+    sweep()
 
 
 def _cap(job: Job) -> int:
@@ -423,8 +422,7 @@ async def _run(job: Job, key: str) -> None:
         job.proc = None
         if workdir is not None:
             shutil.rmtree(workdir, ignore_errors=True)
-        with contextlib.suppress(OSError):
-            sweep()
+        sweep()
 
 
 def _collect(workdir: Path, kind: str | None, cap: int,
@@ -491,14 +489,18 @@ def sweep(need: int = 0) -> None:
     """
     now, on = time.time(), config.CACHE_BYTES > 0
     found = []
-    for entry in os.scandir(config.CACHE_DIR):
+    try:
+        entries = list(os.scandir(config.CACHE_DIR))
+        free = shutil.disk_usage(config.CACHE_DIR).free
+    except OSError:
+        return                                  # no cache directory, nothing to keep
+    for entry in entries:
         if NAME.fullmatch(entry.name) and entry.is_file(follow_symlinks=False):
             with contextlib.suppress(FileNotFoundError):
                 st = entry.stat(follow_symlinks=False)
                 found.append((st.st_atime, st.st_size, entry.path))
     found.sort()                                            # least recently used first
     small = sum(size for _, size, _ in found if on and size <= ITEM_BYTES)
-    free = shutil.disk_usage(config.CACHE_DIR).free
     for used, size, path in found:
         is_small = on and size <= ITEM_BYTES
         if now - used > (SMALL_KEEP if is_small else BIG_KEEP) or (
