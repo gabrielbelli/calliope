@@ -8,24 +8,25 @@ what the code will do for the whole life of the process.
 EVERYTHING BELOW IS OPTIONAL AND EVERY DEFAULT DEGRADES RATHER THAN FAILS.
 That is the stance for this service specifically: it is a convenience in front
 of a stack that already works without it, and the worst outcome would be a UI
-that refuses to start — or worse, starts and hangs — because MeTube is down or
-yt-dlp is missing. Uploads and TTS must never depend on ingestion being
-available.
+that refuses to start — or worse, starts and hangs — because the link cache is
+not writable or yt-dlp is missing. Uploads and TTS must never depend on
+ingestion being available.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import os
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from voice_common.identity import GATEWAY_INTERNAL
 
 __all__ = [
     "GATEWAY_INTERNAL_URL", "IGNORED_INTERNAL_URL",
-    "METUBE_URL", "METUBE_FOLDER", "METUBE_FORMAT", "METUBE_VIDEO_FORMAT",
-    "PROBE", "PROBE_TIMEOUT", "MAX_UPLOAD_BYTES", "MAX_CAPTION_BYTES",
-    "MAX_MEDIA_BYTES",
+    "LINKS", "CACHE_DIR", "MAX_DOWNLOAD_BYTES", "CACHE_BYTES",
+    "CLIP_SOURCE_SECONDS", "FETCHER",
+    "PROBE_TIMEOUT", "MAX_UPLOAD_BYTES", "MAX_CAPTION_BYTES",
     "CONFIRM_SECONDS", "CONFIRM_BYTES", "STT_RTF_SEED", "STT_BUDGET_SECONDS",
     "VOICE_DIR", "MAX_CLIP_BYTES", "MAX_CLIP_SECONDS", "RESOLVE_PER_MINUTE",
     "flag",
@@ -73,80 +74,57 @@ def _internal_url(raw: str | None) -> tuple[str, bool]:
 GATEWAY_INTERNAL_URL, IGNORED_INTERNAL_URL = _internal_url(
     os.getenv("UI_GATEWAY_INTERNAL_URL"))
 
-# MeTube. Unset means the URL box is not rendered at all and the page says
-# "link ingestion not configured" -- not a broken button, not a spinner.
-#
-# A HOST ADDRESS, never a compose service name. MeTube is a separate TrueNAS
-# app (ix-metube-metube-1) with host_network:false and its web port published
-# at 30097, so it shares no DNS with this app's internal network. There is no
-# `metube` name to resolve and `host.docker.internal` is not present either
-# without an explicit extra_hosts entry. Use the NAS's LAN IP.
-METUBE_URL = (os.getenv("UI_METUBE_URL") or "").strip().rstrip("/")
+# LINKS, on unless UI_LINKS=0, which hides the link box and leaves file
+# upload. Pasted links are fetched by app/fetcher.py, a yt-dlp child of this
+# process (see app/downloads.py); nothing outside this container takes part.
+LINKS = flag("UI_LINKS", True)
 
-# Mandatory in effect, not merely tidy. MeTube's AUDIO_DOWNLOAD_DIR defaults to
-# "%%DOWNLOAD_DIR" and is unset on this deployment, so /download/ and
-# /audio_download/ are the SAME directory -- verified. Without a folder every
-# file we ingest lands in the middle of the user's music library. CUSTOM_DIRS
-# and CREATE_CUSTOM_DIRS both default true and are unset, so MeTube creates it.
-METUBE_FOLDER = os.getenv("UI_METUBE_FOLDER", "stt-ingest")
+# Where finished downloads are kept and downloads in progress are written: a
+# named volume in compose. Losing it costs re-downloads and nothing else. Not
+# writable means links are off, as UI_LINKS=0 would, and the log says so.
+CACHE_DIR = Path(os.getenv("UI_CACHE_DIR", "/cache"))
 
-# opus at ~1 MB/min. A 2h14m podcast is ~131 MB of audio rather than tens of
-# gigabytes of 4K video, because download_type:"audio" never fetches the video
-# stream. MeTube 400s on any `quality` but "best" for opus, so quality is not
-# a knob here.
-METUBE_FORMAT = os.getenv("UI_METUBE_FORMAT", "opus")
+# 500 MiB, the most one audio, clip or video download may write, enforced in
+# the child three ways (RLIMIT_FSIZE, its progress hook and max_filesize). Below
+# the gateway's 512 MiB transcription cap, which leaves room for the multipart
+# framing /ui/fetch adds; keep it at or below GATEWAY_UPLOAD_MAX_BYTES.
+MAX_DOWNLOAD_BYTES = int(os.getenv("UI_MAX_DOWNLOAD_BYTES", str(500 * 2**20)))
 
-# THE CONTAINER ASKED FOR WHEN THE USER TICKS "keep the video", and only then.
-# Verified live against this deployment's MeTube: POST /add with
-# download_type:"video", format:"mp4", quality:"best" answers {"status":"ok"}
-# and writes "Me at the zoo.mp4" into the stt-ingest folder.
-#
-# mp4 rather than the source container, because the file is served straight
-# back to a <video> element: Matroska is what canPlayType answers "maybe" to
-# and then declines, and a picture that will not render is the one thing this
-# choice exists to produce. yt-dlp remuxes rather than re-encodes for mp4, so
-# it costs no compute on MeTube's side.
-METUBE_VIDEO_FORMAT = os.getenv("UI_METUBE_VIDEO_FORMAT", "mp4")
+# 1 GiB, every cached file of 128 MiB or less together. 0 turns the cache off:
+# a finished file is then kept an hour after its last use, for playback, and
+# never reused. See app/downloads.py for the whole of the cache.
+CACHE_BYTES = int(os.getenv("UI_CACHE_BYTES", str(2**30)))
 
-# The metadata probe. On by default; UI_PROBE=0 gives a title-only confirm card
-# and never spawns yt-dlp. See app/probe.py for why a probe is not a downloader
-# and what it is still on the hook for.
-PROBE = flag("UI_PROBE", True)
+# Ten minutes, the longest recording the clone sheet takes from a link. The
+# browser holds the whole recording to cut the clip out of it, and AAC at ten
+# minutes is about 10 MB.
+CLIP_SOURCE_SECONDS = 600.0
+
+# Tests only: a script run as `python -I <path> ...` in place of
+# app/fetcher.py. The browser harness sets it so the real yt-dlp never runs
+# outside its network wall, and the lifespan logs a warning when it is set.
+FETCHER = os.getenv("UI_FETCHER") or None
+
+# The probe child's time limit, the wait for a slot included. Past it the
+# confirm card shows a title and no length or size, and the fetch still works.
 PROBE_TIMEOUT = float(os.getenv("UI_PROBE_TIMEOUT", "20"))
 
 # 2 GiB. services/stt/app/main.py:138 is a bare `file.file.read()` on an
 # UploadFile -- no Content-Length check, no cap, no streaming -- so a 4 GB MKV
 # is buffered whole into the stt container's 6 GB memory limit. The page's own
 # uploads go to the gateway, which counts them against its own ceiling; this
-# one bounds what /ui/fetch pulls out of MeTube and hands on, and it is the
-# figure the page reads from /ui/config to decide when to extract the audio in
-# the browser first.
+# is the figure the page reads from /ui/config to decide when to extract the
+# audio in the browser first.
 MAX_UPLOAD_BYTES = int(os.getenv("UI_MAX_UPLOAD_BYTES", str(2 * 1024**3)))
 
-# 8 MiB, and it is a sanity bound rather than a real limit. A captions download
-# is a subtitle track and nothing else -- yt-dlp sets skip_download, so no media
-# stream is fetched at all -- and an hour of dense dialogue is on the order of
-# 100 KB of WebVTT. /ui/captions reads the whole file into memory to parse it,
-# which is the right call for something that size and the wrong one for
-# anything that is not, so the ceiling exists to catch the case where MeTube
-# hands back something that is NOT a subtitle file. Without it, a filename that
-# got past the suffix check would be buffered whole into a container with
-# mem_limit: 384m -- the same shape of bug as the clip route's, which is
-# documented at MAX_CLIP_BYTES and was an OOM kill rather than a message.
+# 8 MiB, the cap for a captions download, and it is a sanity bound rather than
+# a real limit. A captions download is a subtitle track and nothing else --
+# skip_download, so no media stream is fetched at all -- and an hour of dense
+# dialogue is on the order of 100 KB of WebVTT. /ui/captions reads the whole
+# file into memory to parse it, which is the right call for something that size
+# and the wrong one for anything that is not, so the child is held to this
+# many bytes the same three ways a media download is held to its own cap.
 MAX_CAPTION_BYTES = int(os.getenv("UI_MAX_CAPTION_BYTES", str(8 * 1024**2)))
-
-# THE CEILING ON WHAT /ui/media WILL RELAY, and it is deliberately NOT
-# MAX_UPLOAD_BYTES. That one bounds what is pushed INTO the stack -- a body
-# services/stt reads whole into a container with a 6 GB limit, which is why it
-# is a memory question. This bounds what is pulled OUT of it, down a domestic
-# connection, into a browser tab: nothing here is buffered, so it is not about
-# memory at all, and answering "how big a file may stt decode" with "how big a
-# file may this laptop stream" would tie two unrelated decisions together.
-#
-# 4 GiB is about two hours of 1080p. Past that the honest answer is to fetch
-# the audio, keep the transcript and open the file some other way -- and the
-# confirm card says what the video costs before anything is downloaded.
-MAX_MEDIA_BYTES = int(os.getenv("UI_MAX_MEDIA_BYTES", str(4 * 1024**3)))
 
 # WHEN TO NAG, and why these two numbers.
 #

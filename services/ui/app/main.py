@@ -3,8 +3,9 @@
     GET    /ui  /ui/<tab>/...      the page: one HTML file, no build step
     GET    /ui/config              the flags and limits the page starts with
     GET    /ui/clips  POST  DELETE the reference-clip store (voice cloning)
-    POST   /ui/resolve /commit /abandon /fetch /captions /clips/from-link
-    GET    /ui/progress /media     MeTube ingestion -- see app/ingest.py
+    POST   /ui/resolve /commit /abandon /fetch /captions
+    GET    /ui/progress /media     link ingestion: yt-dlp in a guarded child
+                                   process, app/fetcher.py -- see app/ingest.py
     GET    /health                 this container's own probe
 
 WHY THIS IS A FIFTH CONTAINER AND NOT ROUTES ON THE GATEWAY. Ingestion needs
@@ -35,17 +36,18 @@ reach this port acted as one shared credential.
 
 ONE OUTBOUND CALL CARRIES A CREDENTIAL: /ui/fetch, which sends a finished
 download to the gateway's internal listener with this service's key and the
-person's delegation token (D64). Every outbound request, to MeTube or to the
-gateway, is built from named headers and never from the inbound request's
-(D65).
+person's delegation token (D64). Every outbound request is built from named
+headers and never from the inbound request's (D65).
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.metadata
 import json
 import logging
+import os
 import re
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -63,7 +65,7 @@ from voice_common.errors import (ApiError, error_response, http_error_response,
 from voice_common.health import install_health
 from voice_common.scopes import check_owner_filter, valid_scope
 
-from . import clips, config, ingest, metube, probe
+from . import clips, config, downloads, ingest
 
 # The shared setup, not a fourth basicConfig. The format string here was
 # byte-identical to voice_common.logging.FORMAT, and using the shared one also
@@ -86,8 +88,8 @@ def new_client() -> httpx.AsyncClient:
 
     A module-level function rather than an inline constructor for the same
     reason services/gateway has one: it is the seam the tests hand a transport
-    through, so every outbound path runs for real against a mock gateway and a
-    mock MeTube with no socket anywhere.
+    through, so every outbound path runs for real against a mock gateway with
+    no socket anywhere.
 
     It carries no default header of its own: each request names the headers
     it sends (D65).
@@ -100,27 +102,34 @@ def new_client() -> httpx.AsyncClient:
         follow_redirects=False)
 
 
+# The variables of the release that fetched links through MeTube. Named in one
+# warning if any is still set, never with its value. One string, split, so no
+# name is a quoted literal: docs/tests reads a quoted name as a setting the
+# code still reads, and a compose file that sets one must keep failing there.
+RETIRED = tuple("UI_METUBE_URL UI_METUBE_FOLDER UI_METUBE_FORMAT "
+                "UI_METUBE_VIDEO_FORMAT UI_PROBE UI_MAX_MEDIA_BYTES".split())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.client = new_client()
-    log.info("ready: gateway=%s metube=%s probe=%s voices=%s",
-             config.GATEWAY_INTERNAL_URL, config.METUBE_URL or "(unset)",
-             "on" if probe.available() else "off", config.VOICE_DIR)
+    downloads.startup()
+    log.info("ready: gateway=%s links=%s cache=%s voices=%s",
+             config.GATEWAY_INTERNAL_URL, "on" if downloads.available() else "off",
+             config.CACHE_DIR, config.VOICE_DIR)
     if config.IGNORED_INTERNAL_URL:
         # The name and the rule, never the value: a URL can carry a password.
         log.error("UI_GATEWAY_INTERNAL_URL is ignored and %s is used instead: "
                   "/ui/fetch sends this service's key there, so it may name "
                   "only the gateway's internal listener or a loopback address",
                   identity.GATEWAY_INTERNAL)
-    if not metube.configured():
-        log.warning("UI_METUBE_URL is unset: the link box is hidden and only "
-                    "file upload is offered. Set it to the MeTube on this "
-                    "host, by LAN address -- it is a separate TrueNAS app and "
-                    "shares no DNS with this one.")
-    if config.PROBE and not probe.available():
-        log.warning("UI_PROBE is on but yt-dlp is not on PATH: the confirm "
-                    "card will show a title and no duration or size.")
+    if retired := [name for name in RETIRED if name in os.environ]:
+        log.warning("%s is set and no longer read: links are fetched in this "
+                    "container now. Remove it.", ", ".join(retired))
+    if config.FETCHER:
+        log.warning("UI_FETCHER is set: links are fetched by a test stand-in.")
     yield
+    await downloads.shutdown()
     await app.state.client.aclose()
 
 
@@ -175,7 +184,7 @@ def policy(page: str) -> str:
 
     No 'unsafe-inline' for scripts, and no 'self' either: the page is one file
     and loads no script from anywhere, so a script that is not one of these
-    exact bytes does not run -- including one a MeTube title smuggled into the
+    exact bytes does not run -- including one a page title smuggled into the
     DOM, and one served from this origin by some other route. Inline event
     handler attributes are not covered by a hash and are blocked with it; the
     page attaches its handlers with addEventListener.
@@ -279,13 +288,12 @@ async def ui_config() -> Response:
 
     Any signed-in session may read it, so it carries no address, nothing about
     who is asking and nothing per person: which features this deployment has,
-    and the ceilings the page checks a file against before it sends one. There
-    is no MeTube URL in here -- the browser could not use it anyway, since
-    MeTube emits no CORS headers at all. Whether a link needs confirming, and
-    whether it was probed, come back with each link from /ui/resolve.
+    and the ceilings the page checks a file against before it sends one.
+    Whether a link needs confirming, and whether it was probed, come back with
+    each link from /ui/resolve.
     """
     return Response(media_type="application/json", content=json.dumps({
-        "ingestion": metube.configured(),
+        "ingestion": downloads.available(),
         "cloning": clips.writable(),
         "max_upload_bytes": config.MAX_UPLOAD_BYTES,
         "max_clip_seconds": config.MAX_CLIP_SECONDS,
@@ -416,9 +424,20 @@ def _health() -> dict[str, object]:
     -- both added by voice_common.health.
     """
     return {"ui": "ok",
-            "features": {"ingestion": metube.configured(),
-                         "probe": probe.available(),
-                         "cloning": clips.writable()}}
+            "features": {"ingestion": downloads.available(),
+                         "cloning": clips.writable()},
+            # What the cache holds, and the yt-dlp a failing link should be
+            # checked against first. Read from package metadata: this process
+            # never imports yt_dlp.
+            "cache": downloads.stats(),
+            "yt_dlp": _yt_dlp_version()}
+
+
+def _yt_dlp_version() -> str | None:
+    try:
+        return importlib.metadata.version("yt-dlp")
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 install_health(app, _health)

@@ -4,28 +4,29 @@ The gateway hands /ui/fetch a delegation token beside the identity assertion
 (D64). It goes on to the gateway's internal listener with this service's own
 key and nothing else of the inbound request's, and the gateway re-checks the
 person live there. Everything this service sends anywhere is built from named
-values (D65): the assertion is never among them, so MeTube, which has no
-authentication of its own, learns nothing about who is asking.
+values (D65): the assertion is never among them. And the downloader child is
+told a URL, a kind, a cap and a language, so it learns nothing about who is
+asking either.
 """
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from voice_common.identity import ASSERTION_HEADER, DELEGATION_HEADER
 
-from conftest import BOB
+from conftest import BOB, fetched
 
-URL = "https://media.example/watch?v=abcdef"
+URL = "https://media.example/instant-talk"
 
 
 @pytest.fixture
 def finished(client):
-    """A link Alice resolved, committed and MeTube finished."""
-    api, gateway, tube = client()
-    api.post("/ui/resolve", json={"url": URL})
-    api.post("/ui/commit", json={"token": URL})
-    tube.finish(URL, "A Title.opus")
-    return api, gateway, tube
+    """A link Alice resolved, committed and the downloader finished."""
+    api, gateway, fetches = client()
+    fetched(api, URL)
+    return api, gateway, fetches
 
 
 def test_fetch_sends_the_delegation_and_the_service_key_and_no_identity(
@@ -45,15 +46,14 @@ def test_fetch_sends_the_delegation_and_the_service_key_and_no_identity(
 
 def test_fetch_without_a_delegation_downloads_nothing_and_sends_nothing(finished, sign):
     """This service holds no scope that can transcribe on its own, so without
-    the person's token there is nothing to do -- and the 131 MB download is not
+    the person's token there is nothing to do -- and the 131 MB upload is not
     the place to find that out."""
-    api, gateway, tube = finished
-    before = len(tube.requests)
+    api, gateway, _ = finished
     headers = {**sign(), DELEGATION_HEADER: ""}
     response = api.post("/ui/fetch", json={"token": URL}, headers=headers)
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "delegation_refused"
-    assert len(tube.requests) == before and not gateway.seen
+    assert not gateway.seen
 
 
 def test_a_delegation_signed_for_someone_else_is_not_passed_on(finished, sign,
@@ -69,12 +69,11 @@ def test_a_delegation_signed_for_someone_else_is_not_passed_on(finished, sign,
 
 def test_a_delegation_is_passed_on_from_fetch_and_from_nowhere_else(finished, sign):
     """Every request in this suite carries one; only /ui/fetch spends it."""
-    api, gateway, tube = finished
+    api, gateway, _ = finished
     api.get("/ui/progress", params={"token": URL})
     api.get("/ui/media", params={"token": URL})
     api.post("/ui/captions", json={"token": URL})
     assert not gateway.seen
-    assert not [r for r in tube.requests if DELEGATION_HEADER.lower() in r.headers]
 
 
 def test_a_rotated_service_key_is_read_again_and_the_fetch_retried_once(
@@ -134,13 +133,12 @@ def test_a_fresh_key_the_gateway_also_refuses_is_a_503_not_a_401(
 def test_fetch_before_the_service_key_exists_is_a_503(finished, calliope_gateway):
     """The gateway writes the key within seconds of starting (§2.4); until then
     the honest answer is to try again, and nothing is downloaded meanwhile."""
-    api, gateway, tube = finished
+    api, gateway, _ = finished
     (calliope_gateway.directory / "service.key").unlink()
-    before = len(tube.requests)
     response = api.post("/ui/fetch", json={"token": URL})
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "not_ready"
-    assert len(tube.requests) == before and not gateway.seen
+    assert not gateway.seen
 
 
 def test_the_multipart_boundary_cannot_be_predicted(finished):
@@ -156,12 +154,13 @@ def test_the_multipart_boundary_cannot_be_predicted(finished):
 
 
 def test_a_title_that_would_break_the_frame_is_scrubbed_from_the_filename(client):
-    api, gateway, tube = client()
-    api.post("/ui/resolve", json={"url": URL})
-    tube.finish(URL, 'A "quoted"\r\ntitle.opus')
+    api, gateway, _ = client()
+    from app import main
+    from conftest import finished_job
+    finished_job(main, URL, b"RIFF", ".opus", facts={"title": 'A "quoted"\r\ntitle\\'})
     api.post("/ui/fetch", json={"token": URL})
     [sent] = gateway.transcriptions()
-    assert b'filename="A _quoted___title.opus"' in sent.content
+    assert b'filename="A _quoted_title.opus"' in sent.content
 
 
 def test_a_glossary_that_would_break_the_frame_is_refused(finished):
@@ -181,25 +180,21 @@ def test_a_glossary_name_still_reaches_stt_for_it_to_judge(finished):
     assert b'name="glossary"\r\n\r\nhome-assistant' in sent.content
 
 
-def test_metube_is_told_nothing_about_who_is_asking(client, sign):
-    """MeTube has no authentication, so whatever reached it would be readable
-    by anyone on the LAN: no assertion, no delegation, no cookie, no key."""
-    api, _, tube = client()
+def test_the_downloader_is_told_nothing_about_who_is_asking(client, sign,
+                                                           calliope_gateway):
+    """The child's argv is a mode, a kind, a cap, a language and the link, and
+    its environment is four fixed variables: no sub, no assertion, no
+    delegation, no cookie and no key, and no path to the volume that holds one."""
+    api, _, fetches = client()
     headers = {**sign(), "Cookie": "__Host-calliope_session=abc",
                "Authorization": "Bearer calliope_" + "x" * 36,
-               "X-Calliope-Anything": "1", "Range": "bytes=0-3"}
-    api.post("/ui/resolve", json={"url": URL}, headers=headers)
-    api.post("/ui/commit", json={"token": URL}, headers=headers)
-    api.get("/ui/progress", params={"token": URL}, headers=headers)
-    tube.finish(URL, "A Title.mp4")
-    api.get("/ui/media", params={"token": URL}, headers=headers)
+               "X-Calliope-Anything": "1"}
+    fetched(api, URL, headers=headers)
     api.post("/ui/fetch", json={"token": URL}, headers=headers)
-    api.post("/ui/abandon", json={"token": URL}, headers=headers)
-
-    assert len(tube.requests) > 5
-    for request in tube.requests:
-        names = {name.lower() for name in request.headers}
-        assert not {n for n in names if n.startswith("x-calliope-")}, request.url
-        assert not names & {"authorization", "cookie"}, request.url
-    # The one inbound header MeTube is meant to see, by name.
-    assert any(r.headers.get("range") == "bytes=0-3" for r in tube.requests)
+    [call] = fetches.calls()
+    told = json.dumps(call)
+    for secret in ("u_aaaaaaaaaaaaaaaa", headers[ASSERTION_HEADER],
+                   headers[DELEGATION_HEADER], "calliope_session", "Bearer",
+                   calliope_gateway.service_key, str(calliope_gateway.directory)):
+        assert secret not in told, secret
+    assert call["argv"] == ["fetch", "audio", str(500 * 2**20), "-", "--", URL]

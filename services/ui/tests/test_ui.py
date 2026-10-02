@@ -34,7 +34,6 @@ ROUTES = [
     ("GET", "/ui/clips"),
     ("POST", "/ui/clips"),
     ("DELETE", "/ui/clips/someone"),
-    ("POST", "/ui/clips/from-link"),
     ("POST", "/ui/resolve"),
     ("POST", "/ui/commit"),
     ("POST", "/ui/abandon"),
@@ -71,12 +70,12 @@ def test_the_route_list_here_is_every_route_the_app_answers(client):
 @pytest.mark.parametrize("method,path", ROUTES)
 def test_every_route_refuses_a_request_with_no_assertion(client, method, path):
     """The gateway is the only door, and this is what makes that true (D52)."""
-    api, gateway, tube = client()
+    api, gateway, fetches = client()
     response = _send(api, method, path, headers={ASSERTION_HEADER: "",
                                                  DELEGATION_HEADER: ""})
     assert response.status_code == 401, response.text
     assert_four_field_envelope(response)
-    assert not tube.requests and not gateway.seen, "a refused request reached a backend"
+    assert not fetches.calls() and not gateway.seen, "a refused request reached a backend"
 
 
 @pytest.mark.parametrize("method,path", ROUTES)
@@ -99,13 +98,30 @@ def test_health_needs_no_assertion_and_asks_nobody_anything(client):
     itself now, and a probe that depended on the gateway would report this
     container unhealthy whenever a backend restarted.
     """
-    api, gateway, tube = client()
+    api, gateway, _ = client()
     response = api.get("/health", headers={ASSERTION_HEADER: ""})
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok" and body["ui"] == "ok"
-    assert body["features"] == {"ingestion": True, "probe": False, "cloning": False}
-    assert not gateway.seen and not tube.requests
+    assert body["features"] == {"ingestion": True, "cloning": False}
+    assert not gateway.seen
+
+
+def test_health_says_what_the_cache_holds_and_which_yt_dlp_runs(client):
+    """The version is the first thing to check when links start failing, and
+    it is read from package metadata: this process never imports yt_dlp."""
+    import importlib.metadata
+    from pathlib import Path
+
+    api, _, _ = client()
+    body = api.get("/health").json()
+    assert body["cache"] == {"items": 0, "bytes": 0}
+    assert body["yt_dlp"] == importlib.metadata.version("yt-dlp")
+    app = Path(__file__).resolve().parents[1] / "app"
+    for path in app.glob("*.py"):
+        if path.name != "fetcher.py":
+            source = path.read_text()
+            assert "import yt_dlp" not in source and "from yt_dlp" not in source, path.name
 
 
 def test_health_says_not_ready_until_the_gateway_has_written_the_credentials(
@@ -333,13 +349,13 @@ def test_a_deep_link_serves_the_same_page_with_the_same_headers(client):
 
 
 def test_a_deep_link_costs_no_outbound_request(client):
-    """The page is static markup: loading it at any address asks MeTube and
-    the gateway nothing, so it loads in exactly the cases /ui does."""
-    api, gateway, tube = client()
+    """The page is static markup: loading it at any address asks the gateway
+    nothing and fetches nothing, so it loads in exactly the cases /ui does."""
+    api, gateway, fetches = client()
     for path in ("/ui/transcribe", "/ui/speak/clone", "/ui/jobs/abc",
                  "/ui/vocabulary/tech", "/ui/satellites/wake-words/hey_jarvis/more"):
         assert api.get(path).status_code == 200, path
-    assert not gateway.seen and not tube.requests
+    assert not gateway.seen and not fetches.calls()
 
 
 def test_the_page_views_shadow_no_route_of_this_service(client):
@@ -366,7 +382,7 @@ def test_nothing_is_forwarded_to_the_gateway_any_more(client):
     a path this service used to forward with a container key; each is now a
     404 here, and nothing leaves the service to find that out.
     """
-    api, gateway, tube = client()
+    api, gateway, fetches = client()
     for method, path in (("GET", "/voices"), ("POST", "/v1/audio/transcriptions"),
                          ("DELETE", "/jobs/abc"), ("GET", "/satellites"),
                          ("PUT", "/satellites/secrets"), ("GET", "/glossaries/tech"),
@@ -376,7 +392,7 @@ def test_nothing_is_forwarded_to_the_gateway_any_more(client):
         response = api.request(method, path)
         assert response.status_code in (404, 405), (method, path)
         assert_four_field_envelope(response)
-    assert not gateway.seen and not tube.requests
+    assert not gateway.seen and not fetches.calls()
 
 
 def test_no_removed_variable_is_read_by_this_service():
@@ -401,23 +417,44 @@ def test_config_is_the_flags_and_limits_and_nothing_else(client):
     assert set(payload) == {"ingestion", "cloning", "max_upload_bytes",
                             "max_clip_seconds", "stt_rtf_seed", "stt_budget_seconds"}
     assert payload["ingestion"] is True
-    assert "metube" not in json.dumps(payload).lower()
+    assert "cache" not in json.dumps(payload).lower()
     assert ALICE not in json.dumps(payload)
     # The seed is the conservative figure the gateway's own 900 s timeout was
     # built on, not the root README's optimistic one.
     assert payload["stt_rtf_seed"] == 8.5
 
 
-def test_config_says_ingestion_is_off_when_metube_is_unset(client):
-    api, _, _ = client(UI_METUBE_URL="")
+def test_ui_links_0_switches_ingestion_off(client):
+    api, _, _ = client(UI_LINKS="0")
     assert api.get("/ui/config").json()["ingestion"] is False
+    assert api.get("/health").json()["features"]["ingestion"] is False
 
 
-def test_resolve_is_a_clean_501_rather_than_a_hang_when_unconfigured(client):
-    api, _, _ = client(UI_METUBE_URL="")
+def test_resolve_is_a_clean_501_rather_than_a_hang_when_switched_off(client):
+    api, _, fetches = client(UI_LINKS="0")
     response = api.post("/ui/resolve", json={"url": "https://example.com/v"})
     assert response.status_code == 501
     assert response.json()["error"]["code"] == "ingestion_not_configured"
+    assert not fetches.calls()
+
+
+def test_a_cache_that_cannot_be_written_switches_ingestion_off(client, tmp_path):
+    """Degrades rather than fails: the page still starts, and offers upload."""
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a directory")
+    api, _, _ = client(UI_CACHE_DIR=str(blocker / "cache"))
+    assert api.get("/ui/config").json()["ingestion"] is False
+    assert api.post("/ui/resolve", json={"url": "https://example.com/v"}).status_code == 501
+
+
+def test_a_variable_of_the_metube_release_is_named_once_and_its_value_never(
+        client, caplog):
+    with caplog.at_level("WARNING", logger="voice-ui"):
+        client(UI_METUBE_URL="http://192.0.2.10:30000", UI_PROBE="0")
+    warned = [r.getMessage() for r in caplog.records if "no longer read" in r.getMessage()]
+    assert len(warned) == 1, warned
+    assert "UI_METUBE_URL" in warned[0] and "UI_PROBE" in warned[0]
+    assert "192.0.2.10" not in "\n".join(caplog.messages)
 
 
 @pytest.mark.parametrize("value,expected", [
