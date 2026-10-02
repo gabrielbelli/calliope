@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import multiprocessing
 import os
 import re
@@ -368,6 +369,8 @@ class Dispatcher:
         self._proc = None
         self._conn = None
         self.engine: str | None = None
+        # When the last worker was gone, its memory with it. -inf: none yet.
+        self._released = -math.inf
         self._last_end = time.monotonic()
         self._stopping = threading.Event()
         self._stop_at = 0.0
@@ -384,7 +387,12 @@ class Dispatcher:
         """(closed, free MiB). Closed only with no worker, a minimum and a reading."""
         if self.worker_alive() or MIN_FREE_MIB <= 0:
             return False, None
-        reading = self.sampler.latest() or {}
+        # NOT A READING TAKEN WHILE OUR OWN WORKER HELD THE CARD. One taken up
+        # to SAMPLE_EVERY_S before an idle stop counted the worker's memory as
+        # somebody else's, the gate closed on it, and tts-long spoke the next
+        # job on its CPU. Until a newer one arrives there is no reading, and
+        # with no reading the gate is open, as it is without nvidia-smi.
+        reading = self.sampler.latest(since=self._released) or {}
         free = reading.get("memory_free_mib")
         return (free is not None and free < MIN_FREE_MIB), free
 
@@ -625,7 +633,12 @@ class Dispatcher:
         self._drop()
 
     def _drop(self) -> None:
+        """Forget a worker that has exited, and have the card read again."""
         if self._conn is not None:
             with suppress(OSError):
                 self._conn.close()
+        # BEFORE THE HANDLE GOES: a handler that sees no worker must also see
+        # the time after which a reading counts.
+        self._released = time.monotonic()
         self._proc, self._conn, self.engine = None, None, None
+        self.sampler.again()

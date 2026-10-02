@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import itertools
 import re
 import socket
+import time
 
 import pytest
 from starlette.testclient import TestClient
@@ -287,6 +289,62 @@ def test_a_full_card_closes_the_gate_only_while_nothing_of_ours_is_loaded(runner
     assert runner.dispatcher.worker_alive()
     row = runner.client.get("/v1/services").json()["services"][0]
     assert row["available"] is True, "our own loaded engine closed the gate"
+
+
+def test_a_reading_from_before_an_idle_stop_does_not_close_the_gate(runner,
+                                                                    monkeypatch):
+    """Our worker's memory, read before it stopped, is not somebody else's.
+
+    nvidia-smi is read every five seconds. Straight after an idle stop the last
+    reading still counted the worker's memory as used: the gate closed, a
+    submit got 503, and tts-long spoke the job on its CPU.
+    """
+    def done(job):
+        return runner.client.get(f"/v1/services/chatterbox/jobs/{job}").json()[
+            "status"] == "done"
+
+    job = submit(runner.client, segments=["Hello."]).json()["job_id"]
+    settle(lambda: done(job))
+    runner.sampler.reading = {"memory_free_mib": 1024}
+    assert runner.dispatcher.worker_alive()
+    monkeypatch.setattr(runner.modules.jobs, "IDLE_SECONDS", 0.0)
+    settle(lambda: not runner.dispatcher.worker_alive(),
+           why="the idle worker was never stopped")
+    assert runner.sampler.asked_again, "the card was not read again"
+    assert runner.client.get("/v1/status").json()["machine_state"] == "free"
+    after = submit(runner.client, segments=["Straight after."])
+    assert after.status_code == 202, after.text
+    settle(lambda: done(after.json()["job_id"]))
+
+    # A reading taken once nothing of ours is loaded still closes it.
+    settle(lambda: not runner.dispatcher.worker_alive(),
+           why="the idle worker was never stopped")
+    runner.sampler.reading = {"memory_free_mib": 1024}
+    assert runner.client.get("/v1/status").json()["machine_state"] == "busy"
+    assert submit(runner.client, segments=["Too full."]).status_code == 503
+
+
+def test_the_sampler_drops_a_reading_from_before_and_reads_again_when_asked(
+        runner_modules, monkeypatch):
+    """The real Sampler's half of the test above, with nvidia-smi faked."""
+    gpu = runner_modules.gpu
+    count = itertools.count()
+    monkeypatch.setattr(gpu.Sampler, "sample",
+                        staticmethod(lambda: {"memory_free_mib": next(count)}))
+    monkeypatch.setattr(gpu.shutil, "which", lambda _name: "nvidia-smi")
+    monkeypatch.setattr(gpu, "SAMPLE_EVERY_S", 60.0)
+    sampler = gpu.Sampler()
+    sampler.start()
+    try:
+        first = settle(sampler.latest, why="the sampler never read the card")
+        released = time.monotonic()
+        assert sampler.latest(since=released) is None, "a reading from before counted"
+        sampler.again()
+        second = settle(lambda: sampler.latest(since=released),
+                        why="again() did not read the card")
+        assert second["memory_free_mib"] > first["memory_free_mib"]
+    finally:
+        sampler.stop()
 
 
 def test_state_is_ready_when_idle_and_busy_while_a_job_runs(runner):

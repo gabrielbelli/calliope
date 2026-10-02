@@ -7,6 +7,7 @@ in tests/conftest.py.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 import types
@@ -35,13 +36,29 @@ class FakeProbe:
 
 
 class FakeSampler:
-    """nvidia-smi's last reading, set by hand. None is "no nvidia-smi"."""
+    """nvidia-smi's last reading, set by hand. None is "no nvidia-smi".
+
+    Stamped when it is set, as the real one is when it is asked for, and
+    `again()` is counted.
+    """
 
     def __init__(self, reading: dict | None = None) -> None:
         self.reading = reading
+        self.asked_again = 0
 
-    def latest(self) -> dict | None:
-        return self.reading
+    @property
+    def reading(self) -> dict | None:
+        return self._reading
+
+    @reading.setter
+    def reading(self, value: dict | None) -> None:
+        self._reading, self.taken = value, time.monotonic()
+
+    def latest(self, since: float = -math.inf) -> dict | None:
+        return self._reading if self.taken >= since else None
+
+    def again(self) -> None:
+        self.asked_again += 1
 
     def start(self) -> None:
         pass

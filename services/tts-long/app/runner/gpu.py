@@ -15,10 +15,12 @@ tts-long's gateway inlines that document into an unauthenticated /health.
 from __future__ import annotations
 
 import logging
+import math
 import multiprocessing
 import shutil
 import subprocess
 import threading
+import time
 
 log = logging.getLogger("tts-runner.gpu")
 
@@ -169,15 +171,28 @@ def parse(line: str) -> dict | None:
 
 
 class Sampler:
-    """nvidia-smi every few seconds, cached. Handlers read; they never ask."""
+    """nvidia-smi every few seconds, cached. Handlers read; they never ask.
+
+    EACH READING CARRIES THE MOMENT IT WAS ASKED FOR, so the gate can refuse
+    one taken while our own worker still held the card. Stamped before the
+    query rather than after, and kept with the reading as one tuple, so a
+    reader never pairs one reading with another's time.
+    """
 
     def __init__(self) -> None:
-        self._latest: dict | None = None
+        self._sample: tuple[float, dict | None] = (-math.inf, None)
+        self._again = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def latest(self) -> dict | None:
-        return self._latest
+    def latest(self, since: float = -math.inf) -> dict | None:
+        """The last reading, or None when it was asked for before `since`."""
+        taken, reading = self._sample
+        return reading if taken >= since else None
+
+    def again(self) -> None:
+        """Read the card now rather than at the next interval."""
+        self._again.set()
 
     def start(self) -> None:
         if self._thread is not None:
@@ -194,11 +209,16 @@ class Sampler:
 
     def stop(self) -> None:
         self._stop.set()
+        self._again.set()
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            self._latest = self.sample()
-            self._stop.wait(SAMPLE_EVERY_S)
+            # CLEARED BEFORE THE QUERY: an again() that lands during it gets a
+            # reading of its own afterwards rather than being lost.
+            self._again.clear()
+            taken = time.monotonic()
+            self._sample = (taken, self.sample())
+            self._again.wait(SAMPLE_EVERY_S)
 
     @staticmethod
     def sample() -> dict | None:
@@ -215,8 +235,11 @@ class Sampler:
 class NoSampler:
     """What a runner with RUNNER_DEVICE=cpu has: no card, so no figures."""
 
-    def latest(self) -> dict | None:
+    def latest(self, since: float = -math.inf) -> dict | None:
         return None
+
+    def again(self) -> None:
+        pass
 
     def start(self) -> None:
         pass
