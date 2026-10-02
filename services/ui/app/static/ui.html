@@ -153,6 +153,12 @@
      a line, roughly twice the width anything is comfortable to read, and the
      Transcribe tab is a wall of transcript. */
   --measure:46rem;
+  /* ADMIN IS NOT READ, IT IS OPERATED. Its tables (users, keys, the roles
+     matrix, secrets, the audit) are the one place a reading measure only
+     squeezes, and it is used now and then rather than every day, so it gets
+     the width. The masthead takes the same measure, so the title and the
+     panel still start on one edge. */
+  --measure-wide:76rem;
   /* ONE SPRING, CRITICALLY DAMPED (damping 1.0, response .35 s), sampled from
      x(t)=1-(1+wt)e^(-wt) at thirteen points. Damping 1.0 and no bounce
      anywhere on this page, deliberately: nothing here is dragged, flicked or
@@ -292,6 +298,7 @@ code,.num{font-family:var(--mono)}
 /* The dictation clock and the clone countdown both repaint every 100 ms, and
    proportional digits made them jitter sideways as the glyphs changed width. */
 .num,.ring,.job .id,.facts dd,.slider output{font-variant-numeric:tabular-nums}
+:root[data-view=admin]{--measure:var(--measure-wide)}
 .wrap{max-width:var(--measure);margin:0 auto;position:relative;z-index:2;
   /* IT CLEARS THE DOCK. The navigation is a fixed object at the foot of the
      viewport now, not a lid at the top, so the column has to end above it or
@@ -4371,6 +4378,8 @@ function dockMasthead(button) {
   const w = $("word"), t = $("tagline");
   if (w) w.textContent = said[0];
   if (t) t.textContent = said[1];
+  /* Which view is open, for the stylesheet: Admin takes the wide measure. */
+  document.documentElement.dataset.view = button.dataset.tab;
 }
 
 /* ------------------------------------------------------------- the lamp -- */
