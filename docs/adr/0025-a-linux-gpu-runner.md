@@ -1,4 +1,4 @@
-# ADR 0024 — An always-on Linux GPU runner, beside offpeak rather than instead of it
+# ADR 0025 — An always-on Linux GPU runner, beside offpeak rather than instead of it
 
 **Status:** accepted
 **Date:** 2026-10-02

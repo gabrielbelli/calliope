@@ -1126,7 +1126,7 @@ and a job handed back or left waiting past `TTS_RUNNER_MAX_WAIT` is spoken here
 instead.
 
 **There can be more than one runner, and each is a lane**
-([ADR 0024](adr/0024-a-linux-gpu-runner.md)). Beside offpeak's desktop,
+([ADR 0025](adr/0025-a-linux-gpu-runner.md)). Beside offpeak's desktop,
 `calliope-tts-runner` is an always-on container for a Linux host with an NVIDIA
 card: tts-long's own `Synth` on CUDA behind offpeak's protocol
 ([`services/tts-long/RUNNER.md`](../services/tts-long/RUNNER.md)). The second
@@ -1589,7 +1589,7 @@ skips the extension if OpenClip is absent.
 ## 10. Decision records
 
 `docs/adr/` holds the decisions, dated, each with what it cost. The sequence
-runs 0001–0010 and 0012–0024; there is no 0011.
+runs 0001–0010 and 0012–0025; there is no 0011.
 
 | | Status |
 |---|---|
@@ -1616,7 +1616,7 @@ runs 0001–0010 and 0012–0024; there is no 0011.
 | [0022 — Everything is behind a login, and the gateway is the only place that checks one](adr/0022-everything-behind-a-login.md) | accepted |
 | [0023 — Every secret the stack holds is in one encrypted store in the gateway](adr/0023-one-secret-store.md) | accepted |
 | [0024 — voice-ui fetches pasted links itself, with a small cache](adr/0024-links-fetched-in-voice-ui.md) | accepted |
-| [0024 — An always-on Linux GPU runner, beside offpeak rather than instead of it](adr/0024-a-linux-gpu-runner.md) | accepted |
+| [0025 — An always-on Linux GPU runner, beside offpeak rather than instead of it](adr/0025-a-linux-gpu-runner.md) | accepted |
 
 Smaller decisions from the satellites work are recorded where they apply
 rather than in records of their own:

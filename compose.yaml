@@ -726,7 +726,7 @@ services:
       # TTS_REALTIME_FACTOR_RUNNER2_CHATTERBOX_TURBO from its `smoke`. Every
       # runner is a lane: a job goes to the free one that finishes it first,
       # and this CPU is the last fallback. Not set here until that card has
-      # been measured (ADR 0024).
+      # been measured (ADR 0025).
 
       # ------------------------------------------- two lanes, not a ladder --
       #

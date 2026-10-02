@@ -1139,7 +1139,7 @@ about 1.3 times this CPU's rate or better, after an 8 s handover and the 1.25
 margin: about 0.57–0.61x for Turbo and 0.26–0.30x for baseline. Baseline on a
 GTX 1060 may well not clear that, and then baseline uses the card only while
 this CPU is busy, which is the arithmetic working rather than a fault. See
-[ADR 0024](../../docs/adr/0024-a-linux-gpu-runner.md).
+[ADR 0025](../../docs/adr/0025-a-linux-gpu-runner.md).
 
 ### What it buys, measured
 
