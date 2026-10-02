@@ -648,8 +648,8 @@ def test_voice_ui_shares_no_network_with_a_backend(compose):
 
     On `edge` alone, the gateway is the only Calliope service it can reach,
     so a process tricked into fetching an internal address meets nothing but
-    a gateway that wants an identity. Neither network may be internal: the
-    hub, tts-long and voice-ui all call out of the stack.
+    a gateway that wants an identity. No network may be internal: the hub,
+    tts-long, voice-ui and SearXNG all call out of the stack.
     """
     services = compose["services"]
 
@@ -659,8 +659,11 @@ def test_voice_ui_shares_no_network_with_a_backend(compose):
     backends = [s for s in services if s not in (GATEWAY, "voice-ui")]
     shared = {b: sorted(networks("voice-ui") & networks(b)) for b in backends}
     assert not any(shared.values()), f"voice-ui shares a network with {shared}"
+    # SearXNG is no Calliope service and the gateway never calls it: only the
+    # hub may reach it (the tests below).
     unreachable = sorted(s for s in services
-                         if s != GATEWAY and not networks(s) & networks(GATEWAY))
+                         if s not in (GATEWAY, SEARXNG)
+                         and not networks(s) & networks(GATEWAY))
     assert not unreachable, f"the gateway shares no network with {unreachable}"
     internal = sorted(name for name, net in (compose.get("networks") or {}).items()
                       if (net or {}).get("internal"))
@@ -731,3 +734,53 @@ def test_dependabot_watches_requirements_that_name_no_local_path(root):
     containerfile = (root / "services/ui/Containerfile").read_text(encoding="utf-8")
     assert re.search(r"^COPY services/ui/yt-dlp/requirements\.txt ./yt-dlp/requirements\.txt$",
                      containerfile, re.M), "the image would not find the pin"
+
+
+# -- the bundled SearXNG -----------------------------------------------------
+#
+# Optional three ways: bundled (what compose.yaml ships), another instance by
+# SATELLITES_SEARXNG_URL, or none. These check the shipped one, and that
+# deleting its block breaks nothing else.
+
+SEARXNG = "searxng"
+
+
+def test_only_the_hub_reaches_searxng_and_nothing_waits_for_it(compose, env_of):
+    """SearXNG checks no credential and fetches from the internet for whoever
+    asks. On `core` it would be one hop from every backend, and on `edge` one
+    from the container that runs yt-dlp, so it has a network of its own with
+    the hub. And a `depends_on` naming it would turn "delete the block to
+    switch search off" into a file that no longer comes up."""
+    services = compose["services"]
+
+    def networks(name: str) -> set[str]:
+        return set(services[name].get("networks") or ["default"])
+
+    reach = sorted(s for s in services if s != SEARXNG and networks(s) & networks(SEARXNG))
+    assert reach == [SATELLITES], f"SearXNG shares a network with {reach}, not the hub alone"
+    url = env_of(SATELLITES).get("SATELLITES_SEARXNG_URL", "").rstrip("/")
+    expose = [str(p) for p in services[SEARXNG].get("expose") or []]
+    assert expose and url == f"http://{SEARXNG}:{expose[0]}", (
+        f"the hub asks {url!r} for search, not the bundled SearXNG on {expose}")
+    waits = sorted(s for s, svc in services.items() if SEARXNG in (svc.get("depends_on") or {}))
+    assert not waits, f"{waits} depend on {SEARXNG}, so deleting its block breaks them"
+
+
+def test_searxng_serves_json_with_a_secret_it_makes_itself(compose):
+    """Stock SearXNG answers `format=json` with 403, and JSON is all the hub
+    reads; it also refuses to start on the default secret_key. No environment
+    variable sets either, so an entrypoint writes settings.yml before handing
+    over. The key must come from the shell at each start, never from this
+    published file, and land on a tmpfs rather than a volume."""
+    svc = compose["services"][SEARXNG]
+    script = svc["entrypoint"][-1]
+    settings = yaml.safe_load(script.split("<<EOF\n", 1)[1].split("\nEOF", 1)[0])
+    assert "json" in settings["search"]["formats"], "SearXNG would answer the hub 403"
+    secret = settings["server"]["secret_key"]
+    assert secret.startswith("$$(") and "/dev/urandom" in secret, (
+        f"secret_key is {secret!r}: written in compose.yaml rather than made at start")
+    assert script.rstrip().endswith("exec /usr/local/searxng/entrypoint.sh")
+    assert any(t.split(":")[0] == "/etc/searxng" for t in svc.get("tmpfs") or []), (
+        "settings.yml, and the key in it, would outlive the container")
+    assert str(svc.get("user", "")).split(":")[0] not in ("", "0", "root"), \
+        "SearXNG runs as root"

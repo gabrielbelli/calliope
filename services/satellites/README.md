@@ -12,7 +12,7 @@ satellite ──wss /satellites/ws──▶ voice-gateway :30080 ──ws──�
                                                                wake words, routing
 browser ──/ui/api/satellites──▶ voice-ui ──▶ voice-gateway ──▶ voice-satellites
 voice-satellites ──▶ stt-stack, tts-stack, and whatever a wake word's action names (Home Assistant, an LLM, a webhook)
-voice-satellites ──▶ a SearXNG and Open-Meteo, only for a language model word with those tools on
+voice-satellites ──▶ SearXNG (bundled, or yours) and Open-Meteo, only for a language model word with those tools on
 ```
 
 Sibling of `stt`, `tts`, `tts-long`, `gateway` and `ui`. The first satellite is
@@ -88,7 +88,8 @@ else.
    at first, and it echoes what it heard until it has an action
    ([Wake words](#wake-words)).
 7. **Then, as needed:** an API key for a language model, stored in Admin ›
-   Secrets ([Keys](#keys)),
+   Secrets ([Keys](#keys)), a SearXNG of your own or none in place of the
+   bundled one ([Web search](#web-search)),
    Home Assistant through the Calliope integration
    ([`clients/home-assistant`](../../clients/home-assistant/README.md)) or
    over MQTT ([below](#home-assistant-over-mqtt)), and a firmware signing key
@@ -834,7 +835,7 @@ A word's `tools` lets the model call these:
 
 | Tool | Source | What leaves the hub, and to whom | Limits | Needs |
 |---|---|---|---|---|
-| `web_search` | A SearXNG you run (`SATELLITES_SEARXNG_URL`), JSON output on | The model's search query goes to your SearXNG, and from there to the search engines it is set to use | 4 s; the top 5 results' titles and snippets, 280 characters each, and any direct answer or infobox. No page is fetched | `SATELLITES_SEARXNG_URL`. Unset, the tool tells the model search is not set up, and the page greys the box |
+| `web_search` | SearXNG (`SATELLITES_SEARXNG_URL`): the one `compose.yaml` bundles, or one you run with JSON output on | The model's search query goes to that SearXNG, and from there to the search engines it is set to use | 4 s; the top 5 results' titles and snippets, 280 characters each, and any direct answer or infobox. No page is fetched | `SATELLITES_SEARXNG_URL`, which `compose.yaml` sets ([Web search](#web-search)). Unset or empty, the tool tells the model search is not set up, and the page greys the box |
 | `weather` | Open-Meteo, `api.open-meteo.com` and its geocoder `geocoding-api.open-meteo.com` | The home's coordinates, or the place the question names, go to Open-Meteo over the internet, even when the language model is on your own network | 4 s; now and the next three days, in the household's units (`SATELLITES_UNITS`) | Nothing. Open-Meteo's free API is for non-commercial use, and its data is CC BY 4.0 ([THIRD-PARTY-NOTICES.md](../../THIRD-PARTY-NOTICES.md)) |
 
 **Home** is `SATELLITES_HOME_LAT`, `SATELLITES_HOME_LON` and
@@ -855,6 +856,24 @@ request. On a server of your own that may mean switching tool calling on:
 llama.cpp's `--jinja`, vLLM's automatic tool choice, or an Ollama model that
 has tools. [ADR 0018](../../docs/adr/0018-language-model-tools.md) records
 why these two tools and not more.
+
+#### Web search
+
+`web_search` asks a SearXNG over its JSON API. `SATELLITES_SEARXNG_URL`
+chooses one of three:
+
+| `SATELLITES_SEARXNG_URL` | Which SearXNG | What else |
+|---|---|---|
+| `http://searxng:8080`, as `compose.yaml` ships | The `searxng` service in `compose.yaml`: upstream's image, unmodified, pinned to a dated build | Nothing. It publishes no port and shares a network, `search`, with the hub alone. Its entrypoint writes its settings at every start: JSON on, and a new random `secret_key` |
+| The address of one you run | Yours | JSON output on (`search.formats: [html, json]`): a stock SearXNG answers `format=json` with 403. Delete the `searxng` block |
+| `""` | None | Delete the `searxng` block. The tool tells the model search is not set up, and the page greys the box |
+
+Nothing waits for SearXNG. The hub has no `depends_on` on it, so deleting
+the block changes nothing else, and while SearXNG is down or starting the
+tool tells the model so and the turn goes on. SafeSearch and the engines it
+asks are SearXNG's own settings: for the bundled one, add them to the
+settings its entrypoint writes. Raise its image tag now and then, because the
+engines change their pages and an old build stops getting their results.
 
 #### Language model providers
 
@@ -1595,7 +1614,7 @@ from `/inject` are counted apart, as `injected_turns`.
 | `SATELLITES_DATA_DIR` | `/data` | Where the hub keeps its state ([The data volume](#the-data-volume)). Mount a volume: losing it un-adopts every satellite. |
 | `SATELLITES_TTS_URL` | unset | Where speech is asked for, for `say` and every reply: `http://voice-gateway:8081`, the gateway's internal listener. The hub's service key is sent only there ([Access](#access)). Unset, `say` answers 503 and names this variable. |
 | `SATELLITES_TTS_VOICE` | `bm_george` | |
-| `SATELLITES_SEARXNG_URL` | unset | A SearXNG with JSON output on (`search.formats: [html, json]`), for the `web_search` tool. Unset, the tool tells the model search is not set up. SafeSearch is the instance's own setting. |
+| `SATELLITES_SEARXNG_URL` | unset | A SearXNG with JSON output on (`search.formats: [html, json]`), for the `web_search` tool. `compose.yaml` sets `http://searxng:8080`, the SearXNG it bundles ([Web search](#web-search)). Unset or empty, the tool tells the model search is not set up. SafeSearch is the instance's own setting. |
 | `SATELLITES_HOME_LAT`, `SATELLITES_HOME_LON`, `SATELLITES_HOME_NAME` | unset | Home, for the `weather` tool. Unset, Home Assistant's own location is used (`GET /api/config`, through the first Home Assistant action and its token, kept an hour; a failed ask is not repeated for five minutes). |
 | `SATELLITES_TIMEZONE` | Home Assistant's, else `TZ`, else UTC | The zone of the date and time every language model prompt carries, with tools or without. |
 | `SATELLITES_UNITS` | Home Assistant's unit system, else `metric` | `us` or `metric`: the `weather` tool's °F, mph and inches, or °C, km/h and mm. |

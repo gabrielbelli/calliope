@@ -3,7 +3,7 @@
 #   host:30080  ->  voice-gateway:8080  ->  stt-stack:8000
 #                   TLS, sign-in, keys      tts-stack:8001
 #                                           tts-long:8002
-#                                           voice-satellites:8003
+#                                           voice-satellites:8003  ->  searxng:8080
 #                                           voice-ui:8090
 #
 # ONE PUBLISHED PORT, AND ONE PROCESS THAT DECIDES WHO IS ASKING. Every request
@@ -25,12 +25,14 @@
 # service key is refused on 30080, so one that leaks from a container is no use
 # from outside.
 #
-# TWO NETWORKS. `edge` holds the gateway and voice-ui; `core` holds the
+# THREE NETWORKS. `edge` holds the gateway and voice-ui; `core` holds the
 # gateway and the other four. voice-ui runs yt-dlp on addresses people paste,
 # so it shares no network with a backend: the gateway is the only Calliope
-# service it can reach. Neither network is `internal: true`, because the hub
-# calls Home Assistant and language models, tts-long its GPU runner, and
-# voice-ui fetches links from the internet.
+# service it can reach. `search` holds the hub and the bundled SearXNG and
+# nothing else, so no other service can reach SearXNG and SearXNG can reach
+# none of them. No network is `internal: true`, because the hub calls Home
+# Assistant and language models, tts-long its GPU runner, voice-ui fetches
+# links from the internet and SearXNG asks the search engines.
 #
 # WHAT CHANGED WHEN THE FIVE REPOSITORIES BECAME ONE. The image names, and
 # nothing else:
@@ -1039,10 +1041,13 @@ services:
       # at the hub's first start with it, and ignored from then on with a
       # WARNING that names it: remove it from the app config once Admin >
       # Secrets lists it as set, and confirm each imported row there.
-      # A SearXNG you run, with JSON output on, for a language model word's
-      # web_search tool. The model's query goes there and on to its engines.
-      # Unset, the tool says search is not set up (docs/adr/0018).
-      # SATELLITES_SEARXNG_URL: "http://searxng:8080"
+      # Web search, for a language model word's web_search tool: the bundled
+      # SearXNG below, on the `search` network. The model's query goes there
+      # and on to the search engines it asks. The address of a SearXNG you
+      # already run works too, with JSON output on; "" switches search off,
+      # and the tool then tells the model search is not set up
+      # (docs/adr/0018). The searxng block says what each of the three needs.
+      SATELLITES_SEARXNG_URL: "http://searxng:8080"
       # Home, for the weather tool, which sends these coordinates to
       # Open-Meteo over the internet. Unset, the hub asks Home Assistant's
       # /api/config with the first Home Assistant action's token.
@@ -1082,8 +1087,13 @@ services:
     depends_on:
       voice-gateway:
         condition: service_healthy
+    # NOT ON searxng. Deleting that block must leave a file that still comes
+    # up, and web_search already answers the model in words while SearXNG is
+    # down or still starting.
     networks:
       - core
+      # The bundled SearXNG, and nothing else is on it.
+      - search
     volumes:
       # This service's key and the gateway's public key, read-only. The relay
       # assertion on the device socket is checked with it.
@@ -1107,6 +1117,94 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8003/health')"]
       interval: 60s
       timeout: 30s
+      retries: 3
+      start_period: 30s
+
+
+  # ------------------------------------------------------- web search --
+  #
+  # SEARXNG, FOR THE HUB'S web_search TOOL AND NOTHING ELSE. A language model
+  # word with web_search ticked sends its query here, and SearXNG asks the
+  # search engines it is set to use (docs/adr/0018). It is upstream's image,
+  # run unmodified as a separate program. It is AGPL-3.0, and
+  # THIRD-PARTY-NOTICES.md says why that leaves this repository BSD.
+  #
+  # THREE WAYS TO RUN IT, and SATELLITES_SEARXNG_URL on the hub picks one:
+  #   - bundled, the default: this block, and "http://searxng:8080";
+  #   - a SearXNG you already run: its address, with JSON output on
+  #     (search.formats: [html, json]), and this block deleted;
+  #   - none: "", and this block deleted. The tool tells the model search is
+  #     not set up, and the Satellites tab greys its box.
+  # With the block gone, `search` can go from the hub's networks and from the
+  # list at the bottom as well. Left in, it is a network with only the hub on
+  # it, which costs nothing.
+  #
+  # NO depends_on POINTS HERE, and none may: deleting this block has to leave
+  # a file that still comes up.
+  #
+  # NO PORT, AND A NETWORK OF ITS OWN. `search` holds this and the hub: the
+  # gateway, the page and the backends cannot reach SearXNG, and SearXNG
+  # cannot reach them. It is not `internal: true`, because SearXNG asks the
+  # search engines over the internet.
+  searxng:
+    container_name: searxng
+    # PINNED, like every image here. Upstream has no releases and tags each
+    # build YYYY.M.D-<commit>. Raise it now and then: the engines it asks
+    # change their pages, and an old build stops getting their results.
+    image: docker.io/searxng/searxng:2026.10.2-19ffbcd30
+    pull_policy: always
+    restart: unless-stopped
+    # Not root, which the image is by default. As uid 977 its entrypoint
+    # skips the steps only root can take (chown, update-ca-certificates) and
+    # starts as normal.
+    user: "977:977"
+    expose:
+      - "8080"
+    networks:
+      - search
+    environment:
+      # IPv4. The image binds `::` by default, which fails on a host with IPv6
+      # switched off (searxng#5654).
+      GRANIAN_HOST: "0.0.0.0"
+    # A SETTINGS FILE WRITTEN AT EVERY START, then the image's own entrypoint.
+    # No environment variable gives either of the two things it sets:
+    #   - JSON output. Stock settings serve HTML only and answer format=json
+    #     with 403, and JSON is all the hub reads.
+    #   - A secret_key of its own. SearXNG refuses to start on the default,
+    #     and a value written in this published file would be no secret.
+    # A new key at each start costs nothing here: it signs the preferences
+    # cookie, image-proxy addresses and the limiter's tokens, and the hub uses
+    # none of them. The limiter stays off (it needs Valkey), which suits an
+    # instance only the hub can reach. `$$` is compose's escape for `$`, so the
+    # shell runs the substitution, not compose.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        umask 077
+        cat > /etc/searxng/settings.yml <<EOF
+        use_default_settings: true
+        search:
+          formats: [html, json]
+        server:
+          secret_key: "$$(head -c 32 /dev/urandom | base64 | tr -dc A-Za-z0-9)"
+        EOF
+        exec /usr/local/searxng/entrypoint.sh
+    # NOTHING TO KEEP, so no volume. The settings are written again at each
+    # start and the cache is a cache, so both are tmpfs owned by the uid above.
+    tmpfs:
+      - /etc/searxng:uid=977,gid=977,mode=0700
+      - /var/cache/searxng:uid=977,gid=977,mode=0700
+    # 1 CPU and 384 MiB. Measured: about 125 MiB idle, and 184 MiB at the peak
+    # of eight searches at once.
+    cpus: 1
+    mem_limit: 384m
+    healthcheck:
+      # Its own localhost, like every probe here, with the image's BusyBox
+      # wget. It answers OK about 3 s after start.
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 60s
+      timeout: 10s
       retries: 3
       start_period: 30s
 
@@ -1169,7 +1267,8 @@ volumes:
 # `edge` is the side people reach: the gateway and the page. `core` is the
 # side only the gateway reaches: the four services that do the work. voice-ui
 # is on `edge` alone, so the container that runs yt-dlp on pasted addresses
-# can reach no backend directly. Neither is `internal: true`; each service
+# can reach no backend directly. `search` is the hub and the bundled SearXNG
+# and nobody else (the searxng block). None is `internal: true`; each service
 # still needs the way out it always had.
 #
 # voice-ui needs nothing on the LAN, so an egress rule may block private
@@ -1179,3 +1278,4 @@ volumes:
 networks:
   edge:
   core:
+  search:

@@ -21,16 +21,18 @@ $EDITOR compose.yaml      # a host name, a first password, and a few more: see R
 docker compose up -d
 ```
 
-All six images are published to `ghcr.io`, so nothing has to be built.
+All six images are published to `ghcr.io`, so nothing has to be built. A
+seventh container, SearXNG for the satellites' web search, is upstream's
+image and optional.
 `compose.yaml` is a live deployment rather than a template, so it will not come
 up unedited; [Run it](#run-it) names every line.
 
 One port is published, **30080**, and it is both the API and the page: `/`
-redirects to `/ui`, `/v1/…` is the API, and the other five services stay on the
-internal network. **Everything behind it needs a sign-in or an API key**:
-people sign in at `/login`, and clients use keys a person creates on the
-Account tab. Satellites connect through the same port, with their own
-adoption tokens.
+redirects to `/ui`, `/v1/…` is the API, and the other five services and
+SearXNG stay on internal networks. **Everything behind it needs a sign-in or
+an API key**: people sign in at `/login`, and clients use keys a person
+creates on the Account tab. Satellites connect through the same port, with
+their own adoption tokens.
 
 ## The page
 
@@ -180,6 +182,7 @@ flowchart LR
     T["tts :8001<br/>Kokoro, 54 voices"]
     L["tts-long :8002<br/>Chatterbox, a job queue"]
     H["satellites :8003<br/>the satellite hub"]
+    X["searxng :8080<br/>web search, optional"]
   end
   D["Satellites,<br/>on Wi-Fi"] -->|"wss /satellites/ws"| G
   G --> U
@@ -188,6 +191,7 @@ flowchart LR
   G --> L
   G --> H
   H -->|"service key, :8081"| G
+  H -->|"web_search"| X
   U -->|"service key, :8081"| G
 ```
 
@@ -206,6 +210,7 @@ only their own keys
 | [`services/gateway`](services/gateway/README.md) | `calliope-gateway` | Sign-in, API keys, routing, the secret store, one health answer | — |
 | [`services/ui`](services/ui/README.md) | `calliope-ui` | The page, and link ingestion | — |
 | [`services/satellites`](services/satellites/README.md) | `calliope-satellites` | The satellite hub: adoption, wake words, echo cancellation, what each word does. Optional | 228 to 326 MiB, measured with 0 to 6 satellites |
+| `searxng` | `searxng/searxng`, upstream's, unmodified | Web search for the hub's `web_search` tool, reachable from the hub alone. Optional | about 125 MiB idle, 184 MiB with eight searches at once |
 
 On the deployed NAS: Parakeet 8.5–10.4× realtime, Kokoro 1.8× at four threads
 and 2.8× at eight, Chatterbox 0.21×. The gateway hop adds 0.85 ms on a laptop over
@@ -214,8 +219,8 @@ loopback and has not been measured on the NAS.
 /health` reports your own, with the sample count beside it.
 
 Only `tts-long` carries torch; `stt` and `tts` run on ONNX Runtime and
-CTranslate2 instead. As written `compose.yaml` asks for 32 CPUs and about
-19.4 GB across the six, which is the box it came from rather than a
+CTranslate2 instead. As written `compose.yaml` asks for 33 CPUs and about
+19.8 GB across the seven, which is the box it came from rather than a
 requirement.
 
 ### Transcription
@@ -282,6 +287,7 @@ choose, or are optional.
 | `TTS_RUNNER_*` and the `runner-key` bind mount | an optional GPU box on another LAN | Delete both. `tts-long` runs everything locally without it |
 | `AIV_HOST_LABEL`, `cpus:`, `mem_limit:` | a label stamped into every job record, and the size of the original box | Your own name, and limits that fit your machine |
 | `voice-satellites` and `GATEWAY_SATELLITES_URL` | the satellite hub, for devices on Wi-Fi | Delete the block and set the URL to `""` if you have no satellites. If you keep it, keep TLS: release firmware connects only to `wss://`, and trusts Let's Encrypt's roots unless it is built with your CA's ([Deploy](services/satellites/README.md#deploy)) |
+| `searxng` and `SATELLITES_SEARXNG_URL` | web search for the hub's language model words | Keep both as they are for the bundled SearXNG. To use one you already run, set the URL to its address (JSON output on) and delete the block; for no web search, set the URL to `""` and delete the block. Without the hub, delete the block too ([Web search](services/satellites/README.md#web-search)) |
 
 **First start is slow, legitimately.** No model is baked into any image; each
 downloads into its own volume (Parakeet 461 MB, Kokoro about 340 MB), and the

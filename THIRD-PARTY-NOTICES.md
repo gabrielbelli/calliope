@@ -120,13 +120,24 @@ no attribution; this entry and the satellite hub's README name the source.
 
 ### SearXNG — `searxng/searxng` — **AGPL-3.0**
 
-The `web_search` tool calls a SearXNG instance that the operator runs, over
-its JSON API. No SearXNG code is in this repository or in an image. AGPL-3.0's
-§13 obliges an operator who *modifies* the program and lets users interact
-with it over a network to offer them the modified source; calling a separate
-program's network API is not a derivative work, so the hub is not one, and the
-operator runs SearXNG's published image as it is. Vendoring or patching
-SearXNG would be a different answer: re-read this before doing either.
+The `web_search` tool calls SearXNG over its JSON API. **`compose.yaml` runs
+upstream's published image, unmodified, as a separate container** (the
+`searxng` service, pinned to a dated build), and the operator can point the
+hub at an instance of their own instead, or at none. No SearXNG code is in
+this repository or in any image built from it, and the image is not
+redistributed here: compose pulls it from Docker Hub as upstream publishes
+it, and its source is upstream's, `github.com/searxng/searxng`.
+
+The entrypoint in `compose.yaml` writes a settings file through SearXNG's own
+`use_default_settings` mechanism (JSON output on, a random secret key) and
+then runs the image's own entrypoint. That is configuration, not a change to
+the program. AGPL-3.0's §13 obliges an operator who *modifies* the program
+and lets users interact with it over a network to offer them the modified
+source; calling a separate program's network API is not a derivative work,
+so the hub is not one.
+
+**If anyone later patches SearXNG, builds a derived image of it or vendors
+its code, that reasoning stops holding.** Re-read this section first.
 
 ### The Brazilian Portuguese Parakeet — `alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx` — **CC BY 4.0**
 

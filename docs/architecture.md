@@ -28,6 +28,7 @@ flowchart TB
   G -->|"/jobs/*<br/>/v1/audio/speech, long"| L["<b>tts-long</b> :8002"]
   G -->|"/satellites/*, and the<br/>device socket, relayed"| H["<b>voice-satellites</b> :8003"]
   H -->|"speech, secrets<br/>:8081, service key"| G
+  H -->|"web_search,<br/>the search network"| X["<b>searxng</b> :8080<br/>optional"]
   S -->|"run records<br/>:8081, service key"| G
 ```
 
@@ -42,7 +43,9 @@ calls whatever a wake word's action names (Home Assistant, a language model,
 a webhook), with a secret it reads from the gateway's store. The device socket
 is relayed frame for frame and needs no sign-in; a per-satellite adoption
 token is the credential, and the gateway adds a relay assertion
-([ADR 0013](adr/0013-satellites-one-door.md)).
+([ADR 0013](adr/0013-satellites-one-door.md)). Its `web_search` tool asks
+SearXNG, which is upstream's and no Calliope process: `compose.yaml` bundles
+it on a network it shares with the hub alone (§6.8).
 
 `voice-ui` is a client of the gateway, never of a backend, and `compose.yaml`
 keeps it on a network of its own with the gateway (`edge`) so it cannot be
@@ -116,6 +119,9 @@ not fit in 6 GB of VRAM at fp32 regardless.
 | `gateway-data` | `voice-gateway` at `/data` | `calliope.db`: users, sessions and API keys (hashes only), the encrypted secrets, the audit |
 | `calliope-keys` | `voice-gateway` at `/keys` | The identity signing key, a generated secret-store key, and the marker that the first-access password was used. Never in the same backup as `gateway-data` |
 | `calliope-svc-<name>`, five | `voice-gateway` at `/svc/<name>`, read-write; the service at `/run/calliope`, read-only | That service's key and the gateway's public key. Minted again at start when missing |
+
+`searxng` has no volume. Its settings are written again at every start and
+its cache is a cache, so both are tmpfs.
 
 **No key is on a service's own volume any more.** An older hub's
 `secrets.json` is imported into the gateway's store at its first start, then
@@ -873,8 +879,8 @@ boundary and must not be able to alter anything else. The lines that belong
 to the original machine, the sign-in settings every deployment has to choose,
 and what to do with each, are in the README's *Run it* table.
 
-As written it asks for **32 CPUs and about 19.4 GB** across the six, which is
-the box it came from rather than a requirement:
+As written it asks for **33 CPUs and about 19.8 GB** across the seven, which
+is the box it came from rather than a requirement:
 
 | | `cpus` | `mem_limit` |
 |---|---|---|
@@ -884,6 +890,7 @@ the box it came from rather than a requirement:
 | `tts-long` | 10 | 10g |
 | `voice-ui` | 1 | 512m |
 | `voice-satellites` | 1 | 512m |
+| `searxng` | 1 | 384m |
 
 Set the container's CPU limit **and** the service's `*_THREADS` to the same
 number. ONNX Runtime sizes its thread pool from the host's core count, not the
@@ -918,8 +925,8 @@ published port still presents the real certificate.
 
 ### 6.3 Healthchecks
 
-**None of the six images carries a `HEALTHCHECK` instruction, and that is not
-an oversight.** `HEALTHCHECK` is not a field in the OCI image spec, and CI
+**None of Calliope's six images carries a `HEALTHCHECK` instruction, and that
+is not an oversight.** `HEALTHCHECK` is not a field in the OCI image spec, and CI
 builds with buildah, whose default format is `oci`, so the instruction is
 dropped silently on the way to the registry — `docker inspect` on a published
 image shows none. The probes live in `compose.yaml`, which is where they take
@@ -945,6 +952,7 @@ Two rules hold across all six:
 | `voice-gateway` | 30s | No model to load |
 | `voice-ui` | 30s | No model to load |
 | `voice-satellites` | 30s | The image carries its wake word model, so a first start needs no download |
+| `searxng` | 30s | Healthy in about 3 s. Its probe is the image's BusyBox `wget` against its own `/healthz` |
 | `tts-stack` | 300s | ~340 MB on first start |
 | `stt-stack` | 600s | 461 MB on first start |
 | `tts-long` | 900s | ~3 GB, and only on the first job. A shorter grace kills the container mid-download and the next one starts the download again |
@@ -1142,6 +1150,54 @@ does not have is **fatal at boot**, naming the key and the way out, and so is a
 global key that reaches no enabled engine. No key spells `turbo` by hand
 anywhere, which is what keeps a third engine a catalogue row rather than a
 branch.
+
+### 6.8 SearXNG, bundled and optional
+
+The hub's `web_search` tool asks a SearXNG over its JSON API, and
+`SATELLITES_SEARXNG_URL` chooses which:
+
+| | `SATELLITES_SEARXNG_URL` | The `searxng` block |
+|---|---|---|
+| Bundled, the default | `http://searxng:8080` | Kept |
+| One you already run | Its address. It needs `search.formats: [html, json]` | Deleted |
+| None | `""`. The tool tells the model search is not set up | Deleted |
+
+The bundled one is upstream's image, unmodified. What it needed was found by
+running that image (`2026.10.2-19ffbcd30`, the tag pinned):
+
+- **JSON is off in the stock image, and no variable turns it on.**
+  `search.formats` has no environment variable, and a stock instance answers
+  `format=json` with 403. So compose overrides the entrypoint: a shell writes
+  a minimal `settings.yml` to a tmpfs (`use_default_settings`, JSON on, a new
+  random `secret_key`) and then runs the image's own entrypoint. There is no
+  derived image to build and keep current, and no `configs:` file: a static
+  file cannot hold a random secret, and SearXNG refuses to start on the
+  default one.
+- **A new secret at each start is harmless here.** It signs the preferences
+  cookie, image-proxy addresses and the limiter's tokens, and the hub uses
+  none of them. The limiter is off, and would need Valkey; an instance only
+  the hub can reach needs neither.
+- **A network of its own, `search`, with the hub alone, and no published
+  port.** A container on `core` alone could not reach it. `search` is not
+  `internal`, because SearXNG asks the search engines over the internet.
+- **No `depends_on` names it.** Deleting the block must leave a file that
+  still comes up, and `web_search` already tells the model when SearXNG is
+  down, and the turn goes on.
+- **`GRANIAN_HOST: "0.0.0.0"`.** The image binds `::` by default, which fails
+  on a host with IPv6 switched off (searxng#5654).
+- **uid 977, not root.** The image's entrypoint skips its root-only steps
+  (chown, `update-ca-certificates`). `/etc/searxng` and `/var/cache/searxng`
+  are tmpfs owned by that uid, because nothing in either has to outlive the
+  container.
+- **Measured:** healthy about 3 s after start; about 125 MiB idle and 184 MiB
+  at the peak of eight searches at once, under a 384 MiB limit; about 97 MB
+  of image, compressed. The hub's own request (`format=json`,
+  `language=en-GB`) returned results, answers and infoboxes in 1.7 s.
+
+Upstream has no releases and tags each build `YYYY.M.D-<commit>`. Raise the
+tag now and then: the engines it asks change their pages, and an old build
+stops getting their results. Not yet run on TrueNAS itself, whose compose
+escapes `$$` the same way.
 
 ---
 
@@ -1404,7 +1460,8 @@ cannot see. A service that mounts its key volume read-write, or another
 service's; a run log pointed at tts-long directly, which the run log answers by
 switching itself off; a volume the gateway must write that arrives owned by
 root; the internal listener published; the page's container on the backends'
-network; a removed key variable left in a comment as a suggestion. Each fails
+network; SearXNG reachable from anything but the hub, or waited on by
+anything; a removed key variable left in a comment as a suggestion. Each fails
 quietly at run time, so each is checked here instead.
 
 ---
