@@ -49,7 +49,12 @@ ONE_MIB = 1 << 20
 # be accepted here. Everything else is a JSON document or nothing.
 CAPS = {"/v1/assets": 32 * ONE_MIB}
 IN_FLIGHT = 16
-MAX_SEGMENTS = 2000
+# AS MANY AS THE ARTEFACT NAMES CAN NUMBER, five digits. tts-long bounds a job
+# by characters, not segments, and never merges one segment into the next, so
+# 2,001 short lines are 2,001 segments well inside its 100,000 characters. A
+# lower cap here refused those jobs, and tts-long spoke them on its CPU. The
+# 1 MiB body cap is what bounds the memory.
+MAX_SEGMENTS = 100_000
 MAX_SEGMENT_CHARS = 2000
 MAX_KEY_CHARS = 512
 # How often "refused a request without a valid key" may be said.

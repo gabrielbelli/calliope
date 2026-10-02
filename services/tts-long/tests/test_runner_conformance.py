@@ -133,6 +133,21 @@ def test_turbo_is_sent_temperature_alone_and_succeeds(remote, clip):
     assert ("POST", "/v1/services/chatterbox-turbo/jobs") in remote.seen
 
 
+def test_a_script_of_more_than_2000_short_lines_is_spoken_on_the_card(remote):
+    """tts-long caps characters, not segments: 2,001 lines are 2,001 segments.
+
+    The runner refused more than 2,000 with a 400, which tts-long reads as a
+    lost lane: the job went back to its CPU and the lane cooled for 30 s.
+    """
+    from app.engines import ENGINES
+    from app.remote import RemoteSynth
+
+    lines = [(f"Line {n}.", 0.0) for n in range(2001)]
+    spoken = RemoteSynth(remote.client, job_id=uuid.uuid4().hex,
+                         spec=ENGINES["chatterbox"]).speak_segments(lines, "en", {})
+    assert spoken.audio.size == sum(len(t) for t, _ in lines) * SAMPLES_PER_CHAR
+
+
 def test_a_wrong_key_is_a_lost_lane_not_a_failed_job(remote):
     from app.remote import RemoteUnavailable, RunnerClient
 
