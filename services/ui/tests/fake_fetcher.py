@@ -18,6 +18,8 @@ card can be reached without the network.
             private      a refusal, as the guard words one
             unsupported  an extractor's failure
             flood        one line of 70,000 characters
+            infinity     a duration of Infinity and a size of 1e400
+            nested       60,000 [ on one line first, then the facts
 
     fetch   every run first appends its argv, environment, cwd, pid and
             whether it runs isolated (-I) to ../../fetches.log, which is the
@@ -35,9 +37,14 @@ card can be reached without the network.
                          two files; media.wav a symlink to /etc/hosts;
                          media.exe; a 0-byte media.wav. Each still says ok
             hang         sleeps an hour
+            stall        one progress line, then sleeps an hour
             flood        one line of 70,000 characters
             silent       exits 0 and prints nothing
             junk         prints `not json` first, then runs as normal
+            infinity     a progress line of Infinity, NaN and a 400-digit
+                         number after the first, then runs as normal
+            nested       60,000 [ on one line after the first progress line,
+                         then runs as normal
 
 THE REAL yt-dlp MUST NEVER RUN UNDER THE BROWSER TESTS. launch.py walls in the
 page server's own sockets, not a child's, so services/ui/e2e/stack.py refuses
@@ -60,6 +67,14 @@ from pathlib import Path
 def say(**message: object) -> None:
     sys.stdout.write(json.dumps(message) + "\n")
     sys.stdout.flush()
+
+
+def line(text: str) -> None:
+    sys.stdout.write(text + "\n")
+    sys.stdout.flush()
+
+
+NESTED = "[" * 60_000     # under LINE_LIMIT, and a RecursionError to json.loads
 
 
 def tone(seconds: float = 12.0, rate: int = 16000) -> bytes:
@@ -88,6 +103,11 @@ def probe(url: str) -> int:
         sys.stdout.write("x" * 70_000 + "\n")
         sys.stdout.flush()
         return 1
+    if "nested" in url:
+        line(NESTED)
+    if "infinity" in url:
+        say(facts={"title": "Probed talk", "duration": float("inf"), "bytes": 1e400})
+        return 0
     if "live" in url:
         say(error="This is a live or upcoming stream.", code="live")
         return 1
@@ -129,6 +149,13 @@ def fetch(kind: str, url: str) -> int:
     for step in range(1, steps + 1):
         say(done=step * 128_000, total=steps * 128_000, speed=128_000.0,
             eta=float(steps - step))
+        if "stall" in url:
+            time.sleep(3600)
+        if step == 1 and "infinity" in url:
+            line('{"done": 1e400, "total": Infinity, "speed": NaN, "eta": -Infinity}')
+            line('{"done": ' + "9" * 400 + ', "total": ' + "9" * 400 + '}')
+        if step == 1 and "nested" in url:
+            line(NESTED)
         if steps > 1:
             time.sleep(1)
     if "broken" in url:

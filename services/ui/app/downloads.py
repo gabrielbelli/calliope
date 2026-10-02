@@ -212,15 +212,20 @@ async def _kill(proc: asyncio.subprocess.Process) -> None:
 
 
 def _message(line: bytes) -> dict | None:
+    # json.loads takes Infinity and NaN, and a line of 60,000 [ is under
+    # LINE_LIMIT and a RecursionError: the child's output is a stranger's.
     try:
         message = json.loads(line)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     return message if isinstance(message, dict) else None
 
 
 def _number(value: object, kind: type) -> int | float | None:
+    """A number both int() and json.dumps take, or None: NaN fails the range too."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not -2**53 <= value <= 2**53:
         return None
     return kind(value)
 
@@ -413,14 +418,14 @@ async def _run(job: Job, key: str) -> None:
                                 other.path.unlink()
     except CollectError as exc:
         _fail(job, str(exc))
-    except asyncio.CancelledError:
-        if job.proc is not None:
-            await asyncio.shield(_kill(job.proc))
-        raise
     except Exception as exc:  # noqa: BLE001 - the job says so, the server goes on
         log.warning("a download could not be run: %s", type(exc).__name__)
         _fail(job, "The download could not be run on this server.")
     finally:
+        # Every way out, a cancel included: once this task is done, nothing
+        # else holds the child, and shutdown() would not find it.
+        if job.proc is not None and job.proc.returncode is None:
+            await asyncio.shield(_kill(job.proc))
         job.proc = None
         if workdir is not None:
             shutil.rmtree(workdir, ignore_errors=True)

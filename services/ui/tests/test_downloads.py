@@ -12,11 +12,12 @@ import os
 import sys
 import time
 from collections import namedtuple
+from pathlib import Path
 
 import httpx
 import pytest
 
-from conftest import ALICE, BOB, fetched
+from conftest import ALICE, BOB, fetched, wait_for
 
 URL = "https://media.example/instant-talk"
 HOUR = 3600
@@ -37,6 +38,25 @@ def settled(job, seconds=10.0):
     """Wait for the job's task to end, so the sweep after it has run too."""
     ends = time.monotonic() + seconds
     while job.task is not None and not job.task.done() and time.monotonic() < ends:
+        time.sleep(0.05)
+
+
+def gone(pid, seconds=5.0):
+    """Whether `pid` has exited within `seconds`. A zombie waiting for init to
+    reap it counts: an orphaned grandchild is reparented, not reaped, at once."""
+    ends = time.monotonic() + seconds
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:
+            if Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].startswith("Z"):
+                return True
+        except (OSError, IndexError):
+            pass
+        if time.monotonic() > ends:
+            return False
         time.sleep(0.05)
 
 
@@ -337,6 +357,54 @@ def test_a_download_past_the_time_limit_is_killed_with_its_process_group(client,
     [call] = fetches.calls()
     with pytest.raises(ProcessLookupError):
         os.kill(call["pid"], 0)
+
+
+def test_a_child_is_killed_whatever_ends_its_download(client, monkeypatch):
+    """An exception the parent did not foresee fails the job, and the child
+    goes with it: once the task is done, nothing else holds the child, and
+    shutdown() would not find it."""
+    api, _, fetches = client()
+    from app import downloads
+    url = "https://media.example/stall"
+    api.post("/ui/resolve", json={"url": url})
+
+    def unforeseen(line):
+        raise RuntimeError("a fault in the parent")
+
+    monkeypatch.setattr(downloads, "_message", unforeseen)
+    api.post("/ui/commit", json={"token": url})
+    state = wait_for(api, url)
+    assert state["status"] == "error"
+    assert state["error"] == "The download could not be run on this server."
+    [call] = fetches.calls()
+    assert gone(call["pid"]), "the child outlived its download"
+
+
+def test_numbers_json_cannot_carry_back_out_are_ignored(client):
+    """Infinity, NaN and a 400-digit number. json.loads takes all three; int()
+    of the first is an OverflowError, and json.dumps would put the rest into
+    /ui/progress as words no browser parses."""
+    api, _, _ = client()
+    url = "https://media.example/instant-infinity"
+    resolved = api.post("/ui/resolve", json={"url": url})
+    assert resolved.status_code == 200
+    assert "Infinity" not in resolved.text and "NaN" not in resolved.text
+    assert (resolved.json()["duration"], resolved.json()["bytes"]) == (None, None)
+    assert api.post("/ui/commit", json={"token": url}).status_code == 200
+    state = wait_for(api, url)
+    assert state["ready"] is True, state
+    text = api.get("/ui/progress", params={"token": url}).text
+    assert "Infinity" not in text and "NaN" not in text
+
+
+def test_a_line_nested_too_deep_to_parse_is_ignored(client):
+    """60,000 [ is under LINE_LIMIT and a RecursionError to json.loads."""
+    api, _, _ = client()
+    url = "https://media.example/instant-nested"
+    resolved = api.post("/ui/resolve", json={"url": url})
+    assert resolved.status_code == 200 and resolved.json()["probed"] is True
+    assert api.post("/ui/commit", json={"token": url}).status_code == 200
+    assert wait_for(api, url)["ready"] is True
 
 
 def test_a_line_too_long_to_read_fails_the_download_cleanly(client):
