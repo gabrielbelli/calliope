@@ -1054,6 +1054,14 @@ an hour after its last use. Before a download starts, free space minus what
 running downloads may still write must leave its cap and 64 MiB, or the
 download fails with that reason. `UI_CACHE_BYTES=0` turns the cache off.
 
+**A proxy that terminates TLS logs every pasted link.** The page polls
+`/ui/progress?token=<the link>` and plays `/ui/media?token=<the link>`.
+voice-ui writes no access log and the gateway drops a `/ui/` query string
+from its own, but a proxy in front that terminates TLS logs the whole request
+line unless it is told to log the path alone (HAProxy's `%HP`, nginx's
+`$uri`; the [gateway README](../services/gateway/README.md#logging)
+has both). HAProxy in `mode tcp` passthrough sees only TLS.
+
 **The upload ceiling is the gateway's, not the recogniser's.** `services/stt/app/main.py` reads an
 `UploadFile` whole with no `Content-Length` check, no cap and no streaming, so a
 4 GB file is buffered into a container limited to 6 GB and the failure is an OOM

@@ -855,6 +855,13 @@ there: the page polls `/ui/progress?token=<the link>` once a second while a
 link downloads, and a pasted link is not the log's business. Pass
 `--no-access-log` if one line per request is meant literally.
 
+A reverse proxy in front sees each request before this gateway does. HAProxy
+in `mode tcp` passthrough sees only TLS and logs no path. A proxy that
+terminates TLS logs the request line with its query string, so it logs every
+pasted link, unless it is told to log the path alone: in HAProxy, a
+`log-format` with `%HM %HP %HV` in place of the `%{+Q}r` that
+`option httplog` uses; in nginx, `$uri` in place of `$request`.
+
 ## Deploying
 
 The three services, the page, the hub and this gateway are **one TrueNAS
