@@ -966,14 +966,15 @@ def test_the_runner_panel_asks_the_three_questions_separately():
     # goes through one accessor.
     assert "function ttsLongHealth()" in HTML
     assert "const b = HEALTH && HEALTH.backends && HEALTH.backends[name];" in HTML
-    assert "const r = ttsLongHealth().runner;" in HTML
+    assert "const health = ttsLongHealth();" in function("paintRunner")
+    assert "const r = health.runner;" in function("paintRunner")
     assert "ttsLongHealth().realtime_factor" in HTML, "the rate reader drifted off the accessor"
     # visible(), not HTML: the comment above the accessor quotes the wrong
     # path deliberately, to record what it was.
     assert "HEALTH.gateway" not in visible(), "the /ui/health wrapping is back"
     # Hidden completely when no runner is configured: a panel that always says
     # "none" is furniture.
-    assert "if (!r) { box.hidden = true; return; }" in HTML
+    assert "if (!all.length) { box.hidden = true; return; }" in HTML
     # The reason is the runner's words, not a guess from the state name.
     assert "r.reason" in HTML
 
@@ -2640,9 +2641,9 @@ def test_the_runner_never_shows_an_exception_name():
     """"GPU runner: not answering. The last attempt gave RemoteUnavailable."
     The class name is for a log; the panel says what it means for a desktop
     that may be off, asleep or restarting."""
-    paint = function("paintRunner")
+    paint = function("paintRunnerCard")
     assert "r.error +" not in paint and "+ r.error" not in paint
-    assert '$("runnerwhy").textContent = runnerTrouble(r.error);' in paint
+    assert "parts.why.textContent = runnerTrouble(r.error);" in paint
     trouble = function("runnerTrouble")
     assert "${" not in trouble and "+ name" not in trouble and "name +" not in trouble, \
         "the exception's name is pasted into the sentence"

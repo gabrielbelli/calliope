@@ -62,9 +62,13 @@ DETAIL: Mapping[str, frozenset[str]] = {
                               "runlog", "ignored_variables"},
     "tts": FILTERED["tts"] | {"threads", "host_label", "runlog", "realtime_factor_samples",
                               "ignored_variables"},
+    # `runners` is every GPU runner, one row each; `runner` is the first alone,
+    # kept for a page or a script written while there was one. Both are the
+    # operator's: what each machine is doing is detail, not a tab's business.
     "tts_long": FILTERED["tts_long"] | {"threads", "backend_observations",
                                         "engine_observations", "backend_order", "runner",
-                                        "dispatch", "host_label", "ignored_variables"},
+                                        "runners", "dispatch", "host_label",
+                                        "ignored_variables"},
     "satellites": FILTERED["satellites"] | {"satellites", "tts", "voice", "routing", "mqtt",
                                             "ignored_variables"},
 }

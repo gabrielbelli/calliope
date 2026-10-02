@@ -28,11 +28,21 @@ its own thread, and the chooser reads the tuple it left behind. Ten seconds of
 staleness costs at most one wrong lane choice, which the yield path already
 recovers; a network call on the job's thread costs the job.
 
-WIDTH IS ONE ON BOTH LANES AND LOCAL'S IS NOT CONFIGURABLE. `Synth._speak`
+WIDTH IS ONE ON EVERY LANE AND LOCAL'S IS NOT CONFIGURABLE. `Synth._speak`
 holds one `threading.Lock` across `_ensure_loaded()` and `generate()`, so two
 local jobs do not overlap -- they interleave at segment granularity for zero
 extra throughput and double the latency of each. Every concurrency this module
-delivers comes from the SECOND MACHINE, not from a second thread here.
+delivers comes from OTHER MACHINES, not from a second thread here.
+
+ONE LANE PER RUNNER. offpeak's desktop and the Linux GPU runner (app/runner)
+are `runner` and `runner2`, each with its own probe, rate, cooldown and refused
+set, and nothing below knows how many there are. A job goes to whichever free
+lane would finish it first by its own measured rate -- so the faster runner
+wins while both are free, the other takes it while one is busy or gated, and
+the CPU takes it when neither is there or neither is clearly better. A runner
+that loses a job hands it back exactly as one runner always did: the job goes
+to the head of the deque with that lane in its refused set, and the next pick
+is between the lanes that are left.
 
 `runner_cpu` IS NOT A LANE, AND THE SERVER NO LONGER CONFIGURES ONE EITHER. The
 agent on that desktop registers only `echo` and `chatterbox`, so the rung was
@@ -289,6 +299,32 @@ class LaneProbe:
                     # a runner that publishes no per-service map.
                     "by_service": {k: {"ready": v[0], "why": v[1]}
                                    for k, v in self.by_service.items()}}
+
+
+class AnyProbe:
+    """Several runners' probes asked as one question: can ANY of them run this.
+
+    THE ROUTING NEVER ASKS THIS. Each runner is a lane with its own probe, and
+    the chooser weighs them one by one. This is for the two places that need
+    a single yes or no about "the runner" in the singular: refusing a
+    runner-only engine at submit, and naming why a stranded job could not run.
+    With one runner it answers exactly what that runner's probe answers.
+    """
+
+    def __init__(self, probes: dict[str, "LaneProbe"]) -> None:
+        self._probes = {name: p for name, p in probes.items() if p is not None}
+
+    def ok_for(self, engine: str | None) -> bool:
+        return any(p.ok_for(engine) for p in self._probes.values())
+
+    def why_for(self, engine: str | None) -> str:
+        """The reason, and with several runners every runner's, by lane."""
+        if not self._probes:
+            return "no runner lane is configured"
+        if len(self._probes) == 1:
+            return next(iter(self._probes.values())).why_for(engine)
+        return "; ".join(f"{name}: {p.why_for(engine)}"
+                         for name, p in self._probes.items())
 
 
 class Dispatcher:

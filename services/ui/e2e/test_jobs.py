@@ -1171,6 +1171,45 @@ def test_the_gpu_runner_that_does_not_answer_is_said_in_words(page, goto, fake):
         assert error not in page.locator("#runnerbox").inner_text()
 
 
+def test_every_gpu_runner_has_a_card_and_a_job_names_the_one_it_ran_on(page, goto, stack, fake):
+    """tts-long drives offpeak's desktop and a Linux GPU box at once and lists
+    both under `runners`. Each is drawn as the first card always was, named by
+    the operator's label or numbered, and a card goes when its runner does."""
+    first = stack.fake.backend_health("tts_long")["runner"]
+    second = {"reachable": True, "can_run": True, "state": "busy", "machine_state": "free",
+              "mode": "always-on", "job_running": True, "seconds_until_available": 0,
+              "gpu": {"util_gpu": 97, "mem_used_mib": 4980}, "services": []}
+    away = {"reachable": False, "error": "ConnectTimeout"}
+    fake.health("tts_long", runners=[{"lane": "runner", "label": None, **first},
+                                     {"lane": "runner2", "label": "Linux GPU", **second},
+                                     {"lane": "runner3", "label": None, **away}])
+    on_second = fake.add_job(scripted=False, status="done", backend="runner2",
+                             runner_host="gpu-box", engine="chatterbox")["id"]
+    page.clock.install()
+    goto("/ui/jobs")
+    settled(page)
+    expect(page.locator("#runnerstate")).to_have_text("GPU runner 1: idle")
+    expect(page.locator("#runnerstate-runner2")).to_have_text("Linux GPU: busy · working")
+    expect(page.locator("#runnerwhere-runner2")).to_have_text("always-on")
+    expect(page.locator("#runnergpu-runner2")).to_contain_text("97% used")
+    expect(page.locator("#runnerstate-runner3")).to_have_text("GPU runner 3: not answering")
+    expect(page.locator("#runnerwhy-runner3")).to_have_text(
+        "It did not reply in time. It may be asleep or busy.")
+    assert page.locator(".jobsrunner").evaluate_all("cards => cards.map(c => c.id)") == \
+        ["runnerbox", "runnerbox-runner2", "runnerbox-runner3"], "the cards are out of order"
+    # THE SAME CARD, NOT A NEW STYLE: every copy measures as the first does.
+    sizes = page.locator(".jobsrunner").evaluate_all(
+        "cards => cards.map(c => [getComputedStyle(c).borderBottomWidth, getComputedStyle(c).marginBottom])")
+    assert len(set(map(tuple, sizes))) == 1, sizes
+    expect(job_row(page, on_second)).to_contain_text("GPU gpu-box · Chatterbox")
+
+    fake.health("tts_long", runners=[{"lane": "runner", "label": None, **first}])
+    page.clock.fast_forward(30_000)
+    expect(page.locator("#runnerbox-runner2")).to_have_count(0)
+    expect(page.locator("#runnerbox-runner3")).to_have_count(0)
+    expect(page.locator("#runnerstate")).to_have_text("GPU runner: idle")
+
+
 # ---- when the list is asked for --------------------------------------------------------
 
 

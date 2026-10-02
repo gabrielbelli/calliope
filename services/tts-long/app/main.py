@@ -10,9 +10,10 @@ the model is 6.5 GB and concurrency would double the memory; the real
 constraint is that Synth._speak holds one threading.Lock across _ensure_loaded
 and generate(), so two local jobs do not run side by side at all — they
 interleave at segment granularity, for no extra throughput and double the
-latency of each. A second machine is therefore the only thing that can make two
-jobs overlap, and app/dispatch.py is how: one lane here, one lane on the
-runner, chosen per job rather than walked as a ladder.
+latency of each. Another machine is therefore the only thing that can make two
+jobs overlap, and app/dispatch.py is how: one lane here, and one lane per GPU
+runner -- offpeak's desktop, the Linux runner in app/runner, or both -- chosen
+per job rather than walked as a ladder.
 
 /v1/audio/speech sits on top of the same queue for OpenAI clients, and it now
 answers in all three of the ways that endpoint can honestly be answered here:
@@ -122,10 +123,10 @@ def _controls_model(name: str):
     "this ENGINE has no such dial, here is why, and here is the one that does".
     """
     return create_model(name, **{f: _control_field(f) for f in WIRE_CONTROLS})
-from .dispatch import FINISHED, YIELDED, Dispatcher, LaneProbe
+from .dispatch import FINISHED, YIELDED, AnyProbe, Dispatcher, LaneProbe
 from .encoders import MEDIA_TYPES, available_formats, encode, make_encoder
 from .remote import (RemoteSynth, RemoteUnavailable, RemoteYield, RunnerClient,
-                     RunnerConfig)
+                     RunnerConfig, runner_lanes)
 from .runner_key import FILE_VARIABLE as RUNNER_KEY_FILE_VARIABLE, RunnerKey
 from .synth import SAMPLE_RATE, Synth, speech_tokens
 
@@ -174,6 +175,39 @@ RTF_SEED = float(os.getenv("TTS_REALTIME_FACTOR", "0.21"))
 RTF_SEED_LOCAL = float(os.getenv("TTS_REALTIME_FACTOR_LOCAL") or RTF_SEED)
 RTF_SEED_RUNNER = float(os.getenv("TTS_REALTIME_FACTOR_RUNNER") or 0.70)
 
+# EVERY RUNNER THIS DEPLOYMENT NAMES, as (lane, setting prefix): `runner` from
+# TTS_RUNNER_*, always, and `runner2`, `runner3`... from TTS_RUNNER2_*... when
+# their host is set. One lane each, so offpeak's desktop and a Linux GPU box
+# serve at once and each job goes to whichever is free and faster. See
+# app/remote.py's `runner_lanes` and app/dispatch.py.
+RUNNER_LANES = runner_lanes()
+RUNNER_LANE_NAMES = tuple(lane for lane, _prefix in RUNNER_LANES)
+
+
+def _runner_configs() -> dict[str, RunnerConfig]:
+    """{lane: config} for every runner whose host is set, checked at import.
+
+    TWO RUNNERS AT ONE ORIGIN ARE REFUSED HERE, at boot, named. They would be
+    one machine counted as two lanes and offered two jobs at once by a
+    dispatcher that believes in a concurrency the card will never give.
+    """
+    configs: dict[str, RunnerConfig] = {}
+    named: dict[str, str] = {}
+    for lane, prefix in RUNNER_LANES:
+        cfg = RunnerConfig.from_env(prefix=prefix)
+        if cfg is None:
+            continue
+        if cfg.origin in named:
+            raise SystemExit(
+                f"tts-long: {prefix}_HOST and {named[cfg.origin]}_HOST both "
+                f"name {cfg.origin}. One machine is one runner: remove one.")
+        named[cfg.origin] = prefix
+        configs[lane] = cfg
+    return configs
+
+
+RUNNER_CONFIGS = _runner_configs()
+
 # WHICH LANES EXIST. It was an ORDER -- a ladder walked top to bottom -- and a
 # ladder is why `runner_cpu` never ran a single job: `local` is a rung, it is
 # always willing, and anything below an always-willing rung is unreachable.
@@ -186,8 +220,15 @@ RTF_SEED_RUNNER = float(os.getenv("TTS_REALTIME_FACTOR_RUNNER") or 0.70)
 # never offered a job and could not have been; and at its measured 0.24x
 # against this host's 0.23x the arithmetic in dispatch.py refuses it anyway,
 # without a special case.
+#
+# EVERY CONFIGURED RUNNER IS IN THE DEFAULT. A second runner is turned on by
+# setting its host; making somebody also edit this list would be a second
+# switch for one decision. An explicit TTS_BACKEND_ORDER is still the whole
+# answer, and a runner it leaves out is said at start-up rather than dropped
+# in silence.
 BACKEND_ORDER = tuple(x.strip() for x in
-                      (os.getenv("TTS_BACKEND_ORDER") or "runner,local").split(",")
+                      (os.getenv("TTS_BACKEND_ORDER")
+                       or ",".join((*RUNNER_LANE_NAMES, "local"))).split(",")
                       if x.strip())
 
 # HOW MUCH BETTER A REMOTE LANE HAS TO BE BEFORE A JOB CROSSES THE NETWORK.
@@ -413,8 +454,16 @@ class _Rate:
 # list. A third pair for `runner_cpu` sat here reading
 # TTS_REALTIME_FACTOR_RUNNER_CPU, so an operator who set that key got a number
 # accepted, stored and published on /health for a lane no job can be sent to.
+#
+# A NUMBERED RUNNER IS SEEDED THE SAME WAY UNDER ITS OWN NAME:
+# TTS_REALTIME_FACTOR_RUNNER2 for the default engine and
+# TTS_REALTIME_FACTOR_RUNNER2_<ENGINE> per engine, falling back to the
+# catalogue's runner figure. Never to the first runner's key: two runners are
+# two cards, and the reason there is a choice at all is that they differ.
 _LANE_ENV = {"local": ("TTS_REALTIME_FACTOR_LOCAL", "TTS_REALTIME_FACTOR"),
-             "runner": ("TTS_REALTIME_FACTOR_RUNNER",)}
+             "runner": ("TTS_REALTIME_FACTOR_RUNNER",),
+             **{lane: (f"TTS_REALTIME_FACTOR_{lane.upper()}",)
+                for lane in RUNNER_LANE_NAMES if lane != "runner"}}
 _LANE_SEEDS = {"local": RTF_SEED_LOCAL,
                "runner": RTF_SEED_RUNNER}
 
@@ -923,8 +972,7 @@ def _expire_stranded(job_id: str, waited: float) -> None:
     if job is None:
         return
     spec = ENGINES.get(job.get("engine") or DEFAULT_ENGINE)
-    lane = dispatch.lanes.get("runner")
-    probe = lane.probe if lane is not None else None
+    probe = _any_runner()
     why = (probe.why_for(job.get("engine")) if probe is not None
            else "no runner lane is configured")
     minutes = round(waited / 60.0)
@@ -937,6 +985,19 @@ def _expire_stranded(job_id: str, waited: float) -> None:
         f"'{spec.runner_service if spec else ''}' back up on the runner.")
 
 
+def _runner_lanes() -> list[str]:
+    """The runner lanes the dispatcher has, in the order they were configured."""
+    return [lane for lane in RUNNER_LANE_NAMES if lane in dispatch.lanes]
+
+
+def _any_runner() -> AnyProbe | None:
+    """Every runner lane's probe as one question, or None with no runner lane."""
+    lanes = _runner_lanes()
+    if not lanes:
+        return None
+    return AnyProbe({lane: dispatch.lanes[lane].probe for lane in lanes})
+
+
 def _build_dispatch() -> Dispatcher:
     """The lanes this process has, built before any of them runs.
 
@@ -947,6 +1008,10 @@ def _build_dispatch() -> Dispatcher:
     reconfiguration -- invisible for the life of the process. The probe reads
     `state` on every round instead, and answers "no runner is configured" as an
     ordinary shut lane.
+
+    A NUMBERED RUNNER'S LANE EXISTS WHEN ITS HOST IS SET, and is built exactly
+    like the first: its own probe reading `state[<lane>]`, the same hop, and
+    its own rate under its own name. The dispatcher weighs them one by one.
     """
     d = Dispatcher(execute=_execute_on_lane, job_of=jobs.get,
                    work_of=_job_work,
@@ -964,15 +1029,17 @@ def _build_dispatch() -> Dispatcher:
                    expire=_expire_stranded,
                    stranded_deadline=RUNNER_ONLY_DEADLINE_S)
     d.add_lane("local")
-    if "runner" in BACKEND_ORDER:
-        d.add_lane("runner", hop=RUNNER_HOP_S,
+    for lane in RUNNER_LANE_NAMES:
+        if lane not in BACKEND_ORDER:
+            continue
+        d.add_lane(lane, hop=RUNNER_HOP_S,
                    # THE PROBE IS TOLD WHICH SERVICE CARRIES WHICH ENGINE, so
                    # a missing turbo service shuts turbo and nothing else. It
                    # asks the runner about EVERY service in the same request it
                    # was already making -- which is what `chatterbox-cpu` never
                    # had: a detector that existed and that nothing ran.
-                   probe=LaneProbe(lambda: state.get("runner"),
-                                   RUNNER_PROBE_S, log,
+                   probe=LaneProbe(lambda lane=lane: state.get(lane),
+                                   RUNNER_PROBE_S, log, name=lane,
                                    services={e: s.runner_service
                                              for e, s in ENGINES.items()}))
     return d
@@ -1692,6 +1759,31 @@ def _recover() -> int:
 
 
 
+def _runner_clients() -> dict[str, RunnerClient]:
+    """{lane: client} for every runner whose host is set. Empty is local only.
+
+    THE FIRST RUNNER'S KEY COMES FROM THE GATEWAY'S SECRET STORE, and the old
+    file or variable is posted there once, off the startup path: a gateway that
+    is still starting must not hold this service's lifespan open. A deployment
+    with no runner never touches the store at all.
+
+    EVERY OTHER RUNNER'S KEY IS ITS OWN SECRET, TTS_RUNNER<N>_API_KEY, set in
+    Admin › Secrets with that runner's origin in its allowed hosts. Two runners
+    never share a key: a compromise of one machine must not let it call the
+    other, and offpeak serves stored voice clips back to a key holder.
+    """
+    clients: dict[str, RunnerClient] = {}
+    prefixes = dict(RUNNER_LANES)
+    for lane, cfg in RUNNER_CONFIGS.items():
+        if lane == "runner":
+            key = RunnerKey.from_env(cfg.origin)
+            key.start_import()
+        else:
+            key = RunnerKey(target=cfg.origin, name=f"{prefixes[lane]}_API_KEY")
+        clients[lane] = RunnerClient(cfg, key=key)
+    return clients
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1708,26 +1800,28 @@ async def lifespan(app: FastAPI):
     # UNSET MEANS LOCAL ONLY, and that is the default. RunnerConfig.from_env
     # returns None when TTS_RUNNER_HOST is not set, state["runner"] stays None,
     # and _backend_for returns the local Synth without importing anything else.
-    runner_cfg = RunnerConfig.from_env()
-    state["runner"] = None
-    if runner_cfg:
-        # THE KEY COMES FROM THE GATEWAY'S SECRET STORE, and the old file or
-        # variable is posted there once, off the startup path: a gateway that
-        # is still starting must not hold this service's lifespan open. A
-        # deployment with no runner never touches the store at all.
-        runner_key = RunnerKey.from_env(runner_cfg.origin)
-        runner_key.start_import()
-        state["runner"] = RunnerClient(runner_cfg, key=runner_key)
-    # ONE CLIENT, AND A SECOND ONE IS NOT BUILT HERE ANY MORE. `runner_cfg
+    for lane in RUNNER_LANE_NAMES:
+        state[lane] = None
+    for lane, client in _runner_clients().items():
+        state[lane] = client
+    # ONE CLIENT PER MACHINE, AND NOT ONE PER SERVICE ON IT. `runner_cfg
     # .for_cpu()` used to build a second RunnerClient for `chatterbox-cpu` at
     # every startup -- a whole TLS context and a pinned certificate for a
     # service the agent on spring has never registered and a lane the
     # dispatcher cannot construct. The engine-to-service mapping that IS live
-    # is `_runner_for`, which copies this client on demand. See RunnerConfig.
-    if runner_cfg:
-        log.info("a runner is configured at %s:%d; its card is service %s. "
-                 "Lanes: %s.", runner_cfg.host, runner_cfg.port,
-                 runner_cfg.service, ", ".join(dispatch.lanes))
+    # is `_runner_for`, which copies a machine's client on demand. A second
+    # MACHINE is a second lane, and gets a client of its own here.
+    for lane in RUNNER_LANE_NAMES:
+        client = state.get(lane)
+        if client is not None:
+            log.info("a runner is configured at %s:%d for the %s lane. Lanes: "
+                     "%s.", client.cfg.host, client.cfg.port, lane,
+                     ", ".join(dispatch.lanes))
+        if lane not in dispatch.lanes and lane != "runner":
+            log.warning("TTS_%s_HOST is set and TTS_BACKEND_ORDER does not name "
+                        "%s, so that runner is not used. Add it to "
+                        "TTS_BACKEND_ORDER, or unset TTS_BACKEND_ORDER.",
+                        lane.upper(), lane)
     # ONE LANE PER PLACE THE WORK CAN GO, each one thread wide. Local's width is
     # 1 by construction and is not a knob: Synth._speak holds one lock across
     # _ensure_loaded and generate(), so two local jobs interleave at segment
@@ -1863,20 +1957,48 @@ def _runner_settings(engine: str) -> dict | None:
     before manifests carried them. Absent is not empty: a page that drew "{}"
     would be reporting that the machine is configured with nothing.
     """
-    snapshot = _last_runner_snapshot()
-    if not snapshot:
-        return None
     service = ENGINES[engine].runner_service
-    for row in (snapshot.get("services") or []):
-        if row.get("id") == service:
-            return row.get("settings") or None
+    for lane in RUNNER_LANE_NAMES:
+        snapshot = _last_runner_snapshot(lane)
+        for row in ((snapshot or {}).get("services") or []):
+            if row.get("id") == service and row.get("settings"):
+                return row["settings"]
     return None
 
 
-def _last_runner_snapshot() -> dict | None:
+def _last_runner_snapshot(lane: str = "runner") -> dict | None:
     """The snapshot `_health` already fetched, without fetching another."""
-    runner = state.get("runner")
+    runner = state.get(lane)
     return getattr(runner, "_snap", None) if runner is not None else None
+
+
+def _engine_runner_row(engine: str) -> dict:
+    """Can a runner take this engine now, and if not why not, over every runner.
+
+    ONE RUNNER IS THE ROW THAT HAS ALWAYS SHIPPED, byte for byte: that lane's
+    probe's answer. With several, `ready` is "any of them", `why` is the first
+    configured runner's reason when none is, and `lanes` says each runner's
+    answer, so "why did this not go to the desktop" is readable per machine.
+    """
+    lanes = _runner_lanes()
+    row: dict = {"service": ENGINES[engine].runner_service,
+                 "settings": _runner_settings(engine)}
+    if not lanes:
+        return {"ready": False, "why": "no runner lane is configured", **row}
+    probes = {lane: dispatch.lanes[lane].probe for lane in lanes}
+    answers = {lane: (bool(p.ok_for(engine)), p.why_for(engine))
+               for lane, p in probes.items()}
+    ready = any(ok for ok, _ in answers.values())
+    if len(lanes) == 1:
+        why = answers[lanes[0]][1]
+    else:
+        configured = [lane for lane in lanes if state.get(lane) is not None]
+        why = "" if ready else answers[(configured or lanes)[0]][1]
+    out = {"ready": ready, "why": why, **row}
+    if len(lanes) > 1:
+        out["lanes"] = {lane: {"ready": ok, "why": said}
+                        for lane, (ok, said) in answers.items()}
+    return out
 
 
 def _runner_key_file_present() -> bool:
@@ -1920,11 +2042,16 @@ async def _health() -> dict[str, object]:
     # an answer is owed even then, because the probe that asks has no way to
     # know how far start-up has got.
     pool: _Synths | None = state.get("synths")  # type: ignore[assignment]
-    runner = state.get("runner")
-    snapshot = (await run_in_threadpool(runner.snapshot)
-                if runner is not None else None)
-    lane = dispatch.lanes.get("runner")
-    probe = lane.probe if lane is not None else None
+    # EVERY RUNNER AT ONCE, each off the loop. Asked one after another, two
+    # runners that drop packets would cost two offer timeouts in a row on a
+    # route a healthcheck waits on.
+    clients = [(lane, state.get(lane)) for lane in RUNNER_LANE_NAMES]
+    clients = [(lane, c) for lane, c in clients if c is not None]
+    snapshots = dict(zip(
+        [lane for lane, _ in clients],
+        await asyncio.gather(*(run_in_threadpool(c.snapshot)
+                               for _, c in clients))))
+    snapshot = snapshots.get("runner")
     return {
         "status": "ok",
         "model_loaded": pool is not None and pool.loaded,
@@ -1979,19 +2106,14 @@ async def _health() -> dict[str, object]:
                                  else "not in TTS_LOCAL_ENGINES",
                           "resident": pool is not None
                                       and pool.resident(engine)},
-                "runner": {
-                    "ready": bool(probe is not None and probe.ok_for(engine)),
-                    "why": (probe.why_for(engine) if probe is not None
-                            else "no runner lane is configured"),
-                    "service": ENGINES[engine].runner_service,
-                    # WHAT THAT MACHINE IS ACTUALLY SERVING, echoed from its
-                    # own manifest. The load-time settings -- quantisation
-                    # group size, the frame ceiling, the fade, the low-pass --
-                    # are not caller fields and never will be, but they decide
-                    # how the audio sounds, and the only other way to read them
-                    # is an SSH session that lands in Session 0 and cannot see
-                    # the desktop. `curl /health | jq` answers it instead.
-                    "settings": _runner_settings(engine)},
+                # WHAT THAT MACHINE IS ACTUALLY SERVING rides here as
+                # `settings`, echoed from its own manifest. The load-time
+                # settings -- quantisation group size, the frame ceiling, the
+                # fade, the low-pass -- are not caller fields and never will
+                # be, but they decide how the audio sounds, and the only other
+                # way to read them is an SSH session that lands in Session 0
+                # and cannot see the desktop. `curl /health | jq` answers it.
+                "runner": _engine_runner_row(engine),
             }
             for engine, row in engine_rows().items()},
         "default_engine": DEFAULT_ENGINE,
@@ -2004,6 +2126,15 @@ async def _health() -> dict[str, object]:
         # snapshot and not a flag. None when no runner is configured at all,
         # which is still distinguishable from one that is configured and down.
         "runner": snapshot,
+        # EVERY RUNNER, ONE ROW EACH, in the order they are configured: the
+        # same snapshot as `runner` above, plus the lane it is and the word
+        # the operator gave it. `runner` stays the first runner's alone, so a
+        # page or a script written for one runner reads what it always read.
+        "runners": [{"lane": lane,
+                     "label": getattr(getattr(client, "cfg", None), "label", "")
+                     or None,
+                     **snapshots[lane]}
+                    for lane, client in clients],
         # ONE ROW PER LANE, and it is what makes "why did that job run here"
         # answerable without reading the log. A shut lane says which of the
         # three reasons shut it: nothing configured, the probe cannot reach it,
@@ -3086,8 +3217,9 @@ def _choose(*, model: str | None, voice, language: str | None,
     if refusal is not None:
         return refusal
 
-    lane = dispatch.lanes.get("runner")
-    refusal = refuse_unavailable(spec, lane.probe if lane is not None else None)
+    # ANY RUNNER WILL DO. With several, a runner-only engine is refused only
+    # when none of them can take it, and the sentence names each one's reason.
+    refusal = refuse_unavailable(spec, _any_runner())
     if refusal is not None:
         return refusal
 

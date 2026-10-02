@@ -767,8 +767,9 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
 #glossman:is(:has(#glossform:not([hidden])),:has(#glossnames:empty)) #glossidle{display:none}
 /* THE RUNNER'S HEADLINE TAKES THE ROW. With the mode hidden the spacer still
    took half of it, and on a phone "GPU runner: not answering" wrapped beside
-   an empty right half. */
-#runnerstate{flex:1 1 auto;min-width:0}
+   an empty right half. Every runner's card is a copy of the first, its ids
+   suffixed with its lane, so the one rule reaches all of them. */
+[id^="runnerstate"]{flex:1 1 auto;min-width:0}
 /* First in the card now, so the filters under it get the gap a section does. */
 .jobsrunner{margin-bottom:var(--s4);padding-bottom:var(--s3);border-bottom:1px solid var(--line)}
 /* THE PAGE'S FEW GLYPHS ARE DRAWN, in the dock's stroke, so a button's mark is
@@ -3938,9 +3939,10 @@ function engineKind(id) {
    button then quotes a figure measured on a different model. Null is the
    answer cloneRate already knows how to hold. */
 function cloneBackend(engine) {
-  const spec = engineSpec(engine === undefined ? currentEngine() : engine);
+  const id = engine === undefined ? currentEngine() : engine;
+  const spec = engineSpec(id);
   if (spec) {
-    if (spec.runner && spec.runner.ready) return "runner";
+    if (spec.runner && spec.runner.ready) return readyRunner(spec.runner, id);
     if (spec.local && spec.local.ready) return "local";
     /* Both rows absent is a tts-long that predates them, and its one engine
        runs here: today's answer, byte for byte. */
@@ -3948,6 +3950,18 @@ function cloneBackend(engine) {
   }
   const r = ttsLongHealth().runner;
   return (r && r.can_run) ? "runner" : "local";
+}
+
+/* WHICH RUNNER, WHEN THERE ARE SEVERAL: the ready one with the best measured
+   rate for this engine, which is the one tts-long's dispatcher sends the job
+   to while both are free. `lanes` is published only when there is more than
+   one runner; without it the one runner is "runner", as it always was. */
+function readyRunner(row, id) {
+  const ready = Object.keys(row.lanes || {}).filter(lane => row.lanes[lane].ready);
+  if (ready.length < 2) return ready[0] || "runner";
+  const perEngine = ttsLongHealth().realtime_factor_by_engine || {};
+  const rateOf = lane => perEngine[lane + "/" + id] || 0;
+  return ready.reduce((best, lane) => rateOf(lane) > rateOf(best) ? lane : best);
 }
 
 /* THE RATE OF THE MACHINE THAT WILL RUN IT, or null.
@@ -4644,26 +4658,73 @@ async function poll() {
 /* THE RUNNER, AS A PERSON WOULD ASK ABOUT IT: is it there, will it take work,
    and if not why not. Those are three different questions and the panel keeps
    them apart -- the state is the headline, the reason is its own line, and the
-   card disappears completely when no runner is configured. */
+   card disappears completely when no runner is configured.
+
+   ONE CARD PER RUNNER. tts-long can drive several at once (offpeak's desktop
+   and a Linux GPU box), and /health lists every one under `runners`; `runner`
+   alone is the first, which is all a tts-long from before then publishes. The
+   first card is the one in the markup and the others are copies of it, so
+   every runner is drawn exactly as the first one always was. */
 function paintRunner() {
   const box = $("runnerbox");
   if (!box) return;
-  const r = ttsLongHealth().runner;
-  if (!r) { box.hidden = true; return; }
+  const health = ttsLongHealth();
+  const r = health.runner;
+  const all = Array.isArray(health.runners) && health.runners.length
+    ? health.runners : (r ? [r] : []);
+  const cards = runnerCards(box, all.slice(1));
+  if (!all.length) { box.hidden = true; return; }
   box.hidden = false;
+  all.forEach((runner, i) => paintRunnerCard(i ? cards[i - 1] : {
+    state: $("runnerstate"), why: $("runnerwhy"), where: $("runnerwhere"), gpu: $("runnergpu"),
+  }, runner, runnerName(runner, i, all.length)));
+}
 
+/* WHAT A RUNNER IS CALLED ON ITS CARD. The operator's word when tts-long was
+   given one (TTS_RUNNER_LABEL, TTS_RUNNER2_LABEL); "GPU runner" when there is
+   one; numbered when there are several and nobody named them. Never its
+   address: /health does not carry one. */
+function runnerName(runner, i, count) {
+  if (runner && runner.label) return runner.label;
+  return count > 1 ? "GPU runner " + (i + 1) : "GPU runner";
+}
+
+/* THE CARDS AFTER THE FIRST, one per further runner, copied from the first
+   and kept in step with the list: a runner that is no longer listed loses
+   its card. Ids are suffixed with the lane, so each part is still found by id. */
+function runnerCards(box, rest) {
+  const wanted = rest.map((runner, i) => String(runner.lane || "runner" + (i + 2)));
+  for (const card of [...document.querySelectorAll(".jobsrunner[data-lane]")])
+    if (!wanted.includes(card.dataset.lane)) card.remove();
+  let after = box;
+  return wanted.map(lane => {
+    let card = document.querySelector(`.jobsrunner[data-lane="${CSS.escape(lane)}"]`);
+    if (!card) {
+      card = box.cloneNode(true);
+      card.dataset.lane = lane;
+      for (const part of [card, ...card.querySelectorAll("[id]")]) part.id += "-" + lane;
+    }
+    if (after.nextElementSibling !== card) after.after(card);
+    card.hidden = false;
+    after = card;
+    const part = name => card.querySelector(`#runner${name}-${CSS.escape(lane)}`);
+    return { state: part("state"), why: part("why"), where: part("where"), gpu: part("gpu") };
+  });
+}
+
+function paintRunnerCard(parts, r, name) {
   /* UNREACHABLE IS A STATE, NOT AN ERROR. The machine is somebody's desktop:
      switched off, asleep and rebooting are all ordinary. */
   if (!r.reachable) {
-    $("runnerstate").textContent = "GPU runner: not answering";
-    $("runnerwhy").textContent = runnerTrouble(r.error);
-    $("runnerwhere").textContent = "";
-    $("runnergpu").textContent = "";
+    parts.state.textContent = name + ": not answering";
+    parts.why.textContent = runnerTrouble(r.error);
+    parts.where.textContent = "";
+    parts.gpu.textContent = "";
     return;
   }
 
   const busy = r.job_running ? " · working" : "";
-  $("runnerstate").textContent = "GPU runner: " + (r.state || "unknown") + busy;
+  parts.state.textContent = name + ": " + (r.state || "unknown") + busy;
   /* NOT host:port ANY MORE. /health is the one path the gateway exempts from
      authentication, the gateway inlines this document into it, and it was
      publishing a private workstation's LAN address to anybody who asked. The
@@ -4672,7 +4733,7 @@ function paintRunner() {
      edge of the panel was the runner's own enum, saying nothing a reader
      needs: the runner starting work when there is work is what a runner
      does. Another mode is unusual enough to show, as the runner names it. */
-  $("runnerwhere").textContent = r.mode && r.mode !== "auto" ? r.mode : "";
+  parts.where.textContent = r.mode && r.mode !== "auto" ? r.mode : "";
 
   /* The runner's own prose is gone from the payload for the same reason: on
      the live deployment `reason` read "…and <account> is signed in: cannot
@@ -4686,7 +4747,7 @@ function paintRunner() {
   }[r.machine_state] || (r.machine_state ? "It cannot take work right now." : ""));
   if (!r.can_run && r.seconds_until_available > 0)
     why += (why ? " " : "") + "Free again in " + clock(r.seconds_until_available) + ".";
-  $("runnerwhy").textContent = why;
+  parts.why.textContent = why;
 
   const g = r.gpu || {};
   const bits = [];
@@ -4704,7 +4765,7 @@ function paintRunner() {
     return engineSpec(engine) ? engineLabel(engine) : x.id;
   });
   if (svc.length) bits.push("running " + svc.join(", "));
-  $("runnergpu").textContent = bits.join(" · ");
+  parts.gpu.textContent = bits.join(" · ");
 }
 
 /* WHY THE RUNNER DID NOT ANSWER, IN WORDS. tts-long reports the exception's
@@ -15329,7 +15390,8 @@ function ranOn(job) {
   const engine = engineName(job.engine);
   const why = job.engine_reason
     ? ` (${ENGINE_REASON[job.engine_reason] || job.engine_reason})` : "";
-  if (job.backend === "runner") {
+  /* "runner", or "runner2" and on for every further runner: one lane each. */
+  if (/^runner\d*$/.test(job.backend || "")) {
     const where = job.runner_host || "the runner";
     /* THE ENGINE, NOT THE SERVICE. `runner_service` is a container's name
        on the other machine ("chatterbox-runner"), which says less than the

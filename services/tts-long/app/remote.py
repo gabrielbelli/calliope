@@ -8,9 +8,10 @@ network, and this module is it.
 
 WHAT THIS IS NOT. It is not a client for a cluster, a broker or a scheduler.
 There is no central server, and the runner on the other end is an `offpeak`
-agent listening on its own machine with a pinned self-signed certificate. If
-several runners ever exist, a chooser goes in front of this and nothing here
-changes.
+agent, or the Linux GPU runner in app/runner, listening on its own machine with
+a pinned self-signed certificate. There can be several of them now, one
+RunnerClient each, and the chooser in front of them is app/dispatch.py: every
+runner is a lane of its own, and nothing in this file knows how many there are.
 
 THE SHAPE, AND THE ONE RULE IT KEEPS
 
@@ -77,6 +78,7 @@ import http.client
 import json
 import logging
 import os
+import re
 import ssl
 import threading
 import time
@@ -142,6 +144,43 @@ class RemoteYield(RuntimeError):
     def __init__(self, message: str, delivered: int = 0) -> None:
         super().__init__(message)
         self.delivered = delivered
+
+
+# THE FIRST RUNNER'S SETTINGS ARE TTS_RUNNER_*, AND EVERY OTHER ONE'S ARE
+# TTS_RUNNER<N>_* for N from 2. The first keeps the names it has always had, so
+# a deployment with one runner changes nothing. A number rather than a list in
+# one variable, because each runner carries five values of its own (host,
+# port, fingerprint, CA file, label) and its own secret, and a list of tuples
+# in one environment variable is a format nobody gets right at a terminal.
+FIRST_PREFIX = "TTS_RUNNER"
+# THE FIRST RUNNER'S KEYS, SPELLED OUT, so a search for any of them lands on
+# the line that reads it -- and docs/tests checks every key compose.yaml sets
+# against exactly that. A numbered runner's are the same names under its own
+# prefix.
+_FIRST_KEYS = {"HOST": "TTS_RUNNER_HOST", "PORT": "TTS_RUNNER_PORT",
+               "FINGERPRINT": "TTS_RUNNER_FINGERPRINT",
+               "CA_FILE": "TTS_RUNNER_CA_FILE", "LABEL": "TTS_RUNNER_LABEL",
+               "TIMEOUT": "TTS_RUNNER_TIMEOUT",
+               "OFFER_TIMEOUT": "TTS_RUNNER_OFFER_TIMEOUT",
+               "MAX_WAIT": "TTS_RUNNER_MAX_WAIT", "POLL": "TTS_RUNNER_POLL"}
+_NUMBERED_HOST = re.compile(r"TTS_RUNNER([2-9]|[1-9][0-9])_HOST")
+
+
+def runner_lanes(env: dict[str, str] | None = None) -> list[tuple[str, str]]:
+    """[(lane name, setting prefix)] for every runner this environment names.
+
+    The first is always there, as `runner`, configured or not: its lane exists
+    and its probe answers "no runner is configured" until a host is set, which
+    is how every deployment with one runner has always looked. The others
+    exist only when their host is set, as `runner2`, `runner3` and so on,
+    numbered as their settings are.
+    """
+    e = env if env is not None else os.environ
+    numbers = sorted({int(m.group(1)) for key in e
+                      if (m := _NUMBERED_HOST.fullmatch(key))
+                      and (e.get(key) or "").strip()})
+    return [("runner", FIRST_PREFIX)] + [(f"runner{n}", f"{FIRST_PREFIX}{n}")
+                                         for n in numbers]
 
 
 @dataclass(frozen=True)
@@ -210,6 +249,10 @@ class RunnerConfig:
     # Fifteen reads as a hang followed by an unexplained restart.
     max_wait: float = 300.0
     poll: float = 2.0
+    # WHAT THE STATUS PANEL CALLS THIS RUNNER, when there is more than one to
+    # tell apart. The operator's word, never the host: /health is read by the
+    # page, and an address there told its reader nothing they could use.
+    label: str = ""
 
     def for_engine(self, service: str) -> "RunnerConfig":
         """The same machine, its other speech service.
@@ -236,31 +279,51 @@ class RunnerConfig:
         return f"https://{host}:{self.port}"
 
     @classmethod
-    def from_env(cls, env: dict[str, str] | None = None) -> "RunnerConfig | None":
-        """Build from TTS_RUNNER_*, or return None for local-only.
+    def from_env(cls, env: dict[str, str] | None = None,
+                 prefix: str = FIRST_PREFIX) -> "RunnerConfig | None":
+        """Build from TTS_RUNNER_* (or TTS_RUNNER<N>_*), or None for no runner.
 
         Returning None rather than a disabled object is the point: the caller
         branches once, at startup, and the local path keeps no remote code in it.
+
+        WHERE A RUNNER IS, AND HOW TO TRUST IT, IS ITS OWN: host, port,
+        fingerprint, CA file and label are read under `prefix` alone. How
+        patiently to talk to it is shared: a numbered runner that sets no
+        TIMEOUT, OFFER_TIMEOUT, MAX_WAIT or POLL of its own takes the first
+        runner's. The service ids are per engine and shared by every runner
+        (TTS_RUNNER_SERVICE_<ENGINE>), because offpeak and app/runner name
+        their services the same way.
         """
         e = env if env is not None else os.environ
-        host = (e.get("TTS_RUNNER_HOST") or "").strip()
+
+        def own(name: str) -> str:
+            key = (_FIRST_KEYS[name] if prefix == FIRST_PREFIX
+                   else f"{prefix}_{name}")
+            return (e.get(key) or "").strip()
+
+        def shared(name: str) -> str:
+            return own(name) or (e.get(_FIRST_KEYS[name]) or "").strip()
+
+        host = own("HOST")
         if not host:
             return None
         return cls(
             host=host,
-            port=int(e.get("TTS_RUNNER_PORT") or 47600),
-            fingerprint=(e.get("TTS_RUNNER_FINGERPRINT") or "").replace(":", "").lower().strip(),
-            ca_file=(e.get("TTS_RUNNER_CA_FILE") or "").strip(),
+            port=int(own("PORT") or 47600),
+            fingerprint=own("FINGERPRINT").replace(":", "").lower(),
+            ca_file=own("CA_FILE"),
             service=(e.get("TTS_RUNNER_SERVICE") or "chatterbox").strip(),
-            timeout=float(e.get("TTS_RUNNER_TIMEOUT") or 30.0),
-            offer_timeout=float(e.get("TTS_RUNNER_OFFER_TIMEOUT") or 3.0),
-            max_wait=float(e.get("TTS_RUNNER_MAX_WAIT") or 300.0),
+            timeout=float(shared("TIMEOUT") or 30.0),
+            offer_timeout=float(shared("OFFER_TIMEOUT") or 3.0),
+            max_wait=float(shared("MAX_WAIT") or 300.0),
             # TTS_RUNNER_CPU_SERVICE AND TTS_RUNNER_CPU_MAX_WAIT ARE NOT READ
             # HERE ANY MORE, and an unknown key in `e` is ignored rather than
             # refused, so anyone who still has either in their environment gets
             # exactly what the rung always gave them: nothing. See the comment
             # on `service` above for why they went.
-            poll=float(e.get("TTS_RUNNER_POLL") or 2.0),
+            poll=float(shared("POLL") or 2.0),
+            # Printable and short: it is drawn on a panel, one line.
+            label=" ".join(own("LABEL").split())[:40],
         )
 
 

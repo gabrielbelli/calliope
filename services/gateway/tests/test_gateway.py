@@ -969,6 +969,8 @@ async def test_the_engine_detail_the_voice_picker_reads_reaches_a_speech_user(
                                          "settings": {"flow_steps": 32}}},
         },
         "runner": {"host": "runner-host"},
+        "runners": [{"lane": "runner", "label": None, "host": "runner-host"},
+                    {"lane": "runner2", "label": "Linux GPU", "state": "ready"}],
         "brand_new_field": "nobody has decided which tier this is",
     }
     long.reply = lambda r: (200, {"content-type": "application/json"},
@@ -992,10 +994,13 @@ async def test_the_engine_detail_the_voice_picker_reads_reaches_a_speech_user(
     assert engine["runner"] == {"ready": True}
     tts_long = shown["backends"]["tts_long"]
     assert "runner" not in tts_long["health"] and "url" not in tts_long
+    assert "runners" not in tts_long["health"], "every runner reached a reader"
     assert "brand_new_field" not in json.dumps(shown)
     # The operator's tier has the runner and the lane settings, and still
     # nothing nobody has placed in a tier.
     assert full["backends"]["tts_long"]["health"]["runner"] == {"host": "runner-host"}
+    # EVERY RUNNER, not only the first: the page draws one card per row.
+    assert full["backends"]["tts_long"]["health"]["runners"] == detail["runners"]
     assert full["backends"]["tts_long"]["health"]["engines"]["preset-engine"]["runner"][
         "settings"] == {"flow_steps": 32}
     assert "brand_new_field" not in json.dumps(full)

@@ -183,6 +183,11 @@ def lanes_the_dispatcher_can_build() -> set[str]:
     that set is a property of the source rather than of anybody's environment.
     Read with `ast` rather than written down here, because a list restated in a
     test is a third copy of the contract, free to drift from both.
+
+    THE RUNNER LANES ARE A LOOP, NOT CONSTANTS: one `add_lane` per name in
+    `RUNNER_LANE_NAMES`, which is `runner` plus one `runner<N>` per configured
+    TTS_RUNNER<N>_HOST. A lane named there has a branch -- that loop -- so its
+    names count, read off the same table the loop walks.
     """
     import ast
     from pathlib import Path
@@ -192,13 +197,19 @@ def lanes_the_dispatcher_can_build() -> set[str]:
     tree = ast.parse(Path(main.__file__).read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "_build_dispatch":
-            names = {call.args[0].value
-                     for call in ast.walk(node)
+            calls = [call for call in ast.walk(node)
                      if isinstance(call, ast.Call)
                      and isinstance(call.func, ast.Attribute)
-                     and call.func.attr == "add_lane"
-                     and call.args
-                     and isinstance(call.args[0], ast.Constant)}
+                     and call.func.attr == "add_lane" and call.args]
+            names = {call.args[0].value for call in calls
+                     if isinstance(call.args[0], ast.Constant)}
+            looped = any(isinstance(loop, ast.For)
+                         and isinstance(loop.iter, ast.Name)
+                         and loop.iter.id == "RUNNER_LANE_NAMES"
+                         and any(call in calls for call in ast.walk(loop))
+                         for loop in ast.walk(node))
+            if looped:
+                names |= set(main.RUNNER_LANE_NAMES)
             assert names, "no add_lane call in _build_dispatch; this reader is stale"
             return names
     raise AssertionError("app/main.py has no _build_dispatch to read")

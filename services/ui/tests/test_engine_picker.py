@@ -728,9 +728,25 @@ def _fields_the_service_publishes() -> set[str]:
                 if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict))
     engines = next(v for k, v in zip(body.keys, body.values)
                    if isinstance(k, ast.Constant) and k.value == "engines")
-    lanes = {k.value: _dict_keys(v) for k, v in zip(engines.value.keys,
-                                                    engines.value.values)
-             if isinstance(k, ast.Constant) and isinstance(v, ast.Dict)}
+
+    # A LANE ROW IS A DICT DISPLAY, OR A CALL TO A FUNCTION OF main.py THAT
+    # BUILDS ONE. The runner row is `_engine_runner_row(engine)` since tts-long
+    # can drive several runners: one row over all of them, built in one place.
+    # Its keys are every key that function writes in a dict display.
+    functions = {n.name: n for n in ast.walk(health)
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    def _row_keys(value) -> set[str] | None:
+        if isinstance(value, ast.Dict):
+            return _dict_keys(value)
+        if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                and value.func.id in functions):
+            return set().union(*(_dict_keys(d) for d in ast.walk(functions[value.func.id])
+                                 if isinstance(d, ast.Dict)))
+        return None
+
+    lanes = {k.value: keys for k, v in zip(engines.value.keys, engines.value.values)
+             if isinstance(k, ast.Constant) and (keys := _row_keys(v)) is not None}
     for lane in ("local", "runner"):
         assert {"ready", "why"} <= lanes.get(lane, set()), (
             f"the {lane} row no longer carries ready and why, which is what "

@@ -33,6 +33,14 @@ cached, so setting it again works on the next request.
 request goes without it and the runner answers 401, which fails the lane and
 not the job.
 
+**Every other runner has a secret of its own**, named for its settings:
+TTS_RUNNER2_API_KEY for the runner at TTS_RUNNER2_HOST, and so on. Two runners
+never share a key, so a compromise of one machine cannot call the other, and
+each secret's `allowed_hosts` names its own runner. Those are set in
+Admin › Secrets and nowhere else: there is no file or variable to import them
+from, because the store has been where keys live since D44, and the import
+above stays the one-off migration of the first runner's old setting.
+
 Nothing here is ever logged but the secret's NAME.
 """
 
@@ -100,11 +108,16 @@ class RunnerKey:
     def __init__(self, *, target: str, fallback: str = "",
                  fallback_from: str | None = None,
                  credentials: Credentials | None = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 name: str = NAME) -> None:
         normalised = origin(target)
         if normalised is None:
             raise ValueError(f"{target!r} is not an origin a key can be sent to")
         self.target = normalised
+        # WHICH SECRET. TTS_RUNNER_API_KEY for the first runner; a second
+        # runner has its own (TTS_RUNNER2_API_KEY), with its own allowed hosts,
+        # so a compromise of one machine never hands it the other's key.
+        self.name = name
         self._fallback = fallback
         self._fallback_from = fallback_from
         self._credentials = credentials or Credentials()
@@ -164,7 +177,7 @@ class RunnerKey:
                 self._fresh_until = float("-inf")
                 self._warn(f"status-{status}",
                            "%s is %s in the gateway's secret store; runner "
-                           "requests go without a key", NAME,
+                           "requests go without a key", self.name,
                            "not set" if status == 404
                            else "not readable by tts-long")
                 return None
@@ -209,23 +222,23 @@ class RunnerKey:
             # narrows the imported hosts to it, and with none declared the
             # row would allow no host at all.
             kind = "file" if self._fallback_from == FILE_VARIABLE else "env"
-            entries.append({"name": NAME, "value": self._fallback,
+            entries.append({"name": self.name, "value": self._fallback,
                             "kind": "bearer", "allowed_hosts": [self.target],
                             "source": f"{kind} {self._fallback_from}"})
         body = json.dumps({"final": True, "secrets": entries,
-                           "declared": {NAME: [self.target]}}).encode("utf-8")
+                           "declared": {self.name: [self.target]}}).encode("utf-8")
         try:
             status = self._call("POST", "/internal/secrets/import", body)[0]
         except _Unreachable as exc:
             log.info("the import of %s will be tried again in %.0f s: %s",
-                     NAME, IMPORT_RETRY, exc)
+                     self.name, IMPORT_RETRY, exc)
             return False
         if 200 <= status < 300:
             if self._fallback_from:
                 log.warning("%s is set and now only a fallback: %s lives in "
                             "Admin › Secrets, and this value is used only "
                             "while the gateway cannot be reached. Remove it "
-                            "after the next release.", self._fallback_from, NAME)
+                            "after the next release.", self._fallback_from, self.name)
             return True
         if status == 410:
             # The window is closed: imported before, or closed by an admin.
@@ -235,10 +248,10 @@ class RunnerKey:
             # A key the gateway has not finished minting, or a gateway that
             # is restarting or locked (503): both pass on their own.
             log.info("the gateway answered %d to the import of %s; trying "
-                     "again in %.0f s", status, NAME, IMPORT_RETRY)
+                     "again in %.0f s", status, self.name, IMPORT_RETRY)
             return False
         log.warning("the gateway refused the import of %s with %d; set it in "
-                    "Admin › Secrets instead", NAME, status)
+                    "Admin › Secrets instead", self.name, status)
         return True
 
     def start_import(self) -> None:
@@ -275,19 +288,19 @@ class RunnerKey:
         if self.target in self._allowed:
             return value
         self._warn("host", "%s is not allowed for %s; add that host to the "
-                   "secret in Admin › Secrets", NAME, self.target)
+                   "secret in Admin › Secrets", self.name, self.target)
         return None
 
     def _stale(self, why: str) -> str | None:
         if self._value is not None:
             self._warn("stale", "using the last value of %s the gateway gave: %s",
-                       NAME, why)
+                       self.name, why)
             return self._for_target(self._value)
         if self._fallback:
             self._warn("fallback", "using %s for %s: %s", self._fallback_from,
-                       NAME, why)
+                       self.name, why)
             return self._fallback
-        self._warn("none", "no %s to send to the runner: %s", NAME, why)
+        self._warn("none", "no %s to send to the runner: %s", self.name, why)
         return None
 
     def _warn(self, cause: str, message: str, *args: object) -> None:
@@ -298,7 +311,7 @@ class RunnerKey:
         log.warning(message, *args)
 
     def _fetch(self) -> tuple[int, object]:
-        status, data = self._call("GET", f"/internal/secrets/{NAME}")
+        status, data = self._call("GET", f"/internal/secrets/{self.name}")
         if status != 200:
             return status, None
         try:
