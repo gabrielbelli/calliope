@@ -52,7 +52,8 @@ anything runs. The owner map is gone with the shared queue it existed for.
 **The cache is the directory listing.** A finished file is
 `/cache/<sha256(person, link, kind)>.<ext>`, last used at its atime. A file of
 128 MiB or less is kept a day after its last use, and all of them together
-stay under `UI_CACHE_BYTES` (1 GiB). A bigger file is not cached. Nothing runs
+stay under `UI_CACHE_BYTES` (1 GiB). A bigger file is not cached, and neither
+is one bigger than `UI_CACHE_BYTES`. Nothing runs
 on a timer, and nothing but those names and the `jobs/` work directories is
 ever deleted.
 

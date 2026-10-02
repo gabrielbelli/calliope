@@ -322,7 +322,7 @@ the same.
 | Rule | Value |
 |---|---|
 | A file of 128 MiB or less | Kept a day after its last use. All of them together stay under `UI_CACHE_BYTES` (1 GiB), least recently used out first |
-| A bigger file | Not cached. Deleted on abandon, when its job goes, when the same person finishes another big file, or an hour after its last use |
+| A bigger file, or one bigger than `UI_CACHE_BYTES` | Not cached. Deleted on abandon, when its job goes, when the same person finishes another big file, or an hour after its last use |
 | `UI_CACHE_BYTES=0` | The cache is off: every file is big |
 | Before a download | Free space minus what running downloads may still write must leave the cap and 64 MiB, evicting small files first; otherwise the download fails and says so |
 | What is deleted | Only names the cache wrote, and the `jobs/` work directories. A `UI_CACHE_DIR` pointed at the wrong directory loses nothing |
@@ -1277,7 +1277,7 @@ Every variable is optional and every default degrades rather than fails.
 | `UI_LINKS` | on | `0` hides the link box. File upload and TTS are unaffected |
 | `UI_CACHE_DIR` | `/cache` | Finished downloads and downloads in progress: the `ui-cache` volume. Not writable means links are off, and the log says so |
 | `UI_MAX_DOWNLOAD_BYTES` | 500 MiB | The most one audio, clip or video download may write. Keep it at or below the gateway's `GATEWAY_UPLOAD_MAX_BYTES`, which leaves room for the multipart framing |
-| `UI_CACHE_BYTES` | 1 GiB | Every cached file of 128 MiB or less, together. `0` turns the cache off |
+| `UI_CACHE_BYTES` | 1 GiB | Every cached file of 128 MiB or less, together. A file bigger than this value on its own is not cached, as if it were over 128 MiB. `0` turns the cache off |
 | `UI_PROBE_TIMEOUT` | `20` | The probe's time limit, the wait for a slot included. Past it the card has no length or size |
 | `UI_FETCHER` | *(unset)* | **Tests only.** A script run in place of `app/fetcher.py`; the browser harness points it at `tests/fake_fetcher.py`. Set, the log warns |
 | `UI_MAX_UPLOAD_BYTES` | 2 GiB | Checked on `Content-Length` before a byte is forwarded |

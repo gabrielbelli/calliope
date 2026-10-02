@@ -1048,11 +1048,11 @@ not trust a source address alone (ADR 0024).
 download is kept under a hashed name in the `ui-cache` volume, one per person,
 link and kind. A file of 128 MiB or less is kept a day after its last use, and
 all of them together stay under `UI_CACHE_BYTES` (1 GiB), least recently used
-out first. A bigger file is not cached: it goes when its job goes, when the
-same person finishes another big file, or an hour after its last use. Before a
-download starts, free space minus what running downloads may still write must
-leave its cap and 64 MiB, or the download fails with that reason.
-`UI_CACHE_BYTES=0` turns the cache off.
+out first. A bigger file, or one bigger than `UI_CACHE_BYTES`, is not cached:
+it goes when its job goes, when the same person finishes another big file, or
+an hour after its last use. Before a download starts, free space minus what
+running downloads may still write must leave its cap and 64 MiB, or the
+download fails with that reason. `UI_CACHE_BYTES=0` turns the cache off.
 
 **The upload ceiling is the gateway's, not the recogniser's.** `services/stt/app/main.py` reads an
 `UploadFile` whole with no `Content-Length` check, no cap and no streaming, so a

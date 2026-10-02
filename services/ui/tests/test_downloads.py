@@ -33,6 +33,13 @@ def age(path, seconds):
     os.utime(path, ns=(time.time_ns() - int(seconds * 1e9), st.st_mtime_ns))
 
 
+def settled(job, seconds=10.0):
+    """Wait for the job's task to end, so the sweep after it has run too."""
+    ends = time.monotonic() + seconds
+    while job.task is not None and not job.task.done() and time.monotonic() < ends:
+        time.sleep(0.05)
+
+
 # --------------------------------------------------------------- the key --
 
 
@@ -124,6 +131,20 @@ def test_small_files_over_the_total_go_least_recently_used_first(client):
     assert not paths[0].exists(), "the least recently used small file was kept"
     assert paths[1].exists() and job_of(ALICE, third).path.exists()
     assert job_of(ALICE, "https://media.example/instant-big").path.exists()
+
+
+def test_a_file_bigger_than_the_whole_cache_is_kept_as_a_big_one(client):
+    """Counted as small, it would be over the total on its own, and the sweep
+    after its download would delete it the moment it finished."""
+    api, _, _ = client(UI_CACHE_BYTES="100000")       # under one 384 kB tone
+    state = fetched(api, URL)
+    settled(job_of(ALICE, URL))
+    assert state["ready"] is True, state
+    assert api.get("/ui/progress", params={"token": URL}).json()["ready"] is True
+    assert api.get("/ui/media", params={"token": URL}).status_code == 200
+    first = job_of(ALICE, URL).path
+    fetched(api, "https://media.example/instant-other")
+    assert not first.exists(), "a person keeps one big file, and this one is big"
 
 
 def test_a_person_keeps_one_big_file_and_another_person_s_is_untouched(client, sign):

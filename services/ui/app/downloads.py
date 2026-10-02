@@ -29,7 +29,9 @@ ETag /ui/media sends stays the same. A file of ITEM_BYTES or less is kept
 SMALL_KEEP after its last use, and all of them together stay under
 UI_CACHE_BYTES, least recently used out first. A bigger file is not cached:
 it goes when its job goes, when the same person finishes another big file, or
-BIG_KEEP after its last use. UI_CACHE_BYTES=0 makes every file big. sweep()
+BIG_KEEP after its last use. So is a file bigger than UI_CACHE_BYTES itself,
+which the total would otherwise evict the moment it finished, and
+UI_CACHE_BYTES=0 makes every file big. sweep()
 runs at start-up, after every download, on abandon and on every resolve, and
 it deletes only names it wrote.
 """
@@ -477,7 +479,8 @@ def touch(path: Path) -> None:
 
 
 def big(size: int) -> bool:
-    return config.CACHE_BYTES == 0 or size > ITEM_BYTES
+    """Not cached: over ITEM_BYTES, or more than the whole cache may hold."""
+    return config.CACHE_BYTES == 0 or size > min(ITEM_BYTES, config.CACHE_BYTES)
 
 
 def sweep(need: int = 0) -> None:
@@ -487,7 +490,7 @@ def sweep(need: int = 0) -> None:
     grace period: the file used last goes last, and a reader that has a file
     open when it is unlinked reads it to the end.
     """
-    now, on = time.time(), config.CACHE_BYTES > 0
+    now = time.time()
     found = []
     try:
         entries = list(os.scandir(config.CACHE_DIR))
@@ -500,9 +503,9 @@ def sweep(need: int = 0) -> None:
                 st = entry.stat(follow_symlinks=False)
                 found.append((st.st_atime, st.st_size, entry.path))
     found.sort()                                            # least recently used first
-    small = sum(size for _, size, _ in found if on and size <= ITEM_BYTES)
+    small = sum(size for _, size, _ in found if not big(size))
     for used, size, path in found:
-        is_small = on and size <= ITEM_BYTES
+        is_small = not big(size)
         if now - used > (SMALL_KEEP if is_small else BIG_KEEP) or (
                 is_small and (small > config.CACHE_BYTES or free < need)):
             with contextlib.suppress(FileNotFoundError):

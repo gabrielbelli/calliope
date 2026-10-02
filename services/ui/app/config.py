@@ -90,9 +90,10 @@ CACHE_DIR = Path(os.getenv("UI_CACHE_DIR", "/cache"))
 # framing /ui/fetch adds; keep it at or below GATEWAY_UPLOAD_MAX_BYTES.
 MAX_DOWNLOAD_BYTES = int(os.getenv("UI_MAX_DOWNLOAD_BYTES", str(500 * 2**20)))
 
-# 1 GiB, every cached file of 128 MiB or less together. 0 turns the cache off:
-# a finished file is then kept an hour after its last use, for playback, and
-# never reused. See app/downloads.py for the whole of the cache.
+# 1 GiB, every cached file of 128 MiB or less together. A file bigger than
+# this on its own is not cached either. 0 turns the cache off: a finished file
+# is then kept an hour after its last use, for playback, and never reused. See
+# app/downloads.py for the whole of the cache.
 CACHE_BYTES = int(os.getenv("UI_CACHE_BYTES", str(2**30)))
 
 # Ten minutes, the longest recording the clone sheet takes from a link. The
