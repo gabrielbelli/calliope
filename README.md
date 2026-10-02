@@ -207,6 +207,7 @@ only their own keys
 | [`services/stt`](services/stt/README.md) | `calliope-stt` | Parakeet TDT 0.6B v3, or Whisper large-v3 with `STT_MODEL=whisper`, or several side by side with `STT_MODELS` | 1.4 GB |
 | [`services/tts`](services/tts/README.md) | `calliope-tts` | Kokoro-82M, 54 voices, six output formats | 0.33 GB |
 | [`services/tts-long`](services/tts-long/README.md) | `calliope-tts-long` | Chatterbox and Chatterbox Turbo, as jobs | 6.6 GB |
+| [`services/tts-long`](services/tts-long/RUNNER.md) | `calliope-tts-runner` | The same engines on an NVIDIA GPU, on another Linux host, as a runner tts-long sends jobs to. Optional, amd64 only | one engine in VRAM |
 | [`services/gateway`](services/gateway/README.md) | `calliope-gateway` | Sign-in, API keys, routing, the secret store, one health answer | — |
 | [`services/ui`](services/ui/README.md) | `calliope-ui` | The page, and link ingestion | — |
 | [`services/satellites`](services/satellites/README.md) | `calliope-satellites` | The satellite hub: adoption, wake words, echo cancellation, what each word does. Optional | 228 to 326 MiB, measured with 0 to 6 satellites |

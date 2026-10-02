@@ -966,6 +966,8 @@ sentence.
 | `TTS_LOCAL_RESIDENT_MAX` | `1` | Local checkpoints kept loaded at once. Two engines resident is ~6.6 GB plus 1.83 GB against a 10 GB limit |
 | `TTS_<ENGINE>_<FIELD>` | the global default | Per-engine default for one control, e.g. `TTS_CHATTERBOX_TURBO_TEMPERATURE`. Setting one for a field that engine has no control for is **fatal at boot**, naming the key and the way out |
 | `TTS_RUNNER_PORT` | `47600` | The runner's port. Only read when `TTS_RUNNER_HOST` is set |
+| `TTS_RUNNER_LABEL` | *(unset)* | What the page's runner card calls this runner, when there are several to tell apart. A word, never an address |
+| `TTS_RUNNER<N>_HOST` | *(unset)* | A further runner, from `TTS_RUNNER2_HOST` up, each a lane of its own. `_PORT`, `_FINGERPRINT`, `_CA_FILE` and `_LABEL` are its own; `_TIMEOUT`, `_OFFER_TIMEOUT`, `_MAX_WAIT` and `_POLL` fall back to the first runner's. Its key is the secret `TTS_RUNNER<N>_API_KEY` |
 | `TTS_RUNNER_POLL` | `2` | Seconds between polls of a lease the runner is already working on. Not the readiness probe — that is `TTS_RUNNER_PROBE_S` |
 | `TTS_RUNNER_SERVICE_<ENGINE>` | the engine id | The `offpeak` service id per engine. `TTS_RUNNER_SERVICE` is the legacy spelling and now means the `chatterbox` engine only. For an engine with no local lane an uninstalled service is a 503 rather than a slow local job, because there is no local job |
 | `TTS_REALTIME_FACTOR_<LANE>_<ENGINE>` | the catalogue seed | Rate seed per (lane, engine) pair. Falls back pair → lane → global |
@@ -987,7 +989,7 @@ sentence.
 | `TTS_LONG_MAX_TEXT` | `100000` | Characters one `POST /jobs` may carry, `segments` included; more is a **413**. `0` disables it |
 | `TTS_AUDIO_TTL` | `86400` | Seconds the AUDIO survives. The record stays and says `expired`. `TTS_JOB_TTL` is still read and means this |
 | `TTS_RECORD_TTL` | `2592000` | Seconds the RECORD survives. Thirty days. `0` on either disables that half |
-| `TTS_BACKEND_ORDER` | `runner,local` | Which lanes exist. A membership test, not an order: leaving a name out switches that lane off, and `local` alone is local-only |
+| `TTS_BACKEND_ORDER` | every runner, then `local` | Which lanes exist. A membership test, not an order: leaving a name out switches that lane off, and `local` alone is local-only. Unset, it is `runner`, then `runner2` and on for each runner whose host is set, then `local` |
 | `TTS_RUNNER_MAX_WAIT` | `300` | Seconds a job may sit queued on the runner before it is given up on and spoken here. Was 900 when a yield stalled the whole service; with two lanes it is five minutes of a still progress bar against fifteen |
 | `TTS_DISPATCH_MARGIN` | `1.25` | How much better a remote lane must be before a job crosses the network |
 | `TTS_RUNNER_HOP_S` | `8` | The fixed cost of the handover, added rather than multiplied |
@@ -1041,10 +1043,16 @@ the memory for both — 6.6 GB plus turbo's 1.83 GB of weights and an
 ## Torch, and why CPU
 
 Chatterbox has no ONNX build, so torch is unavoidable. The **CPU wheel** is
-used on purpose: the CUDA wheels add several gigabytes, and the GPU this would
-otherwise target is a GTX 1060 — Pascal, whose FP16 runs at 1/64 rate. It
-would not help even where one exists, and 6.5 GB does not fit in 6 GB of VRAM
-at fp32 regardless.
+used on purpose: the CUDA wheels add several gigabytes, and a GPU belongs to a
+runner on the machine that has one (below). The CPU index is on the
+Containerfile's `pip` line rather than in `requirements.txt`, so the GPU
+runner's image installs the same pins from the same file, and CI asserts each
+image got the wheel it should.
+
+Chatterbox runs in FP32, so the 1/64 FP16 rate of a Pascal card such as a GTX
+1060 does not apply to it. What decides whether a card helps is its FP32 rate
+against this CPU, and that is measured, not assumed: `python -m app.runner
+smoke` prints it ([RUNNER.md](RUNNER.md)).
 
 ## Borrowing somebody's GPU, optionally
 
@@ -1091,6 +1099,47 @@ never overwrites a value an admin has set. After that the setting is a
 fallback for this release only: it is used while the gateway cannot be reached
 and has given nothing better, with a WARNING. An admin confirms the imported
 row in Admin › Secrets. Remove the setting after the next release.
+
+### A Linux GPU runner, and both at once
+
+`offpeak` lends a desktop's card while nobody is using it. **tts-runner** is the
+other kind: an always-on container for any Linux host with an NVIDIA card,
+built from this directory (`Containerfile.runner`, image `calliope-tts-runner`)
+and running this service's own `Synth` on CUDA behind the same protocol, so
+nothing in `app/remote.py` changed for it. [RUNNER.md](RUNNER.md) is the
+operator's guide.
+
+There are three modes, and tts-long's environment alone chooses:
+
+| Mode | Settings |
+|---|---|
+| CPU only | no `TTS_RUNNER_HOST` |
+| One runner, either kind | `TTS_RUNNER_*`, and its key as `TTS_RUNNER_API_KEY` in Admin › Secrets |
+| Both | the second as `TTS_RUNNER2_*`, and its key as `TTS_RUNNER2_API_KEY` |
+
+**Every runner is a lane of its own.** Each has its own probe, rate seeds,
+cooldown and secret; a job goes to whichever free runner would finish it first
+by its own measured rate, so the faster one wins while both are free, the
+other takes the job while one is busy or gated, and this CPU takes it when no
+runner is free or none is clearly better. A runner that goes away mid-job, or
+yields, hands the job back exactly as one runner always did, and the next pick
+is between the lanes that are left. Two runner settings that name the same
+host and port refuse to start: one machine is one runner.
+
+`TTS_RUNNER2_HOST`, `_PORT`, `_FINGERPRINT`, `_CA_FILE` and `_LABEL` are the
+second runner's own. Its timeouts, poll interval and maximum wait fall back to
+the first runner's when unset. Its seeds are `TTS_REALTIME_FACTOR_RUNNER2` and
+`TTS_REALTIME_FACTOR_RUNNER2_<ENGINE>`, never the first runner's: two cards are
+the reason there is a choice at all. A third is `TTS_RUNNER3_*`, and so on.
+`/health` lists every runner under `runners`, and the page draws one card each.
+
+**A Pascal card is expected to help Turbo far more than baseline.** On the
+dispatcher's own rule a runner gets a job while this CPU is idle only if it is
+about 1.3 times this CPU's rate or better, after an 8 s handover and the 1.25
+margin: about 0.57–0.61x for Turbo and 0.26–0.30x for baseline. Baseline on a
+GTX 1060 may well not clear that, and then baseline uses the card only while
+this CPU is busy, which is the arithmetic working rather than a fault. See
+[ADR 0024](../../docs/adr/0024-a-linux-gpu-runner.md).
 
 ### What it buys, measured
 

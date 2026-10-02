@@ -717,6 +717,16 @@ services:
       # restart. An override here would keep the old number in production
       # while the code says 300, which is exactly what happened.
       # TTS_RUNNER_MAX_WAIT: "300"
+      #
+      # A SECOND RUNNER GOES BESIDE THIS ONE, NOT INSTEAD OF IT. The always-on
+      # Linux GPU runner (services/tts-long/RUNNER.md, image
+      # calliope-tts-runner) is TTS_RUNNER2_HOST, _PORT, _FINGERPRINT and
+      # _LABEL, its key the secret TTS_RUNNER2_API_KEY in Admin > Secrets with
+      # its own allowed host, and its rates TTS_REALTIME_FACTOR_RUNNER2 and
+      # TTS_REALTIME_FACTOR_RUNNER2_CHATTERBOX_TURBO from its `smoke`. Every
+      # runner is a lane: a job goes to the free one that finishes it first,
+      # and this CPU is the last fallback. Not set here until that card has
+      # been measured (ADR 0024).
 
       # ------------------------------------------- two lanes, not a ladder --
       #
