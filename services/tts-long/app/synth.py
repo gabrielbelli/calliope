@@ -1,4 +1,10 @@
-"""Chatterbox synthesis, CPU.
+"""Chatterbox synthesis, on the CPU here and on CUDA in the GPU runner.
+
+This service always constructs `Synth` with the default device, "cpu", so its
+own image never needs a CUDA wheel. The runner (app/runner/, built from
+Containerfile.runner) runs THIS class on an NVIDIA card with `device="cuda"`:
+the same float32 guard, watermark stub, checkpoint assertion, catalogue-driven
+generate() arguments and token count, on other hardware.
 
 Slow by nature. Measured on an M2 Max at 4, 8 and 16 threads it held around
 0.21x realtime with under 5% spread — it is not thread-bound, because
@@ -181,9 +187,13 @@ class Synth:
     """Loads on first use, unloads after `idle_timeout` seconds of quiet."""
 
     def __init__(self, idle_timeout: float = 600.0, threads: int = 8,
-                 spec=None) -> None:
+                 spec=None, device: str = "cpu") -> None:
         self.idle_timeout = idle_timeout
         self.threads = threads
+        # WHERE THE WEIGHTS GO. "cpu" for every caller in this service; the
+        # GPU runner passes "cuda". A setting of tts-long's own would put the
+        # CUDA wheels in its image for a card it does not have.
+        self.device = device
         # WHICH CHECKPOINT THIS ONE IS. Default rather than required, because
         # every existing caller and every test builds a Synth without one and
         # means the engine there has always been.
@@ -230,8 +240,9 @@ class Synth:
         _pin_every_loaded_module()
 
         t = time.monotonic()
-        log.info("loading %s on cpu, %d threads", self.spec.id, self.threads)
-        self._model = cls.from_pretrained(device="cpu")
+        log.info("loading %s on %s, %d threads", self.spec.id, self.device,
+                 self.threads)
+        self._model = cls.from_pretrained(device=self.device)
         self.load_seconds = round(time.monotonic() - t, 1)
         self.loads += 1
         log.info("loaded %s in %.0fs", self.spec.id, self.load_seconds)

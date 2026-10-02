@@ -271,3 +271,49 @@ def live(tmp_path, monkeypatch, gateway):
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+
+# ------------------------------------------------------------ the runner ---
+#
+# app/runner, the GPU runner's server, driven on the CPU with a fake engine.
+# The helpers are in runner_support.py, which the runner tests import by name.
+
+
+@pytest.fixture
+def runner_modules(tmp_path, monkeypatch):
+    """app.runner and app.engines, imported fresh with both Chatterbox engines.
+
+    Fresh for the same reason `_build` imports app.main fresh: app.engines reads
+    TTS_ENGINES once, at import. The spawned worker imports it again in its own
+    interpreter, from the environment set here.
+    """
+    import types
+
+    from runner_support import RUNNER_ENGINES
+
+    monkeypatch.setenv("TTS_ENGINES", RUNNER_ENGINES)
+    monkeypatch.setenv("FAKE_SYNTH_LOG", str(tmp_path / "fake-synth.log"))
+    for name in [n for n in sys.modules if n == "app" or n.startswith("app.")]:
+        del sys.modules[name]
+    from app.engines import ENGINES
+    from app.runner import api, gpu, jobs, server, tls, worker
+
+    # A tick of 50 ms rather than a second: the tests wait on state changes,
+    # and the dispatcher's own clock is not what they are about.
+    monkeypatch.setattr(jobs, "TICK_S", 0.05)
+    return types.SimpleNamespace(api=api, gpu=gpu, jobs=jobs, server=server,
+                                 tls=tls, worker=worker, engines=ENGINES,
+                                 fake_log=tmp_path / "fake-synth.log")
+
+
+@pytest.fixture
+def runner(runner_modules, tmp_path):
+    """The runner app on a TestClient, with its lifespan, holding the key."""
+    from runner_support import RUNNER_KEY, build_runner
+
+    built = build_runner(runner_modules, tmp_path / "state")
+    with TestClient(built.app) as client:
+        client.headers["authorization"] = f"Bearer {RUNNER_KEY}"
+        built.client = client
+        yield built

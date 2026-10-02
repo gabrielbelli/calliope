@@ -1,7 +1,9 @@
-# CPU-only torch. The CUDA wheels are several gigabytes and this service is
-# explicitly for machines without a usable GPU — a GTX 1060 is Pascal, whose
-# FP16 runs at 1/64 rate, so it would not help even where one exists.
---extra-index-url https://download.pytorch.org/whl/cpu
+# NO WHEEL INDEX HERE, and that is what lets two images share these pins. The
+# CPU image (Containerfile) adds PyTorch's CPU index on its pip line; the GPU
+# runner (Containerfile.runner) adds none, and on linux/amd64 PyPI's torch 2.6.0
+# IS the CUDA 12.4 build. Both images then install the same versions from this
+# one file, and CI asserts the wheel each one got, so the wrong torch is a red
+# build in either direction rather than a slow service or a huge one.
 
 # The shared wire contract: the identity assertion's verifier (which brings
 # cryptography), the OpenAI error envelope, the health route, Segment and

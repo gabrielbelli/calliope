@@ -10,9 +10,12 @@
 # three quarters of an hour. An HTTP request waiting for that would time out.
 #
 # Torch is unavoidable here — Chatterbox has no ONNX build — but the CPU wheel
-# is used deliberately. The CUDA wheels add several gigabytes, and the GPU this
-# would otherwise target is a GTX 1060: Pascal, whose FP16 runs at 1/64 rate,
-# so it would not help even where one exists.
+# is used deliberately. The CUDA wheels add several gigabytes, and a GPU belongs
+# to a runner on the machine that has one: Containerfile.runner builds that
+# image from the same requirements.txt. Chatterbox runs in FP32, so the 1/64
+# FP16 rate of a Pascal card such as a GTX 1060 does not apply to it; what
+# decides whether a card helps is its FP32 rate against this CPU, measured
+# (services/tts-long/RUNNER.md).
 #
 # Build, from the repository root:
 #   docker build -f services/tts-long/Containerfile -t calliope-tts-long .
@@ -71,7 +74,15 @@ COPY services/tts-long/requirements.txt ./requirements.txt
 # same tree as the auth code. Checked here rather than discovered at run time,
 # the way setpriv is above: a build that stopped installing the script would
 # otherwise produce an image that builds and then cannot start.
-RUN pip install --no-cache-dir -r requirements.txt \
+#
+# THE CPU INDEX IS ON THIS LINE AND NOT IN requirements.txt, so the GPU runner
+# can install the same pins from the same file without it. Without the index pip
+# resolves PyPI's torch, which on amd64 is the CUDA build: gigabytes of
+# libraries for a card this image never sees. CI asserts torch.version.cuda is
+# None in this image.
+RUN pip install --no-cache-dir \
+      --extra-index-url https://download.pytorch.org/whl/cpu \
+      -r requirements.txt \
  && command -v voice-entrypoint.sh
 
 COPY services/tts-long/app/ ./app/

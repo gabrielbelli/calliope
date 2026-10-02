@@ -78,6 +78,36 @@ sets it and `app/wakeword.py` sets it before anything imports onnxruntime. This
 is a term of use rather than a licence one, and it is recorded here because a
 hub that listens in a house must not phone home by default.
 
+### The GPU runner image (`calliope-tts-runner`)
+
+Built from `services/tts-long/Containerfile.runner` with tts-long's own
+`requirements.txt`, **without** the CPU wheel index, so pip installs PyPI's
+`torch==2.6.0`, which on linux/amd64 is the CUDA 12.4 build and brings NVIDIA's
+CUDA user-space libraries as wheels. Nothing NVIDIA ships is in this
+repository; the image downloads them at build time and redistributes them as
+the PyPI wheels are published. The kernel driver and `libcuda` are not in the
+image: the NVIDIA Container Toolkit injects them from the host.
+
+| Package | Version | Licence |
+|---|---|---|
+| torch | 2.6.0 | BSD-3-Clause |
+| triton | 3.2.0 | MIT |
+| nvidia-cuda-runtime-cu12, nvidia-cuda-nvrtc-cu12, nvidia-cuda-cupti-cu12 | 12.4.127 | NVIDIA CUDA Toolkit EULA (redistributable components) |
+| nvidia-cublas-cu12 | 12.4.5.8 | NVIDIA CUDA Toolkit EULA (redistributable components) |
+| nvidia-cufft-cu12, nvidia-curand-cu12, nvidia-cusolver-cu12, nvidia-cusparse-cu12, nvidia-nvjitlink-cu12 | 11.2.1.3, 10.3.5.147, 11.6.1.9, 12.3.1.170, 12.4.127 | NVIDIA CUDA Toolkit EULA (redistributable components) |
+| nvidia-cusparselt-cu12 | 0.6.2 | NVIDIA cuSPARSELt licence (proprietary, redistributable) |
+| nvidia-cudnn-cu12 | 9.1.0.70 | NVIDIA cuDNN Software License Agreement (proprietary, redistributable) |
+| nvidia-nccl-cu12 | 2.21.5 | BSD-3-Clause |
+| nvidia-nvtx-cu12 | 12.4.127 | Apache-2.0 |
+| ffmpeg | Debian trixie's package | LGPL-2.1-or-later, GPL-2.0-or-later as Debian builds it |
+
+**The proprietary NVIDIA terms permit redistributing these libraries with an
+application and forbid modifying them**; nothing here modifies them. ffmpeg is
+a separate program the image calls (librosa falls back to it to decode a
+reference clip libsndfile cannot read); it is not linked into anything in this
+repository. The CPU image, `calliope-tts-long`, carries the same Debian
+ffmpeg and none of the NVIDIA wheels.
+
 ### openWakeWord's pre-trained models — **CC BY-NC-SA 4.0**, David Scripka
 
 Not the code's licence. openWakeWord's README: *"All of the included

@@ -456,6 +456,37 @@ def test_a_checkpoint_under_a_shorter_import_path_is_not_refused(
     assert synth.loads == 1
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_the_weights_go_to_the_device_the_synth_was_given(
+        device, weights, build):
+    """THE GPU RUNNER'S ONE CHANGE TO THIS CLASS, AND THE DEFAULT IS UNCHANGED.
+
+    app/runner builds `Synth(device="cuda")` and this service never passes a
+    device at all. A loader that ignored the argument would put the runner's
+    model on its CPU, where it would work, slowly, with nothing reporting it.
+    """
+    build(TTS_ENGINES=LOCAL_BOTH)
+    from app.engines import ENGINES
+    from app.synth import Synth
+
+    asked: list[str] = []
+
+    class _Recording(_MultilingualLike):
+        @classmethod
+        def from_pretrained(cls, device="cpu"):
+            asked.append(device)
+            return cls()
+
+    weights("chatterbox", _Recording)
+    synth = (Synth(spec=ENGINES["chatterbox"]) if device == "cpu"
+             else Synth(spec=ENGINES["chatterbox"], device=device))
+    try:
+        synth._ensure_loaded()  # noqa: SLF001 - the method under test
+    finally:
+        synth.close()
+    assert asked == [device]
+
+
 # ----------------------------------------------- the real weights, on demand ---
 
 

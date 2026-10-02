@@ -92,11 +92,34 @@ jobs:
               "ui":       {"image": "calliope-ui",       "base": "python:3.13-slim-trixie"},
               # The satellite hub: fastapi, httpx and numpy, no model.
               "satellites": {"image": "calliope-satellites", "base": "python:3.13-slim-trixie"},
+              # tts-long's engines on CUDA (services/tts-long/RUNNER.md). amd64
+              # only: no aarch64 torch 2.6 CUDA wheel has Pascal kernels. Built
+              # only when a file the image contains changes -- its paths are
+              # exactly the COPY lines of Containerfile.runner, and the two
+              # lists must agree.
+              "tts-runner": {
+                  "image": "calliope-tts-runner", "base": "python:3.12-slim-trixie",
+                  "containerfile": "services/tts-long/Containerfile.runner",
+                  "arches": ["amd64"],
+                  "paths": ["services/tts-long/Containerfile.runner",
+                            "services/tts-long/requirements.txt",
+                            "services/tts-long/app/__init__.py",
+                            "services/tts-long/app/engines.py",
+                            "services/tts-long/app/synth.py",
+                            "services/tts-long/app/runner/"],
+              },
           }
           # Native runners per architecture rather than qemu. Every one of
           # these images has RUN instructions (apt, pip), and emulated arm64
           # pip installs take tens of minutes where a native runner takes two.
           ARCHES = {"amd64": "ubuntu-24.04", "arm64": "ubuntu-24.04-arm"}
+
+          # A service's own directory unless it names its paths; every
+          # architecture unless it names its own; its directory's Containerfile
+          # unless it names another.
+          paths_of = lambda s: tuple(SERVICES[s].get("paths", [f"services/{s}/"]))
+          arches_of = lambda s: SERVICES[s].get("arches", list(ARCHES))
+          cfile_of = lambda s: SERVICES[s].get("containerfile", f"services/{s}/Containerfile")
 
           event, ref = os.environ["EVENT_NAME"], os.environ["REF"]
 
@@ -136,10 +159,10 @@ jobs:
               selected = list(SERVICES)
           elif any(p.startswith(SHARED) or p in PIPELINE for p in changed):
               selected = list(SERVICES)
-              why += "; shared code or the pipeline changed, so all five"
+              why += "; shared code or the pipeline changed, so all of them"
           else:
               selected = [s for s in SERVICES
-                          if any(p.startswith(f"services/{s}/") for p in changed)]
+                          if any(p.startswith(paths_of(s)) for p in changed)]
               why += f"; changed services: {selected or 'none'}"
 
           # The pipeline counts here too: a change to this file can change how the
@@ -150,11 +173,16 @@ jobs:
 
           print("services=" + json.dumps(selected))
           print("common=" + ("true" if common else "false"))
+          # THE ENTRIES ARE BUILT FIELD BY FIELD, not with **SERVICES[s], so the
+          # lists above (paths, arches) never reach the matrix.
           print("build_matrix=" + json.dumps({"include": [
-              dict(service=s, arch=a, runner=r, **SERVICES[s])
-              for s in selected for a, r in ARCHES.items()]}))
+              {"service": s, "arch": a, "runner": ARCHES[a],
+               "image": SERVICES[s]["image"], "base": SERVICES[s]["base"],
+               "containerfile": cfile_of(s)}
+              for s in selected for a in arches_of(s)]}))
           print("manifest_matrix=" + json.dumps({"include": [
-              dict(service=s, image=SERVICES[s]["image"]) for s in selected]}))
+              {"service": s, "image": SERVICES[s]["image"],
+               "arches": " ".join(arches_of(s))} for s in selected]}))
 
           print(f"base={base} -> {why}", file=sys.stderr)
           PY
@@ -429,6 +457,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y buildah
 
+      - name: Make room for the CUDA wheels (tts-runner)
+        if: matrix.service == 'tts-runner'
+        # buildah on vfs copies whole layers, and this image is about 6.5 GB.
+        # The hosted runner's preinstalled toolchains are about 25 GB that this
+        # job never uses.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       # The context is `.`, the repository root, for every service. That is
       # what lets a Containerfile COPY both its own directory and
       # packages/common, which is the whole reason the path dependency works.
@@ -437,6 +474,7 @@ jobs:
           SERVICE: ${{ matrix.service }}
           ARCH: ${{ matrix.arch }}
           BASE: ${{ matrix.base }}
+          CONTAINERFILE: ${{ matrix.containerfile }}
         run: |
           buildah bud \
             --platform "linux/${ARCH}" \
@@ -445,7 +483,7 @@ jobs:
             --annotation "org.opencontainers.image.licenses=BSD-2-Clause" \
             --annotation "org.opencontainers.image.base.name=docker.io/library/${BASE}" \
             -t "localhost/build:${SERVICE}-${ARCH}" \
-            -f "services/${SERVICE}/Containerfile" .
+            -f "${CONTAINERFILE}" .
 
       # The per-architecture runtime import check, kept per service because
       # each one records a defect that really happened. An image is useless if
@@ -481,11 +519,30 @@ jobs:
       # vendor their own libgomp.so.1 and the arm64 ones do not, so without it
       # the image built cleanly on both and then failed to import torch on
       # arm64. This check is what caught that.
+      #
+      # AND IT IS THE CPU WHEEL. The CPU index moved from requirements.txt to
+      # the Containerfile's pip line so the GPU runner can share the pins; a
+      # build that lost it would resolve PyPI's CUDA torch on amd64 and ship
+      # gigabytes for a card this image never sees.
       - name: Check the runtime imports on this architecture (tts-long)
         if: matrix.service == 'tts-long'
         run: |
           buildah run --user root "$(buildah from localhost/build:tts-long-${{ matrix.arch }})" -- \
-            python -c 'import torch, chatterbox, soundfile; print("ok", torch.__version__)'
+            python -c 'import torch, chatterbox, soundfile; assert torch.version.cuda is None, torch.version.cuda; print("ok", torch.__version__)'
+
+      # The other direction: the CUDA wheel, with Pascal's kernels in it, and
+      # every module the runner imports. ONE working container for every
+      # check, because on vfs each `buildah from` is a full copy of the image.
+      # _cuda_getArchFlags() reads the compiled architecture list without a
+      # GPU; `python -m app.runner smoke` on the card checks it for real.
+      - name: Check the image (tts-runner)
+        if: matrix.service == 'tts-runner'
+        run: |
+          c="$(buildah from localhost/build:tts-runner-${{ matrix.arch }})"
+          buildah run --user root "$c" -- sh -c 'command -v voice-entrypoint.sh && command -v ffmpeg'
+          buildah run --user root "$c" -- \
+            python -c 'import torch, chatterbox, app.synth, app.runner.api, app.runner.jobs, app.runner.worker, app.runner.gpu, app.runner.tls, app.runner.server; flags = torch._C._cuda_getArchFlags(); assert torch.version.cuda.startswith("12.") and "sm_60" in flags, (torch.version.cuda, flags); print("ok", torch.__version__, torch.version.cuda, flags)'
+          buildah rm "$c"
 
       # No compiled wheels of consequence here — the reason the siblings check
       # this — but uvicorn[standard] pulls httptools and uvloop, which are, and
@@ -542,7 +599,7 @@ jobs:
       # that starts and immediately exits with "exec: voice-entrypoint.sh: not
       # found", which is a run-time failure this makes a build-time one.
       - name: Check the shared entrypoint installed
-        if: matrix.service != 'gateway' && matrix.service != 'ui'
+        if: matrix.service != 'gateway' && matrix.service != 'ui' && matrix.service != 'tts-runner'
         run: |
           buildah run --user root "$(buildah from localhost/build:${{ matrix.service }}-${{ matrix.arch }})" -- \
             sh -c 'command -v voice-entrypoint.sh'
@@ -589,12 +646,15 @@ jobs:
       - name: Assemble the multi-architecture tags
         env:
           IMAGE: ${{ matrix.image }}
+          # Every architecture this image is built for: both for the services,
+          # amd64 alone for the GPU runner.
+          ARCHES: ${{ matrix.arches }}
         run: |
           set -eu
           dest="${REGISTRY}/${{ github.repository_owner }}/${IMAGE}"
 
           buildah manifest create m
-          for arch in amd64 arm64; do
+          for arch in ${ARCHES}; do
             buildah manifest add m "docker://${dest}:${GITHUB_SHA}-${arch}"
           done
 
