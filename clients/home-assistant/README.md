@@ -49,6 +49,14 @@ git subtree split --prefix clients/home-assistant -b home-assistant
 Push that branch to its own repository, then in HACS open *Integrations* →
 *Custom repositories* and add it as an *Integration*.
 
+**The icon.** The integration carries Calliope's mark in
+`custom_components/calliope/brand/` (`icon.png` and `icon@2x.png`, the
+drawing the macOS app's icon uses). Home Assistant 2026.8 and later serve a
+custom integration's own brand images, so the mark shows wherever Home
+Assistant shows the integration's logo, with nothing added to the brands
+repository. The mark is a dark plate that reads on the light and the dark
+theme, so there are no `dark_` variants, and the logo is the icon.
+
 ## Set up
 
 In Home Assistant open *Settings* → *Devices & services* → *Add integration*
