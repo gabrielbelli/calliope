@@ -100,6 +100,14 @@ SPELLINGS: dict[str, tuple[str, ...]] = {
     "hey_gemini": _GEMINI, "gemini": _GEMINI,
     "hey_chat_gpt": _GPT, "gpt": _GPT,
 }
+# SPELLINGS THAT ARE EVERYDAY WORDS count only straight after a "hey" or an
+# "ok". On 2 Oct 2026 a video wakened hey_claude and the check let it through,
+# because "cloud" is a spelling of "Claude" and was heard anywhere in the
+# transcript; a language model then got the room's audio. "Hey cloud" is
+# still Claude misheard; "the cloud is down" is a video. Names nobody says in
+# passing ("Jarvis", "Alexa", "Grok") need no lead.
+EVERYDAY = frozenset({"cloud", "clod", "gpt"})
+_LEADS = frozenset({"hey", "ok", "okay"})
 # A "hey" or an "ok" before a name, or on its own: every "hey jarvis" has one,
 # so as a spelling it would match any wake at all, and as vocabulary it
 # would tell STT to hear it.
@@ -244,8 +252,11 @@ def matches(transcript: str, spellings: list[str]) -> str | None:
         tight = want.replace(" ", "")
         short = len(tight) <= SHORT_SPELLING
         sound = sounds(want)
+        led = want in EVERYDAY
         for n in range(1, k + 1):
             for i in range(len(words) - n + 1):
+                if led and (i == 0 or words[i - 1] not in _LEADS):
+                    continue
                 run = words[i:i + n]
                 if n == k and _close(" ".join(run), want, short, sound):
                     return spelling

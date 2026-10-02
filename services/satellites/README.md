@@ -683,7 +683,9 @@ or fewer must be there exactly as written: at 0.8, "could" and "loud" were
 "cloud", "the rock" was "grock" and "Davis" was "javis". An empty transcript
 matches nothing. The spellings are the ones the
 hub knows STT writes for the word (`SPELLINGS` there: `alexa` also as
-"alexia", "aleksa", "alecsa" and "alessa"; `hey_claude` also as "cloud"), or
+"alexia", "aleksa", "alecsa" and "alessa"; `hey_claude` also as "cloud", which,
+being an everyday word, counts only straight after a "hey" or an "ok", as do
+"clod" and "gpt"), or
 for any other word its name with underscores as spaces and without a version
 (`hey_nabu_v2` is "nabu"), and then the word's own `verify.spellings`. A
 leading "hey" or "ok" is dropped from each, so "Hey, Jarvis." is heard as

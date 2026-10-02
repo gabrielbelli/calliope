@@ -124,6 +124,16 @@ def telemetry_on(client, level: str = "full") -> None:
     # Everyday words one letter away from a short spelling (SHORT_SPELLING),
     # or with all the sounds of one too short to be told by them (SOUND_MIN).
     ("I could do that", "hey_claude", False),
+    # An everyday word that is also a spelling counts only after a "hey" or
+    # an "ok" (2 Oct 2026: a video saying "cloud" woke hey_claude).
+    ("the cloud is down", "hey_claude", False),
+    ("We moved it to the cloud", "hey_claude", False),
+    ("cloud computing", "hey_claude", False),
+    ("a clod of earth", "hey_claude", False),
+    ("Okay, cloud", "hey_claude", True),
+    ("GPT is out", "hey_chat_gpt", False),
+    ("the new GPT model", "hey_chat_gpt", False),
+    ("Hey GPT", "hey_chat_gpt", True),
     ("so loud", "hey_claude", False),
     ("the rock", "hey_grok", False),
     # One sound short of "jarvis": T F S, and T R S.
