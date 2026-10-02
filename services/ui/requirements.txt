@@ -21,11 +21,10 @@ python-multipart==0.0.20
 # uvicorn[standard] and yt-dlp uses it; it is pure Python, so the check covers
 # it too.
 #
-# Pinned rather than floated: an unpinned yt-dlp makes two builds of the same
-# commit different images. YouTube breaks yt-dlp every few weeks, so
-# .github/dependabot.yml opens a pull request for each release, and /health
-# reports the version that is running.
-yt-dlp==2026.8.19
+# The pin is in yt-dlp/requirements.txt, where .github/dependabot.yml can keep
+# it current; that file says why it is on its own. A nested -r is read relative
+# to this file, so every install of this one installs it.
+-r yt-dlp/requirements.txt
 
 # The OpenAI error envelope, shared with the four siblings rather than
 # hand-copied into a fifth file. Resolved relative to the process's CWD, which

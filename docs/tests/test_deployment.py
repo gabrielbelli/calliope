@@ -21,6 +21,7 @@ import json
 import re
 
 import pytest
+import yaml
 
 from conftest import KEY, PREFIXES, keys_read_by_code
 from voice_common.auth import REMOVED_VARIABLES
@@ -705,3 +706,28 @@ def test_voice_ui_writes_no_access_log(root, compose):
     if command is not None:
         words = command if isinstance(command, list) else command.split()
         assert "--no-access-log" in words, "compose replaces the command and logs every link"
+
+
+def test_dependabot_watches_requirements_that_name_no_local_path(root):
+    """Dependabot reads every requirements file in the directory it watches,
+    and a path it cannot fetch from there fails the whole run, with no pull
+    request. ./packages/common is relative to the repository root, so the
+    yt-dlp pin lives where no such path is, and voice-ui's requirements
+    install it from there."""
+    config = yaml.safe_load((root / ".github/dependabot.yml").read_text(encoding="utf-8"))
+    pip = [u for u in config["updates"] if u["package-ecosystem"] == "pip"]
+    assert pip, "Dependabot no longer watches yt-dlp"
+    for update in pip:
+        directory = root / update["directory"].strip("/")
+        files = sorted(directory.rglob("*.txt")) + sorted(directory.rglob("*.in"))
+        assert files, f"{update['directory']} has no requirements file"
+        for path in files:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.split("#", 1)[0].strip()
+                assert not re.match(r"(-e\s+)?['\"]?(\.|/|file:)", line), (
+                    f"{path.relative_to(root)} names a local path: {line}")
+    requirements = (root / "services/ui/requirements.txt").read_text(encoding="utf-8")
+    assert re.search(r"^-r yt-dlp/requirements\.txt$", requirements, re.M)
+    containerfile = (root / "services/ui/Containerfile").read_text(encoding="utf-8")
+    assert re.search(r"^COPY services/ui/yt-dlp/requirements\.txt ./yt-dlp/requirements\.txt$",
+                     containerfile, re.M), "the image would not find the pin"

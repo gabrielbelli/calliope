@@ -59,6 +59,7 @@ WORKDIR /srv
 # to have stopped.
 COPY packages/common/ ./packages/common/
 COPY services/ui/requirements.txt ./requirements.txt
+COPY services/ui/yt-dlp/requirements.txt ./yt-dlp/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # NO NATIVE NETWORK STACK, and the build fails if one arrives. app/fetcher.py

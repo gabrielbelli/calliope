@@ -335,9 +335,15 @@ cached file.
 ### Keeping yt-dlp current
 
 YouTube breaks yt-dlp every few weeks. `yt-dlp` is pinned in
-`requirements.txt`, `.github/dependabot.yml` opens a pull request for each
-release, and `/health` reports the version that runs. When links start failing
-with an extractor error, merge the bump, tag a release, and update compose.
+`yt-dlp/requirements.txt`, which `requirements.txt` installs.
+`.github/dependabot.yml` opens a pull request for each release, and `/health`
+reports the version that runs. When links start failing with an extractor
+error, merge the bump, tag a release, and update compose.
+
+The pin has a directory of its own because Dependabot reads every requirements
+file in the directory it watches. The `./packages/common` path in
+`requirements.txt` is relative to the repository root, so Dependabot would not
+find it, and its run would fail with no pull request.
 
 ---
 
