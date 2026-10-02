@@ -16,7 +16,6 @@ in this file, so nothing before them sees a renamed or forgotten satellite.
 
 from __future__ import annotations
 
-import json
 import re
 
 import pytest
@@ -138,71 +137,33 @@ def test_every_page_address_is_served_through_the_gateway(stack):
 # ---- tabs ------------------------------------------------------------------------------
 
 
-# What the dock shows on each of the first twenty frames it is drawn, measured
-# against the tab the ADDRESS names. Measured against whichever tab was
-# selected on the frame, a frame drawn before the page had chosen passed as
-# "under jobs" with the pill under Transcribe. Per frame: the pill's centre
-# less that tab's, every tab's name opacity, the accent the pill is painted
-# in, and every icon's height above the bar's centre line. Called with the
-# tab's name, before the page's own script runs.
-DOCK_FRAMES = """target => {
+# Where the bead is, relative to the selected tab, on each of the first twenty
+# frames the dock is drawn. Installed before the page's own script runs.
+BEAD_FRAMES = """
+(() => {
   const seen = [];
-  window.__dock = seen;
+  window.__bead = seen;
   const look = () => {
-    const pill = document.getElementById("highlight"), dock = document.getElementById("dock");
-    const tab = document.querySelector(`[role=tab][data-tab="${target}"]`);
-    const tabs = [...document.querySelectorAll("[role=tab]")];
-    if (pill && dock && tab && tabs.length === 7) {
-      const b = pill.getBoundingClientRect(), t = tab.getBoundingClientRect(), d = dock.getBoundingClientRect();
-      const mid = r => r.top + r.height / 2;
-      seen.push({
-        off: (b.left + b.width / 2) - (t.left + t.width / 2),
-        names: Object.fromEntries(tabs.map(e => [e.dataset.tab,
-                                                 Number(getComputedStyle(e.querySelector(".label")).opacity)])),
-        glow: getComputedStyle(pill).getPropertyValue("--glow-rgb").trim(),
-        rise: Object.fromEntries(tabs.map(e => [e.dataset.tab,
-                                                mid(d) - mid(e.querySelector("svg").getBoundingClientRect())])),
-      });
+    const bead = document.getElementById("bead"), dock = document.getElementById("dock");
+    const tab = document.querySelector('[role=tab][aria-selected="true"]');
+    if (bead && dock && dock.classList.contains("ready") && tab) {
+      const b = bead.getBoundingClientRect(), t = tab.getBoundingClientRect();
+      seen.push((b.left + b.width / 2) - (t.left + t.width / 2));
     }
     if (seen.length < 20) requestAnimationFrame(look);
   };
   requestAnimationFrame(look);
-}"""
-
-# How far the pill's centre is from the selected tab's, and whether anything
-# in the bar is still moving. The page's own elements, read in one pass.
-PILL = """() => {
-  const pill = document.getElementById("highlight");
-  const tab = document.querySelector('[role=tab][aria-selected="true"]');
-  const b = pill.getBoundingClientRect(), t = tab.getBoundingClientRect();
-  return { off: (b.left + b.width / 2) - (t.left + t.width / 2), width: b.width - t.width,
-           moving: document.getElementById("dock").getAnimations({ subtree: true }).length };
-}"""
-
-
-def accent(page, tab: str) -> str:
-    """The tab's own accent as the bare channels the pill is painted from."""
-    hexa = page.locator(f'[role=tab][data-tab="{tab}"]').evaluate(
-        "e => getComputedStyle(e).getPropertyValue('--acc').trim()")
-    return " ".join(str(int(hexa[i:i + 2], 16)) for i in (1, 3, 5))
-
-
-def pill_under(page, tab: str) -> None:
-    """The tab is selected and the bar has come to rest with the pill under it, one tab wide."""
-    expect(page.locator(f'[role=tab][data-tab="{tab}"]')).to_have_attribute("aria-selected", "true")
-    page.wait_for_function(f"() => {{ const p = ({PILL})(); return Math.abs(p.off) <= 1 && !p.moving; }}")
-    assert abs(page.evaluate(PILL)["width"]) <= 1, "the pill is not one tab wide"
+})();
+"""
 
 
 @pytest.mark.parametrize("tab", list(SLUGS))
-def test_each_tab_address_opens_its_own_tab_on_load_without_the_pill_travelling(page, goto, tab):
+def test_each_tab_address_opens_its_own_tab_on_load_without_the_bead_travelling(page, goto, tab):
     """Before the router the page always opened on Transcribe, so a link to
-    Jobs would have drawn Transcribe first and then slid the selection across.
-    The tab is chosen before the first paint, and from the first frame the
-    dock is drawn nothing in it moves: the pill is under the tab, only its
-    name shows, the pill is in its accent and only its icon is raised. A link
-    to Jobs once opened with "Transcribe" fading out for 150 ms."""
-    page.add_init_script(f"({DOCK_FRAMES})({json.dumps(tab)})")
+    Jobs would have drawn Transcribe first and then slid the bead across.
+    The tab is chosen before the first paint: the bead is under it from the
+    first frame the dock is drawn, and stays there."""
+    page.add_init_script(BEAD_FRAMES)
     goto(SLUGS[tab])
     button = page.locator(f'[role=tab][data-tab="{tab}"]')
     expect(button).to_have_attribute("aria-selected", "true")
@@ -210,17 +171,11 @@ def test_each_tab_address_opens_its_own_tab_on_load_without_the_pill_travelling(
         "els => els.filter(e => !e.hidden && getComputedStyle(e).display !== 'none').map(e => e.id)")
     assert visible == [f"tab-{tab}"], visible
     expect(page.locator("#word")).to_have_text(TABS[tab])
-    page.wait_for_function("() => window.__dock && window.__dock.length >= 20")
-    frames = page.evaluate("window.__dock")
-    named = {t: (1 if t == tab else 0) for t in SLUGS}
-    rest = frames[-1]["rise"]
-    assert rest[tab] > 4 and all(abs(rest[t]) < .5 for t in SLUGS if t != tab), f"the icons at rest: {rest}"
-    for n, frame in enumerate(frames):
-        assert abs(frame["off"]) <= 1, f"frame {n}: the pill was not under {tab}: {frame}"
-        assert frame["names"] == named, f"frame {n}: the names were not {tab}'s alone: {frame}"
-        assert frame["glow"] == accent(page, tab), f"frame {n}: the pill was not in {tab}'s accent: {frame}"
-        assert all(abs(frame["rise"][t] - rest[t]) < .5 for t in SLUGS), f"frame {n}: an icon moved: {frame}"
-    pill_under(page, tab)
+    page.wait_for_function("() => window.__bead && window.__bead.length >= 20")
+    frames = page.evaluate("window.__bead")
+    settled_at = frames[-1]
+    assert abs(frames[0] - settled_at) <= 2, f"the bead started {frames[0] - settled_at:.1f}px away: {frames}"
+    assert max(abs(f - settled_at) for f in frames) <= 2, f"the bead travelled: {frames}"
 
 
 def test_clicking_a_tab_puts_its_address_in_the_bar(page, goto):
@@ -232,89 +187,45 @@ def test_clicking_a_tab_puts_its_address_in_the_bar(page, goto):
         assert page.title().endswith(f"{TABS[tab]} · Calliope"), page.title()
 
 
-def test_arrow_keys_change_the_address_like_a_click(page, goto):
-    """The keyboard's ways of choosing a tab go through the handler a click
-    does: one address each, one step of history, the masthead and the pill
-    following."""
+def test_arrow_keys_and_a_dock_drag_change_the_address_like_a_click(page, goto):
+    """Three ways to choose a tab, one handler, one address each."""
     goto("/ui")
     settled(page)
     page.locator("#tab-btn-transcribe").focus()
-    before = history_length(page)
     page.keyboard.press("ArrowRight")
-    wait_for_tab(page, "/ui/speak")
-    assert history_length(page) == before + 1
-    expect(page.locator("#word")).to_have_text("Speak")
-    pill_under(page, "speak")
+    wait_for_address(page, "/ui/speak")
     page.keyboard.press("End")
     wait_for_address(page, "/ui/admin")
-    pill_under(page, "admin")
     page.keyboard.press("Home")
     wait_for_address(page, "/ui")
-    expect(page.locator("#word")).to_have_text("Transcribe")
-    pill_under(page, "transcribe")
+    before = history_length(page)
+    drag_bead_to(page, "jobs")
+    wait_for_address(page, "/ui/jobs")
+    assert history_length(page) == before + 1
 
 
-def test_the_pill_follows_a_click_and_back_and_forward(page, goto):
-    """Back and Forward choose the tab through the same handler, so the pill
-    is under whatever tab the entry names, not under the one last clicked."""
+def drag_bead_to(page, tab: str) -> None:
+    """Press on the bead, drag it past the dock's 7px hysteresis to the
+    tab's centre, and let go: the pointer path a finger takes."""
+    bead = page.locator("#bead").bounding_box()
+    target = page.locator(f'[role=tab][data-tab="{tab}"]').bounding_box()
+    y = bead["y"] + bead["height"] / 2
+    page.mouse.move(bead["x"] + bead["width"] / 2, y)
+    page.mouse.down()
+    page.mouse.move(target["x"] + target["width"] / 2, y, steps=12)
+    page.mouse.up()
+
+
+def test_dragging_the_bead_writes_the_new_tab_into_the_masthead(page, goto):
+    """A REAL DEFECT: the dock wrote the <h1> from a listener of its own that a
+    drag suppressed, so the bead and the panel moved to the new tab and the
+    heading kept the old one."""
     goto("/ui")
     settled(page)
-    open_tab(page, "jobs")
-    pill_under(page, "jobs")
-    open_tab(page, "satellites")
-    pill_under(page, "satellites")
-    page.go_back()
-    wait_for_address(page, "/ui/jobs")
-    pill_under(page, "jobs")
-    page.go_back()
-    wait_for_address(page, "/ui")
-    pill_under(page, "transcribe")
-    page.go_forward()
-    wait_for_address(page, "/ui/jobs")
-    pill_under(page, "jobs")
-
-
-# The pill the moment a click has landed: where it is, and what is moving it,
-# the wash, the root and the chosen tab's icon. Clicked and read in one task,
-# so no frame can pass in between.
-CLICK_AND_LOOK = """name => {
-  const tab = document.querySelector(`[role=tab][data-tab="${name}"]`);
-  tab.click();
-  const look = (""" + PILL + """)();
-  const running = e => e.getAnimations().map(a => a.transitionProperty).sort();
-  look.running = running(document.getElementById("highlight"));
-  look.wash = running(document.getElementById("bloom"));
-  look.root = running(document.documentElement);
-  look.icon = running(tab.querySelector("svg"));
-  return look;
-}"""
-
-
-@pytest.mark.parametrize("motion", ["no-preference", "reduce"])
-def test_the_pill_travels_and_under_reduced_motion_it_arrives(new_page, goto, motion):
-    """The pill slides to the chosen tab on a transform transition; asked for
-    less motion, it is under the tab the moment the click lands and the icon
-    is set at its height, and the name still appears. The colour cross-fades
-    either way: it is not motion, and it says which tab was chosen. It fades
-    on the pill and the wash, and never on the root, where every element on
-    the page inherited it and was restyled on every frame."""
-    page = new_page(reduced_motion=motion)
-    goto("/ui", target=page)
-    settled(page)
-    look = page.evaluate(CLICK_AND_LOOK, "satellites")
-    if motion == "reduce":
-        assert look["running"] == ["--glow-rgb"], f"the pill travels under reduced motion: {look}"
-        assert abs(look["off"]) <= 1, f"the pill did not arrive: {look}"
-        assert look["icon"] == ["color"], f"the icon rises under reduced motion: {look}"
-    else:
-        assert look["running"] == ["--glow-rgb", "transform"], f"the pill jumped instead of travelling: {look}"
-        assert abs(look["off"]) > 100, f"the pill set off from somewhere else: {look}"
-        assert look["icon"] == ["color", "transform"], f"the icon jumped instead of rising: {look}"
-    assert look["wash"] == ["--glow-rgb"], f"the colour switched instead of cross-fading: {look}"
-    assert look["root"] == [], f"the colour fades on the root, so the whole page restyles: {look}"
-    pill_under(page, "satellites")
-    label = page.locator('[role=tab][data-tab="satellites"] .label')
-    page.wait_for_function("e => getComputedStyle(e).opacity === '1'", arg=label.element_handle())
+    drag_bead_to(page, "vocab")
+    expect(page.locator("#tab-btn-vocab")).to_have_attribute("aria-selected", "true")
+    expect(page.locator("#word")).to_have_text("Vocabulary")
+    wait_for_address(page, "/ui/vocabulary")
 
 
 def test_back_and_forward_walk_the_tabs_visited(page, goto):
@@ -720,19 +631,13 @@ def test_back_while_the_link_dialog_is_open_abandons_the_link(page, goto, browse
     goto("/ui")
     settled(page)
     open_tab(page, "speak")
-    # THE ENTRY BACK RETURNS TO, read off the bar once the voice list has
-    # answered. Speak's entry gains ?voice= when the list answers while it is
-    # showing, which a warm stack does: after test_smoke.py this failed on
-    # every run, waiting for a bare /ui/speak that was no longer the entry.
-    settled(page)
-    speak = here(page)
     open_tab(page, "transcribe")
     page.locator("#url").fill("https://example.com/a-talk")
     page.locator("#resolve").click()
     expect(page.locator("#confirm")).to_have_attribute("open", "")
     with page.expect_request(lambda r: r.method == "POST" and r.url.endswith("/ui/abandon")):
         page.go_back()
-    wait_for_address(page, speak)
+    wait_for_address(page, "/ui/speak")
     expect(page.locator("#confirm")).not_to_have_attribute("open", "")
 
 
@@ -832,18 +737,14 @@ def test_pointing_at_a_tab_names_it(page, goto):
     assert float(label.evaluate("e => getComputedStyle(e).opacity")) < 0.05
     page.locator('[role=tab][data-tab="vocab"]').hover()
     page.wait_for_function("e => getComputedStyle(e).opacity === '1'", arg=label.element_handle())
-    # In its icon's grey: in the accent, with no pill behind it, it read as a
-    # tab half chosen.
-    grey = page.locator('[role=tab][data-tab="vocab"] svg').evaluate("e => getComputedStyle(e).color")
-    assert label.evaluate("e => getComputedStyle(e).color") == grey, "the pointed-at name is in the accent"
     page.mouse.move(5, 5)
     page.wait_for_function("e => Number(getComputedStyle(e).opacity) < 0.05", arg=label.element_handle())
 
 
 def test_the_dock_focus_ring_encloses_the_whole_tab(page, goto):
     """The keyboard's ring is drawn round the tab and its name, not inset over
-    the icon and through the name, and the pill has come to rest under the
-    chosen tab by the time the ring is read."""
+    the icon and through the name; the icon of the chosen tab has risen into
+    the bead, above the bar, by the time the ring is read."""
     goto("/ui")
     settled(page)
     page.locator("body").click(position={"x": 5, "y": 5})
@@ -867,83 +768,6 @@ def test_the_dock_focus_ring_encloses_the_whole_tab(page, goto):
     assert ring["left"] <= box["x"] and box["x"] + box["width"] <= ring["right"], "the ring cuts the name"
     assert ring["top"] <= box["y"] and box["y"] + box["height"] <= ring["bottom"], "the ring cuts the name"
     assert tab.locator(".label").evaluate("e => getComputedStyle(e).opacity") == "1"
-
-
-# Every element in the dock whose box reaches past the bar's, as "tag.class x,y wxh".
-OUTSIDE_THE_BAR = """() => {
-  const bar = document.getElementById("dock").getBoundingClientRect();
-  return [...document.querySelectorAll("#dock *")]
-    .map(e => [e, e.getBoundingClientRect()])
-    .filter(([, r]) => r.width && r.height && (r.left < bar.left - .5 || r.right > bar.right + .5
-                                              || r.top < bar.top - .5 || r.bottom > bar.bottom + .5))
-    .map(([e, r]) => `${e.tagName.toLowerCase()}.${e.getAttribute("class")} `
-                     + `${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}`);
-}"""
-
-
-# For each tab, how far its group sits from the bar's centre line: the icon
-# alone, or for the tab named, the icon and the name under it together.
-CENTRED = """name => {
-  const d = document.getElementById("dock").getBoundingClientRect(), mid = d.top + d.height / 2;
-  // The tabs on the bar: a phone's Account and Admin are in the name's menu.
-  return Object.fromEntries([...document.querySelectorAll("[role=tab]")].filter(t => t.checkVisibility()).map(t => {
-    const i = t.querySelector("svg").getBoundingClientRect(), l = t.querySelector(".label").getBoundingClientRect();
-    return [t.dataset.tab, (t.dataset.tab === name ? (i.top + l.bottom) / 2 : (i.top + i.bottom) / 2) - mid];
-  }));
-}"""
-
-
-@pytest.mark.parametrize("scheme", ["light", "dark"])
-@pytest.mark.parametrize("form", ["desktop", "mobile"])
-def test_the_dock_is_one_bar_with_everything_inside_it(new_page, goto, screenshot, form, scheme):
-    """The selection used to be a bead that rose out of the bar through a
-    notch in its outline. Nothing in the dock reaches past the bar's box now,
-    and the chosen tab's name sits inside its pill -- Vocabulary and
-    Satellites, the longest, included. The admin's seven tabs are all on a
-    desktop bar; on a phone seven names do not fit 390px, so Account and Admin
-    open from the name's menu, the bar keeps five, and with one of those two
-    chosen no pill marks a tab beside it. Photographed with Satellites (whose
-    badge counts Hallway) and Jobs selected."""
-    page = new_page(form, scheme=scheme)
-    goto("/ui", target=page)
-    settled(page)
-    for tab in ("satellites", "jobs", "vocab", "speak", "transcribe", "account", "admin"):
-        button = page.locator(f'[role=tab][data-tab="{tab}"]')
-        if form == "mobile" and tab in ("account", "admin"):
-            expect(button).to_be_hidden()
-            page.locator("#who > summary").click()
-            page.locator(f"#who-{tab}").click()
-            expect(button).to_have_attribute("aria-selected", "true")
-            expect(page.locator("#highlight")).to_have_css("opacity", "0")
-            assert page.locator('[role=tab]:visible').count() == 5, f"{scheme} {tab}: the phone bar is not five tabs"
-            outside = page.evaluate(OUTSIDE_THE_BAR)
-            assert not outside, f"{form} {scheme} {tab}: outside the bar: {outside}"
-            continue
-        open_tab(page, tab)
-        pill_under(page, tab)
-        outside = page.evaluate(OUTSIDE_THE_BAR)
-        assert not outside, f"{form} {scheme} {tab}: outside the bar: {outside}"
-        name = page.locator(f'[role=tab][data-tab="{tab}"] .label').bounding_box()
-        pill = page.locator("#highlight").bounding_box()
-        assert pill["x"] <= name["x"] and name["x"] + name["width"] <= pill["x"] + pill["width"], \
-            f"{tab}: the name overhangs its pill"
-        assert pill["y"] <= name["y"] and name["y"] + name["height"] <= pill["y"] + pill["height"], \
-            f"{tab}: the name is not inside its pill"
-        # Every group is centred in the bar: a lone icon on the centre line,
-        # and the chosen tab's icon and name taken together. The four lone
-        # icons once rode 9px high over an empty strip.
-        off = page.evaluate(CENTRED, tab)
-        assert all(abs(v) < 1 for v in off.values()), f"{form} {scheme} {tab}: off the centre line: {off}"
-        # A badge on the chosen tab stands clear of the pill's edges; it once
-        # came within 1.35px of the top one and read as a collision.
-        badge = page.locator(f'[role=tab][data-tab="{tab}"] .count')
-        if badge.count() and badge.is_visible():
-            b = badge.bounding_box()
-            room = min(b["y"] - pill["y"], pill["y"] + pill["height"] - b["y"] - b["height"],
-                       b["x"] - pill["x"], pill["x"] + pill["width"] - b["x"] - b["width"])
-            assert room >= 4, f"{form} {scheme} {tab}: the badge is {room:.2f}px from its pill's edge"
-        if tab in ("satellites", "jobs"):
-            screenshot(f"dock-{form}-{scheme}-{tab}", target=page)
 
 
 @pytest.mark.parametrize("scheme", ["light", "dark"])
@@ -985,3 +809,34 @@ def test_forgetting_the_satellite_the_address_names_returns_to_the_list(page, go
     wait_for_address(page, "/ui/satellites")
     assert dialogs.seen and dialogs.seen[0][1].startswith("Forget Kitchen?"), dialogs.seen
     expect(page).to_have_title("Satellites · Calliope")
+
+
+@pytest.mark.parametrize("form", ["desktop", "mobile"])
+def test_account_is_the_person_icon_and_never_a_tab_on_the_bar(new_page, goto, form):
+    """Account is the person icon at the top right, never a slot on the bar.
+    Admin is on the bar wherever it fits and joins Account under the icon on
+    a phone, so the bar keeps five and the bead its size. Opening either from
+    the icon closes the socket (no bead claims a tab beside it) and lights
+    the icon in that tab's accent."""
+    page = new_page(form)
+    goto("/ui", target=page)
+    settled(page)
+    on_bar = ["transcribe", "speak", "jobs", "vocab", "satellites"] + (["admin"] if form == "desktop" else [])
+    shown = page.locator("[role=tab]:visible").evaluate_all("els => els.map(e => e.dataset.tab)")
+    assert shown == on_bar, f"{form}: the bar holds {shown}"
+    from_icon = ["account"] + (["admin"] if form == "mobile" else [])
+    for tab in from_icon:
+        page.locator("#who > summary").click()
+        expect(page.locator("#who .who-id")).to_contain_text("admin")
+        page.locator(f"#who-{tab}").click()
+        expect(page.locator(f'[role=tab][data-tab="{tab}"]')).to_have_attribute("aria-selected", "true")
+        expect(page.locator("#word")).to_have_text(TABS[tab])
+        expect(page.locator("#dock")).to_have_attribute("data-away", "")
+        expect(page.locator("#bead")).to_have_css("opacity", "0")
+        expect(page.locator("#who")).to_have_attribute("data-here", "")
+    if form == "desktop":
+        expect(page.locator("#who-admin")).to_be_hidden()
+    # Back on the bar, the bead returns under its tab and the icon goes quiet.
+    open_tab(page, "jobs")
+    expect(page.locator("#dock")).not_to_have_attribute("data-away", "")
+    expect(page.locator("#who")).not_to_have_attribute("data-here", "")

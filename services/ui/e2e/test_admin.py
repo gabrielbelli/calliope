@@ -193,12 +193,12 @@ def test_the_audit_lists_what_the_admin_did(page, goto, stack):
     settled(page)
     # The page says "you" for the reader's own rows.
     newest = page.locator("#audit tbody tr").first.locator("td")
-    expect(newest.nth(1)).to_have_text("you")
-    expect(newest.nth(4)).to_have_text("key_created")
+    expect(newest.nth(1)).to_have_text(re.compile(r"^you"))
+    expect(newest.nth(2)).to_have_text(re.compile(r"^key_created"))
     page.locator("#audit-action").fill("bootstrap_consumed")
     page.locator("#audit-apply").click()
     expect(page.locator("#audit tbody tr")).to_have_count(1)
-    expect(page.locator("#audit tbody tr td").nth(1)).to_have_text("you")
+    expect(page.locator("#audit tbody tr td").nth(1)).to_have_text(re.compile(r"^you"))
 
 
 def test_a_look_at_everyones_jobs_is_on_record_as_a_read_that_was_allowed(page, goto):
@@ -216,7 +216,7 @@ def test_a_look_at_everyones_jobs_is_on_record_as_a_read_that_was_allowed(page, 
     page.locator("#audit-action").fill("read_all")
     page.locator("#audit-apply").click()
     newest = page.locator("#audit tbody tr").first.locator("td")
-    expect(newest.nth(1)).to_have_text("you")
-    expect(newest.nth(4)).to_have_text("read_all")
-    expect(newest.nth(5)).to_have_text("all")
-    expect(newest.nth(6)).to_have_text("ok")
+    expect(newest.nth(1)).to_have_text(re.compile(r"^you"))
+    expect(newest.nth(2)).to_have_text(re.compile(r"^read_all"))
+    expect(newest.nth(2).locator(".sub")).to_have_text("all")
+    expect(newest.nth(3)).to_have_text("ok")

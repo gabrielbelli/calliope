@@ -14,7 +14,8 @@ from test_routes import settled
 from voice_common.scopes import SERVICE_ONLY, SESSION_ONLY, session_scopes
 
 # The speech role's tabs: the four sections it may use, then its Account.
-SPEECH_TABS = ["transcribe", "speak", "jobs", "vocab", "account"]
+# On the bar. Account is the person icon at the top right, for every role.
+SPEECH_TABS = ["transcribe", "speak", "jobs", "vocab"]
 WRITE_REFUSED = 'Bearer error="insufficient_scope", scope="glossaries:write:all"'
 
 
@@ -24,12 +25,16 @@ def shown_tabs(page) -> list[str]:
 
 
 def test_a_speech_user_sees_their_four_sections_and_their_account(speech_page, goto, browser_log):
-    """Transcribe, Speak, Jobs, Vocabulary and Account; no Satellites and no
-    Admin, and the hub is never asked for anything (§4.2)."""
+    """Transcribe, Speak, Jobs and Vocabulary on the bar and Account under the
+    person icon; no Satellites and no Admin anywhere, and the hub is never
+    asked for anything (§4.2)."""
     goto("/ui", target=speech_page)
     settled(speech_page)
     assert shown_tabs(speech_page) == SPEECH_TABS
     expect(speech_page.locator("#who-role")).to_have_text("speech")
+    speech_page.locator("#who > summary").click()
+    expect(speech_page.locator("#who-account")).to_be_visible()
+    expect(speech_page.locator("#who-admin")).to_be_hidden()
     assert not browser_log.sent(path=r"^/satellites"), browser_log.sent(path=r"^/satellites")
     assert not browser_log.sent(path=r"^/admin/")
 

@@ -203,6 +203,25 @@ def test_the_dark_card_is_not_carried_by_a_shadow_it_cannot_show():
         "the dark card is back on a drop shadow")
 
 
+def test_the_dock_falls_back_to_a_plain_bar_without_its_script():
+    """ORDER IS THE WHOLE FIX, AND IT OUTLIVED THE HEADER IT WAS WRITTEN FOR.
+    The bar's real outline is an SVG path cut by JS, so the element carries a
+    plain rounded background first and the script removes it by putting .js on
+    the root. Declared the other way round -- or gated on a class that is added
+    before the path exists -- an engine that never runs the script renders four
+    icons floating on the page with no bar under them at all."""
+    assert "background:var(--plate)" in rule(".dock{"), \
+        "the dock has no fallback if its script never runs"
+    assert "border-radius:var(--dock-r)" in rule(".dock{")
+    plain = CSS.index(".dock{")
+    stripped = CSS.index(".js .dock{background:none}")
+    assert plain < stripped, "the fallback is declared after the thing it backs up"
+    # And the class that strips it is added by the script itself, not printed
+    # into the markup, so "the script ran" is the only thing that can remove it.
+    assert 'document.documentElement.classList.add("js")' in SCRIPT
+    assert '<html lang="en">' in HTML and 'class="js"' not in HTML[:200]
+
+
 def test_only_one_surface_on_the_page_is_translucent():
     """Stacked translucency is where legibility collapses, and the header is
     the only element here with content genuinely scrolling under it."""
@@ -459,7 +478,8 @@ def test_the_tabs_are_one_stop_and_the_arrows_move_between_them():
     # Only over the tabs on the bar: a hidden tab is not a stop, and neither
     # is one a phone moves to the name's menu.
     assert "const shown = TABS.filter(docked);" in handler
-    assert 'const docked = b => !b.hidden && !(PHONE.matches && "menu" in b.dataset);' in SCRIPT
+    assert 'const docked = b => !b.hidden && b.dataset.menu !== "always"' in SCRIPT
+    assert '&& !(PHONE.matches && "menu" in b.dataset);' in SCRIPT
     # The script and the stylesheet take Account and Admin off the bar at the
     # same width, or the pill would count a column that is not drawn.
     assert 'const PHONE = matchMedia("(max-width:600px)");' in SCRIPT
@@ -1306,79 +1326,49 @@ def js_between(start: str, end: str) -> str:
     return HTML[a:HTML.index(end, a)]
 
 
-# ----------------------------------------------------------------- the dock ----
+# ------------------------------------------------------------- meniscus ----
 #
-# One rounded bar, and a tinted pill behind the selected tab that slides to
-# whichever tab is chosen. It replaced a glowing bead that rose out of the bar
-# through a socket notched into its outline, which the owner found unsettling.
-# The bar is adapted from hasib41/meniscus-liquid-nav, MIT.
+# The identity. A meniscus is the curve a liquid makes where it meets its
+# container; the tab strip floats on one, and the trough leans while it
+# travels. Adapted from hasib41/meniscus-liquid-nav, MIT.
 
 
-def dock_markup() -> str:
-    return HTML[HTML.index('<div class="rail">'):HTML.index("<!-- ==================================================== /the dock ====")]
+def test_the_selected_tab_is_not_also_a_filled_pill():
+    """The bead says which tab is selected -- it sits in a socket cut for it,
+    the icon rides up into it, and the label appears underneath. Leaving a
+    filled pill behind that means two mechanisms for one job, and the pill is
+    the louder of the two: it competes with every --accent control on the page.
 
-
-def test_the_selection_is_one_pill_and_not_also_a_filled_tab():
-    """The pill says which tab is selected, and it is one element that moves.
-    A background on the selected button as well would be two mechanisms for
-    one job, and the louder one would compete with every --accent control on
-    the page. The only things aria-selected changes on the button itself are
-    the colour of its icon and whether its name shows."""
+    THERE IS NO aria-selected FILL RULE AT ALL NOW, which is the point. The
+    only thing the attribute selects for is the label's opacity."""
     fills = [r for r in BARE_CSS.split("\n")
              if "[aria-selected=true]" in r and "background:" in r
              and "forced-colors" not in r]
     # The forced-colours fallback is allowed to fill, and must: see
-    # test_forced_colours_outlines_the_selected_tab.
+    # test_forced_colours_gets_the_pill_back.
     fc = CSS[CSS.index("@media (forced-colors:active)"):]
     fc = fc[:fc.index("}\n}") + 3]
     fills = [r for r in fills if r.strip() not in
              {ln.strip() for ln in fc.split("\n")}]
-    assert not fills, f"the selected tab is filled as well as pilled: {fills}"
-    dock = dock_markup()
-    assert dock.count('class="highlight"') == 1, "the selection is not one element"
-    # FIRST IN THE STRIP, so every icon and name paints over it.
-    assert dock.index('class="highlight"') < dock.index('role="tab"'), \
-        "the pill is painted over the tab it sits behind"
-    assert "opacity:1" in rule(".tabs button[aria-selected=true] .label{"), \
+    assert not fills, f"the pill survived the rebrand: {fills}"
+    assert ".tabs button[aria-selected=true] .label," in BARE_CSS, \
         "the selected tab does not name itself"
-    assert "color:var(--on)" in rule(".tabs button[aria-selected=true] svg{")
-    # The accent is the selection's alone: a name shown by pointing at an
-    # unchosen tab is in its icon's grey, or it reads as a tab half chosen.
-    assert "color:var(--icon-off)" in rule(".tabs .label{")
-    assert "color:var(--on)" in rule(".tabs button[aria-selected=true] .label{")
+    assert "opacity:var(--t)" in rule(".tabs button[aria-selected=true] .label,")
 
 
-def test_a_lone_icon_sits_on_the_centre_line_and_a_named_one_makes_room():
-    """The rise that makes room for a name was on every tab, so the four
-    unnamed icons rode 9px above the bar's centre over an empty strip. Only a
-    named tab rises now, and its icon, name and badge rise together, on the
-    pill's clock."""
-    tab = rule(".tabs button{")
-    assert "--up:0px" in tab
-    assert "--up-named:calc((3px + var(--t-micro) * 1.3) / 2)" in tab
-    assert ".tabs button[aria-selected=true]{--up:var(--up-named)}" in BARE_CSS
-    for part, lift in ((".tabs button svg{", "calc(-50% - var(--up))"),
-                       (".tabs .label{", "calc(-1 * var(--up))"),
-                       (".tabs .count{", "calc(-1 * var(--up))")):
-        body = rule(part)
-        assert lift in body, f"{part} does not rise with its tab"
-        assert "transform .5s var(--spring)" in body, f"{part} rises off the pill's clock"
-    # The badge hangs off the icon's corner, not off the bar's centre, so on a
-    # chosen tab it stays clear of the pill's top edge.
-    assert "margin:calc(-1 * var(--ico) / 2 - 6px) 0 0 calc(var(--ico) / 2 - 7px)" in rule(".tabs .count{")
-    # Under forced colours every tab is named, so every icon makes room.
-    fc = CSS[CSS.index("@media (forced-colors:active)"):]
-    assert ".tabs button{--up:var(--up-named)}" in fc[:fc.index("}\n}") + 3]
-
-
-def test_the_pill_and_the_wash_are_decorative_and_the_state_is_not_in_them():
-    """aria-selected and the name already carry the selection, so a screen
-    reader gains nothing from the pill or the wash and would only have to skip
-    past them."""
-    for decoration in ('<span class="highlight"', '<div class="bloom"'):
+def test_the_surface_is_decorative_and_the_state_is_not_in_it():
+    """aria-selected and the label already carry the selection, so a screen
+    reader gains nothing from the plate, the bead or the ground shadow and
+    would only have to skip past three of them."""
+    start = HTML.index('class="skin"')
+    tag = HTML[start:HTML.index(">", start)]
+    assert 'aria-hidden="true"' in tag
+    assert 'focusable="false"' in tag, "SVG is focusable in IE/Edge legacy trees"
+    for decoration in ('<span class="cast"', '<span class="bead"',
+                       '<div class="bloom"'):
         at = HTML.index(decoration)
         assert 'aria-hidden="true"' in HTML[at:HTML.index(">", at)], decoration
-    # The icons too: each button already has a name beside it, so an icon that
+    # The icons too: each button already has a label beside it, so an icon that
     # announced itself would say the name of the tab twice.
     icons = HTML[HTML.index('<div class="tabs"'):HTML.index("<!-- ==================================================== /the dock ====")]
     # Seven since Account and Admin.
@@ -1386,164 +1376,109 @@ def test_the_pill_and_the_wash_are_decorative_and_the_state_is_not_in_them():
     assert icons.count('aria-hidden="true" focusable="false"') == 7
 
 
-def test_the_bar_is_one_rounded_rectangle_drawn_by_the_stylesheet():
-    """The bar's outline was an SVG path cut by script, notched where the bead
-    sat, so the bar changed shape with every selection and a page whose script
-    never ran had to fall back to a second, plain bar. It is one CSS box now:
-    the same plate, rim light and shadow, an unbroken outline, and nothing to
-    fall back from."""
-    dock = rule(".dock{")
-    assert "border-radius:var(--dock-r)" in dock
-    assert "linear-gradient(var(--plate-hi),var(--plate-lo)) padding-box" in dock, \
-        "the plate lost its light"
-    assert "var(--dock-rim) border-box" in dock and "border:1px solid transparent" in dock
-    assert "box-shadow:var(--dock-shadow)" in dock, "the bar is printed on the page, not standing off it"
-    # THE EDGE AND THE SHADOW ARE PER THEME. On a dark page the rim light is
-    # the plate's silhouette and a deep black shadow is invisible anyway; on
-    # the creme page the same white rim drew a pale outline round the plate
-    # and the black shadow a grey haze under it.
-    light = BARE_CSS[BARE_CSS.index(":root{"):BARE_CSS.index("@media (prefers-color-scheme:dark)")]
-    dark = BARE_CSS[BARE_CSS.index("@media (prefers-color-scheme:dark)"):BARE_CSS.index("*{box-sizing")]
-    assert "--dock-rim:linear-gradient(rgb(255 255 255 / .58),rgb(255 255 255 / .06))" in dark, \
-        "the plate lost its rim light, which is its silhouette on a dark page"
-    assert "--dock-shadow:0 6px 14px rgb(0 0 0 / .5)" in dark
-    assert "--dock-rim:linear-gradient(#" in light, "the plate has a pale outline on the creme page"
-    shadow = light[light.index("--dock-shadow:"):]
-    shadow = shadow[:shadow.index(";")]
-    assert "rgb(0 0 0" not in shadow, "a black shadow is back on the creme page"
-    assert "inset 0 1px 0 rgb(255 255 255" in shadow, "the light lost its line under the top edge"
-    # The corner is the cards' corner, by token rather than by a second number.
-    assert "--dock-r:var(--radius-l)" in dock
-    markup = dock_markup()
-    for gone in ("<linearGradient", 'class="skin"', 'class="bead"', 'class="cast"'):
-        assert gone not in markup, f"{gone} is back in the dock"
-    # The only drawings left in the dock are the seven icons.
-    assert markup.count("<svg") == 7
-    # Nothing to fall back from, so nothing marks that the script ran.
-    assert 'classList.add("js")' not in SCRIPT
-    assert ".js " not in BARE_CSS
+def test_the_trough_is_one_path_rather_than_assembled_shapes():
+    """A socket built from a border-radius and two overlapping boxes leaves
+    seams, and the seams appear exactly when the shape is asymmetric -- which
+    is the whole point of the lean.
+
+    THREE TANGENT ARCS, SOLVED RATHER THAN EYEBALLED: a convex shoulder that
+    turns the top edge down, a concave bowl that wraps the bead, and a second
+    shoulder back up. Because they are solved for tangency the bowl hugs the
+    bead exactly and the joins are invisible at any size."""
+    body = js_between("function dockTrough(", "3 one rAF, one spring")
+    assert body.count('return "M0 "') == 1, "the outline is not one path"
+    assert body[:body.index("\n}\n")].rstrip().endswith('+ "Z";'), \
+        "the outline is not closed, so the plate has no inside to fill"
+    assert body.count('"A"') >= 6, "a socket in a rounded bar needs six arcs"
+    # The tangency solve itself, which is what makes it one shape rather than
+    # three drawn next to each other.
+    assert "external tangency" in body
+    assert "const dreach = (s, rb, by) => Math.sqrt(" in SCRIPT
 
 
-def test_the_pill_moves_by_whole_columns_and_needs_no_measuring():
-    """The bead's socket was solved from the measured position of every tab,
-    re-measured on resize and again once the display face arrived. The tabs
-    are equal grid columns now and the pill is laid in the first, so a
-    translate by its own width times the selected index lands it under any
-    tab at any bar width, and the script writes only the index."""
-    tabs = rule(".tabs{")
-    assert "display:grid" in tabs and "grid-auto-columns:1fr" in tabs, \
-        "the tabs are not equal columns, so one width cannot be every tab's"
-    pill = rule(".tabs .highlight{")
-    # Both end lines named: an `auto` end on an absolutely positioned item is
-    # the padding edge, which made the pill as wide as the whole strip.
-    assert "position:absolute" in pill and "grid-area:1/1/2/2" in pill
-    assert "transform:translateX(calc(var(--at) * 100%))" in pill
-    # INSIDE THE BAR: stood off its top and bottom edges by the same inset as
-    # the ends, and rounded concentrically with the bar's corner.
-    assert "inset:calc(var(--dock-in) - 1px) 0" in pill
-    assert "border-radius:calc(var(--dock-r) - var(--dock-in))" in pill
-    assert "padding:0 calc(var(--dock-in) - 1px)" in tabs
-    place = function("dockPlace")
-    assert 'DOCK.style.setProperty("--at", String(at));' in place
-    dock = SCRIPT[SCRIPT.index("/* ========================================================== the dock ===== */"):
-                  SCRIPT.index("const TABS = Array.from")]
-    for gone in ("getBoundingClientRect", "ResizeObserver", "requestAnimationFrame",
-                 "pointermove", "setPointerCapture"):
-        assert gone not in bare(dock), f"the dock does {gone} again"
+def test_the_lean_is_clamped_and_the_two_shoulders_disagree():
+    """THE LIQUID IS ENTIRELY IN THE SHOULDERS. The trailing radius draws out
+    long and the leading one tightens, so the socket smears behind the weight
+    moving through it; give both the same radius and the bar is a notch that
+    slides. The signed travel has to be clamped or a fast drag inverts the
+    arithmetic and the socket turns inside out."""
+    body = js_between("function dockPaint(", "function dockLoop(")
+    assert "dclamp(dv / 1100, -1, 1)" in body, "the lean is neither normalised nor clamped"
+    assert "+ 0.40 * q" in body and "- 0.40 * q" in body, \
+        "both shoulders lean the same way, so the surface slides instead of dragging"
+    assert "G.S * 0.55, G.S * 2.1" in body, "a shoulder can collapse or run away"
+    # Volume-preserving squash: a bead that only widened would gain area as it
+    # travelled, which reads as it inflating rather than being thrown.
+    assert "(1 / sx).toFixed(3)" in body, "the squash is not volume preserving"
 
 
-def test_the_pill_travels_on_the_page_spring_and_cannot_overshoot():
-    """At C=19.3 against K=142 the bead's damping ratio was .81, and it swung
-    past the tab it was sent to and back. A tap carries no momentum, so the
-    pill travels on --spring, the page's critically damped curve, whose stops
-    never pass 1 (test_nothing_on_this_page_overshoots); and it moves by
-    transform alone, so the travel never touches layout."""
-    pill = rule(".tabs .highlight{")
-    assert "transition:transform .5s var(--spring)" in pill
-    # The colour cross-fades over the same travel rather than switching on the
-    # click: registered, the channels interpolate.
-    assert '@property --glow-rgb{syntax:"<number>+";inherits:false;' in BARE_CSS
-    assert "--glow-rgb .5s var(--spring)" in pill
-    assert "transition:--glow-rgb .5s var(--spring)" in rule(".bloom{")
-    # NOT ON :root. Inherited from there, every element on the page took a
-    # new value on every frame of the fade, and the whole document was
-    # restyled for half a second on each tab change.
-    assert "transition:--glow-rgb" not in rule(":root{")
-    assert "root.style.setProperty(\"--glow-rgb\"" not in SCRIPT
+def test_the_frame_loop_cancels_itself_once_the_surface_settles():
+    """A requestAnimationFrame loop that runs for the life of the page to
+    animate nothing is the usual cost of this pattern, and it is the reason a
+    decorative flourish shows up in a battery trace."""
+    body = js_between("function dockLoop(", "function dockRun(")
+    assert "draf = 0;" in body, "the loop never stops"
+    assert "else { dx = dtarget; dv = 0; dockPaint(); }" in body, \
+        "the loop reschedules unconditionally"
+    # And dockRun is the only thing that arms it, so there is exactly one place
+    # a second loop could be started from.
+    assert SCRIPT.count("requestAnimationFrame(dockLoop)") == 1
 
 
-def test_a_tab_answers_the_press_before_the_pill_moves():
-    """The pill sets off on the click, which is the release; the press itself
-    is answered at once, by the tab under the finger."""
-    press = rule(".tabs button:active:not(:disabled){")
-    # Deep enough to see: at .97 a 24px icon shrank by under a pixel.
-    assert "transform:scale(.94)" in press and "opacity:.7" in press
-    # Quick in, slower out.
-    assert "transition-duration:.06s" in press
-    assert "transition:transform .2s ease-out,opacity .2s ease-out" in rule(".tabs button{")
-
-
-def test_the_first_paint_places_the_pill_and_does_not_slide_it():
-    """A link to Jobs must open with the pill under Jobs, not with it sliding
-    across from Transcribe. The transitions are off for exactly the one style
-    pass that commits the placement, and on again after it."""
-    place = function("dockPlace")
-    still = place.index('root.classList.add("dock-still")')
-    write = place.index('DOCK.style.setProperty("--at"')
-    flush = place.index('void getComputedStyle($("highlight")).transform;')
-    back = place.index('root.classList.remove("dock-still")')
-    assert still < write < flush < back, "the placement is not committed while the transitions are off"
-    # EVERYTHING IN THE BAR, AND THE WASH. With the names and icons left out,
-    # a link to Jobs opened with "Transcribe" fading out for 150 ms. :root
-    # gives it the weight to outrank the reduced-motion rules.
-    assert ":root.dock-still .tabs *,:root.dock-still .bloom{transition:none}" in BARE_CSS
-
-
-def test_the_pill_still_moves_under_reduced_motion_it_just_arrives():
+def test_the_surface_still_moves_under_reduced_motion_it_just_arrives():
     """Reduced motion means a gentler equivalent, not the removal of the one
-    cue that says which tab is selected. The pill still goes to the tab; it
-    arrives instead of travelling. The name still appears and the colour still
-    changes, because both answer "which one is selected" and neither is
-    vestibular."""
+    cue that says which tab is selected."""
+    body = js_between("function meniscusTo(", "4 the masthead")
+    assert "MENISCUS.calm.matches" in body, "reduced motion is not consulted"
+    assert "dx = dtarget; dv = 0; dockPaint(); return;" in body, \
+        "the bead fails to arrive, so the selection has no surface cue at all"
+    # The icon still rises and the label still appears: both answer "which one
+    # is selected", and neither is vestibular. What goes is the travel.
     calm = CSS[CSS.index("@media (prefers-reduced-motion:reduce){\n  /*"):]
     calm = calm[:calm.index("\n}\n") + 3]
-    # The pill arrives and the icons are set at their height; the colour and
-    # the name still fade, because neither is motion.
-    assert ".tabs .highlight{transition-property:--glow-rgb}" in calm
-    assert ".tabs button svg{transition-property:color}" in calm
-    assert ".tabs .label{transition-property:opacity,color}" in calm
-    assert ".tabs .count{transition:none}" in calm
-    # And the press keeps an answer: it loses the scale, not the feedback.
-    assert ".tabs button:active:not(:disabled){transform:none;opacity:.65}" in calm
+    assert "opacity" not in rule(".tabs button svg{"), \
+        "the icon fades rather than moving, so there is nothing to reduce"
+    assert ".tabs button svg{transition:none}" in calm
 
 
-def test_forced_colours_outlines_the_selected_tab():
-    """A tinted ground is painted over by the system palette, so under forced
-    colours the selection would rest on the colour of one icon -- the cue those
-    users are most likely to have lost already. The pill goes, every tab is
-    named, and the selected one is outlined."""
+def test_forced_colours_gets_the_pill_back():
+    """A gradient stroke is painted over by the system palette, so under forced
+    colours the selection would rest on font-weight alone -- the cue those
+    users are most likely to have lost already."""
     block = CSS[CSS.index("@media (forced-colors:active)"):]
     block = block[:block.index("}\n}") + 3]
-    assert ".tabs .highlight,.bloom{display:none}" in block
-    assert "outline:2px solid Highlight" in block
+    assert ".dock .skin,.dock .bead,.dock .cast,.bloom{display:none}" in block
+    assert "background:Highlight" in block
+    # AND THE RISE HAS TO BE UNDONE WITH THEM. With the bead painted over, an
+    # icon left translated 38px up sits outside a bar that is now a plain
+    # rectangle -- the selected tab would be the one whose icon has vanished.
+    assert ".tabs button svg{transform:translate(-50%,-50%)}" in block
     assert ".tabs .label{opacity:1;color:ButtonText}" in block, \
         "only the selected tab is named, and its name is the cue being lost"
 
 
-def test_more_contrast_draws_an_edge_round_the_pill():
-    """The pill's tint is a step of 1.2 to 1.7:1 on the plate, exactly the
-    kind of cue a reader who asked for more contrast cannot find; the bar's
-    rim light is the other."""
-    block = BARE_CSS[BARE_CSS.index("@media (prefers-contrast:more){"):]
-    block = block[:block.index("\n}\n")]
-    assert ".tabs .highlight{box-shadow:inset 0 0 0 2px rgb(var(--glow-rgb))}" in block
-    assert ".dock{border-color:var(--ink)}" in block
+def test_the_trough_is_measured_rather_than_positioned_by_a_constant():
+    """Tab widths move with the reader's text size, with translation, and with
+    the jobs chip appearing. A number written into the source is wrong the
+    first time any of those changes."""
+    body = js_between("function dockMeasure(", "2 the skin --")
+    assert "getBoundingClientRect()" in body
+    # Measured from the tabs on the bar: a phone's Admin and everyone's
+    # Account are under the person icon, and take no slot.
+    assert "DOCKON = DOCKTABS.filter(docked);" in body
+    assert "G.slots = DOCKON.map" in body, "the tab centres are written down"
+    assert "new ResizeObserver(() => dockLayout(false)).observe(DOCK)" in SCRIPT, \
+        "the badge changes the bar without changing the window"
+    # AND AGAIN ONCE THE DISPLAY FACE ARRIVES. The face is a data: URI so it
+    # does not cross the network, but it still decodes asynchronously, and the
+    # masthead reflowing is exactly the kind of thing that moves the dock.
+    assert "document.fonts.ready.then(() => dockLayout(false))" in SCRIPT
 
 
 def test_the_borrowed_component_is_attributed_where_it_is_used():
     """MIT asks for attribution and the licence text says 'Use it in anything'.
     The obligation is cheap and the provenance is worth more than the licence:
-    somebody reading this bar should be able to find the original."""
+    somebody reading this geometry should be able to find the original."""
     assert HTML.count("hasib41/meniscus-liquid-nav") >= 2, \
         "attributed in fewer than both places it was adapted"
     assert "MIT" in HTML
@@ -1761,26 +1696,34 @@ def test_a_destructive_button_is_outlined_and_never_filled():
 def test_the_navigation_is_one_object_and_the_labels_are_inside_it():
     """THE NOTE WAS "a bold menu with text inside the form", and twice it was
     read as a strip with a line under it. The bar is a solid plate; the icons,
-    the names and the pill all live inside its bounds, and the pill is a tint
-    inside the plate rather than a marker drawn on top of it.
+    the label and the bead all live inside its bounds, and the bead is a thing
+    the plate's own top edge dips beneath rather than a marker drawn on top.
 
     THE MECHANISM MOVED AND THE INTENT DID NOT. This used to assert a full-width
     slab spanning the text measure; the navigation is a fixed dock sized to the
     thumb now, so what must be true is that it is ONE shape with everything
     inside it -- not that it is as wide as the column."""
     assert "background:var(--panel)" in rule("body{"), "the page lost its faceplate"
-    # One box, one fill, one rim: the plate is the shape.
-    assert "linear-gradient(var(--plate-hi),var(--plate-lo)) padding-box" in rule(".dock{")
+    # One path, one fill, one stroke: the plate is the shape, not a box with a
+    # dip drawn under it.
+    assert "fill:url(#dock-plate)" in rule(".dock .skin path{")
+    assert "stroke:url(#dock-rim)" in rule(".dock .skin path{"), \
+        "the plate has no silhouette, so the socket has no edge to be cut into"
+    skin = rule(".dock .skin{")
+    assert "position:absolute" in skin and "inset:0" in skin, \
+        "the plate does not span the dock"
     # The controls sit INSIDE the plate's bounds and fill it edge to edge.
     tabs = rule(".tabs{")
     assert "position:absolute" in tabs and "inset:0" in tabs
-    assert "grid-auto-columns:1fr" in tabs, \
-        "the tabs do not fill the bar they sit inside"
+    assert "flex:1" in rule(".tabs button{"), \
+        "the labels do not fill the bar they sit inside"
     # And the content column is not glued to it any more -- it clears it, which
-    # is what a fixed object at the foot of the viewport requires: 76 of bar
-    # and the 22 it floats by. Nothing rises above the bar any more, so the
-    # 26px once reserved for the bead's upper half is gone with it.
-    assert "98px" in rule(".wrap{"), "the last control on every tab is under the dock"
+    # is what a fixed object at the foot of the viewport requires.
+    # 124 RESERVES THE BEAD, NOT JUST THE BAR. The bead rides ON the surface
+    # line -- its centre is the plate's top edge -- so half a diameter sits
+    # above the dock. Reserving 98 (76 of bar plus the 22 it floats by) left
+    # the last control on a panel with 14px of real air beneath a glowing disc.
+    assert "124px" in rule(".wrap{"), "the last control on every tab is under the dock"
 
 def test_the_biggest_thing_on_the_page_is_where_you_are():
     """It was the other way round twice. First the brand was --t-display at
@@ -1832,9 +1775,9 @@ def test_the_page_tells_you_which_tab_you_are_on_from_across_the_room():
     deviation that got the last two attempts rejected.
 
     What carries it now is four bits, not one, and it is the size of the
-    window: every tab has its own accent, and the pill behind it, its name and
-    the wash behind the entire page all take it, cross-fading as the pill
-    travels. You do not read which tab you are on; the room changes colour."""
+    window: every tab has its own accent, and the bead, its halo, the label and
+    the wash behind the entire page are all lerped to it as the bead travels.
+    You do not read which tab you are on; the room changes colour."""
     dock = HTML[HTML.index('<div class="rail">'):HTML.index("<!-- ==================================================== /the dock ====")]
     accents = re.findall(r'--acc:(#[0-9A-Fa-f]{6})', dock)
     # Seven since Account and Admin.
@@ -1842,35 +1785,30 @@ def test_the_page_tells_you_which_tab_you_are_on_from_across_the_room():
     assert len(set(accents)) == 7, f"two tabs share an accent: {accents}"
     # READ FROM THE STYLESHEET, NOT WRITTEN TWICE. A palette with a second copy
     # in the script is a palette that drifts the first time one of them moves.
-    body = js_between("const DOCKACC", "function dockPlace(")
+    body = js_between("const DOCKACC", "1 geometry --")
     assert 'getComputedStyle(t).getPropertyValue("--acc")' in body
-    # And the wash is driven by the SAME channels as the pill, so the colour of
-    # the room is the colour of the selection by construction rather than by
-    # coincidence.
-    assert 'const DOCKGLOW = [$("highlight"), $("bloom")]' in SCRIPT
-    # The colour is the selected tab's own, found among every tab; the pill's
-    # place is counted among the tabs this session may open.
-    assert 'for (const el of DOCKGLOW) el.style.setProperty("--glow-rgb", DOCKACC[lit]);' in function("dockPlace")
-    assert "const lit = Math.max(0, DOCKTABS.indexOf(found < 0 ? selected : shown[at]));" in function("dockPlace")
+    # And the wash is driven by the SAME channels, so the colour of the room is
+    # the colour of the bead by construction rather than by coincidence.
+    paint = js_between("function dockPaint(", "function dockLoop(")
+    assert 'document.documentElement.style.setProperty("--glow-rgb"' in paint
+    assert "dmix(acc(near), acc(other), t)" in paint, \
+        "the accent steps between tabs instead of travelling with the bead"
     assert "rgb(var(--glow-rgb) / var(--bloom-a))" in rule(".bloom{")
-    assert "background:rgb(var(--glow-rgb) / var(--pill-a))" in rule(".tabs .highlight{")
-    # The name and the icon take the tab's own accent, lifted toward white so
-    # the name clears 4.5:1 on its pill for every accent.
-    assert "--on:color-mix(in srgb,var(--acc) 70%,#fff)" in rule(".tabs button{")
-    assert "color:var(--on)" in rule(".tabs button[aria-selected=true] .label{")
 
 
-def test_the_lamp_does_not_start_a_frame_loop_of_its_own():
-    """The meter already runs a display-synced loop with the PPM ballistic on
-    it; the lamp is lit when it starts and put out when it stops, and arms no
-    loop of its own that could outlive either."""
-    body = function("lampMic")
-    assert "lampPaint()" in body
+def test_the_level_does_not_start_a_second_frame_loop():
+    """meniscusStep cancels itself the moment the surface settles, which is the
+    one thing that keeps a decorative flourish out of a battery trace. A
+    waterline that armed its own rAF would defeat that and leave a loop running
+    for the life of the page. meter() already runs a display-synced loop with
+    the PPM ballistic on it, so the level borrows that one."""
+    body = js_between("function meniscusLevel(", "function meniscusBusy(")
+    assert "meniscusLamp()" in body
     assert "requestAnimationFrame" not in body, "the lamp started its own loop"
     meter = HTML[HTML.index("function meter(bar, analyser, data)"):]
     meter = meter[:meter.index("\n}\n")]
-    assert "lampMic(true);" in meter, "the lamp does not light while the microphone is open"
-    assert "lampMic(false);" in meter, "the lamp stays lit after the stop"
+    assert "meniscusLevel(shown, true)" in meter, "the seam reads a second analyser"
+    assert "meniscusLevel(0, false)" in meter, "the lamp stays lit after the stop"
 
 
 def test_the_lamp_has_a_state_it_can_be_seen_to_be_in():
@@ -1882,7 +1820,7 @@ def test_the_lamp_has_a_state_it_can_be_seen_to_be_in():
     for theme in ("light", "dark"):
         assert "--lamp-off" in tokens(theme), f"--lamp-off is undefined for {theme}"
     # THE LAMP MOVED OUT OF THE NAVIGATION AND BECAME THE MARK. It was a bead
-    # in the tab strip; the pill in the dock is the SELECTION now and carries
+    # in the tab strip; the bead in the dock is the SELECTION now and carries
     # the tab's accent at all times, so it cannot also mean "something is
     # running" without meaning both at once. The disc beside the wordmark is
     # the one object on the page whose only job is that fact.
@@ -1897,9 +1835,9 @@ def test_the_lamp_has_a_state_it_can_be_seen_to_be_in():
     assert "animation" not in rule(".brand .lamp{")
     assert "animation" not in rule(".brand.lit .lamp{")
     # Two independent reasons can light it and neither may dark the other.
-    busy = function("lampBusy")
-    assert "LAMP.busy.add(source)" in busy and "LAMP.busy.delete(source)" in busy
-    assert 'b.classList.toggle("lit", LAMP.mic || LAMP.busy.size > 0)' in SCRIPT
+    busy = js_between("function meniscusBusy(", "the drag --")
+    assert "MENISCUS.busy.add(source)" in busy and "MENISCUS.busy.delete(source)" in busy
+    assert 'b.classList.toggle("lit", MENISCUS.mic || MENISCUS.busy.size > 0)' in SCRIPT
 
 
 def test_where_am_i_is_reachable_by_thumb_on_a_phone():
@@ -1915,32 +1853,26 @@ def test_where_am_i_is_reachable_by_thumb_on_a_phone():
     rail = rule(".rail{")
     assert "position:fixed" in rail
     assert "env(safe-area-inset-bottom)" in rail, "the dock sits under the home indicator"
-    # The first and last tabs stand off the bar's ends by the pill's inset,
-    # so the pill stays concentric with the corner it sits in.
-    assert "padding:0 calc(var(--dock-in) - 1px)" in rule(".tabs{")
+    assert "padding-inline:clamp(26px,10.5%,54px)" in rule(".tabs{"), \
+        "the tabs run to the plate's corners, where the socket cannot clear them"
     # And the column still has to end above it, or the last control on every
     # tab is behind the bar.
-    assert "calc(var(--s6) + 98px + env(safe-area-inset-bottom))" \
+    assert "calc(var(--s6) + 124px + env(safe-area-inset-bottom))" \
         in rule(".wrap{"), "the dock covers the last rows of a scroll"
     block = CSS[CSS.index("@media (max-width:30rem)"):]
     block = block[:block.index("\n}\n") + 3]
-    assert ".tabs button{--ico:22px}" in block, "the icons do not tighten on a narrow screen"
-    # THE NAMES DO NOT RETRACK HERE. They are --t-micro on every screen, and
-    # tracking follows the size, not the viewport; .02em everywhere also
-    # leaves Vocabulary a margin inside a phone's 68px pill.
-    assert ".tabs .label" not in block
-    assert "letter-spacing:.02em" in rule(".tabs .label{")
+    assert "width:22px" in block, "the icons do not tighten on a narrow screen"
 
 
 def test_the_live_state_survives_the_surface_being_switched_off():
-    """The pill is display:none under forced colours, so if a tint were the
-    only carrier of "something is running" those readers would lose it.
+    """The bead is display:none under forced colours, so if it were the only
+    carrier of "something is running" those readers would lose it entirely.
     Every lamp on this page has a string beside it: the chip says Running, the
     tab carries a numeral, the clone clock counts down. Nothing here depends on
     red alone, in any mode."""
     block = CSS[CSS.index("@media (forced-colors:active)"):]
     block = block[:block.index("}\n}") + 3]
-    assert ".tabs .highlight,.bloom{display:none}" in block
+    assert ".dock .skin,.dock .bead,.dock .cast,.bloom{display:none}" in block
     assert "background:Highlight" in block
     assert "ButtonFace" in block, "the filled primary loses its edge"
     assert '<span class="count" id="jobcount"></span>' in HTML
@@ -2251,32 +2183,34 @@ def test_no_control_is_left_wearing_the_operating_system():
         "the scrubber stopped painting its own track"
 
 
-def test_the_pill_cannot_be_left_under_the_wrong_tab():
+def test_the_bead_cannot_be_left_under_the_wrong_tab():
     """A REAL DEFECT, found by rendering the page rather than by reading it.
-    The selection marker was once placed from a requestAnimationFrame callback
+    The bead was placed by `requestAnimationFrame(() => meniscusTo(true))`
     fired BEFORE the loop that sets aria-selected -- so the one cue that says
     which tab you are on depended on a frame callback landing, and it read the
     attributes it was racing. Rendered headless, where frames are scheduled on
-    demand, the panel and the heading switched to Jobs while the marker stayed
-    under Transcribe.
+    demand, the panel and the heading switched to Jobs while the bead stayed
+    sitting under Transcribe.
 
     A frame that never comes is not hypothetical here: a backgrounded tab still
-    runs timers and still finishes jobs. There is nothing to defer for either:
-    dockPlace writes two custom properties and the stylesheet does the travel.
+    runs timers and still finishes jobs. There is nothing to defer for either
+    -- meniscusTo reads G.slots, which dockMeasure has already filled in, so it
+    touches no layout at all.
     """
-    # bare(), NOT SCRIPT: the comment above the call quotes the very pattern
-    # it replaced, which is the trap bare()'s own docstring is about.
+    # bare(), NOT SCRIPT: the comment above the change quotes the very call it
+    # removed, which is the trap bare()'s own docstring is about. A negative
+    # assertion over the raw text would match the documentation of the fix.
     handler = bare(SCRIPT)
     handler = handler[handler.index("const TABS = Array.from"):]
     handler = handler[:handler.index("async function poll()")]
-    assert "requestAnimationFrame(() => dockPlace" not in handler, \
-        "the pill is behind a frame callback again"
-    assert "dockPlace(true);" in handler, "the click no longer moves the pill"
+    assert "requestAnimationFrame(() => meniscusTo" not in handler, \
+        "the bead is behind a frame callback again"
+    assert "meniscusTo(changed);" in handler, "the click no longer places the bead"
     # AND IT IS PLACED AFTER THE ATTRIBUTE IT READS, which is the other half:
     # called first, it finds the tab that was selected a moment ago.
     sets = handler.index('b.setAttribute("aria-selected"')
-    places = handler.index("dockPlace(true);")
-    assert sets < places, "the pill is placed from the previous selection"
+    places = handler.index("meniscusTo(changed);")
+    assert sets < places, "the bead is placed from the previous selection"
 
 
 def test_the_stylesheet_has_no_declaration_outside_a_block():
@@ -2426,20 +2360,19 @@ ROUTER = SCRIPT[SCRIPT.index("/* ===============================================
 
 
 def test_the_tab_handler_hands_every_change_to_the_router():
-    """A click, an arrow key, Home and End all land in the tab handler, so
-    that is where the address is written, once, for all four."""
+    """A click, an arrow key, Home, End and a drag of the bead all land in the
+    tab handler, so that is where the address is written, once, for all five."""
     handler = SCRIPT[SCRIPT.index("const TABS = Array.from"):]
     handler = handler[:handler.index("async function poll()")]
     assert "navTabSelected(button, changed);" in handler
     assert "history." not in bare(handler), "the tab handler writes history of its own"
 
 
-def test_the_masthead_is_written_by_the_tab_handler_alone():
+def test_the_masthead_is_written_by_the_tab_handler_so_a_drag_names_its_tab():
     """A REAL DEFECT. The dock kept a click listener of its own to write the
-    <h1>, and a drag (since removed) suppressed it so the release would not
-    count as a press. The release landed through click() all the same, so the
-    panel moved and the old tab's name stayed over it. One writer, in the
-    handler every way of choosing a tab goes through."""
+    <h1>, and suppressed it during a drag so the release would not count as a
+    press. The release lands through click() all the same, so a drag moved
+    the bead and the panel and left the old tab's name over them."""
     selected = js_between("function navTabSelected(", "\n}\n")
     assert "dockMasthead(button);" in selected
     assert selected.index("dockMasthead(button);") < selected.index("if (!changed) return;"), \
@@ -2555,10 +2488,7 @@ def test_the_dock_focus_ring_is_drawn_around_the_whole_tab_and_survives_forced_c
     a box-shadow is not painted, it becomes an outline in the system colour."""
     assert "outline:none" in rule(".tabs button:focus-visible{")
     ring = rule(".tabs button:focus-visible::after{")
-    # A pixel outside the pill's own outline, so it encloses the icon and the
-    # name and still lies inside the bar.
-    assert "inset:calc(var(--dock-in) - 2px) -1px" in ring
-    assert "box-shadow:0 0 0 2px var(--acc)" in ring
+    assert "inset:6px -6px" in ring and "box-shadow:0 0 0 2px var(--acc)" in ring
     block = BARE_CSS[BARE_CSS.index("@media (forced-colors:active)"):]
     block = block[:block.index("\n}\n")]
     assert ".tabs button:focus-visible::after{box-shadow:none;outline:2px dotted ButtonText}" in block
@@ -2638,6 +2568,17 @@ def test_every_text_field_has_a_name_that_survives_typing():
                  or (ident and ident.group(1) in labelled))
         assert named, f"a text field has no name once typed into: {tag}"
     assert 'aria-label="Link to a video or audio page"' in page
+
+
+def test_a_tapped_tab_settles_without_overshoot():
+    """At C=19.3 against K=142 the damping ratio was .81, and the bead swung
+    past the tab it was sent to and back. A tap carries no momentum, so its
+    spring is critically damped: C is at least 2 times the root of K."""
+    import math
+    line = re.search(r"const K = ddragging \? (\d+) : (\d+), C = ddragging \? (\d+) : ([\d.]+);", SCRIPT)
+    assert line, "the dock's spring constants moved"
+    k_tap, c_tap = float(line.group(2)), float(line.group(4))
+    assert c_tap >= 2 * math.sqrt(k_tap), f"a tap overshoots: C={c_tap} under {2 * math.sqrt(k_tap):.2f}"
 
 
 def test_no_unicode_glyph_stands_in_for_an_icon():
