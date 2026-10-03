@@ -56,14 +56,20 @@ rate. With today's NAS figures that is about 0.57–0.61x for Turbo and
 
 | Engine | NAS CPU | RTX 3070 (offpeak) | GTX 1060 (this runner) | Device peak on the 1060 |
 |---|---|---|---|---|
-| `chatterbox` | 0.230x, measured | 0.70x | not measured yet | not measured yet |
-| `chatterbox-turbo` | 0.45x, a seed never measured | 1.54x | not measured yet | not measured yet |
+| `chatterbox` | 0.230x, measured | 0.70x | 1.19x, measured | 3778 MiB |
+| `chatterbox-turbo` | 0.45x, a seed never measured | 1.54x | 2.09x, measured | 3686 MiB |
 
 The operator measures the card with `python -m app.runner smoke` (see
 `services/tts-long/RUNNER.md`, step 3) and the NAS with the same five segments,
 writes the four rates and both device peaks here, sets
 `TTS_REALTIME_FACTOR_RUNNER2*` to the card's rates, and sets
 `RUNNER_MIN_FREE_MIB` from the larger peak. The pass mark for VRAM is 5.4 GiB.
+
+Measured on 2026-10-03 (torch 2.6.0+cu124, sm_61 runs on the sm_60 kernels):
+both engines clear the go rule on the 1060, baseline at about five times the
+NAS rate and Turbo at more than four times its seed, so the NAS Turbo figure
+cannot change the outcome. Both peaks are under the 5.4 GiB pass mark, and
+`RUNNER_MIN_FREE_MIB` for this card is 4034 (3778 + 256).
 
 ## Consequences
 

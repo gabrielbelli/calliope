@@ -52,10 +52,14 @@ COPY services/tts-long/app/runner/ ./app/runner/
 # `python -m app.runner smoke` turns it off for itself, to download the weights.
 # HOME and NUMBA_CACHE_DIR for the same reasons as the CPU image: setpriv keeps
 # HOME=/root, and librosa's numba cache must be writable.
+# PKUSEG_HOME: chatterbox's multilingual tokeniser downloads a segmenter model
+# into ~/.pkuseg on first load, and HOME is a root-owned tmpfs on a read-only
+# root, so it would fail there; /models keeps it with the weights.
 ENV VOICE_CHOWN_DIRS="/models /state" \
     HOME=/home/tts \
     NUMBA_CACHE_DIR=/tmp/numba \
     HF_HOME=/models \
+    PKUSEG_HOME=/models/pkuseg \
     HF_HUB_OFFLINE=1 \
     HF_HUB_DISABLE_TELEMETRY=1 \
     TTS_ENGINES=chatterbox,chatterbox-turbo \
