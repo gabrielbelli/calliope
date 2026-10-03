@@ -853,9 +853,13 @@ async def test_a_stack_that_did_not_answer_its_health_is_asked_again(make, fake,
 
     clock = time.monotonic() + router_module.ENGINE_RETRY_S
     monkeypatch.setattr(router_module.time, "monotonic", lambda: clock)
+    # The command that finds the answer stale does not wait for a new one:
+    # it starts the ask, and the command after it has the answer.
     await router.transcribe(ONE_SECOND, "pt-BR")
-    first, soon, later = transcriptions(fake)
-    assert first["model"] == soon["model"] == b"whisper-1"
+    await router._stt_probe
+    await router.transcribe(ONE_SECOND, "pt-BR")
+    first, soon, stale, later = transcriptions(fake)
+    assert first["model"] == soon["model"] == stale["model"] == b"whisper-1"
     assert later["model"] == b"parakeet-pt-br"
     assert health_asked(fake) == 2
 
@@ -874,8 +878,29 @@ async def test_a_stack_redeployed_with_a_fine_tune_is_seen_without_a_restart(mak
 
     clock = time.monotonic() + router_module.ENGINE_RECHECK_S
     monkeypatch.setattr(router_module.time, "monotonic", lambda: clock)
+    await router.transcribe(ONE_SECOND, "pt-BR")   # stale: asks again, waits for nothing
+    await router._stt_probe
     await router.transcribe(ONE_SECOND, "pt-BR")
-    before, soon, after = transcriptions(fake)
-    assert before["model"] == soon["model"] == b"whisper-1"
+    before, soon, stale, after = transcriptions(fake)
+    assert before["model"] == soon["model"] == stale["model"] == b"whisper-1"
     assert after["model"] == b"parakeet-pt-br"
     assert health_asked(fake) == 2
+
+
+async def test_a_check_never_waits_for_the_engines(make, fake):
+    """A wake word's double-check (a transcription with a deadline) answers
+    from what was last learnt and never waits for /health: since the
+    sign-in release /health is the gateway's, 0.7-3 s, and waiting for it
+    spent the check's budget and let wakes through unchecked (2 Oct 2026)."""
+    stt_with(fake, engine="parakeet", profiles={"home-assistant"}, models=[PARAKEET])
+    slow = fake.handlers["stt.test"]
+
+    async def handler(r: httpx.Request) -> httpx.Response:
+        if r.url.path == "/health":
+            await asyncio.sleep(2.0)
+        return await slow(r) if asyncio.iscoroutinefunction(slow) else slow(r)
+    fake.handlers["stt.test"] = handler
+    router = make()
+    t0 = time.monotonic()
+    await router.transcribe(ONE_SECOND, timeout=1.5)
+    assert time.monotonic() - t0 < 1.0, "the check waited for /health"

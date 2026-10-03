@@ -644,6 +644,11 @@ class Router:
         # is looked for again.
         self._stt: dict | None = None
         self._stt_until = 0.0
+        # The probe under way, if one is: never more than one at a time.
+        self._stt_probe: asyncio.Task | None = None
+        # The vocabulary is being looked for again (_names_glossary): a
+        # command may wait for that one answer; a check never does.
+        self._stt_recheck = False
         # When stt-stack last refused HA_GLOSSARY, or listed it as absent,
         # when it last refused `boost`, and when it last could not boost a
         # wake word's terms, by the `prompt` they went as.
@@ -737,38 +742,77 @@ class Router:
             out.timings_ms[name] = round(out.timings_ms.get(name, 0.0)
                                          + (time.monotonic() - t) * 1000, 1)
 
-    async def _stt_health(self) -> dict:
-        """stt-stack's /health, asked before the first transcription of a
-        start and remembered for ENGINE_RECHECK_S (and asked again when the
-        vocabulary is looked for again, _names_glossary). A stack that does
-        not answer, or answers without a `models` list, leaves the engine to
-        be learnt from the first answer's x-stt-engine.
+    def warm(self) -> None:
+        """Ask stt-stack for its engines now, in the background, so the first
+        transcription of a start (often a wake word's double-check) has them
+        and waits for nothing. Called once the hub's loop is running."""
+        if self._stt_probe is None or self._stt_probe.done():
+            self._stt_probe = asyncio.get_running_loop().create_task(
+                self._probe_stt(), name="stt-engines")
 
-        A PROBE THAT GOT NO USABLE ANSWER IS MADE AGAIN after ENGINE_RETRY_S.
-        It was remembered as "no engines" until the hub restarted, so a hub
-        whose first command came while stt-stack was still loading its
-        models sent no word to a fine-tune (STT_MODELS=parakeet,
-        parakeet-pt-br) for the rest of its life."""
+    async def _stt_health(self, *, wait: bool = False) -> dict:
+        """What stt-stack's /health said, as far as transcribing needs it.
+
+        A TRANSCRIPTION NEVER WAITS FOR THE PROBE. It answers from what was
+        last learnt, and a stale answer (older than ENGINE_RECHECK_S, or
+        ENGINE_RETRY_S after a probe got nothing) starts a probe in the
+        background for the next one. It used to probe first, and since the
+        sign-in release /health is the gateway's, which waits on every
+        backend and the GPU runner: measured 0.7-3.0 s against STT's own
+        15 ms. That spent a wake word's whole double-check budget
+        (verify.VERIFY_TIMEOUT_S) and let the wake through unchecked; on
+        2 Oct 2026 a video's hey_claude reached a language model that way,
+        and a Lumos turned the lights on.
+
+        `wait`: only for a transcription with no deadline of its own (a
+        command, never a check), and only when nothing has ever been learnt
+        or the vocabulary is being looked for again, is the probe awaited, so
+        a command neither misses a fine-tune (STT_MODELS=parakeet,
+        parakeet-pt-br) for want of the list nor leaves the vocabulary off
+        after the integration wrote it."""
         if self._stt is not None and time.monotonic() < self._stt_until:
             return self._stt
-        self._stt = {"engines": [], "hotwords": None, "glossaries": None}
+        self.warm()
+        if wait and (self._stt is None or self._stt_recheck) and self._stt_probe is not None:
+            await asyncio.shield(self._stt_probe)
+        return self._stt if self._stt is not None else {"engines": [], "hotwords": None,
+                                                          "glossaries": None}
+
+    async def _probe_stt(self) -> None:
+        """One ask of stt-stack's /health, remembered for ENGINE_RECHECK_S (and
+        asked again when the vocabulary is looked for again, _names_glossary).
+        A stack that does not answer, or answers without a `models` list,
+        keeps what was last learnt (or nothing, the engine then learnt from
+        the first answer's x-stt-engine) and is asked again after
+        ENGINE_RETRY_S: remembered as "no engines" until the hub restarted, a
+        hub whose first command came while stt-stack was still loading its
+        models sent no word to a fine-tune for the rest of its life."""
         self._stt_until = time.monotonic() + ENGINE_RETRY_S
+        try:
+            await self._ask_stt()
+        finally:
+            self._stt_recheck = False
+
+    async def _ask_stt(self) -> None:
         if not self.stt_url:
-            return self._stt
+            self._stt = self._stt or {"engines": [], "hotwords": None, "glossaries": None}
+            return
         try:
             r = await gateway.request(self.client, "GET", f"{self.stt_url}/health",
                                       timeout=ENGINE_PROBE_S)
             body = _stt_part(r.json()) if r.status_code == 200 else None
         except (httpx.HTTPError, ValueError, gateway.NotReady) as e:
-            log.info("routing: could not ask stt-stack which engines it runs (%s); commands go "
-                     "to its default engine until it is asked again in %.0f s",
+            log.info("routing: could not ask stt-stack which engines it runs (%s); what was "
+                     "last learnt stands until it is asked again in %.0f s",
                      type(e).__name__, ENGINE_RETRY_S)
-            return self._stt
+            self._stt = self._stt or {"engines": [], "hotwords": None, "glossaries": None}
+            return
         if not isinstance(body, dict):
-            log.info("routing: stt-stack's /health answered %s, not its engines; commands go "
-                     "to its default engine until it is asked again in %.0f s",
+            log.info("routing: stt-stack's /health answered %s, not its engines; what was last "
+                     "learnt stands until it is asked again in %.0f s",
                      r.status_code, ENGINE_RETRY_S)
-            return self._stt
+            self._stt = self._stt or {"engines": [], "hotwords": None, "glossaries": None}
+            return
         models = body.get("models")
         engines = [m for m in (models if isinstance(models, list) else [])
                    if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
@@ -788,7 +832,6 @@ class Router:
         default = next((e for e in engines if e.get("default")), engines[0] if engines else None)
         if default is not None and isinstance(default.get("family"), str):
             self.stt_engine = default["family"].lower()
-        return self._stt
 
     def _engine_for(self, hint: str | None) -> dict | None:
         """The engine a command goes to. An engine the stack loaded for the
@@ -813,7 +856,8 @@ class Router:
         if time.monotonic() - self._glossary_missing < GLOSSARY_RETRY_S:
             return False
         self._glossary_missing = None
-        self._stt = None
+        self._stt_until = 0.0   # asked again; the engines stand meanwhile
+        self._stt_recheck = True
         return True
 
     async def transcribe(self, pcm: bytes, hint: str | None = None, *,
@@ -868,7 +912,7 @@ class Router:
             raise DestinationError("SATELLITES_STT_URL is not set, so nothing can be transcribed")
         pcm = pcm[:len(pcm) & ~1]  # whole samples only
         names = self._names_glossary()
-        health = await self._stt_health()
+        health = await self._stt_health(wait=timeout is None)
         engine = self._engine_for(hint)
         family = (engine or {}).get("family") or self.stt_engine
         takes_language = engine.get("accepts_language") if engine else family == "whisper"

@@ -2852,6 +2852,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     routing.configure(routing.Router(wakewords_config.WordActions(hub.voice.assignment),
                                      output_of=hub.output_of,
                                      lookup=lookup_satellite))
+    # STT's engines learnt now, so the first double-check waits for nothing.
+    routing.current().warm()
     for problem in legacy_settings(dict(os.environ), _named_actions()) + lang.household_problems():
         log.warning("%s", problem)
     log.info("household languages: %s", ", ".join(lang.household()))

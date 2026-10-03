@@ -530,6 +530,11 @@ def test_the_check_tells_stt_to_listen_for_the_word_and_the_command_is_not_told(
             return httpx.Response(200, json={"status": "ok", "hotwords": True, "models": [PARAKEET]})
         return await stt(request)
     services.handlers["stt.test"] = parakeet
+    # The hub learnt the stand-in STT's engines at start; it learns this
+    # one's now, as it would after ENGINE_RECHECK_S, and the check uses them
+    # without waiting.
+    router = app.routing.current()
+    client.portal.call(router._probe_stt)
     with client.websocket_connect("/satellites/ws") as ws:
         adopt(client, ws)
         save(client, ALEXA_ON | {"verify": {"mode": "on", "spellings": ["Hey Lexa", "alexa"]}})
