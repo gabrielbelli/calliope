@@ -1,0 +1,33 @@
+#!/bin/sh
+# The `calliope` command: finds a Python 3 and runs calliope.py, which sits beside this file.
+#
+# ~/.local/bin/calliope IS A SYMLINK TO THIS FILE INSIDE Calliope.app, so $0 is the link and
+# everything this needs is beside the target. The loop follows the links by hand: `readlink -f`
+# is missing from the macOS releases before 12.3, and `realpath` from those before 13.
+set -eu
+
+self=$0
+while [ -L "$self" ]; do
+    link=$(readlink "$self")
+    case $link in
+        /*) self=$link ;;
+        *) self=$(dirname "$self")/$link ;;
+    esac
+done
+here=$(cd "$(dirname "$self")" && pwd -P)
+
+# THE SAME ORDER AS shared/paths.swift: the interpreter sealed into the bundle when there is one
+# (a Homebrew install has nothing else), then the venv install.sh builds, then any python3 at
+# all -- calliope.py is stdlib only, so even the system's will do.
+if [ -x "$here/../python/bin/python3" ]; then
+    python=$here/../python/bin/python3
+elif [ -x "$HOME/.local/share/calliope/.venv/bin/python" ]; then
+    python=$HOME/.local/share/calliope/.venv/bin/python
+elif command -v python3 >/dev/null 2>&1; then
+    python=python3
+else
+    echo "calliope: no Python 3 found; reinstall Calliope.app" >&2
+    exit 1
+fi
+
+exec "$python" "$here/calliope.py" "$@"

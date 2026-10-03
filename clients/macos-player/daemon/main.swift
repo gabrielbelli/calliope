@@ -27,7 +27,7 @@ import Darwin
 import ServiceManagement
 import Security
 
-let settings = UserDefaults(suiteName: "com.gabrielbelli.calliope-player")!
+let settings = preferences    // shared/preferences.swift: the suite the player reads
 
 // MARK: - The Kokoro server
 
@@ -61,7 +61,7 @@ final class ServerSupervisor {
         defer { close(socket) }
         var address = sockaddr_in()
         address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = UInt16(47815).bigEndian
+        address.sin_port = UInt16(Preference.port).bigEndian
         address.sin_addr.s_addr = inet_addr("127.0.0.1")
         let connected = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -91,7 +91,7 @@ final class ServerSupervisor {
         // it, so taking it over costs at most one interrupted passage, and
         // only if something is speaking at the moment the daemon starts.
         if somethingIsListening {
-            Log.write("port 47815 is taken; reclaiming it")
+            Log.write("port \(Preference.port) is taken; reclaiming it")
             reclaimPort()
         }
 
@@ -116,6 +116,15 @@ final class ServerSupervisor {
         // open, so it closes when this one does and not before.
         var env = ProcessInfo.processInfo.environment
         env["CALLIOPE_IDLE_SECONDS"] = "0"
+        // THE ENGINE IS A SEPARATE QUESTION FROM THE PROXY. The proxy stays up
+        // for as long as this daemon does -- it is a few megabytes, and every
+        // program on this Mac that speaks goes through it -- while Kokoro's
+        // 450 MB is held only while it is used, unless Keep loaded says
+        // otherwise. Measured: releasing the model inside one process frees
+        // nothing, so the proxy runs it as a child and lets that child exit.
+        env["CALLIOPE_PORT"] = String(Preference.port)
+        env["CALLIOPE_LOCAL"] = Preference.macOn ? "1" : "0"
+        env["CALLIOPE_KEEP_LOADED"] = Preference.keepLoaded ? "1" : "0"
         // PASSED IN, NEVER READ FROM DISK BY THE SERVER. The daemon is the one
         // thing that knows both -- the URL from the settings, the key from the
         // Keychain -- so a server started by the one-shot player inherits
@@ -170,7 +179,7 @@ final class ServerSupervisor {
             if !somethingIsListening { return }
             Thread.sleep(forTimeInterval: 0.1)
         }
-        Log.write("port 47815 is still held after 3 s; starting anyway")
+        Log.write("port \(Preference.port) is still held after 3 s; starting anyway")
     }
 
     private func childDied() {
@@ -574,17 +583,9 @@ final class Hotkey {
 final class Daemon: NSObject, NSApplicationDelegate {
     private var item: NSStatusItem!
     private var loginItem: NSMenuItem?
-    private var settingsWindow: NSWindow?
-    private var loginCheckbox: NSButton?
-    private var speedPopup: NSPopUpButton?
-    private var voicePopup: NSPopUpButton?
-    private var statusText: NSTextField?
-    private var permissionButton: NSButton?
-    private var calliopeToggle: NSSwitch?
-    private var calliopeFields: NSStackView?
-    private var calliopeURLField: NSTextField?
-    private var calliopeKeyField: NSSecureTextField?
-    private var calliopeResult: NSTextField?
+    private var speedItems: [NSMenuItem] = []
+    private var openCalliopeItem: NSMenuItem?
+    private var settingsWindow: SettingsController?
     private let server = ServerSupervisor()
     private let speaker = Speaker()
     private var hotkey: Hotkey?
@@ -648,10 +649,9 @@ final class Daemon: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        // NO SETTINGS WINDOW FOR TWO CONTROLS. A window is a thing to find,
-        // open, and close; a menu that is already open is not. It earns one
-        // when there is something in it that a menu cannot express -- a server
-        // URL and a key, which is the Calliope section and does not exist yet.
+        // THE MENU KEEPS WHAT IS CHANGED OFTEN. Open at login and the speed are
+        // here as well as in Settings, because a menu that is already open is
+        // quicker than a window to find; everything else needs the window.
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin),
                                keyEquivalent: "")
         login.target = self
@@ -661,6 +661,15 @@ final class Daemon: NSObject, NSApplicationDelegate {
         menu.addItem(speedMenu())
         menu.addItem(.separator())
         menu.addItem(statusLine)
+
+        // THE WEB PAGE, ONE CLICK AWAY, once there is a server to open. Hidden
+        // rather than disabled while there is none: a greyed item for a server
+        // somebody does not have reads as something broken.
+        let openCalliope = NSMenuItem(title: "Open Calliope", action: #selector(openCalliopePage),
+                                      keyEquivalent: "")
+        openCalliope.target = self
+        openCalliopeItem = openCalliope
+        menu.addItem(openCalliope)
         menu.addItem(.separator())
 
         let prefs = NSMenuItem(title: "Settings…", action: #selector(showSettings),
@@ -715,6 +724,7 @@ final class Daemon: NSObject, NSApplicationDelegate {
             item.representedObject = step
             item.state = abs(step - current) < 0.01 ? .on : .off
             menu.addItem(item)
+            speedItems.append(item)
         }
         parent.submenu = menu
         return parent
@@ -748,347 +758,98 @@ final class Daemon: NSObject, NSApplicationDelegate {
 
     @objc private func quit() { NSApp.terminate(nil) }
 
-    /// WHAT A MENU CANNOT SAY. The two controls here are also in the menu, and
-    /// on their own they would not have earned a window -- a window is a thing
-    /// to find, open and close. What earns it is everything else on this
-    /// panel: whether the permission is granted, whether the model is warm,
-    /// and where the log is when the answer to "nothing happened" lives in it.
-    ///
-    /// The Calliope section waited for the proxy rather than shipping ahead of
-    /// it: fields that save somewhere nothing reads make the window lie about
-    /// what the app can do. server.py forwards now, so the switch is here, and
-    /// what it reports is the round trip rather than a claim about it.
+    /// The window lives in settings.swift; this is where the menu opens it.
     @objc private func showSettings() {
-        if settingsWindow == nil { settingsWindow = buildSettingsWindow() }
-        refreshSettings()
-        NSApp.activate(ignoringOtherApps: true)
-        settingsWindow?.makeKeyAndOrderFront(nil)
+        if settingsWindow == nil { settingsWindow = SettingsController(host: self) }
+        settingsWindow?.show()
     }
 
-    private func buildSettingsWindow() -> NSWindow {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 100),
-                              styleMask: [.titled, .closable],
-                              backing: .buffered, defer: false)
-        window.title = "Calliope"
-        window.isReleasedWhenClosed = false
-        window.center()
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        func heading(_ text: String) -> NSTextField {
-            let label = NSTextField(labelWithString: text)
-            label.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
-            return label
-        }
-        func note(_ text: String) -> NSTextField {
-            let label = NSTextField(wrappingLabelWithString: text)
-            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-            label.textColor = .secondaryLabelColor
-            label.preferredMaxLayoutWidth = 380
-            return label
-        }
-
-        stack.addArrangedSubview(heading("Speaking"))
-
-        let login = NSButton(checkboxWithTitle: "Open at login",
-                             target: self, action: #selector(toggleLoginFromWindow(_:)))
-        loginCheckbox = login
-        stack.addArrangedSubview(login)
-
-        let speedRow = NSStackView()
-        speedRow.orientation = .horizontal
-        speedRow.spacing = 8
-        speedRow.addArrangedSubview(NSTextField(labelWithString: "Speed"))
-        let popup = NSPopUpButton()
-        for step in [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
-            popup.addItem(withTitle: step == 1.0 ? "1× (normal)" : "\(step)×")
-            popup.lastItem?.representedObject = step
-        }
-        popup.target = self
-        popup.action = #selector(setSpeedFromWindow(_:))
-        speedPopup = popup
-        speedRow.addArrangedSubview(popup)
-        stack.addArrangedSubview(speedRow)
-
-        let voiceRow = NSStackView()
-        voiceRow.orientation = .horizontal
-        voiceRow.spacing = 8
-        voiceRow.addArrangedSubview(NSTextField(labelWithString: "Voice"))
-        let voices = NSPopUpButton()
-        voices.target = self
-        voices.action = #selector(setVoiceFromWindow(_:))
-        voicePopup = voices
-        voiceRow.addArrangedSubview(voices)
-        stack.addArrangedSubview(voiceRow)
-
-        stack.addArrangedSubview(note("The hotkey is ⌥⌘S. Speed applies to the "
-            + "next passage; the capsule has its own control for the one being read. "
-            + "A chosen voice is used when the text is in that voice's language — "
-            + "otherwise the detected language's own voice is, because the voice is "
-            + "what tells the server how to pronounce the words."))
-
-        // A SWITCH, AND THE FIELDS ONLY WHEN IT IS ON. Three controls and a
-        // button, all visible, made the common case -- everything on this Mac
-        // -- look like something half-configured. Off is the resting state and
-        // it should look like one line.
-        let calliopeRow = NSStackView()
-        calliopeRow.orientation = .horizontal
-        calliopeRow.spacing = 8
-        calliopeRow.addArrangedSubview(heading("Use a Calliope server"))
-        let toggle = NSSwitch()
-        toggle.target = self
-        toggle.action = #selector(toggleCalliope(_:))
-        calliopeToggle = toggle
-        calliopeRow.addArrangedSubview(toggle)
-        stack.addArrangedSubview(calliopeRow)
-
-        let fields = NSStackView()
-        fields.orientation = .vertical
-        fields.alignment = .leading
-        fields.spacing = 8
-        fields.addArrangedSubview(note("The other engines -- cloned voices, long "
-            + "documents, transcription -- answer at the same address, from your own "
-            + "server. Nothing else changes: same hotkey, same capsule."))
-
-        let urlField = NSTextField(string: Calliope.url)
-        urlField.placeholderString = "https://calliope.example.com"
-        urlField.widthAnchor.constraint(equalToConstant: 380).isActive = true
-        // NO CONNECT BUTTON. Typing an address and then having to press a
-        // second thing is one step more than the switch already promised, so
-        // the field commits itself: on Return, and on leaving it.
-        urlField.target = self
-        urlField.action = #selector(saveCalliope)
-        (urlField.cell as? NSTextFieldCell)?.sendsActionOnEndEditing = true
-        calliopeURLField = urlField
-        fields.addArrangedSubview(urlField)
-
-        let keyField = NSSecureTextField(string: Calliope.key)
-        keyField.placeholderString = "API key: Account › API keys, preset speak-only"
-        keyField.widthAnchor.constraint(equalToConstant: 380).isActive = true
-        keyField.target = self
-        keyField.action = #selector(saveCalliope)
-        (keyField.cell as? NSTextFieldCell)?.sendsActionOnEndEditing = true
-        calliopeKeyField = keyField
-        fields.addArrangedSubview(keyField)
-
-        let result = NSTextField(wrappingLabelWithString: "")
-        result.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        result.textColor = .secondaryLabelColor
-        result.preferredMaxLayoutWidth = 380
-        calliopeResult = result
-        fields.addArrangedSubview(result)
-
-        calliopeFields = fields
-        stack.addArrangedSubview(fields)
-
-        stack.addArrangedSubview(heading("Status"))
-        let status = NSTextField(wrappingLabelWithString: "")
-        status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        status.preferredMaxLayoutWidth = 380
-        statusText = status
-        stack.addArrangedSubview(status)
-
-        let permission = NSButton(title: "Grant Accessibility…", target: self,
-                                  action: #selector(askForPermission))
-        permission.bezelStyle = .rounded
-        permissionButton = permission
-        stack.addArrangedSubview(permission)
-
-        let logs = NSButton(title: "Open Log", target: self, action: #selector(openLog))
-        logs.bezelStyle = .rounded
-        stack.addArrangedSubview(logs)
-
-        window.contentView = stack
-        // SEEN IN A SCREENSHOT, NOT REASONED ABOUT. The secure field took focus
-        // on open, so macOS anchored its Passwords autofill popover to it --
-        // squarely on top of the Connect button. Opening a settings window
-        // should not summon a password manager, and it certainly should not
-        // hide the only button that does anything.
-        window.initialFirstResponder = urlField
-        // And the height was a guess that left dead space under the last
-        // control. The stack knows what it needs.
-        window.setContentSize(stack.fittingSize)
-        return window
-    }
-
-    private func refreshSettings() {
-        loginCheckbox?.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        calliopeToggle?.state = Calliope.isOn ? .on : .off
-        loadVoices()
-        showCalliopeFields(Calliope.isOn)
-        let speed = settings.object(forKey: "speed") as? Double ?? 1.0
-        speedPopup?.selectItem(at: [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
-            .firstIndex(where: { abs($0 - speed) < 0.01 }) ?? 1)
-
-        let kokoro = server.lastError ?? (server.isRunning ? "warm" : "starting…")
-        let access = Selection.isPermitted ? "granted" : "not granted — the hotkey cannot read a selection"
-        statusText?.stringValue = "Kokoro: \(kokoro)\nAccessibility: \(access)"
-        permissionButton?.isHidden = Selection.isPermitted
-    }
-
-    @objc private func toggleLoginFromWindow(_ sender: NSButton) {
-        toggleLogin()
-        refreshSettings()
-    }
-
-    /// Fill the voice list from the server rather than from a list in here.
-    ///
-    /// ASKED, NOT HARDCODED, AND THE ENDPOINT IS THE FILTER. server.py answers
-    /// /voices with Kokoro's own presets plus -- when a Calliope server is
-    /// configured -- that server's, which the gateway routes to tts-stack
-    /// alone. The engines that answer 202 with a job instead of audio never
-    /// appear on that path, so nothing here can offer a voice that would give
-    /// somebody a capsule that shows and never speaks.
-    private func loadVoices() {
-        let url = URL(string: "http://127.0.0.1:47815/voices")!
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            let listing = data.flatMap {
-                (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
-            }
-            let names = (listing?["voices"] as? [String] ?? []).sorted()
-            DispatchQueue.main.async { self?.fillVoices(names) }
-        }.resume()
-    }
-
-    private func fillVoices(_ names: [String]) {
-        guard let popup = voicePopup else { return }
-        let chosen = settings.string(forKey: "voice") ?? ""
-        popup.removeAllItems()
-        // The default is first and is not a voice: matching the language is
-        // what this did before there was a choice, and it stays the behaviour
-        // for anybody who never opens this window.
-        popup.addItem(withTitle: "Match the language")
-        popup.lastItem?.representedObject = ""
-        for name in names {
-            popup.addItem(withTitle: name)
-            popup.lastItem?.representedObject = name
-        }
-        popup.selectItem(at: names.firstIndex(of: chosen).map { $0 + 1 } ?? 0)
-        popup.isEnabled = !names.isEmpty
-    }
-
-    @objc private func setVoiceFromWindow(_ sender: NSPopUpButton) {
-        settings.set(sender.selectedItem?.representedObject as? String ?? "", forKey: "voice")
-    }
-
-    @objc private func setSpeedFromWindow(_ sender: NSPopUpButton) {
-        guard let step = sender.selectedItem?.representedObject as? Double else { return }
-        settings.set(step, forKey: "speed")
-    }
-
-    /// Save both, restart the server that reads them, then ask it what it can
-    /// reach and say so.
-    ///
-    /// THE ANSWER COMES FROM THE PROXY, NOT FROM THE SERVER BEING CONFIGURED.
-    /// The daemon could reach the Calliope address itself and get a faster,
-    /// prettier yes -- and it would be testing a path nothing uses. What
-    /// matters is whether the thing the player talks to can reach it, with the
-    /// credential this daemon just handed it, so that is what gets asked.
-    @objc private func toggleCalliope(_ sender: NSSwitch) {
-        Calliope.isOn = sender.state == .on
-        showCalliopeFields(Calliope.isOn)
-        saveCalliope()
-        if Calliope.isOn, Calliope.url.isEmpty {
-            calliopeResult?.stringValue = "Where is it?"
-            settingsWindow?.makeFirstResponder(calliopeURLField)
-        }
-    }
-
-    private func showCalliopeFields(_ shown: Bool) {
-        calliopeFields?.isHidden = !shown
-        if let stack = settingsWindow?.contentView {
-            settingsWindow?.setContentSize(stack.fittingSize)
-        }
-    }
-
-    @objc private func saveCalliope() {
-        let wasURL = Calliope.url, wasKey = Calliope.key, wasOn = Calliope.isOn
-        Calliope.url = calliopeURLField?.stringValue ?? ""
-        Calliope.key = calliopeKeyField?.stringValue ?? ""
-        calliopeURLField?.stringValue = Calliope.url      // show the trim
-
-        // ONLY WHEN SOMETHING CHANGED. Both fields commit on leaving them, so
-        // tabbing from the URL to the key fired this twice -- and a restart
-        // takes the server away from whatever is being read aloud, which the
-        // player sees as a passage that stops early.
-        guard Calliope.url != wasURL || Calliope.key != wasKey || Calliope.isOn != wasOn else { return }
-        server.restart()
-
-        guard Calliope.isConfigured else {
-            if !Calliope.isOn {
-                calliopeResult?.stringValue = "Off. Everything runs on this Mac."
-            } else if !Calliope.url.isEmpty {
-                calliopeResult?.stringValue = "A key is required. In Calliope: Account › "
-                    + "API keys › New key, preset speak-only."
-            } else {
-                calliopeResult?.stringValue = ""
-            }
-            return
-        }
-        calliopeResult?.stringValue = "Connecting…"
-        // The server has to come back up before it can answer, so this asks for
-        // a while rather than once. Ten seconds is past a cold Kokoro load.
-        askProxy(attemptsLeft: 20)
-    }
-
-    private func askProxy(attemptsLeft: Int) {
-        let url = URL(string: "http://127.0.0.1:47815/v1/models")!
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            let listing = data.flatMap {
-                (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
-            }
-            let rows = listing?["data"] as? [[String: Any]] ?? []
-            let remote = rows.filter { $0["owned_by"] as? String == "calliope-remote" }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if !remote.isEmpty {
-                    let names = remote.compactMap { $0["id"] as? String }.sorted()
-                    self.calliopeResult?.stringValue =
-                        "Connected. \(names.count) more models: \(names.joined(separator: ", "))"
-                } else if attemptsLeft > 0 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        self.askProxy(attemptsLeft: attemptsLeft - 1)
-                    }
-                } else {
-                    // Saved anyway: an address that is down now may be up later,
-                    // and clearing it would lose what they typed.
-                    self.calliopeResult?.stringValue = "Saved, but no answer from that "
-                        + "address. Check the URL and the key, or that the server is up."
-                }
-            }
-        }.resume()
-    }
-
-    @objc private func askForPermission() {
-        Selection.requestPermission()
-        // The grant happens in System Settings, in their own time, so the panel
-        // has to notice rather than assume.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.refreshSettings() }
-    }
-
-    @objc private func openLog() {
-        NSWorkspace.shared.open(runtimeURL.appendingPathComponent("daemon.log"))
+    @objc private func openCalliopePage() {
+        guard let url = URL(string: Calliope.url), url.scheme?.hasPrefix("http") == true else { return }
+        NSWorkspace.shared.open(url)
     }
 }
 
 extension Daemon: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         loginItem?.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        // THE CHECKMARK FOLLOWS THE SETTING, wherever it was changed. It was set
+        // once when the menu was built, so a speed chosen in the capsule or in
+        // Settings left the menu ticking the old one.
+        let speed = settings.object(forKey: "speed") as? Double ?? 1.0
+        for item in speedItems {
+            let step = item.representedObject as? Double ?? 0
+            item.state = abs(step - speed) < 0.01 ? .on : .off
+        }
+        openCalliopeItem?.isHidden = !Calliope.isConfigured
         if !Selection.isPermitted {
             statusLine.title = "Needs Accessibility permission to read a selection"
         } else if let error = server.lastError {
-            statusLine.title = "Kokoro: \(error)"
-        } else if server.isRunning {
-            statusLine.title = "Kokoro is warm"
+            statusLine.title = "Proxy: \(error)"
+        } else if !server.isRunning {
+            statusLine.title = "Starting…"
         } else {
-            statusLine.title = "Kokoro is starting…"
+            statusLine.title = engineLine(loaded: nil)
+            // Asked, not assumed: whether the model is in memory right now is
+            // the proxy's to say, and the line updates while the menu is open.
+            Proxy.get("/status", timeout: 0.5) { [weak self] body in
+                let mac = body?["mac"] as? [String: Any]
+                guard let self, let loaded = mac?["loaded"] as? Bool else { return }
+                self.statusLine.title = self.engineLine(loaded: loaded)
+            }
         }
     }
+
+    private func engineLine(loaded: Bool?) -> String {
+        var parts: [String] = []
+        if Preference.macOn {
+            parts.append(loaded == true ? "Voice loaded" : "This Mac")
+        }
+        if Calliope.isConfigured { parts.append("Calliope server") }
+        return parts.isEmpty ? "Both engines are off" : parts.joined(separator: " · ")
+    }
+}
+
+// MARK: - What the Settings window may ask of the daemon
+
+extension Daemon: SettingsHost {
+    var loginEnabled: Bool { SMAppService.mainApp.status == .enabled }
+
+    /// SMAppService, NOT A LaunchAgent plist: one call, and macOS lists it with
+    /// everything else that opens at login.
+    func setLogin(_ on: Bool) {
+        guard on != loginEnabled else { return }
+        toggleLogin()
+    }
+
+    var accessibilityGranted: Bool { Selection.isPermitted }
+    func requestAccessibility() { Selection.requestPermission() }
+
+    func openLog() {
+        NSWorkspace.shared.open(runtimeURL.appendingPathComponent("daemon.log"))
+    }
+
+    var serverProblem: String? { server.lastError }
+    func restartServer() { server.restart() }
+
+    var calliopeURL: String {
+        get { Calliope.url }
+        set { Calliope.url = newValue }
+    }
+
+    /// Written only when it changed: a Keychain write for every field that
+    /// lost focus is a delete and an add each time, for nothing.
+    var calliopeKey: String {
+        get { Calliope.key }
+        set { if newValue != Calliope.key { Calliope.key = newValue } }
+    }
+
+    var calliopeOn: Bool {
+        get { Calliope.isOn }
+        set { Calliope.isOn = newValue }
+    }
+
+    var calliopeConfigured: Bool { Calliope.isConfigured }
 }
 
 // MARK: - One of us, not several

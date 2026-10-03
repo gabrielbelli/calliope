@@ -10,11 +10,19 @@ import pathlib
 import re
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
-DAEMON = (HERE / "daemon" / "main.swift").read_text()
+# EVERY FILE THE DAEMON IS BUILT FROM. The Settings window moved into
+# daemon/settings.swift so a harness can render it without the daemon, and a
+# suite that read main.swift alone would have stopped checking the window the
+# day it moved -- passing on everything it could no longer see.
+DAEMON = "\n".join(path.read_text() for path in sorted((HERE / "daemon").glob("*.swift")))
+SHARED = "\n".join(path.read_text() for path in sorted((HERE / "shared").glob("*.swift")))
 PLAYER = (HERE / "player" / "main.swift").read_text()
 SERVER = (HERE / "server" / "server.py").read_text()
 INSTALL = (HERE / "install.sh").read_text()
 OPENCLIP = (HERE / "openclip" / "calliope.py").read_text()
+# The third way of starting a player, and the one the OpenClip action now goes
+# through: `calliope speak` stops the current player and starts the next.
+CLI = (HERE / "cli" / "calliope.py").read_text()
 
 
 def code(source: str) -> str:
@@ -92,7 +100,7 @@ def test_both_ways_of_starting_a_player_can_stop_each_other():
     assert "setsid()" in PLAYER, \
         "the player is not a group leader unless its caller remembers to arrange it"
     assert "player.pid" in DAEMON, "the daemon's player cannot be stopped from outside"
-    assert "killpg" in OPENCLIP and "player.pid" in OPENCLIP, \
+    assert "killpg" in CLI and "player.pid" in CLI, \
         "the contract this test is about no longer exists on the other side"
 
 
@@ -208,7 +216,8 @@ def test_the_settings_window_says_what_a_menu_cannot():
     # AND IT REFRESHES WHEN OPENED. A permission granted in System Settings
     # happens outside this process, so a panel that reads its state once is
     # wrong from the moment somebody acts on it.
-    assert "refreshSettings()" in DAEMON_CODE
+    show = DAEMON_CODE.split("func show()")[1].split("\n    }")[0]
+    assert "refresh()" in show, "the window shows what it read when it was first built"
 
 
 def test_the_daemon_owns_its_server_rather_than_adopting_one():
@@ -253,6 +262,11 @@ def test_the_daemon_is_local_only_like_the_player():
 
     hosts = {u.split("/")[2] for u in urls if u != placeholder}
     assert hosts <= {"127.0.0.1:47815"}, f"the daemon reaches elsewhere: {hosts}"
+    # THE ADDRESS IS BUILT IN ONE PLACE NOW, because the port became a setting.
+    # The host is still not one: the builder is loopback, and every request the
+    # window makes goes through it.
+    assert 'var localServerURL: String { "http://127.0.0.1:\\(Preference.port)" }' in code(SHARED)
+    assert "URL(string: localServerURL + " in DAEMON_CODE
     assert "Authorization" not in DAEMON_CODE, \
         "the daemon authenticates to the remote itself instead of handing the key on"
 
@@ -277,8 +291,9 @@ def test_the_calliope_fields_reach_the_process_that_reads_them():
     # Every UserDefaults key, literal or named. Two are expected; a third is
     # something new stored in a plist that rides in every backup, and the only
     # value here that must never do that is the key.
-    keys = set(re.findall(r'forKey:\s*("?\w+"?)', DAEMON_CODE))
-    assert keys <= {'"speed"', '"voice"', "urlKey", "onKey"}, \
+    keys = set(re.findall(r'forKey:\s*("?\w+"?)', DAEMON_CODE + code(SHARED)))
+    assert keys <= {'"speed"', "urlKey", "onKey", "voicesKey", "legacyVoiceKey", "macKey",
+                    "keepLoadedKey", "portKey", "calliopeKey"}, \
         f"something new is in UserDefaults, and a credential must not be: {keys}"
     # And the round trip is proven rather than claimed: the button reads back
     # what the proxy says it can reach.
@@ -293,7 +308,9 @@ def test_the_daemon_hands_on_an_address_only_with_its_key():
     is required where it is typed (tests/test_remote.py runs the server half)."""
     assert "isConfigured: Bool { isOn && !url.isEmpty && !key.isEmpty }" in DAEMON_CODE
     assert '"A key is required.' in DAEMON_CODE
-    assert "preset speak-only" in DAEMON_CODE
+    # The presets a person can make a key from: user (speech and transcription)
+    # and user-jobs (long documents as well).
+    assert "Preset user covers speech and transcription" in DAEMON_CODE
 
 
 def test_the_key_is_not_handed_to_an_unverified_connection():
@@ -370,7 +387,8 @@ def test_the_calliope_section_is_one_line_until_it_is_wanted():
         "a saved address is used whether or not the switch is on"
     assert "sendsActionOnEndEditing = true" in DAEMON_CODE, \
         "the fields need a second thing pressed to take effect"
-    assert "window.initialFirstResponder = urlField" in DAEMON_CODE, \
+    assert "initialFirstResponder = nil" in DAEMON_CODE \
+        and "initialFirstResponder = keyField" not in DAEMON_CODE, \
         "opening the window summons the Passwords popover over the section"
 
 
@@ -486,31 +504,46 @@ def test_the_voice_list_comes_from_the_server_and_cannot_offer_a_job():
     So the list is asked for, and the endpoint is the filter: the gateway
     routes GET /voices to tts-stack alone, so a name that comes back is a name
     that can be spoken with."""
-    assert "127.0.0.1:47815/voices" in DAEMON_CODE, \
+    assert 'Proxy.get("/voices")' in DAEMON_CODE, \
         "the voice list is built from something other than the server"
-    assert 'forKey: "voice"' in DAEMON_CODE, "choosing a voice saves nothing"
+    assert "Preference.voices = saved" in DAEMON_CODE, "choosing a voice saves nothing"
     assert "/voices" in SERVER and "def voices(" in SERVER, "the server cannot list voices"
     assert "remote_voice_names" in SERVER, \
         "a configured Calliope server contributes no voices"
     # Local first and merged, not replaced: the ones on this Mac keep working
-    # when the network does not.
-    assert "KOKORO.get_voices()" in SERVER
+    # when the network does not. Read from the voices file rather than from a
+    # loaded model, so listing them never brings 450 MB into memory.
+    assert "def local_voice_names(" in SERVER and "zipfile.ZipFile(" in SERVER
 
 
-def test_a_chosen_voice_does_not_override_the_detected_language():
-    """A PINNED VOICE CANNOT SIMPLY WIN. Kokoro derives its phonemiser from the
-    voice's first letter, so pinning an English voice and then selecting
-    Portuguese does not give Portuguese in an English accent -- it gives
-    Portuguese words run through an English phonemiser, which is a different
-    and much worse thing. Detection exists to stop exactly that.
+def test_a_language_is_only_offered_voices_that_can_pronounce_it():
+    """A VOICE CAN ONLY READ THE LANGUAGE ITS FIRST LETTER SAYS. Kokoro derives
+    its phonemiser from that letter, so Portuguese words in an English voice are
+    not an accent but Portuguese run through an English phonemiser.
 
-    So the preference applies where it can and the language wins where it
-    cannot, and the Settings window says so rather than leaving somebody to
-    discover it on a paragraph of French."""
-    assert "func voiceFor(" in PLAYER, "the reconciliation does not exist"
+    The single pinned voice of the previous version had to be reconciled with
+    detection after the fact. A voice per language removes the question: the
+    Voices pane offers each language only its own voices, and the player looks
+    the voice up by the language it detected."""
+    assert "$0.language == spoken.code" in DAEMON_CODE, \
+        "a language's menu offers voices of other languages"
     body = PLAYER.split("func voiceFor(")[1].split("\n}")[0]
-    assert "languageByVoicePrefix[prefix] == language" in body, \
-        "a chosen voice is used whatever language the text turned out to be"
-    assert "return fallback" in body, "there is no fall back to the language's own voice"
-    assert "that voice's language" in DAEMON_CODE, \
-        "the window does not say when a chosen voice applies"
+    assert "chosen[spoken.code]" in body, "the player does not look the voice up by language"
+    assert "spoken.standardVoice" in body, "a language nobody configured has no voice"
+
+
+def test_the_engines_are_switches_and_the_model_is_not_resident_by_default():
+    """THE FOOTPRINT AT REST IS THE MENU BAR ITEM AND A SMALL PROXY. Kokoro holds
+    430-510 MB once loaded, measured, and releasing it inside one process frees
+    nothing -- so the daemon tells the proxy whether to keep it, and the proxy
+    runs it as a child that can exit. Keep loaded is off unless chosen, and This
+    Mac is on unless switched off, because that is every install before the
+    switch existed."""
+    for name in ("CALLIOPE_PORT", "CALLIOPE_LOCAL", "CALLIOPE_KEEP_LOADED"):
+        assert f'env["{name}"]' in DAEMON_CODE, f"the daemon never passes {name}"
+        assert name in SERVER, f"server.py does not read {name}"
+    shared = code(SHARED)
+    assert "preferences.object(forKey: macKey) as? Bool ?? true" in shared, \
+        "This Mac is off on an install that never chose"
+    assert "preferences.bool(forKey: keepLoadedKey)" in shared, \
+        "the model is kept resident unless somebody turns that off"

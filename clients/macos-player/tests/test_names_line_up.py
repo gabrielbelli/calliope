@@ -11,6 +11,10 @@ import re
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 INSTALL = (ROOT / "install.sh").read_text()
 ACTION = (ROOT / "openclip/calliope.py").read_text()
+# THE COMMAND LINE STARTS THE PLAYER NOW, for the OpenClip action as well: the
+# action hands its text to `calliope speak -`, so the paths it used to spell
+# are spelled in cli/calliope.py, and the action only has to find the command.
+CLI = (ROOT / "cli/calliope.py").read_text()
 MAIN = (ROOT / "player/main.swift").read_text()
 DEFAULTS = (ROOT / "player/defaults.swift").read_text()
 DIRECTOR = (ROOT / "demo/director.swift").read_text()
@@ -29,8 +33,10 @@ def test_the_extension_launches_the_player_where_the_installer_puts_it():
     an install somewhere else cannot leave the extension pointing at
     /Applications."""
     inside = "Contents/Helpers/CalliopePlayer.app/Contents/MacOS/calliope-player"
-    assert inside in ACTION, "the extension does not look inside the app bundle"
-    assert inside in PATHS, "the Swift and the extension disagree about the player"
+    assert inside in CLI, "the command does not look inside the app bundle"
+    assert inside in PATHS, "the Swift and the command disagree about the player"
+    assert "Contents/Resources/cli/calliope" in ACTION, \
+        "the extension does not run the command the installer bundles"
     assert '"$helper/MacOS/calliope-player"' in INSTALL, \
         "the installer no longer builds the player where the others look for it"
     assert '"s|__APP__|$app|"' in INSTALL and "__APP__" in ACTION, \
@@ -40,7 +46,7 @@ def test_the_extension_launches_the_player_where_the_installer_puts_it():
 def test_everything_agrees_on_the_runtime_directory():
     runtime = shell("runtime")
     assert runtime == "~/.local/share/calliope"
-    assert re.search(r'RUNTIME = os\.path\.expanduser\("([^"]+)"\)', ACTION).group(1) == runtime
+    assert re.search(r'RUNTIME = os\.path\.expanduser\("([^"]+)"\)', CLI).group(1) == runtime
     # One Swift definition now, in shared/paths.swift, compiled into all three.
     assert re.search(r'runtimeURL = URL\(fileURLWithPath: NSString\(string: "([^"]+)"\)',
                      PATHS).group(1) == runtime

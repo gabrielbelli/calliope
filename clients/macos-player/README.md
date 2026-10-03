@@ -18,7 +18,8 @@ That address can answer for more than this Mac. Left alone it is Kokoro and noth
 no URL, no key, no outage, because the model runs faster than realtime on this CPU and a
 server on the network would buy nothing. Given a Calliope address in Settings, the same
 address also answers for the engines this Mac has no business running, and the player never
-learns the difference.
+learns the difference. The `calliope` command and any other program on this Mac use the same
+address, so an agent can read an explanation aloud through the voices you chose.
 
 ## Layout
 
@@ -26,12 +27,16 @@ learns the difference.
 |---|---|
 | `bundle/*.plist` | The two identities: `com.gabrielbelli.calliope` and `…calliope.player` |
 | `shared/paths.swift` | Where everything is, said once and compiled into all three binaries |
-| `daemon/main.swift` | The daemon: the menu bar item, the hotkey, the warm server, Settings |
+| `shared/preferences.swift` | The settings both halves read: voices per language, the engines, the port |
+| `daemon/main.swift` | The daemon: the menu bar item, the hotkey, the proxy it supervises |
+| `daemon/settings.swift` | Settings: General, Voices, Engines, Proxy, Integrations |
 | `player/main.swift` | The player: language detection, sentence splitting, playback, the capsule |
-| `player/defaults.swift` | The two saved settings, and the carry from the pre-rename suite |
-| `server/server.py` | A local server answering the subset of `services/tts` the player uses |
-| `openclip/` | The OpenClip extension: one **Speak** action |
-| `install.sh` | Builds and installs all four |
+| `player/defaults.swift` | The carry from the pre-rename suite |
+| `server/server.py` | The proxy on loopback, and the Kokoro engine it starts on demand (`--engine`) |
+| `cli/` | The `calliope` command: speak, save, transcribe, voices, status |
+| `skill/calliope-voice/` | An agent skill that writes an explanation and reads it aloud |
+| `openclip/` | The OpenClip extension: one **Speak** action, through `calliope speak` |
+| `install.sh` | Builds and installs all of it |
 
 It installs as an application, `/Applications/Calliope.app`:
 
@@ -39,7 +44,9 @@ It installs as an application, `/Applications/Calliope.app`:
 Calliope.app/Contents/
   MacOS/calliope-daemon                                  the menu bar, the hotkey, Settings
   Helpers/CalliopePlayer.app/…/calliope-player           one process per passage
-  Resources/server.py                                    the local server
+  Resources/server.py                                    the proxy, and the engine it starts
+  Resources/cli/calliope                                 the command, linked to ~/.local/bin
+  Resources/skill/calliope-voice/                        installed only from Settings
 ```
 
 Everything that changes stays outside it, in `~/.local/share/calliope`: the Python 3.12 venv,
@@ -87,12 +94,17 @@ old suite is left alone.
 ## Behaviour worth knowing
 
 - **Language** comes from `NLLanguageRecognizer` over the whole selection. Below 0.5
-  confidence (`ok`, a lone command) it falls back to English. Each language maps to one voice
-  (`af_heart`, `pf_dora`, `ef_dora`, `ff_siwis`, `if_sara`, `hf_alpha`, `jf_alpha`, `zf_xiaobei`).
+  confidence (`ok`, a lone command) it falls back to English.
+- **Voices** are chosen per language in Settings › Voices, for the languages you add; any
+  other language is read with its standard voice (`af_heart`, `pf_dora`, `ef_dora`,
+  `ff_siwis`, `if_sara`, `hf_alpha`, `jf_alpha`, `zf_xiaobei`). A language is offered only the
+  voices whose first letter is that language, because Kokoro derives its phonemiser from the
+  letter. Each choice names its side, `mac/pf_dora` or `calliope/pf_dora`: the voice decides
+  where it is spoken.
 - **Speed** is applied while playing (`AVAudioUnitTimePitch`, 0.75×–3×), not sent to Kokoro,
   so it changes instantly without re-synthesising. The last speed is remembered.
-- **First sound**: about 0.3 s for a short sentence with the server warm; about 4 s when the
-  server has to start. Sentences over 140 characters are split at clause punctuation so a
+- **First sound**: about 0.3 s for a short sentence with the model loaded; about 2 s more when
+  it has to load first (see *Engines and footprint*). Sentences over 140 characters are split at clause punctuation so a
   long first sentence does not hold up the start.
 - **Reader**: the speech-bubble button grows the capsule upwards into a box showing the whole
   selection as it was selected — paragraphs and line breaks intact, one text size. Words already
@@ -116,37 +128,92 @@ old suite is left alone.
 - **Temp directories**: phonemizer copies `libespeak-ng.dylib` into a new temp directory per
   process and removes it only on a normal exit, so the server turns SIGTERM into one.
 
+## Engines and footprint
+
+Settings › Engines has two switches, **This Mac** and **Calliope server**. Each language's voice
+comes from either side, and runs there.
+
+| What is running | Memory, measured | When |
+|---|---|---|
+| The daemon (menu bar, hotkey) | about 56 MB | always |
+| The proxy, `server.py` | 17–19 MB | always; standard library only |
+| The Kokoro engine, `server.py --engine` | 430–580 MB | only while it is used |
+
+**The model is not resident unless you ask for it.** Measured: freeing Kokoro inside a process
+returns nothing to the system (509 MB loaded, 508 MB after `del` and a collection), so the
+proxy runs the model in a child process and lets that child exit after 10 minutes without a
+word to say. The next word loads it again, in about 1.5–2 seconds. **Keep the voice loaded**
+keeps it in memory for an instant start. With This Mac switched off the engine never starts;
+with the Calliope server switched off nothing leaves this Mac.
+
+## The proxy
+
+Other programs on this Mac can use Calliope at one OpenAI-compatible address,
+`http://127.0.0.1:47815` (Settings › Proxy changes the port):
+
+| Route | Answered by |
+|---|---|
+| `POST /v1/audio/speech`, model `kokoro`, `tts-1`, `tts-1-hd` | This Mac; `pcm` or `wav` |
+| `POST /v1/audio/speech`, model `calliope/<id>` | The Calliope server, as `<id>` |
+| `POST /v1/audio/transcriptions`, `/translations` | The Calliope server |
+| `/jobs`, `/jobs/{id}`, `/jobs/{id}/audio` | The Calliope server (long-form voices answer with a job) |
+| `GET /v1/models`, `GET /voices` | Both sides, each row saying which |
+| `GET /status`, `GET /calliope/test` | The proxy: what is loaded, and a fresh round trip |
+
+The key stays in the proxy: a program asks `127.0.0.1` with no credential, and the proxy adds
+the key on the way to the server. A request with an `Origin` header -- which every browser
+sends cross-site -- is refused on every route but `/health`, so a web page cannot spend your
+voices or your key.
+
+## The `calliope` command
+
+```bash
+calliope speak --reader -f explanation.md     # read a file aloud, with the reader open
+calliope speak "Hello there"                  # or text
+calliope save -f notes.md -o notes.wav        # an audio file instead
+calliope transcribe meeting.m4a               # needs the Calliope server
+calliope voices --language pt                 # what can speak Portuguese, on which side
+calliope status --test                        # what is running, and a test of the server
+```
+
+Markdown is read as prose: code blocks, link targets, images and markup are left out, and
+headings and list items end as sentences. `install.sh` links the command into `~/.local/bin`;
+Settings › Integrations can do the same for an app installed another way.
+
+**For agents.** `skill/calliope-voice` is a small skill for Claude Code and similar agents:
+asked to say something out loud, the agent writes the explanation for the ear as Markdown,
+saves it where you asked (or in the temporary directory) and plays it with `calliope speak`.
+It is copied into `~/.claude/skills` only when you press **Install Skill** in Settings ›
+Integrations.
+
 ## The Calliope server (optional)
 
-Menu bar icon → **Settings…** → **Use a Calliope server**. Off is the resting state and
-looks like one line; on reveals an address and a key, and turning it back off leaves both
-alone. The fields commit on Return or on leaving them — there is nothing else to press.
+Menu bar icon → **Settings…** → **Engines** → **Calliope server**. Off is the resting state;
+on reveals an address and a key, and turning it back off leaves both alone. The fields commit
+on Return or on leaving them -- there is nothing else to press. **Test Connection** asks the
+proxy to check the server afresh, in order, stopping at the first failure: reachable, key
+accepted, voices listed, a word spoken. The same test runs after every change that completes
+the address.
 
 **The key is required.** A Calliope server answers nothing but its liveness without one. Make
-it in Calliope under *Account* → *API keys* → *New key* with the preset `speak-only`: model
-listing, speech on both lanes, and reading your own jobs, because a long-form voice answers
-with a job to poll. The `user-jobs` preset works too, and holds more than the player uses.
-Both need an account with the `user-jobs` role: a `user` has no long-form voices to offer. An
+it in Calliope under *Account* → *API keys* → *New key*: the preset `user` covers speech and
+transcription, and `user-jobs` adds long documents, which answer with a job to poll. An
 address without a key is not used: the settings say a key is required, and `server.py`
 started with `CALLIOPE_URL` but no `CALLIOPE_KEY` says so once and forwards nothing.
 
-Filled in, `server.py` becomes a proxy: `kokoro`, `tts-1` and `tts-1-hd` are answered on this
-Mac as before, and anything else is forwarded to the Calliope gateway. `GET /v1/models` lists
-both, with `owned_by` saying which side each comes from, so one address covers every engine
-and nothing that talks to `127.0.0.1:47815` needs to know where a voice actually ran.
+Filled in, every model the server lists is offered here as `calliope/<id>`. `GET /v1/models`
+lists both sides, with `owned_by` saying which each comes from, so one address covers every
+engine and nothing that talks to `127.0.0.1` needs to know where a voice actually ran.
 
 Three things are deliberate:
 
 - **The key is in the Keychain**, not in the preferences plist, which rides in every backup.
   The daemon is the only process holding both halves and passes them to `server.py` in its
-  environment — so a server started by the one-shot player has no remote at all.
+  environment -- so a server started by the one-shot player has no remote at all, and the
+  Kokoro engine the proxy starts is never given the key.
 - **The certificate is verified** whenever the address has a name in it. An address typed as a
   bare IP cannot be verified by any certificate, so that one case is trusted on the strength
   of being your own network.
 - **An unknown model is refused here**, with both lists in the error, rather than forwarded.
   A gateway answers a name it does not know with a default voice, which turns a typo into
   audio nobody chose.
-
-Each change saves, restarts the server and then asks the proxy what it can reach, so the line
-under the fields is the round trip rather than a claim about it. An address that is down is
-still saved — it may be up later.

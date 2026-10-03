@@ -97,11 +97,12 @@ target="$(uname -m)-apple-macos26.0"
 
 echo "==> Daemon"
 swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" "$here/shared/mark.swift" \
-    "$here/daemon/main.swift" -o "$contents/MacOS/calliope-daemon"
+    "$here/shared/preferences.swift" "$here/daemon/main.swift" "$here/daemon/settings.swift" \
+    -o "$contents/MacOS/calliope-daemon"
 
 echo "==> Player"
 swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" \
-    "$here/player/main.swift" "$here/player/defaults.swift" \
+    "$here/shared/preferences.swift" "$here/player/main.swift" "$here/player/defaults.swift" \
     -o "$helper/MacOS/calliope-player"
 
 echo "==> Server"
@@ -114,6 +115,16 @@ install -m 0644 "$here/server/server.py" "$contents/Resources/server.py"
 swiftc -O -swift-version 5 -target "$target" "$here/shared/mark.swift" \
     "$here/bundle/make-icon.swift" -o "$staging/make-icon"
 "$staging/make-icon" "$contents/Resources/Calliope.icns"
+
+# THE COMMAND AND THE SKILL TRAVEL INSIDE THE APP, so the `calliope` on the PATH
+# always matches this player and this proxy: ~/.local/bin/calliope is only a
+# link to it. The skill is carried, not installed -- writing into somebody's
+# agent configuration is theirs to ask for, from Settings.
+echo "==> Command line"
+mkdir -p "$contents/Resources/cli"
+install -m 0755 "$here/cli/calliope" "$contents/Resources/cli/calliope"
+install -m 0755 "$here/cli/calliope.py" "$contents/Resources/cli/calliope.py"
+cp -R "$here/skill" "$contents/Resources/skill"
 
 echo "==> Bundle"
 sed "s/__VERSION__/$version/g" "$here/bundle/Calliope-Info.plist" > "$contents/Info.plist"
@@ -170,6 +181,22 @@ mv "$staging/Calliope.app" "$app"
 # copy that nothing updates, and the OpenClip action used to point at one.
 rm -f "$runtime/calliope-daemon" "$runtime/calliope-player" "$runtime/server.py"
 
+# A LINK INTO THE APP, NOT A COPY, so a re-install can never leave an older
+# command behind on the PATH. A file there that is not a link is somebody
+# else's `calliope`, and it is left alone.
+echo "==> The calliope command"
+cli_link="$HOME/.local/bin/calliope"
+mkdir -p "$HOME/.local/bin"
+if [ -e "$cli_link" ] && [ ! -L "$cli_link" ]; then
+    echo "    $cli_link is not a link into Calliope.app; left alone"
+else
+    ln -sfn "$app/Contents/Resources/cli/calliope" "$cli_link"
+fi
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) echo "    ~/.local/bin is not on your PATH: add it to run calliope by name" ;;
+esac
+
 # TELL LAUNCHSERVICES THE APP EXISTS. Measured: until it knows, SMAppService
 # reports notFound for an app sitting in /Applications, so the Open at Login
 # checkbox reads as off and cannot be turned on. Moving a bundle into place is
@@ -194,6 +221,8 @@ echo
 echo "  Resident:             open $app"
 echo "                        a menu bar icon, the model kept warm, and"
 echo "                        Option-Command-S to speak the selection."
+echo
+echo "  From a terminal:      calliope speak \"Hello\"    (calliope --help)"
 echo
 echo "  The hotkey needs Accessibility permission -- there is no way to read"
 echo "  another application's selection without it. The daemon asks the first"

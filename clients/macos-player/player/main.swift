@@ -3,7 +3,8 @@
 // across each word as it is spoken.
 //
 // Build and install: ../install.sh
-// Usage: calliope-player <text-file>   (the file is deleted once read)
+// Usage: calliope-player <text-file> [--reader] [--voice mac/<name>|calliope/<name>]
+//        (the file is deleted once read)
 //
 // Speaks the same contract as services/tts: POST /v1/audio/speech with response_format "pcm",
 // to the local server (server/server.py), which it starts on demand.
@@ -12,61 +13,42 @@ import AVFoundation
 import NaturalLanguage
 
 let settings = playerDefaults()
-// THE PLAYER NEVER TALKS TO THE CALLIOPE STACK, AND THE SERVER IS NOT CONFIGURABLE. It reads
-// text you selected on this Mac. A remote host would mean a URL to keep right, a key to hold,
-// a network that can be down and a second place for a bug to live, and it buys nothing:
-// Kokoro's full model on this M2's own CPU measures about 4.9× realtime, so synthesis is never
-// what you wait for — first sound is about 0.3 s with the server warm. Anything that puts a
-// server URL back in UserDefaults brings all four costs back for that same nothing.
-let localServerURL = "http://127.0.0.1:47815"
+// THE PLAYER NEVER TALKS TO THE CALLIOPE STACK ITSELF. It talks to the proxy on loopback
+// (localServerURL, shared/preferences.swift) and to nothing else, and it holds no credential. A
+// voice that lives on a Calliope server is asked of the proxy as model "calliope/kokoro", and the
+// proxy -- the one process the daemon hands the key to -- makes the call. A host in this file
+// would mean a URL to keep right, a key to hold and a second place for a bug to live.
 let audioFormat = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
 let speedSteps: [Float] = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
 let appleEase = CAMediaTimingFunction(controlPoints: 0.32, 0.72, 0, 1)
 
 struct Voice {
-    let name: String
+    let ref: VoiceRef
     let badge: String
 }
 
-// Detected language -> Kokoro voice; Kokoro derives the language from the voice's first letter.
-// All voices: https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md
-let voices: [NLLanguage: Voice] = [
-    .english: Voice(name: "af_heart", badge: "EN"),
-    .portuguese: Voice(name: "pf_dora", badge: "PT"),
-    .spanish: Voice(name: "ef_dora", badge: "ES"),
-    .french: Voice(name: "ff_siwis", badge: "FR"),
-    .italian: Voice(name: "if_sara", badge: "IT"),
-    .hindi: Voice(name: "hf_alpha", badge: "HI"),
-    .japanese: Voice(name: "jf_alpha", badge: "JA"),
-    .simplifiedChinese: Voice(name: "zf_xiaobei", badge: "ZH"),
-]
-
-/// Kokoro's voices carry their language in the first letter, which is how the
-/// server picks a phonemiser. Reading that back is what lets a chosen voice and
-/// auto-detection coexist.
-let languageByVoicePrefix: [Character: NLLanguage] = [
-    "a": .english, "b": .english, "e": .spanish, "f": .french,
-    "h": .hindi, "i": .italian, "j": .japanese, "p": .portuguese, "z": .simplifiedChinese,
-]
-
-/// The voice to read this passage in: the chosen one when it speaks the right
-/// language, the detected language's own otherwise.
+/// The voice to read this passage in, and the side that speaks it.
 ///
-/// A PINNED VOICE CANNOT SIMPLY WIN. The first letter is not decoration -- the
-/// server derives the phonemiser from it -- so pinning an English voice and
-/// then selecting Portuguese does not give you Portuguese in an English
-/// accent, it gives you Portuguese words run through an English phonemiser,
-/// which is a different and much worse thing. Detection exists precisely to
-/// stop that.
+/// THE LANGUAGE CHOOSES THE ROW AND THE ROW CHOOSES THE VOICE. Settings offers a
+/// language only the voices whose first letter is that language -- the letter
+/// is what the server derives the phonemiser from -- so a saved preference is
+/// always one that can pronounce what was detected, and nothing here has to
+/// second-guess it.
 ///
-/// So the preference applies where it can apply, and the language wins where
-/// it cannot. Settings says so in one line rather than leaving somebody to
-/// discover it on a paragraph of French.
-func voiceFor(_ language: NLLanguage, chosen: String?) -> Voice {
-    let fallback = voices[language] ?? voices[.english]!
-    guard let chosen, !chosen.isEmpty, let prefix = chosen.first else { return fallback }
-    guard languageByVoicePrefix[prefix] == language else { return fallback }
-    return Voice(name: chosen, badge: fallback.badge)
+/// A language nobody configured is read with its standard voice, on this Mac
+/// while This Mac is on and on the Calliope server when only that side is.
+/// A voice forced on the command line (`--voice`) wins outright: whoever typed
+/// it named the voice on purpose, and the badge follows that voice's letter.
+func voiceFor(_ spoken: Language, preferences chosen: [String: String], macOn: Bool,
+              calliopeOn: Bool, forced: String? = nil) -> Voice {
+    if let forced, let ref = VoiceRef(forced) {
+        return Voice(ref: ref, badge: (language(ofVoice: ref.name) ?? spoken).badge)
+    }
+    if let saved = chosen[spoken.code], let ref = VoiceRef(saved) {
+        return Voice(ref: ref, badge: spoken.badge)
+    }
+    let origin: VoiceOrigin = macOn || !calliopeOn ? .mac : .calliope
+    return Voice(ref: VoiceRef(origin: origin, name: spoken.standardVoice), badge: spoken.badge)
 }
 
 var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
@@ -88,23 +70,23 @@ struct WordTiming {
     let end: Double
 }
 
-func detectLanguage(_ text: String) -> NLLanguage {
+func detectLanguage(_ text: String) -> Language {
     let recognizer = NLLanguageRecognizer()
-    recognizer.languageConstraints = Array(voices.keys)
+    recognizer.languageConstraints = languages.map { NLLanguage(rawValue: $0.recognizer) }
     recognizer.processString(text)
     guard let best = recognizer.languageHypotheses(withMaximum: 1).first, best.value >= 0.5 else {
-        return .english
+        return english
     }
-    return best.key
+    return languages.first { $0.recognizer == best.key.rawValue } ?? english
 }
 
 /// Sentences, with long ones broken at clause punctuation: the first audio arrives sooner and
 /// no request carries a whole paragraph.
-func splitIntoChunks(_ text: String, language: NLLanguage) -> [Chunk] {
+func splitIntoChunks(_ text: String, language: Language) -> [Chunk] {
     let full = text as NSString
     let tokenizer = NLTokenizer(unit: .sentence)
     tokenizer.string = text
-    tokenizer.setLanguage(language)
+    tokenizer.setLanguage(NLLanguage(rawValue: language.recognizer))
     var chunks: [Chunk] = []
     tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
         chunks.append(contentsOf: groupWords(wordRanges(in: full, range: NSRange(range, in: text)), of: full))
@@ -206,6 +188,12 @@ func launchLocalServer() {
     let process = Process()
     process.executableURL = pythonURL
     process.arguments = [serverScriptURL.path]
+    // The port and the engine switch, and nothing else: a server this player
+    // starts has no remote, because the key is the daemon's to hand on.
+    var env = ProcessInfo.processInfo.environment
+    env["CALLIOPE_PORT"] = String(Preference.port)
+    env["CALLIOPE_LOCAL"] = Preference.macOn ? "1" : "0"
+    process.environment = env
     process.standardInput = FileHandle.nullDevice
     process.standardOutput = try? FileHandle(forWritingTo: logURL)
     process.standardError = process.standardOutput
@@ -217,14 +205,31 @@ struct Speech {
     let timings: [WordTiming]
 }
 
+/// What the proxy said when it refused, in its own words.
+///
+/// "THE SERVER DID NOT ANSWER" WAS THE ONLY THING A FAILED PASSAGE COULD SAY,
+/// and with two engines it is usually false: the server answered, and what it
+/// said -- this Mac's voice is off, the Calliope server is unreachable, the
+/// key was refused -- is the sentence somebody can act on.
+func refusal(_ data: Data?, status: Int?) -> String {
+    if let data,
+       let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+       let error = body["error"] as? [String: Any], let message = error["message"] as? String {
+        return message
+    }
+    if status == 202 { return "that voice renders as a job, not as speech to play" }
+    return status.map { "the server answered \($0)" } ?? "the server did not answer"
+}
+
 /// One chunk -> 24 kHz mono float buffer plus word timings, via the OpenAI-shaped speech route.
-func synthesise(_ chunk: Chunk, voice: Voice, completion: @escaping (Speech?) -> Void) {
+func synthesise(_ chunk: Chunk, voice: Voice, completion: @escaping (Speech?, String?) -> Void) {
     var request = URLRequest(url: URL(string: localServerURL + "/v1/audio/speech")!)
     request.httpMethod = "POST"
     request.timeoutInterval = 120
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try? JSONSerialization.data(withJSONObject: [
-        "model": "kokoro", "input": chunk.text, "voice": voice.name, "response_format": "pcm",
+        "model": voice.ref.model, "input": chunk.text, "voice": voice.ref.name,
+        "response_format": "pcm",
     ])
     URLSession.shared.dataTask(with: request) { data, response, _ in
         var speech: Speech?
@@ -246,7 +251,8 @@ func synthesise(_ chunk: Chunk, voice: Voice, completion: @escaping (Speech?) ->
                 speech = Speech(buffer: pcm, timings: timings)
             }
         }
-        DispatchQueue.main.async { completion(speech) }
+        let problem = speech == nil ? refusal(data, status: http?.statusCode) : nil
+        DispatchQueue.main.async { completion(speech, problem) }
     }.resume()
 }
 
@@ -273,6 +279,8 @@ final class Player {
     private let timePitch = AVAudioUnitTimePitch()
     private var speeches: [Int: Speech] = [:]
     private var failed = Set<Int>()
+    /// The last thing the proxy said when it refused a chunk.
+    private var lastProblem: String?
     /// Chunks given a second chance; see fetchIfNeeded.
     private var retried: Set<Int> = []
     private var index = 0
@@ -416,8 +424,9 @@ final class Player {
         let window = index..<min(chunks.count, index + prefetchAhead + 1)
         guard let target = window.first(where: { speeches[$0] == nil && !failed.contains($0) }) else { return }
         fetchInFlight = true
-        synthesise(chunks[target], voice: voice) { [self] speech in
+        synthesise(chunks[target], voice: voice) { [self] speech, problem in
             fetchInFlight = false
+            if let problem { lastProblem = problem }
             if let speech {
                 speeches[target] = speech
                 retried.remove(target)
@@ -461,7 +470,7 @@ final class Player {
     private func finish() {
         guard failed.isEmpty else {
             return fail(failed.count == chunks.count
-                ? "the server did not answer"
+                ? (lastProblem ?? "the server did not answer")
                 : "stopped early — \(failed.count) of \(chunks.count) parts did not arrive")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { NSApp.terminate(nil) }
@@ -770,8 +779,12 @@ final class ControlPanel: NSPanel {
         setFrameOrigin(NSPoint(x: screen.visibleFrame.midX - rowWidth / 2, y: screen.visibleFrame.minY + 90))
     }
 
-    /// Opens the reader straight away if it was left open last time.
-    func restoreReader() {
+    /// Opens the reader straight away if it was left open last time, or if
+    /// whoever started this asked for it (`--reader`). Asked for, it is not
+    /// remembered: a command that opens the reader for one explanation must
+    /// not change how the next selection is read.
+    func restoreReader(forced: Bool = false) {
+        if forced { return setExpanded(true, animated: false, remember: false) }
         if settings.bool(forKey: "karaoke") { setExpanded(true, animated: false) }
     }
 
@@ -788,9 +801,9 @@ final class ControlPanel: NSPanel {
         glass.tintColor = status == "error" ? NSColor.systemRed.withAlphaComponent(0.25) : nil
     }
 
-    private func setExpanded(_ expanded: Bool, animated: Bool) {
+    private func setExpanded(_ expanded: Bool, animated: Bool, remember: Bool = true) {
         isExpanded = expanded
-        settings.set(expanded, forKey: "karaoke")
+        if remember { settings.set(expanded, forKey: "karaoke") }
         readerButton.contentTintColor = expanded ? .controlAccentColor : .labelColor
         readerTimer?.invalidate()
         readerTimer = nil
@@ -891,19 +904,32 @@ _ = setsid()
 try? String(getpid()).write(to: runtimeURL.appendingPathComponent("player.pid"),
                             atomically: true, encoding: .utf8)
 
-let arguments = CommandLine.arguments
-guard arguments.count >= 2, let rawText = try? String(contentsOfFile: arguments[1], encoding: .utf8) else {
-    FileHandle.standardError.write(Data("usage: calliope-player <text-file>\n".utf8))
+// The file first, then flags in any order: --reader, and --voice with its reference.
+var path: String?
+var forceReader = false
+var forcedVoice: String?
+var rest = CommandLine.arguments.dropFirst()
+while let argument = rest.popFirst() {
+    switch argument {
+    case "--reader": forceReader = true
+    case "--voice": forcedVoice = rest.popFirst()
+    default: if path == nil { path = argument }
+    }
+}
+guard let path, let rawText = try? String(contentsOfFile: path, encoding: .utf8) else {
+    FileHandle.standardError.write(Data(
+        "usage: calliope-player <text-file> [--reader] [--voice mac/<name>|calliope/<name>]\n".utf8))
     exit(2)
 }
 // Selections can arrive decomposed ("e" + U+0301); espeak drops a lone combining mark,
 // which turns "é" into "e" and changes the word. Precompose before anything else sees it.
 let text = rawText.precomposedStringWithCanonicalMapping
-try? FileManager.default.removeItem(atPath: arguments[1])
+try? FileManager.default.removeItem(atPath: path)
 
-let language = detectLanguage(text)
-let voice = voiceFor(language, chosen: settings.string(forKey: "voice"))
-let chunks = splitIntoChunks(text, language: language)
+let spokenLanguage = detectLanguage(text)
+let voice = voiceFor(spokenLanguage, preferences: Preference.voices, macOn: Preference.macOn,
+                     calliopeOn: Preference.calliopeOn, forced: forcedVoice)
+let chunks = splitIntoChunks(text, language: spokenLanguage)
 guard !chunks.isEmpty else { exit(0) }
 
 let app = NSApplication.shared
@@ -911,7 +937,7 @@ app.setActivationPolicy(.accessory)
 let player = Player(text: text, chunks: chunks, voice: voice)
 let panel = ControlPanel(player: player)
 player.panel = panel
-panel.restoreReader()
+panel.restoreReader(forced: forceReader)
 panel.orderFrontRegardless()
 player.start()
 app.run()

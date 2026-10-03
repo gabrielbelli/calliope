@@ -9,15 +9,21 @@ import pathlib
 import re
 
 PLAYER = pathlib.Path(__file__).resolve().parent.parent / "player"
-SOURCES = sorted(PLAYER.glob("*.swift"))
+SHARED = pathlib.Path(__file__).resolve().parent.parent / "shared" / "preferences.swift"
+# The player's own files and the preferences it shares with the daemon, which
+# is where the address is built now that the port is a setting.
+SOURCES = sorted(PLAYER.glob("*.swift")) + [SHARED]
 
 
 def test_the_only_server_is_loopback():
+    """The port is a setting; the host is not. Any other address in these
+    files -- a URL read back from a setting, a host typed into the source -- is
+    how the player would come to talk to something that is not this Mac."""
     urls = set()
     for source in SOURCES:
         urls.update(re.findall(r'"(https?://[^"]+)"', source.read_text()))
 
-    assert urls == {"http://127.0.0.1:47815"}
+    assert urls == {"http://127.0.0.1:\\(Preference.port)"}
 
 
 def test_no_setting_can_redirect_the_player():
@@ -25,13 +31,18 @@ def test_no_setting_can_redirect_the_player():
     read from the same suite is how the remote path existed before."""
     keys = set()
     for source in SOURCES:
-        keys.update(re.findall(r'forKey: "([^"]+)"', source.read_text()))
+        text = source.read_text()
+        keys.update(re.findall(r'forKey: "([^"]+)"', text))
+        keys.update(re.findall(r'static let \w+Key = "([^"]+)"', text))
 
-    # "voice" is a preset name, not an address: it selects which voice the one
-    # host is asked for, and cannot point the player anywhere. The rule this
-    # test holds is about redirection, so the list grows when something is
-    # added that cannot redirect, and the second assertion is what enforces it.
-    assert keys == {"speed", "karaoke", "voice"}
+    # None of these is an address. "voices" maps a language to a voice and the
+    # side that speaks it -- this Mac or the Calliope server, both reached
+    # through the one loopback proxy; "proxyPort" is that proxy's port, not a
+    # host. The rule this test holds is about redirection, so the list grows
+    # when something is added that cannot redirect, and the second assertion is
+    # what enforces it.
+    assert keys == {"speed", "karaoke", "voice", "voices", "macOn", "keepLoaded",
+                    "proxyPort", "calliopeOn"}
     assert not [k for k in keys if any(word in k.lower()
                                        for word in ("url", "host", "server", "key", "token"))], \
         "a setting is shaped like an address or a credential"

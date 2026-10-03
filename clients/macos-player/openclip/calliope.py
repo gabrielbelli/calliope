@@ -1,20 +1,21 @@
 #!/usr/bin/python3
-"""OpenClip action: read the selection aloud with calliope-player.
+"""OpenClip action: read the selection aloud with Calliope.
 
-Hands the text to ~/.local/share/calliope/calliope-player and returns at once, so OpenClip's
-60-second script watchdog never cuts speech off. A new Speak replaces whatever is playing.
+A thin caller of the `calliope` command inside Calliope.app: the text goes to `calliope speak -`
+on standard input, which queues it, replaces whatever is playing, starts the player and returns
+at once -- so OpenClip's 60-second script watchdog never cuts speech off.
 Installed into ~/.openclip/extensions/calliope.openclipext by ../install.sh.
+
+ONE WAY TO START THE PLAYER, NOT TWO. This file used to carry its own copy of the queue, the pid
+file and the stale-pid guard, and the command line would have needed a second copy of the same.
+Two copies of "stop the player that is speaking" is how a second Speak ends up reading over the
+first, so the command owns it and this only translates its answer into OpenClip's JSON.
 """
 import json
 import os
-import signal
 import subprocess
 import sys
-import tempfile
 
-RUNTIME = os.path.expanduser("~/.local/share/calliope")
-# Inside the application, which is where the code lives now. The runtime below
-# is still the changing half -- the queue, the pid file, the logs.
 # install.sh replaces __APP__ with wherever it put Calliope.app, so this file
 # and the installer cannot disagree. Read straight out of the repository it is
 # still the placeholder, hence the fallback -- and the check is on the variable
@@ -23,47 +24,32 @@ RUNTIME = os.path.expanduser("~/.local/share/calliope")
 APP = "__APP__"
 if APP.startswith("__"):
     APP = "/Applications/Calliope.app"
-PLAYER = os.path.join(APP, "Contents/Helpers/CalliopePlayer.app/Contents/MacOS/calliope-player")
-PID_FILE = os.path.join(RUNTIME, "player.pid")
-QUEUE_DIR = os.path.join(RUNTIME, "queue")
-LOG_FILE = os.path.join(RUNTIME, "player.log")
+CLI = os.path.join(APP, "Contents/Resources/cli/calliope")
 
 
-def stop_current():
-    try:
-        with open(PID_FILE) as f:
-            pid = int(f.read().strip())
-    except (FileNotFoundError, ValueError):
-        return
-    # Guard against a stale pid file whose pid now belongs to another program.
-    command = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(pid)],
-                             capture_output=True, text=True).stdout
-    if PLAYER in command:
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+def reply(message=None):
+    if message is None:
+        sys.stdout.write(json.dumps({"type": "success"}))
+    else:
+        sys.stdout.write(json.dumps({"type": "toast", "message": message, "style": "error"}))
 
 
 def main():
-    stop_current()
-    text = (os.environ.get("OPENCLIP_TEXT") or sys.stdin.read()).strip()
-    if not text:
-        sys.stdout.write(json.dumps({"type": "toast", "message": "No text to speak", "style": "error"}))
-        return
-
-    os.makedirs(QUEUE_DIR, exist_ok=True)
-    fd, text_path = tempfile.mkstemp(dir=QUEUE_DIR, suffix=".txt")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
-    with open(LOG_FILE, "w") as log:
-        proc = subprocess.Popen([PLAYER, text_path], stdin=subprocess.DEVNULL,
-                                stdout=log, stderr=log, start_new_session=True)
-    # THE PLAYER WRITES PID_FILE ITSELF, after setsid(), because it is the
-    # process that has to be named: killpg only reaches a group leader. Two
-    # writers meant the daemon's hotkey and this action each knew only about
-    # their own player, and a second Speak read over the first.
-    sys.stdout.write(json.dumps({"type": "success"}))
+    text = os.environ.get("OPENCLIP_TEXT") or sys.stdin.read()
+    # Empty text is still handed over: the command stops what is playing before it says there
+    # is nothing to speak, which is what Speak with nothing selected has always done.
+    try:
+        result = subprocess.run([CLI, "speak", "-"], input=text, capture_output=True,
+                                text=True, timeout=30)
+    except FileNotFoundError:
+        return reply("Calliope is not installed at %s" % APP)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return reply("Calliope did not start: %s" % exc)
+    if result.returncode != 0:
+        lines = [line for line in result.stderr.splitlines() if line.strip()]
+        message = lines[-1] if lines else "Speak failed"
+        return reply(message[len("calliope: "):] if message.startswith("calliope: ") else message)
+    return reply()
 
 
 if __name__ == "__main__":

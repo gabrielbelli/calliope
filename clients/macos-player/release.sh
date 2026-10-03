@@ -26,9 +26,10 @@ target="$(uname -m)-apple-macos26.0"
 
 echo "==> Code"
 swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" "$here/shared/mark.swift" \
-    "$here/daemon/main.swift" -o "$contents/MacOS/calliope-daemon"
+    "$here/shared/preferences.swift" "$here/daemon/main.swift" "$here/daemon/settings.swift" \
+    -o "$contents/MacOS/calliope-daemon"
 swiftc -O -swift-version 5 -target "$target" "$here/shared/paths.swift" \
-    "$here/player/main.swift" "$here/player/defaults.swift" \
+    "$here/shared/preferences.swift" "$here/player/main.swift" "$here/player/defaults.swift" \
     -o "$helper/MacOS/calliope-player"
 install -m 0644 "$here/server/server.py" "$contents/Resources/server.py"
 
@@ -41,6 +42,14 @@ swiftc -O -swift-version 5 -target "$target" "$here/shared/mark.swift" \
 "$staging/make-icon" "$contents/Resources/Calliope.icns"
 sed "s/__VERSION__/$version/g" "$here/bundle/Calliope-Info.plist" > "$contents/Info.plist"
 sed "s/__VERSION__/$version/g" "$here/bundle/CalliopePlayer-Info.plist" > "$helper/Info.plist"
+
+# The command and the skill, exactly as install.sh carries them: a cask
+# installs the .app and nothing else, so they are inside it or nowhere.
+echo "==> Command line"
+mkdir -p "$contents/Resources/cli"
+install -m 0755 "$here/cli/calliope" "$contents/Resources/cli/calliope"
+install -m 0755 "$here/cli/calliope.py" "$contents/Resources/cli/calliope.py"
+cp -R "$here/skill" "$contents/Resources/skill"
 
 # SEALED IN, NEVER WRITTEN TO. A cask installs the .app and nothing else, so
 # anything the app needs at runtime has to be inside it: an interpreter it does
