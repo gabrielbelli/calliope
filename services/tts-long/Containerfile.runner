@@ -1,0 +1,84 @@
+# tts-long's engines on an NVIDIA GPU, behind the runner protocol tts-long
+# already speaks to offpeak. See services/tts-long/RUNNER.md.
+#
+# Build, from the repository root (linux/amd64 only):
+#   docker build -f services/tts-long/Containerfile.runner -t calliope-tts-runner .
+#
+# NO CUDA BASE IMAGE. On linux/amd64 the PyPI torch 2.6.0 wheel IS the CUDA 12.4
+# build and brings its own CUDA and cuDNN libraries (nvidia-*-cu12); the NVIDIA
+# container toolkit injects libcuda from the host driver. A CUDA base would
+# duplicate those libraries.
+#
+# THE PIN THAT KEEPS PASCAL. chatterbox-tts==0.1.7 pins torch==2.6.0 on Python
+# 3.12, and that wheel carries kernels for sm_50 to sm_90. A GTX 10-series card
+# (sm_61) runs the sm_60 code. Wheels from 2.8 (cu128) and every CUDA 13 build
+# drop Pascal, so do not unpin torch without re-running
+# `python -m app.runner smoke` on a Pascal card. RTX 50-series (sm_120) is NOT
+# covered by this wheel.
+#
+# amd64 ONLY: no aarch64 torch 2.6 CUDA wheel has Pascal kernels.
+FROM python:3.12-slim-trixie
+
+# libsndfile1 for soundfile and librosa. ffmpeg because librosa falls back to it
+# for reference clips libsndfile cannot read (.m4a), and the CPU image has it,
+# so a voice that works on the CPU lane must work here. util-linux for setpriv,
+# which the shared entrypoint uses when it starts as root.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libsndfile1 ffmpeg util-linux \
+ && rm -rf /var/lib/apt/lists/* \
+ && command -v setpriv \
+ && command -v ffmpeg
+
+WORKDIR /srv
+COPY packages/common/ ./packages/common/
+COPY services/tts-long/requirements.txt ./requirements.txt
+
+# The same pins as the CPU image, from the same file, WITHOUT the CPU index. The
+# assertion turns "resolved the CPU wheel" into a failed build, not a slow
+# runner.
+RUN pip install --no-cache-dir -r requirements.txt \
+ && python -c "import torch; v, c = torch.__version__, torch.version.cuda or ''; assert v.startswith('2.6.') and c.startswith('12.'), (v, c)" \
+ && command -v voice-entrypoint.sh
+
+# ONLY the modules the runner imports. CI rebuilds this image when one of these
+# paths changes (.github/workflows/build.yml), so the list here and the list
+# there must agree.
+COPY services/tts-long/app/__init__.py services/tts-long/app/engines.py \
+     services/tts-long/app/synth.py ./app/
+COPY services/tts-long/app/runner/ ./app/runner/
+
+# HF_HUB_OFFLINE=1: a model load never asks Hugging Face for the current
+# revision (chatterbox calls snapshot_download(revision="main") on every load).
+# `python -m app.runner smoke` turns it off for itself, to download the weights.
+# HOME and NUMBA_CACHE_DIR for the same reasons as the CPU image: setpriv keeps
+# HOME=/root, and librosa's numba cache must be writable.
+# PKUSEG_HOME: chatterbox's multilingual tokeniser downloads a segmenter model
+# into ~/.pkuseg on first load, and HOME is a root-owned tmpfs on a read-only
+# root, so it would fail there; /models keeps it with the weights.
+ENV VOICE_CHOWN_DIRS="/models /state" \
+    HOME=/home/tts \
+    NUMBA_CACHE_DIR=/tmp/numba \
+    HF_HOME=/models \
+    PKUSEG_HOME=/models/pkuseg \
+    HF_HUB_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    TTS_ENGINES=chatterbox,chatterbox-turbo \
+    PYTHONUNBUFFERED=1
+
+RUN useradd --create-home --uid 1000 tts \
+ && mkdir -p /models /state \
+ && chown tts:tts /models /state \
+ && chmod 0700 /state
+
+VOLUME ["/models", "/state"]
+EXPOSE 47600
+
+# The shared entrypoint's TLS block is not used: it only appends uvicorn
+# flags, and the runner builds its own TLS context. Its prefix stays the
+# default TTS, so TTS_TLS_CERT set here by mistake makes it refuse to start.
+#
+# No HEALTHCHECK: it is not part of the OCI image format buildah writes. The
+# compose file in RUNNER.md carries a TCP-connect check, so no route answers
+# without the key.
+ENTRYPOINT ["voice-entrypoint.sh"]
+CMD ["python", "-m", "app.runner", "serve"]

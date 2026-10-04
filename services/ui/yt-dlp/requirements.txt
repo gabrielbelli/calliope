@@ -1,0 +1,13 @@
+# yt-dlp, and nothing else, in a directory of its own because this is the one
+# .github/dependabot.yml watches. ../requirements.txt installs it with -r.
+#
+# Dependabot reads every requirements file in the directory it is given, and
+# ../requirements.txt names ./packages/common, a path relative to the
+# repository root that it would look for under services/ui and not find. A
+# path it cannot fetch fails the whole run, and no pull request is opened.
+#
+# Pinned rather than floated: an unpinned yt-dlp makes two builds of the same
+# commit different images. YouTube breaks yt-dlp every few weeks, so Dependabot
+# opens a pull request for each release, and /health reports the version that
+# is running.
+yt-dlp==2026.8.19

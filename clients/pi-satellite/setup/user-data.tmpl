@@ -1,0 +1,17 @@
+#cloud-config
+# Written by scripts/prepare_sd.py; read once by cloud-init on the first boot.
+hostname: calliope-sat
+manage_etc_hosts: true
+enable_ssh: {enable_ssh}
+ssh_pwauth: false
+timezone: {timezone}
+users:
+  - name: calliope
+    gecos: Calliope satellite agent
+    shell: /usr/sbin/nologin
+    groups: [audio]
+    lock_passwd: true
+{admin}
+runcmd:
+  - [sh, -c, "raspi-config nonint do_wifi_country {country} || true"]
+  - [sh, /boot/firmware/calliope/firstboot.sh]

@@ -1,0 +1,366 @@
+# korvo-satellite
+
+Firmware that turns an **ESP32-Korvo v1.1** into a Calliope satellite: three
+microphones and a speaker on Wi-Fi, told what to do by
+[voice-satellites](../../services/satellites/README.md).
+
+The board is Espressif's original ESP32-Korvo (ESP32-WROVER-E, 16 MB flash,
+PSRAM). It has an ES7210 four-channel ADC carrying three analogue mics 65 mm
+apart plus a loopback of the speaker output for echo cancellation, an ES8311
+codec for the speaker and the 3.5 mm jack (headphones or aux), twelve WS2812 LEDs and six buttons.
+Pins come from Espressif's schematics, in `src/board.h`.
+
+## First flash (once, over USB)
+
+The UART port is a CP2102N. esptool fails above 230400 baud on this board, so
+the `usb` env is pinned there.
+
+```bash
+cd clients/korvo-satellite
+pio run -e usb -t erase        # clears any old Wi-Fi credentials
+pio run -e usb -t upload
+```
+
+## Wi-Fi and adoption
+
+1. On first boot the satellite opens a Wi-Fi network called
+   `calliope-sat-XXXX`, and the ring breathes orange.
+2. Join it from a phone. Choose your 2.4 GHz network and enter the password.
+   The hub address is pre-filled with `CALLIOPE_HUB` from the build, if it was
+   set (for example `wss://calliope.example.com`, or
+   `wss://calliope.example.com:30080` with no proxy on 443 in front of the
+   gateway), and is otherwise empty.
+3. The satellite connects, and the ring breathes white while it waits.
+4. Adopt it on the **Satellites** tab.
+
+Release builds connect over TLS only and verify the gateway's certificate
+against the CA certificates compiled in: by default ISRG Root X1 and X2,
+Let's Encrypt's roots (`certs/lets-encrypt-roots.pem`). **The hub's
+certificate must chain to one of them.** One from any other CA fails the TLS
+handshake, and the satellite stays in Connecting, spinning blue, with nothing
+else to say why. For a hub whose certificate comes from another CA (ZeroSSL,
+Google Trust Services, an internal CA, a self-signed one), name a PEM file of
+that CA's root when you build:
+
+```bash
+CALLIOPE_HUB_CA=~/hub-ca.pem pio run -e usb -t upload
+```
+
+The file can hold several certificates. To trust Let's Encrypt as well, add
+`certs/lets-encrypt-roots.pem` to it. The build prints `hub TLS: trusts N CA
+certificate(s) from <file>`, and stops on a file with none. Set the same
+variable for every over-the-air update too: an image built without it trusts
+Let's Encrypt only, cannot reach the hub, and is rolled back.
+
+**Behind a proxy that routes by host name.** The WebSocket library always
+sends the port in its `Host` header (`calliope.example.com:443`). A proxy that
+matches the host exactly must list the name both with and without `:443`, or
+it answers 404 and the board keeps retrying.
+
+A development build with a plain `ws://` hub is made with `DEV_HUB`. The
+address is still the gateway's, one without TLS of its own: the hub on port
+8003 closes any socket the gateway did not relay.
+
+```bash
+PLATFORMIO_BUILD_FLAGS='-DDEV_HUB=\"ws://192.0.2.10:30080\"' pio run -e usb -t upload
+```
+
+## Build settings
+
+The build and the over-the-air upload read these from the environment:
+
+| Variable | Used by | What it is |
+|---|---|---|
+| `CALLIOPE_HUB` | every build | The hub address the setup portal starts with, such as `wss://calliope.example.com`. Unset, the field starts empty. A board that already has a hub keeps it |
+| `CALLIOPE_HUB_CA` | every build | A PEM file of the CA certificates the hub's certificate chains to. Unset, ISRG Root X1 and X2 (Let's Encrypt) |
+| `CALLIOPE_FIRMWARE_PUBKEY` | every build | The firmware signing public key to compile in. Else `~/.config/calliope/firmware-signing.pub.pem`, else `keys/firmware-signing.pub.pem`. None found: an unsigned build, with a warning ([keys/README.md](keys/README.md)) |
+| `CALLIOPE_URL` | `-e ota -t upload` | **Required.** The hub's base URL, which is the gateway's, such as `https://calliope.example.com`. The upload stops without it |
+| `CALLIOPE_SATELLITE` | `-e ota -t upload` | **Required.** A satellite's id, its name, or `all` |
+| `CALLIOPE_API_KEY` | `-e ota -t upload` | **Required.** A Calliope API key with the `firmware-release` preset (`satellites:read`, `satellites:firmware`, `satellites:update`; at most 90 days), made under *Account* → *API keys* → *New key*. Sent as `Authorization: Bearer`. The upload stops without it |
+| `CALLIOPE_SIGNING_KEY` | `-e ota -t upload` | The private key that signs the image. Default `~/.config/calliope/firmware-signing.pem` |
+
+`DEV_HUB` is a compiler flag, not a variable: set it through
+`PLATFORMIO_BUILD_FLAGS`, as above. The upload checks the gateway's
+certificate against the computer's own CA store.
+
+## Updates, over the air
+
+```bash
+export CALLIOPE_URL=https://calliope.example.com
+export CALLIOPE_API_KEY=calliope_...   # firmware-release preset
+CALLIOPE_SATELLITE=kitchen pio run -e ota -t upload     # or CALLIOPE_SATELLITE=all
+```
+
+This builds the image, signs it, uploads it to the hub at `CALLIOPE_URL`, and
+asks the hub to update the satellite. The satellite pulls the image over its
+own connection. It keeps the new image only if it reaches the hub again
+afterwards. Otherwise the bootloader rolls back.
+
+An image can also be uploaded on the Satellites tab, under **Firmware**:
+
+1. Build it: `pio run -e ota` builds `.pio/build/ota/firmware.bin` and uploads
+   nothing.
+2. For a satellite built with a public key, sign the image and put the
+   signature, in base64url, in **Signature**. The `openssl dgst` line in
+   [keys/README.md](keys/README.md#moving-a-satellite-to-a-new-key) makes one.
+3. Type the build's version in **Version**, exactly as
+   `git describe --always --dirty --tags` prints it in the same checkout. The
+   build stamps that string into the firmware, and the tab calls a satellite
+   up to date only when what it reports matches.
+4. Press **Upload**, then **Update every satellite** or a satellite's own
+   **Update**.
+
+This firmware connects to `/satellites/ws`. Pre-release firmware from before
+2026-09-25, when the feature was called nodes, connects to `/nodes/ws` and
+names its setup network `calliope-node-XXXX`. Until no such board is left,
+the gateway and the hub still answer the old path, so a board on that
+firmware is updated over the air like any other
+([ADR 0013](../../docs/adr/0013-satellites-one-door.md#renamed)).
+
+### Signed firmware
+
+A satellite built with a firmware signing public key installs only images
+signed by the matching private key. The signature is ECDSA P-256 over the
+image's SHA-256, in DER, and mbedTLS in the Arduino core verifies it on the
+satellite. The hub only carries the signature, so a hub that is compromised
+still cannot install its own firmware.
+
+The repository carries no key, so a fresh clone builds unsigned satellites
+until you make a key pair of your own. [`keys/README.md`](keys/README.md) says
+how, and where the build looks for the public half
+(`CALLIOPE_FIRMWARE_PUBKEY`, else `~/.config/calliope/firmware-signing.pub.pem`).
+A satellite built unsigned accepts any image the hub sends, so the first
+signed build can go over the air. From then on it refuses unsigned ones.
+[ADR 0021](../../docs/adr/0021-signed-firmware.md) records the decision.
+
+| | Build with the public key | Build without it |
+|---|---|---|
+| The build | prints `firmware signing: updates must be signed by key <id>` | prints an `UNSIGNED BUILD` warning and carries on |
+| An update with no signature | refused: `ota` `failed`, `unsigned image` | installed |
+| An update with a wrong signature | refused: `failed`, `bad signature` | installed |
+| `hello` | `caps.ota_key` = the key's id | no `ota_key` |
+
+The satellite checks the signature twice. It checks first against the SHA-256
+the hub announces, so it refuses a bad signature before it writes the spare
+slot. It checks again against the digest of the bytes it received, before
+`Update.end()` makes the slot bootable, and that second check decides.
+Rollback is unchanged: a signed image that cannot reach the hub still rolls
+back.
+
+`pio run -e ota -t upload` signs with the private key at `CALLIOPE_SIGNING_KEY`
+(default `~/.config/calliope/firmware-signing.pem`), through the `cryptography`
+package when PlatformIO's Python has it and the openssl CLI otherwise. It sends
+the signature as `signature=<base64url>` on `POST /satellites/firmware`. It
+stops before uploading when the build trusts a key but the private key is
+missing, or when the private key is not the build's.
+
+`scripts/sig_host_check.sh` builds the satellite's check (`src/ota_sig.cpp`) on
+a desktop against the same mbedTLS release (2.28.7) and runs it with throwaway
+keys. It accepts good signatures in base64 and base64url, and it refuses a
+signature of another image, a flipped bit, another key, truncated DER, a
+trailing byte, and text that is not base64. On the board, a signed image
+installed and one signed by another key was refused (25 Sep 2026). How long
+the check takes on the ESP32 is not measured.
+
+## Earcons
+
+Earcons are short feedback sounds, such as "I heard you", "done" and "that
+failed". The hub uploads them once and the satellite keeps them in flash. When
+the hub sends `{"type": "earcon", "id": "wake"}`, the satellite plays the sound
+from its own storage. The only thing that crosses the network is that message.
+
+- Storage is LittleFS on the `storage` partition (about 8 MB at `0x810000`).
+  The partition table is unchanged. On a board whose partition was never
+  formatted, the first boot formats it in a background task, so boot and Wi-Fi
+  do not wait. Until the format is done the satellite answers `earcon_list`
+  with `"ready": false`.
+- Each earcon is raw mono s16le at 48 kHz: at most 2 s (192 000 bytes), at most
+  16 earcons, with ids of `[a-z0-9_-]{1,24}`.
+- An upload works like a firmware update. The hub sends `earcon_put` (id, size,
+  sha256). The satellite asks for each piece with `earcon_next`, and the hub
+  answers with binary frame kind `4` (`4, 0, 0, 0, offset u32`, then up to 8
+  KB). The satellite writes to a temporary file. It keeps the earcon only when
+  the SHA-256 matches, and then replies `earcon_stored`. Any failure replies
+  `earcon_failed` with `op` (`put`, `play` or `delete`) and an `error`. An
+  upload is dropped after 5 s with no chunk, or on disconnect.
+- `earcon_list` is answered with `earcons`: the items (id, size, sha256), the
+  `ready` flag, and `last_load_us`, which is the time it took to read the last
+  earcon played from flash. That load time has not been measured on the board
+  yet.
+- An earcon plays immediately, mixed over any audio the hub is sending. It
+  replaces an earcon that is still sounding. `flush` does not stop it, and
+  ducking does not lower it. It plays at the satellite's volume, under the same
+  ceiling, and it appears on the loopback channel like any other speaker
+  output, so echo cancellation still works.
+
+## Ducking
+
+`{"type": "duck", "level": 20, "ms": 0}` lowers the hub's audio, for example
+while the satellite is listening. `level` uses the same 0-100 scale as
+`volume`, so a duck to 20 sounds like the volume set to 20. A level at or above
+the current volume changes nothing. The gain fades over at most 50 ms, so it
+does not click.
+
+- `ms` > 0 restores the volume after that many milliseconds. `ms` = 0 keeps the
+  duck until `{"type": "unduck"}` arrives.
+- A duck is not saved to NVS, because it changes too often for flash to take.
+  A reboot or a lost hub connection ends it. Otherwise a hub that restarted
+  could leave the satellite quiet with nothing to lift it.
+- It is applied to the samples, not the codec, so it can only lower the
+  output. Earcons are not ducked, so a chime can still be heard over lowered
+  speech.
+- `status` reports `duck` (the level, or `null`).
+
+## The ring
+
+| Ring | Meaning |
+|---|---|
+| orange, breathing | Wi-Fi setup network is open |
+| blue, spinning | connecting to Wi-Fi or the hub |
+| white, breathing slowly | connected, waiting to be adopted |
+| amber, breathing | adopted, but the hub is unreachable |
+| red, solid | privacy mute: the mics are powered down |
+| green, filling | firmware update in progress |
+| the wake word's colour, breathing, with a brighter arc gliding towards the talker | listening after a wake word, or for a conversation's next turn (the hub's `listen` mode) |
+| the wake word's colour, spinning | the hub is working on the command |
+| anything else | whatever the hub set |
+
+The board draws `listen` itself, from the colour and direction the hub sends,
+so the arc moves smoothly between the hub's updates. Firmware from before
+28 Sep 2026 does not have the mode, and the hub sends it a pulse instead. A
+wake word with no colour of its own uses the listening blue.
+
+That firmware also sends the ring's frames from an RMT channel large enough
+to hold a whole frame. Before it, the channel was refilled by an interrupt in
+the middle of each frame, and when Wi-Fi or a flash write delayed that
+interrupt, bits went to the wrong LED and random LEDs lit up dimly.
+
+With `lights_enabled` off (the Satellites tab's **Lights** box), the ring stays
+dark through everything above: reboots, updates and mute included. The setting
+is saved on the satellite and read before the first frame is drawn.
+
+The satellite says its settings (volume, mic gain, and the microphone, speaker
+and lights switches) in every `hello` as well as in `status`. A hub that adopts
+it before its first status therefore welcomes it with its own settings, so a
+dark satellite stays dark. Firmware before 2026-09-25 said them only in
+`status`, and the hub leaves such a satellite's settings out of the welcome
+until it has reported them
+([firmware compatibility](../../services/satellites/README.md#firmware-compatibility)).
+
+## Buttons
+
+The satellite reports every press and release to the hub. Each button may also
+do one thing on the satellite itself, chosen on the hub (`src/actions.h`):
+
+| Action | On the satellite |
+|---|---|
+| `mute` | The privacy mute, on or off |
+| `volume_up`, `volume_down` | One of twelve steps, one to an LED. The ring shows the level for 1.5 s, for a volume the hub sets too, unless the ring is dark. The level is a clock bar: it starts at the LED set as 12 o'clock (`ring_top`) and fills clockwise as seen, and `ring_upside_down` reverses it for a board whose LEDs run the other way round |
+| `lights` | Night mode: the ring off, or on |
+| `dimmer`, `brighter` | The ring's brightness down or up a step |
+
+They run here so they work with the hub down, and so only a button can undo
+the mute. The hub sends the table as `button_actions`. Until it does, Rec
+mutes and VOL+/- set the volume. A table without a mute keeps Rec as the mute, and
+so does one whose only mute is KEY1, which a stock board does not wire. A
+setting a button changes is saved and reported at once, in a status marked
+`"cause": "button"`. Two holds are recovery, whatever the buttons are set to:
+
+| Hold | |
+|---|---|
+| SET, 5 s | reopens the Wi-Fi setup network |
+| MODE, 10 s | factory reset: forgets Wi-Fi, hub and adoption |
+
+The six are one resistor ladder on GPIO39 (the mic board's sheet 3: 0.38 V for
+VOL+ up to 2.41 V for REC, 3.1 V idle). Each status carries `buttons_mv`, the
+ladder's latest, lowest and highest millivolts since the last status and how
+many polls ran, so a button that sends nothing can be told from one that
+never moved the line.
+
+**KEY1, the third button on the main board's edge (SW3), is not connected.**
+Its only path to the ESP32 is R37, a 0 Ω link to GPIO39 that is not fitted
+(main board sheet 2). Measured on 27 Sep 2026: pressing it moves the ladder
+not at all. Fitting R37 alone would also put KEY1's own 10 kΩ pull-up (R50) in
+parallel with the ladder's, which moves VOL+ to about 0.68 V, where it reads
+as VOL−. So KEY1 as a seventh button needs R37 fitted and R50 removed. The
+firmware already reads it (below 250 mV, as `key1`), and the hub lists it.
+
+## Sound out
+
+The board is a voice device, not a music speaker ([ADR 0014](../../docs/adr/0014-voice-satellite-not-a-music-speaker.md)):
+
+- **Mono.** The ES8311 has one DAC channel, so there is no stereo to be had.
+- **The 3.5 mm jack is differential.** OUTP is on the tip and OUTN, its
+  inverse, on the ring. Into a stereo amplifier that is the same sound in
+  opposite polarity on the two speakers: thin, and dizzying. For an aux
+  cable, take the tip only, or reverse one speaker's wires.
+- **A plug turns the speaker off and cuts the echo reference**, in hardware:
+  the jack's switch contacts feed both the amplifier and the ES7210 loopback.
+  The hub tells speaker from jack by that loopback while something plays.
+
+## Kept on the device, whatever the hub says
+
+- **The privacy mute.** It powers down the ES7210 mic front-end, and only a
+  button set to mute (REC, out of the box) turns it off. It is saved on the
+  satellite, so a restart, a power cut or an update the hub sends leaves the
+  microphones off and the ring red. A factory reset clears it.
+- **The volume ceiling.** 100 % is 0 dB at the DAC. The codec's +32 dB of
+  digital gain is never used.
+- **Recovery:** the setup portal, the factory reset, and firmware rollback.
+- **The firmware signature**, in a build with a public key. The hub cannot
+  waive it.
+
+## Power: the board does not start by itself after a power cut
+
+**Measured on 26 Sep 2026.** A cold power-on through the **POWER** port puts
+the chip in the ROM's download mode, and it waits there indefinitely. It
+answers a flashing tool without being reset, and the ring stays as it was.
+Any reset afterwards boots it normally: the RST button, a reset pulse on the
+UART, or the BOOT and RST buttons together. After that it reaches the hub in
+about 2.5 s.
+
+The cause is C14, read from the v1.1 schematic (sheets 2 and 5):
+
+- C14 (0.1 µF) sits across the BOOT button, SW9. The button reaches GPIO0 and
+  GPIO2 through D28, a BAT54C, so C14 hangs off GPIO0 through a diode.
+- Nothing charges C14 except GPIO0's weak internal pull-up. At a cold
+  power-on C14 is empty, so it holds GPIO0 low through D28 when the strap is
+  read, and the chip starts in download mode.
+- C14 then stays charged, because the diode stops it draining back into
+  GPIO0. That is why every later reset boots normally.
+- The reset line is not at fault. EN already has Espressif's recommended
+  delay, R185 (10 kΩ) and C127 (1 µF).
+- R40 (47 kΩ, not fitted) would not help. It sits on the cathode side of D30,
+  the auto-program diode, so it cannot lift GPIO0.
+
+Espressif's hardware guidelines warn against exactly this: "Do not add
+high-value capacitors at GPIO0, or the chip may enter download mode." The
+ESP32-DevKitC V4 had the same fault from its C15, and Espressif's advice there
+is to remove the part.
+
+The firmware cannot fix this: the decision is made in ROM before any code
+runs. The boot watchdog below never gets to run in this case. Burning the
+eFuse that disables download mode does not help either. The ROM then prints
+an error instead of booting, and the eFuse is permanent.
+
+**The UART port does not power the board.** D17, the diode from its VBUS, is
+not fitted. The USB-serial chip is powered from the board's own 3.3 V, so the
+UART cable alone leaves the board off.
+
+| Fix | |
+|---|---|
+| **Remove C14** (desolder only, nothing is added) | permanent; recommended. The BOOT button loses its debounce, which only matters for USB flashing. Not yet tried on this board |
+| Or a 10 kΩ from GPIO0 to 3.3 V | permanent; charges C14 before EN rises, but there is no footprint, so it needs a bodge wire |
+| Keep the UART connected to a computer and reset through it | works, but needs the computer |
+| Press **RST** once after power is applied | works, by hand, after every power cut |
+
+The boot journal (`src/boot.cpp`) is for the other kind of stall, one inside
+the firmware. It stamps each start-up step, sends the stamps to the hub
+(`GET /satellites/{id}` → `boot`), and restarts a start-up that has not
+reached Wi-Fi after 20 s.
+
+## Licence
+
+BSD 2-Clause, like the rest of the repository. Code ported from Espressif's
+esp_codec_dev (Apache-2.0) and the libraries fetched at build time are listed
+in [THIRD-PARTY-NOTICES.md](../../THIRD-PARTY-NOTICES.md).

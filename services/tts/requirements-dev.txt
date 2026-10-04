@@ -1,0 +1,16 @@
+# Everything the image needs, plus what the conformance suite needs to run it.
+# Deliberately NOT installed into the image: pytest and httpx have no business
+# in a container that serves audio.
+-r requirements.txt
+
+# voice_common.conformance is a pytest suite the shared package ships and this
+# service runs against its own app object, so a change to packages/common fails
+# here rather than on the NAS. The extra pulls pytest and httpx at the versions
+# the package was tested with.
+#
+# Naming the same path twice with different extras is not a conflict: pip's
+# resolver unions them, so `-r requirements.txt` above plus this line installs
+# [audio] and [conformance] together — checked with `pip install --dry-run`
+# before this file was written, because "double requirement given" is a real
+# pip error and the old pair of tarball lines never explained why it escaped it.
+./packages/common[audio,conformance]

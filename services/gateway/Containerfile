@@ -1,0 +1,131 @@
+# One door in front of every Calliope service, and the one place a credential
+# is checked.
+#
+#   :8080  the published listener, TLS:  sessions and API keys
+#              /v1/audio/* /transcribe     -> stt-stack:8000
+#              /v1/audio/speech /speak     -> tts-stack:8001 or tts-long:8002
+#              /jobs/*                     -> tts-long:8002
+#              /satellites/* and its socket -> voice-satellites:8003
+#              /ui/*                       -> voice-ui:8090
+#              /login /auth/* /admin/* /health /v1/models   answered here
+#   :8081  the internal listener, plain HTTP, NEVER published: service keys
+#          only, the same route table plus /runs and /internal/* (app/internal.py)
+#
+# TWO LISTENERS, ONE PROCESS, ONE WORKER. uvicorn serves :8080; the app's
+# lifespan starts :8081 on the same event loop, because the login throttle,
+# the delegation counts and the open-stream registry live in this process's
+# memory and both listeners need the same copy. More than one worker would
+# split them, so there is one, by design.
+#
+# Build, from the repository root -- the context is the root for every service
+# here. One context rule beats a per-service exception nobody remembers:
+#   docker build -f services/gateway/Containerfile -t calliope-gateway .
+#
+# State lives on three volumes, each owned by uid 1000 (the entrypoint takes
+# ownership of whatever is mounted):
+#   /data          gateway-data: calliope.db (users, sessions, keys, secrets, audit)
+#   /keys          calliope-keys: the identity signing key, a generated keyring,
+#                  the bootstrap marker. Never in the same backup as /data.
+#   /svc/<name>    calliope-svc-<name>, one per service: its service.key and
+#                  identity.pub, which the service mounts read-only.
+#
+# Run (compose or a TrueNAS app, on the network the backends share):
+#   docker run -p 8080:8080 \
+#     -v gateway-data:/data -v calliope-keys:/keys \
+#     -v calliope-svc-stt:/svc/stt ...one per service... \
+#     -e CALLIOPE_PUBLIC_ORIGIN=https://calliope.example \
+#     -e CALLIOPE_ADMIN_PASSWORD=<first access only; replaced at first login> \
+#     calliope-gateway
+#
+# A configuration fault never stops it: it starts LOCKED (app/lockmode.py),
+# answers /health, relays the satellites, serves :8081, and tells a person
+# what to fix. The one exception is an unreadable identity key, without which
+# nothing could be signed.
+
+FROM python:3.13-slim-trixie
+
+# util-linux supplies setpriv for the entrypoint's privilege drop. It is
+# normally already in the slim base; naming it means a base image change
+# cannot silently remove it, and `command -v` fails the build rather than the
+# container if it ever does.
+#
+# Nothing else is installed. No ffmpeg, no libsndfile, no curl: this process
+# never opens an audio file, and the healthcheck below uses the interpreter it
+# already has.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends util-linux \
+ && rm -rf /var/lib/apt/lists/* \
+ && command -v setpriv
+
+WORKDIR /srv
+
+# Repo-relative, because the context is the repository root. The shared
+# package carries the error envelope, the identity assertion format, the
+# scope table and the audit line format, so the gateway and every backend
+# read one copy of each.
+COPY packages/common/ ./packages/common/
+COPY services/gateway/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY services/gateway/app/ ./app/
+
+# The backend URLs default to the service names the compose file uses. They are
+# named here rather than left to the application's defaults so that `docker
+# inspect` shows what this container will talk to.
+#
+# THE SHARED ENTRYPOINT: TLS from GATEWAY_TLS_CERT and GATEWAY_TLS_KEY (handed
+# to uvicorn, which is why the command below is uvicorn), and ownership of the
+# three state directories before the drop to uid 1000.
+ENV VOICE_TLS_PREFIX=GATEWAY \
+    VOICE_CHOWN_DIRS="/data /keys /svc" \
+    GATEWAY_STT_URL=http://stt-stack:8000 \
+    GATEWAY_TTS_URL=http://tts-stack:8001 \
+    GATEWAY_TTS_LONG_URL=http://tts-long:8002 \
+    GATEWAY_BIND=0.0.0.0 \
+    PYTHONUNBUFFERED=1
+
+# uid 1000, created rather than reused: the slim base has no non-root account.
+# There is no USER instruction, for the same reason as in the siblings — the
+# entrypoint starts as root so it can take ownership of anything mounted,
+# then drops to uid 1000 before uvicorn runs. Nothing here ever serves as root.
+# The three state directories exist in the image too, owned by that uid, so a
+# run without volumes still starts (and loses its state with the container).
+RUN useradd --create-home --uid 1000 gateway \
+ && mkdir -p /data /keys /svc \
+ && chown 1000:1000 /data /keys /svc
+
+# 8081 is listed so `docker inspect` shows it exists. Never publish it: it
+# takes service keys, and compose gives it no port mapping.
+EXPOSE 8080 8081
+
+# /health needs no credential, and it answers 200 even when a backend is down
+# or the gateway is locked — a container must not be restarted because a
+# sibling is restarting, and a locked gateway still relays every satellite. It
+# reports `degraded` in the body; this probe only asks whether the gateway
+# itself is still answering.
+#
+# There is no HEALTHCHECK instruction, and the one that used to be here was
+# never in a published image. HEALTHCHECK is not a field in the OCI image spec,
+# so an OCI-format build drops it silently — and OCI is buildah's DEFAULT
+# format (`buildah bud --format`, default "oci"), which is what CI runs. The
+# comment that stood here claimed the opposite, that CI built in the docker
+# format; it did not, so the probe below was written, reviewed and shipped
+# nowhere. The three sibling images already had none for the same reason.
+#
+# It is passed at run time instead, where every runtime honours it. compose.yaml
+# at the repository root carries this exact probe for all four services:
+#
+#   docker run --health-cmd "python -c \
+#     \"import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=8).read()\"" ...
+#
+# python rather than curl, which is not in this image and is not worth a layer.
+
+ENTRYPOINT ["voice-entrypoint.sh"]
+# --loop: asyncio's own loop, with the listener's create_server replaced when
+# CALLIOPE_PROXY_PROTOCOL=1, so a PROXY header from HAProxy is read before TLS
+# (app/proxyproto.py). Without the variable it changes nothing.
+# --no-proxy-headers: uvicorn's own X-Forwarded-For handling would rewrite the
+# client address before the gateway sees it, trusting FORWARDED_ALLOW_IPS
+# rather than CALLIOPE_TRUSTED_PROXIES, the one setting that may (D67).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", \
+     "--loop", "app.proxyproto:EventLoop", "--no-proxy-headers", "--workers", "1"]

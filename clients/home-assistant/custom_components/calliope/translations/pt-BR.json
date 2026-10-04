@@ -1,0 +1,290 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Conectar ao Calliope",
+        "description": "O endereço do gateway do Calliope, que serve a API e a página, e uma chave de API criada no Calliope para o Home Assistant.",
+        "data": {
+          "url": "URL",
+          "api_key": "Chave de API",
+          "verify_ssl": "Verificar o certificado TLS"
+        },
+        "data_description": {
+          "url": "Por exemplo {example_url}",
+          "api_key": "Crie-a no Calliope: Account › API keys › New key, com o preset home-assistant. Só uma conta de administrador vê esse preset, e o Calliope mostra a chave uma única vez.",
+          "verify_ssl": "Desative só para um certificado autoassinado."
+        }
+      },
+      "reauth_confirm": {
+        "title": "O Calliope precisa de uma nova chave de API",
+        "description": "O Calliope recusou a chave: ela foi revogada ou expirou, ou a conta dona da chave foi desativada. Uma entrada criada antes da versão 0.3 não tem chave nenhuma, e agora o Calliope exige uma. No Calliope, abra Account › API keys › New key, escolha o preset home-assistant (só uma conta de administrador vê esse preset), crie a chave e cole-a aqui.",
+        "data": {
+          "api_key": "Chave de API"
+        },
+        "data_description": {
+          "api_key": "A nova chave. Ela começa com calliope_, e o Calliope a mostra uma única vez."
+        }
+      },
+      "reconfigure": {
+        "title": "Conexão com o Calliope",
+        "description": "Altere o endereço do gateway, a chave de API ou a verificação de TLS. A integração é recarregada com eles.",
+        "data": {
+          "url": "URL",
+          "api_key": "Chave de API",
+          "verify_ssl": "Verificar o certificado TLS"
+        },
+        "data_description": {
+          "url": "Por exemplo {example_url}",
+          "api_key": "Crie-a no Calliope: Account › API keys › New key, com o preset home-assistant. Só uma conta de administrador vê esse preset, e o Calliope mostra a chave uma única vez.",
+          "verify_ssl": "Desative só para um certificado autoassinado."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "O Calliope não respondeu nesse endereço.",
+      "invalid_auth": "O Calliope recusou a chave de API: ela é desconhecida, foi revogada ou expirou.",
+      "invalid_url": "Informe uma URL que comece com http:// ou https://.",
+      "malformed_key": "Isso não é uma chave de API do Calliope. Uma chave começa com calliope_ e tem 45 caracteres: cole-a inteira.",
+      "missing_scopes": "O Calliope aceitou a chave, mas ela não tem {scopes}. Os escopos de uma chave não podem ser alterados: crie uma nova chave com o preset home-assistant, que tem todos os escopos que esta integração usa.",
+      "not_calliope": "Algo respondeu, mas não é um gateway do Calliope.",
+      "unknown": "Algo inesperado deu errado. O log do Home Assistant tem os detalhes."
+    },
+    "abort": {
+      "already_configured": "Este gateway do Calliope já está configurado.",
+      "already_in_progress": "Este gateway do Calliope já está sendo configurado.",
+      "reauth_successful": "A nova chave funciona.",
+      "reconfigure_successful": "A conexão foi atualizada.",
+      "reauth_without_satellites": "A nova chave funciona, mas não alcança os satélites: ela não tem satellites:read. A fala funciona. Para os satélites, crie uma chave com o preset home-assistant.",
+      "reconfigure_without_satellites": "A conexão foi atualizada, mas esta chave não alcança os satélites: ela não tem satellites:read. A fala funciona. Para os satélites, crie uma chave com o preset home-assistant."
+    },
+    "create_entry": {
+      "no_satellites": "O Calliope está configurado, mas esta chave não alcança os satélites: ela não tem {scopes}. A fala funciona. Para os satélites, crie uma chave com o preset home-assistant e informe-a em Reconfigurar."
+    }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "wake_word": "Palavra de ativação {subtype} ouvida",
+      "trigger_word": "Palavra de gatilho {subtype} ouvida",
+      "command": "Comando transcrito",
+      "button_press": "{subtype} pressionado",
+      "button_release": "{subtype} solto",
+      "conversation_started": "Conversa iniciada",
+      "conversation_ended": "Conversa encerrada"
+    },
+    "trigger_subtype": {
+      "play": "Botão PLAY",
+      "set": "Botão SET",
+      "mode": "Botão MODE",
+      "rec": "Botão REC",
+      "vol_up": "Botão VOL+",
+      "vol_down": "Botão VOL-",
+      "key1": "Botão KEY1",
+      "hey_jarvis": "Hey Jarvis",
+      "hey_mycroft": "Hey Mycroft",
+      "hey_rhasspy": "Hey Rhasspy",
+      "alexa": "Alexa",
+      "weather": "Weather"
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "online": {
+        "name": "Conectado"
+      },
+      "privacy_mute": {
+        "name": "Mudo de privacidade"
+      },
+      "under_voltage": {
+        "name": "Subtensão"
+      }
+    },
+    "event": {
+      "voice": {
+        "name": "Voz",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "wake_word": "Palavra de ativação",
+              "trigger_word": "Palavra de gatilho",
+              "command": "Comando",
+              "conversation_started": "Conversa iniciada",
+              "conversation_ended": "Conversa encerrada"
+            }
+          }
+        }
+      },
+      "button": {
+        "name": "Botão {button}",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "press": "Pressionado",
+              "release": "Solto"
+            }
+          }
+        }
+      }
+    },
+    "number": {
+      "mic_gain": {
+        "name": "Ganho do microfone"
+      },
+      "brightness": {
+        "name": "Brilho do anel"
+      }
+    },
+    "select": {
+      "output_satellite": {
+        "name": "Reproduz em",
+        "state": {
+          "own": "No próprio alto-falante"
+        }
+      },
+      "output_device": {
+        "name": "Saída",
+        "state": {
+          "default": "Padrão do sistema"
+        }
+      },
+      "input_device": {
+        "name": "Entrada do microfone",
+        "state": {
+          "default": "Padrão do sistema"
+        }
+      }
+    },
+    "sensor": {
+      "wifi_signal": {
+        "name": "Sinal do Wi-Fi"
+      },
+      "uptime": {
+        "name": "Tempo de atividade"
+      },
+      "cpu_temperature": {
+        "name": "Temperatura da CPU"
+      },
+      "last_command": {
+        "name": "Último comando"
+      },
+      "last_wake_word": {
+        "name": "Última palavra de ativação"
+      }
+    },
+    "stt": {
+      "parakeet": {
+        "name": "Parakeet"
+      },
+      "whisper": {
+        "name": "Whisper"
+      }
+    },
+    "switch": {
+      "microphone": {
+        "name": "Microfone"
+      },
+      "speaker": {
+        "name": "Alto-falante"
+      },
+      "lights": {
+        "name": "Luzes"
+      },
+      "echo_reference": {
+        "name": "Referência de eco"
+      },
+      "airplay": {
+        "name": "AirPlay"
+      }
+    },
+    "text": {
+      "airplay_name": {
+        "name": "Nome no AirPlay"
+      }
+    },
+    "tts": {
+      "kokoro": {
+        "name": "Kokoro"
+      }
+    }
+  },
+  "exceptions": {
+    "hub_refused": {
+      "message": "O hub do Calliope recusou a alteração: {error}"
+    },
+    "satellite_refused": {
+      "message": "O Calliope não conseguiu fazer isso em {satellite}: {error}"
+    },
+    "no_satellites": {
+      "message": "O alvo não contém nenhum satélite do Calliope."
+    },
+    "tts_failed": {
+      "message": "O Calliope não conseguiu sintetizar a fala: {error}"
+    },
+    "no_voice": {
+      "message": "O Calliope não tem voz para {language}."
+    },
+    "speaker_off": {
+      "message": "{satellite} está com o alto-falante desligado."
+    },
+    "unsupported_url": {
+      "message": "O Calliope reproduz apenas a mídia do Home Assistant e URLs http ou https."
+    },
+    "hub_cannot_play": {
+      "message": "Este hub do Calliope não consegue reproduzir mídia: atualize-o."
+    },
+    "play_failed": {
+      "message": "O Calliope não conseguiu reproduzir isso em {satellite}: {error}"
+    },
+    "no_update": {
+      "message": "Não há firmware para atualizar {satellite}."
+    },
+    "update_skipped": {
+      "message": "O hub não iniciou a atualização: {reason}"
+    }
+  },
+  "issues": {
+    "missing_scope": {
+      "title": "Falta um escopo na chave de API do Calliope",
+      "description": "O Calliope em {entry} recusou uma requisição porque a chave de API da integração não tem {scopes}. Os escopos de uma chave não podem ser alterados, então crie uma nova: no Calliope, abra Account › API keys › New key, escolha o preset home-assistant, que tem todos os escopos que esta integração usa (só uma conta de administrador vê esse preset), e crie a chave. Depois abra Configurações › Dispositivos e serviços › Calliope, escolha Reconfigurar no menu da entrada e cole a nova chave."
+    }
+  },
+  "services": {
+    "say": {
+      "name": "Falar",
+      "description": "Fala um texto nos satélites, com o Kokoro, pelo hub.",
+      "fields": {
+        "text": {
+          "name": "Texto",
+          "description": "O que falar. No máximo 2000 caracteres."
+        },
+        "voice": {
+          "name": "Voz",
+          "description": "Uma voz do Kokoro, por exemplo pf_dora ou bm_george. Vazio usa a voz padrão do hub."
+        }
+      }
+    },
+    "tone": {
+      "name": "Tom",
+      "description": "Toca um tom senoidal nos satélites.",
+      "fields": {
+        "frequency": {
+          "name": "Frequência",
+          "description": "Em hertz, de 50 a 8000."
+        },
+        "seconds": {
+          "name": "Duração",
+          "description": "Em segundos, até 10."
+        }
+      }
+    },
+    "push_to_talk": {
+      "name": "Apertar para falar",
+      "description": "Começa a ouvir nos satélites, como faz o botão de apertar para falar deles.",
+      "fields": {
+        "wake_word": {
+          "name": "Palavra de ativação",
+          "description": "Escuta como se esta palavra de ativação tivesse sido dita, para que valham o modo e a ação dela. Vazio usa o modo e a ação do próprio apertar para falar."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,1199 @@
+# stt-stack
+
+Self-hosted speech-to-text. One container, whole pipeline, CPU only.
+
+```text
+audio
+  ↓  VAD          Silero — drop silence first
+  ↓  recogniser   Parakeet TDT 0.6B v3 by default, Whisper large-v3 on request
+  ↓  glossary     repair known terms — opt-in, per request
+text
+```
+
+No CUDA, no torch. One model by default, chosen by `STT_MODEL`, or several side by side with `STT_MODELS`; a request picks one with `model`.
+
+## Which model
+
+**Parakeet is the default.** Measured across 25 conditions and five Brazilian
+Portuguese corpora on identical audio:
+
+| Engine | pt-BR WER | English WER | rtf | RAM | Disk |
+|---|---|---|---|---|---|
+| **Parakeet TDT 0.6B v3** | **0.144** | **0.121** | **47–63×** | 1.4 GB | 461 MB |
+| Whisper large-v3 | 0.250 | 0.131 | 0.5–0.9× | 2.9 GB | 2.9 GB |
+
+Parakeet won 21 of 25 conditions at roughly seventy times the speed. It also
+degrades far more gracefully — band-limiting to 4 kHz, which is what a cheap
+or distant microphone does, cost Whisper +206% WER on CORAA and Parakeet +41%.
+
+**Whisper is worth choosing** for clean read speech, where it genuinely leads,
+and for translation. It used to be the only engine that could take a vocabulary
+at decode time; that is no longer true. Both engines now bias their decoder
+from the same terms — Whisper always, Parakeet when a request adds
+`boost=true`. See [Decode-time biasing on Parakeet](#decode-time-biasing-on-parakeet).
+
+**A Brazilian Portuguese fine-tune can run beside Parakeet.**
+`STT_MODELS=parakeet,parakeet-pt-br` loads
+`alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx`, Parakeet v3 fine-tuned on
+the TAGARELA corpus, as a second engine that a request picks with
+`model=parakeet-pt-br`. Measured against Parakeet v3 on the CPU host on
+28 Sep 2026, word error rate on Brazilian Portuguese:
+
+| Audio | `parakeet-pt-br` | `parakeet` |
+|---|---|---|
+| Spoken commands | **0.224** | 0.436 |
+| The same commands through a cheap microphone | **0.195** | 0.523 |
+| CORAA, spontaneous speech | **0.110** | 0.219 |
+| Commands after an English-sounding wake word | **0.129** | 0.313 |
+| Median time per command | **355 ms** | 410 ms |
+
+Parakeet heard up to 9% of those clips as English; the fine-tune heard none.
+It is useless for English (WER 0.89), so it is loaded for Portuguese only and
+never as the only engine of a stack that also hears English. Its weights are
+fp32, 2.4 GB, against Parakeet's 461 MB in int8.
+
+**Canary 1B v2 is not offered**, although onnx-asr loads it and it takes a
+language. On the same host it ran at 3.2× realtime against Parakeet's 9.4×,
+was no more accurate on Brazilian Portuguese commands, and on unclear speech
+its autoregressive decoder looped ("falei, falei, …") for 48 s on a 3 s
+command. [ADR 0016](../../docs/adr/0016-several-stt-engines.md) has the
+decision and what it costs.
+
+## Status
+
+`main` is the one long-lived branch and publishes `:latest`. A release is a
+`v*` tag, published under that version, and the version tag is the one to
+deploy: `compose.yaml` pins `:v0.2.0`. See
+[ADR 0012](../../docs/adr/0012-one-branch.md).
+
+## Run
+
+```bash
+docker run -p 8000:8000 -v stt-models:/models \
+  --cpus 4 -e STT_THREADS=4 \
+  ghcr.io/gabrielbelli/calliope-stt:v0.2.0
+```
+
+First start downloads each engine it loads into the volume. Later starts are
+immediate.
+
+**It answers the Calliope gateway and nobody else.** Every route but `/health`
+needs the gateway's signed identity assertion ([Identity](#identity)), so the
+examples in this file go to the gateway, with an API key, and it forwards them
+by the same path:
+
+```bash
+export CALLIOPE_URL=https://calliope.example   # the gateway, not this port
+export CALLIOPE_KEY=calliope_…                  # Account › API keys, preset transcribe-only
+
+curl -H "Authorization: Bearer $CALLIOPE_KEY" -F file=@clip.wav "$CALLIOPE_URL/transcribe"
+```
+
+```json
+{
+  "text": "I need to make a comet on the harmony dashboard",
+  "raw": "I need to make a comet on the harmony dashboard",
+  "repaired": [],
+  "model": "parakeet",
+  "audio_seconds": 4.1,
+  "speech_seconds": 3.2,
+  "compute_seconds": 2.4,
+  "realtime_factor": 1.7
+}
+```
+
+**No glossary is applied unless you ask for one.** `text` equals `raw` above
+because this request selected no profile — see [Glossary profiles](#glossary-profiles).
+Select one and the repair happens:
+
+```bash
+curl -H "Authorization: Bearer $CALLIOPE_KEY" -F file=@clip.wav -F glossary=dictation "$CALLIOPE_URL/transcribe"
+```
+
+```json
+{
+  "text": "I need to make a commit on the harmony dashboard",
+  "raw": "I need to make a comet on the harmony dashboard",
+  "repaired": ["commit"]
+}
+```
+
+**This route takes 16 kHz only.** Any container libav reads is fine — flac,
+mp3, m4a, mp4, ogg, wav, webm — and stereo is downmixed, but a clip at another
+sample rate is rejected rather than resampled, so a client sending 44.1 kHz
+finds out immediately instead of quietly getting worse transcripts. That rule
+is this route's alone: `/v1` resamples, because no OpenAI client anticipates
+it.
+
+## OpenAI-compatible API
+
+Two routes speak OpenAI's audio shape, so anything already pointed at that API
+works here by changing a base URL:
+
+```text
+POST /v1/audio/transcriptions
+POST /v1/audio/translations
+```
+
+```bash
+curl -H "Authorization: Bearer $CALLIOPE_KEY" \
+     -F file=@clip.wav -F model=whisper-1 \
+     "$CALLIOPE_URL/v1/audio/transcriptions"
+```
+
+```json
+{"text": "I need to make a comet on the harmony dashboard",
+ "usage": {"type": "duration", "seconds": 4}}
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="https://calliope.example/v1", api_key="calliope_…")
+
+with open("clip.wav", "rb") as clip:
+    print(client.audio.transcriptions.create(model="whisper-1", file=clip).text)
+    # Add extra_body={"glossary": "tech"} to select a profile — see below.
+```
+
+`response_format` takes `json`, `text`, `verbose_json`, `srt` and `vtt`. All
+nine input formats the specification lists are accepted — flac, mp3, mp4, mpeg,
+mpga, m4a, ogg, wav and webm — at any sample rate, in mono or stereo. Decoding
+is libav, and it resamples: **this route does not have the native route's
+16 kHz rule**, because no OpenAI client anticipates one and a 44.1 kHz mp3 is
+the ordinary case there.
+
+### Every field is honoured, or refused by name
+
+Nothing is accepted and dropped. A dropped field is a client believing
+something false about the transcript it just received, and this surface used to
+drop eleven of them — `timestamp_granularities[]`, `chunking_strategy`,
+`include[]`, `language`, `temperature`, `prompt`, `keywords[]`, `languages[]`,
+`stream`, both diarisation fields — each with a 200 and a body that gave no
+sign. `stream=true` was the worst: the client's event loop completed having
+seen no events and raised nothing.
+
+| Field | Behaviour |
+|---|---|
+| `file` | All nine formats, any rate, mono or stereo |
+| `model` | **Required**. It picks an engine only when it names one `STT_MODELS` loaded. Anything else, `whisper-1` included, gets the default. See the deviation below |
+| `response_format` | `json`, `text`, `verbose_json`, `srt`, `vtt`. `diarized_json` is refused |
+| `timestamp_granularities[]` | Honoured. `segment` is the default, `word` adds word timings |
+| `chunking_strategy` | Honoured — `server_vad`'s `threshold`, `prefix_padding_ms` and `silence_duration_ms` tune the VAD this service already runs |
+| `stream` | Honoured on Whisper, refused on Parakeet. See below |
+| `language`, `temperature` | Honoured on Whisper, refused on Parakeet |
+| `prompt`, `keywords[]` | Honoured on **both**, in whichever halves the engine has. See [A request's own vocabulary](#a-requests-own-vocabulary) |
+| `glossary` | **Extension.** Named profiles, `glossary=tech,dictation`. Honoured on both engines. See [Glossary profiles](#glossary-profiles) |
+| `boost` | **Extension.** `boost=true` switches decode-time biasing on for this request. Honoured on Parakeet, refused on Whisper. See [Decode-time biasing on Parakeet](#decode-time-biasing-on-parakeet) |
+| `clip_start`, `clip_end` | **Extension.** Seconds of the file, 0 to 86400: only that window is decoded and transcribed, and every time in the answer is on the file's own timeline. Refused with `stream=true` and on `/v1/audio/translations` |
+| `include[]=logprobs` | Honoured on Parakeet, refused on Whisper |
+| `languages[]` | Refused: neither engine takes a candidate set |
+| `known_speaker_names[]`, `known_speaker_references[]` | Refused: nothing here diarises |
+| anything else | Refused by name. `CreateTranscriptionRequest` sets `additionalProperties: false` |
+
+Every refusal is a 400 in OpenAI's envelope, naming the field in `param` and
+saying which engine could do it:
+
+```json
+{"error": {"message": "Unsupported parameter: 'language' is not supported by the 'parakeet' engine, which detects the language itself and takes no hint. …", "type": "invalid_request_error", "param": "language", "code": "unsupported_parameter"}}
+```
+
+### What each engine can do
+
+The two recognisers are not interchangeable, and the compatibility layer
+answers for the difference rather than papering over it. What a request may
+send depends on the engine it reaches, not on the deployment. Under
+`STT_MODELS=parakeet,whisper`, `stream=true` streams with `model=whisper` and
+is refused with `model=whisper-1`, because `whisper-1` reaches the default
+engine. A refusal names the fix: the `model` of a loaded engine that can, or
+the deployment that would.
+
+`GET /health` lists every loaded engine under `models`, the default first, so
+a client can find out without spending a request on a refusal:
+
+```json
+"models": [
+  {"id": "parakeet", "family": "parakeet", "default": true, "languages": ["bg", "cs", "…"],
+   "accepts_language": false, "accepts_boost": true, "can_translate": false, "can_stream": false},
+  {"id": "parakeet-pt-br", "family": "parakeet", "default": false, "languages": ["pt"],
+   "accepts_language": false, "accepts_boost": true, "can_translate": false, "can_stream": false}
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | What a request sends as `model` to reach this engine, and what `x-stt-model` says after it ran |
+| `family` | `parakeet` or `whisper`: the code that runs it, and what `x-stt-engine` says |
+| `default` | Whether a request with any other `model` gets this engine |
+| `languages` | The ISO 639-1 codes it can hear |
+| `accepts_language`, `accepts_boost` | Whether it takes a `language` field, and `boost=true` |
+| `can_translate`, `can_stream` | Whether it answers `/v1/audio/translations` and `stream=true` |
+
+The top-level `translations`, `streaming` and `accepts_vocabulary` are true
+when any loaded engine can. `model` is the default engine's id, and
+`model_id` appears only without `STT_MODELS`. The Home Assistant integration
+builds one speech-to-text entity from each entry, and the satellite hub reads
+the list to choose an engine for each wake word, so both break if a field is
+renamed.
+
+`/transcribe` takes no `model`. It always runs the default engine, and its
+`model` field names that engine.
+
+| | `parakeet` (default), `parakeet-pt-br` | `whisper` |
+|---|---|---|
+| `stream=true` | refused — batch decoder | transcript deltas, one per window |
+| `/v1/audio/translations` | refused — no translate task | `task="translate"` |
+| `language` | refused — takes no hint | honoured |
+| `prompt`, `keywords[]` | honoured — post-decode repair, *and* decode-time biasing with `boost=true` | joined into hotwords, *and* the same repair |
+| `glossary` | honoured — repair, *and* biasing with `boost=true` | honoured — repair *and* hotwords |
+| `boost` | honoured — switches decode-time biasing on for this request | refused — hotwords here are unconditional, there is nothing to switch |
+| `temperature` | refused — no sampling temperature | honoured, and it disables the fallback ladder |
+| `include[]=logprobs` | per-token logprobs | refused — only a per-segment average exists |
+| `verbose_json.language` | `"unknown"` — no language ID in the image | the detected language, e.g. `"english"` |
+| `segments` | cut at the VAD's own pauses | Whisper's own, with its own `seek` and `no_speech_prob` |
+| `words` | from TDT token timings | from Whisper's word timestamps |
+
+### Streaming
+
+`stream=true` is genuinely incremental on Whisper and refused on Parakeet.
+
+faster-whisper yields each segment as CTranslate2 finishes the 30-second window
+it belongs to. Measured over HTTP with `tiny`/int8 on four threads, a 297-second
+clip:
+
+```text
+first delta   6.31 s
+last event   85.07 s      the first event is 7% of the way in
+```
+
+A clip shorter than one window has one window, so its first and last deltas
+arrive together — 2.6 s on a 14.2-second clip. That is the model's granularity
+showing through, not a shortcut here.
+
+Parakeet encodes the whole waveform and then runs a decode loop that emits
+nothing until it ends: 5.07 s to the first and only output on that same 14.2
+second clip. There is no partial transcript to send, so the field is refused
+rather than answered with one delta at the end. Cutting a finished transcript
+into timed deltas would be a lie a client builds timing assumptions on, and the
+specification itself notes that streaming is ignored for `whisper-1`, so a
+refusal has precedent.
+
+On the wire: bare `data:` frames, no `event:` name lines, every event
+terminated by a blank line including the last, and no `[DONE]` sentinel. The
+schema models the JSON payload only, and openai-python dispatches on the JSON
+`type`; the trailing blank line is the one that matters, because its decoder
+drops a final event ending in a single newline silently, with no error. The
+concatenation of every `transcript.text.delta` equals the `transcript.text.done`
+text exactly — glossary repair runs per segment as it is emitted, so a client
+that renders deltas and a client that waits for the terminal event see the same
+transcript.
+
+### Errors
+
+Every `/v1` error is OpenAI's envelope with all four keys — `type`, `message`,
+`param` and `code` — where `param` and `code` are present as `null` rather than
+missing. That includes a 404 on an unknown path and a 405 on a wrong method,
+both of which used to leak FastAPI's `{"detail": ...}`, which openai-python
+reports as a bare "unknown error". A rejected request is a **400**, which is
+what the real API answers and what a client written against it branches on.
+
+`STT_MAX_CONCURRENT` puts a ceiling on how many transcriptions run at once;
+past it, `/v1` answers **429** with `Retry-After` instead of queueing. It is
+unset by default — a limit picked here rather than measured on your host would
+start refusing work the service is doing happily today.
+
+### Which route to prefer
+
+**`/transcribe`, wherever you control the client.** It is the same pipeline,
+and it returns what the OpenAI shape has no field for:
+
+| | `/transcribe` | `/v1/audio/transcriptions` |
+|---|---|---|
+| Transcript | yes | yes |
+| Which glossary terms fired | `repaired` | `x-glossary-repaired` |
+| `raw` — the transcript before repair | yes | — |
+| `realtime_factor` and the timings behind it | yes | — |
+| Segments, words, subtitles, streaming | — | yes |
+| Works with an unmodified OpenAI client | — | yes |
+
+A silent substitution is worse than no substitution: if a glossary rule is
+wrong, you want to see it named. The native route puts that list in `repaired`;
+the compatible route could not, and now answers it in a header instead —
+**`x-glossary-repaired`**, present only when something was actually rewritten,
+listing the terms comma-separated and percent-encoded (a header value is
+latin-1 on the wire and a glossary term is not). A body key would have changed
+the response shape, which ADR 0001 forbids an extension from doing, and `text`,
+`srt` and `vtt` have nowhere to put one anyway.
+
+It is absent on `stream=true`: the headers go out before the first delta is
+decoded, so at that point nothing has been repaired. The deltas themselves are
+already repaired.
+
+### Deviations
+
+What cannot be 1:1, why, and the measurement that forces it. Nothing here is
+hidden and nothing is faked.
+
+**`model` picks an engine only when it names one `STT_MODELS` loaded.** It is
+required, as the specification requires it. `model=parakeet-pt-br` or
+`model=whisper` reaches that engine on a deployment that loaded it. Any other
+name, `whisper-1` included, gets the default engine: the first in
+`STT_MODELS`, or the one `STT_MODEL` names. Refusing `whisper-1` would reject
+every existing client (Open WebUI sends it, and so does the example above) to
+make a point about a name. So the request is answered, and **every `/v1`
+response carries `x-stt-engine` and `x-stt-model`**: the family that ran and
+the engine's id. `parakeet-pt-br` answers `x-stt-engine: parakeet` and
+`x-stt-model: parakeet-pt-br`. Honesty rather than obedience.
+
+`whisper-1` does not select Whisper even where Whisper is loaded. An OpenAI
+client nobody configured sends `whisper-1`, and it gets the engine the
+operator made the default rather than the slowest one. Send `model=whisper`.
+A deployment still loads one engine unless told otherwise: Parakeet needs
+1.4 GB resident and Whisper large-v3 2.9 GB, and a cold load is minutes.
+
+**No streaming, translation, `language` or `temperature` on a Parakeet
+engine.** All four are refusals, not silences, and all four are properties of
+a TDT decoder that has no such mechanism and nothing downstream that can stand
+in for one. They follow the engine a request picks. Load Whisper beside
+Parakeet (`STT_MODELS=parakeet,whisper`) and send `model=whisper`, or deploy
+with `STT_MODEL=whisper`, and pay the order of magnitude in latency.
+
+`prompt` and `keywords[]` used to be a fifth and sixth, on the grounds that
+Parakeet's decoder took no vocabulary. That was wrong twice over: they reach
+the post-decode repair, and since decode-time biasing landed they reach the
+decoder too. The lesson is in the list above — a refusal has to name a
+mechanism that genuinely does not exist, and "the library exposes no argument
+for it" is not that.
+
+**No diarisation.** `diarized_json`, `known_speaker_names[]` and
+`known_speaker_references[]` are refused. There is no speaker-embedding or
+clustering component in this image and neither engine produces speaker labels.
+
+**Two segment fields are synthesised under Parakeet.** `seek` is a Whisper
+30-second window offset and there are no windows — the encoder runs over the
+whole waveform — so it is `0`. `no_speech_prob` is a Whisper decoder output
+that a TDT decoder does not produce, so it is `0.0`; the VAD has already
+removed what it believed was silence. `tokens` is empty, because onnx-asr maps
+token ids to strings inside its decoder and returns only the strings, and an
+array of invented integers would be worse than an empty one.
+
+**Word timings mean slightly different things.** Whisper reports a start and an
+end per word. Parakeet's TDT decoder reports the frame at which each token was
+*emitted*, quantised to 0.08 s, so a word's `end` is its last token's
+timestamp and its `start` is the timestamp of the token before it. Words are
+therefore contiguous, with no invented gaps.
+
+**`usage` is the duration variant only** — `{"type": "duration", "seconds": N}`
+— because neither engine is billed by tokens or reports an input token count.
+The terminal streaming event omits `usage` entirely for the same reason: the
+schema pins it to the token variant there, and inventing `input_tokens` would
+be worse than an absent optional field.
+
+**`glossary` is an extension, and it is off unless asked for.** OpenAI has no
+glossary-profile field, so this one travels the way ADR 0001 requires an
+extension to travel — a body field an SDK reaches with `extra_body`, sitting in
+the allowlist beside `keywords[]` and `languages[]`, absent by default. A
+client that knows nothing about it behaves exactly as it would against OpenAI,
+and the four `/glossaries` routes that manage the profiles are deliberately
+native rather than `/v1`.
+
+**`clip_start` and `clip_end` are the third extension, on the same pattern.**
+voice-ui sends them for a pasted link's Start at and Stop at, because it has no
+ffmpeg and sends the whole file; this service decodes only that window,
+stopping at `clip_end`, and shifts every time it returns by `clip_start`, so a
+player of the whole file lines up with the transcript.
+
+**Glossary repair happens on strings**, when a profile was selected or a
+request sent terms of its own. It is applied to the whole transcript,
+and separately to each segment and each word, so a rule spanning a boundary —
+`cloud code` split across two segments — fires in `text` and cannot fire inside
+the smaller unit. `/transcribe` names every rule that fired in `repaired`, and
+`/v1` in `x-glossary-repaired`.
+
+**`seek` is not remapped.** With the VAD on, the recogniser sees speech runs
+concatenated, and every start and end is mapped back onto the clip you sent.
+`seek` indexes a decoder window rather than naming a moment, so it is passed
+through as the decoder reported it. `id` is *not* passed through: faster-whisper
+numbers its segments from 1 and the specification's own example numbers from 0,
+so both engines are renumbered from 0 here rather than answering the same field
+differently depending on which one is loaded.
+
+**Two conventions chosen by fiat.** `vtt` is served as `text/vtt; charset=utf-8`
+— the specification declares no content type for it, and a browser needs that
+one before it will treat the body as a track. There is no `[DONE]` sentinel on
+the stream: nothing authoritative says the real API emits one, and both SDK
+decoders tolerate its absence.
+
+
+## Identity
+
+**This service answers the Calliope gateway and nobody else.** Every request
+but `GET /health` must carry `X-Calliope-Identity`: an assertion the gateway
+signs with Ed25519 for this service alone (`aud=stt`), which lives 60 seconds.
+The service checks it with the gateway's public key, which the gateway writes
+to `identity.pub` on this service's own credential volume, mounted read-only at
+`/run/calliope`. Nothing here holds anything that could sign one. Without a
+valid assertion the answer is 401, in OpenAI's envelope on every route:
+
+```json
+{"error": {"message": "No valid identity assertion. This service answers only requests the Calliope gateway forwards.", "type": "invalid_request_error", "param": null, "code": "unauthenticated"}}
+```
+
+So a client never talks to this port. It talks to the gateway, with an API key
+or a signed-in session, and the gateway forwards `/transcribe`, `/v1/audio/*`
+and `/glossaries*` by the same path when the credential holds the route's scope
+(`speech:transcribe`, `glossaries:read:own`, `glossaries:write:own`). Keys are
+made on the web page under Account › API keys; `transcribe-only` is the narrow
+preset, and `home-assistant` is the one the integration uses.
+
+- **`/health` is open**, `/health/` included: a container healthcheck has no
+  way to be given an assertion. Its status is `not_ready` until the gateway has
+  written `identity.pub` and `service.key`, because until then every other
+  request would be refused. It lists only the system's glossary profiles and
+  the built-ins, never a user's.
+- **`/docs`, `/redoc` and `/openapi.json` do not exist.** A schema is a free
+  map of the service.
+- **`STT_API_KEYS` is gone.** Left set, it is ignored: the service keeps
+  serving, logs an ERROR naming it once a minute, and lists it in `/health` as
+  `ignored_variables`. The value is never logged. Remove it.
+- **No handler sees an `X-Calliope-*` header.** They are removed from the
+  request once checked, so nothing here can pass one on.
+- **Every run record says whose run it was**: the user's ID, or
+  `svc:satellites` for a satellite's command, and the session, API key or
+  service it came in with. A person's transcripts appear in their own Jobs
+  list and household speech in nobody's. Records go to the gateway's internal
+  listener, as `RUNLOG_URL=http://voice-gateway:8081`, carrying this service's
+  key from `/run/calliope/service.key`.
+- **Glossary profiles belong to someone.** Which ones a request can name is
+  decided from the same assertion; see [Whose profile it is](#whose-profile-it-is).
+
+The benchmark in `bench/` is a client like any other: point it at the gateway
+and export `CALLIOPE_KEY`.
+
+## TLS
+
+Set both `STT_TLS_CERT` and `STT_TLS_KEY` to PEM files and the container
+serves HTTPS. Leave them unset and it serves plain HTTP, as before.
+
+```yaml
+services:
+  stt:
+    environment:
+      STT_TLS_CERT: /etc/letsencrypt/live/stt.example.net/fullchain.pem
+      STT_TLS_KEY: /etc/letsencrypt/live/stt.example.net/privkey.pem
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+```
+
+**Mount `/etc/letsencrypt`, not `live/<domain>`.** The files under `live` are
+relative symlinks into `../../archive/<domain>/`. Mount the `live` directory
+alone and the symlinks arrive intact with their targets left outside the
+container, where they resolve to nothing and uvicorn exits on a missing file.
+
+Setting only one variable is a configuration error, and the container refuses
+to start. It used to warn and serve plain HTTP, which is the failure that
+hides: the operator reads "TLS is configured" from their own compose file and
+believes it, while a bearer token crosses the LAN in the clear on every
+request. Failing to start is the loud version.
+
+Overriding the container's `command:` with TLS configured is refused outright.
+Only uvicorn is given the certificate, so any other command would serve plain
+HTTP with the deployment believing otherwise — the same silent failure, and
+the one thing worse than being told is not being told.
+
+Both files must be readable by uid 1000, which is what the service drops to,
+and the entrypoint checks that **as uid 1000** before starting rather than
+leaving uvicorn to fail on it with a traceback. Certbot leaves `archive/` mode
+`0700` and the private key `0600`, both owned by root, so the straight mount
+above needs either those permissions widened or a deploy hook that copies the
+pair somewhere owned by uid 1000.
+
+**Nothing here generates a certificate.** A self-signed certificate that
+appears by magic is one every client is eventually told to stop verifying,
+which is worse than the plain HTTP it replaced. Use a real one — an internal
+CA, or Let's Encrypt over DNS-01 for a host with no public address — or
+terminate TLS at a reverse proxy in front of the container and leave both
+variables unset.
+
+Under TLS the healthcheck probe needs the `https://` URL and something that
+can verify the certificate.
+
+## Why there is no second model
+
+A consensus pass was built, measured, and removed. The idea was that two
+models failing differently would flag the words worth doubting.
+
+In practice, across every disagreement observed, **the second model was the
+wrong one**. Not once did it catch a real error. A second opinion only informs
+when it is roughly as good as the first; when it is reliably worse, its
+dissent reduces to "the weaker model is wrong again" — noise, at about 40% of
+throughput.
+
+The cost landed worst where it mattered. On short clips, which is what
+dictation consists of, fixed per-request cost dominates:
+
+```text
+long clips (read corpora)          rtf 1.26 – 1.60
+short clips (spontaneous corpora)  rtf 0.39 – 0.47
+```
+
+## Why no LLM cleanup
+
+The obvious next stage, and a trap at any size that fits beside a recogniser
+on a CPU box. Tested at 4B with an explicit prompt forbidding it, the cleanup
+stage still:
+
+- inverted meaning — "makes no sense to be available to me" became "are not
+  available to me"
+- reversed pronouns, turning "those tasks for you" into "those tasks for me"
+- deleted content it was told twice to preserve
+- leaked its own reasoning into the output ("No, that's not right")
+
+Reliable adherence starts around 14B, which needs 10–20 GB of VRAM. Below
+that the raw transcript is more faithful than the cleaned one, and a faithful
+transcript is the product.
+
+## Configuration
+
+| Variable | Default | Notes |
+|---|---|---|
+| `STT_MODEL` | `parakeet` | `parakeet` or `whisper` |
+| `STT_MODELS` | unset | Engines to load side by side, comma-separated, the first the default: `parakeet`, `parakeet-pt-br` (the Brazilian Portuguese fine-tune, 2.4 GB fp32, not for English), `whisper` (large-v3, int8). A request's `model` picks one by id. Any other name, `whisper-1` included, gets the first. `/health` lists them under `models`. Set, it replaces `STT_MODEL`, `STT_MODEL_ID` and `STT_QUANTISATION`, which are then not read. `STT_LANGUAGE` still applies to Whisper. Size `mem_limit` for the sum ([Limiting CPU use](#limiting-cpu-use)) |
+| `STT_MODEL_ID` | model default | Override the specific checkpoint |
+| `STT_QUANTISATION` | `int8` | Whisper also takes `int8_float32`, `float32` |
+| `STT_LANGUAGE` | unset | Leave unset if you code-switch. See below |
+| `STT_THREADS` | `4` | Must match your CPU limit. See below |
+| `STT_VAD` | `1` | Silence removal |
+| `STT_MAX_WINDOW_SECONDS` | `300` | Seconds of **speech** per pass through the recogniser. Longer clips are cut at the VAD's pauses and stitched back. `0` disables it. See below |
+| `STT_HOTWORDS` | `1` | `0` disables decode-time biasing entirely, for A/B tests. See below |
+| `STT_MAX_CONCURRENT` | `0` | Transcriptions allowed at once. `0` is no limit; past a limit, `/v1` answers 429 with `Retry-After` |
+| `STT_GLOSSARY_BUILTIN` | `/etc/calliope/glossaries` | Read-only profiles baked into the image |
+| `STT_GLOSSARY_DIR` | `/glossaries` | Writable profiles. Mount a volume here or the write routes answer 503 |
+| `STT_GLOSSARY_DEFAULT` | unset | Profiles applied when a request selects none. **Leave it unset.** See below |
+| `STT_GLOSSARY` | unset | One extra file, loaded as a profile named after it. The pre-profile variable |
+| `CALLIOPE_RUN_DIR` | `/run/calliope` | Where the gateway's `identity.pub` and this service's `service.key` are mounted, read-only |
+| `RUNLOG_URL` | unset | `http://voice-gateway:8081` sends each finished run's record there. Any other value turns the records off with an ERROR, since each carries this service's key |
+| `STT_LOG_LEVEL` | `INFO` | `DEBUG`, `WARNING`, … An unrecognised value falls back to `INFO` |
+| `STT_TLS_CERT` | unset | PEM certificate. With `STT_TLS_KEY`, serves HTTPS |
+| `STT_TLS_KEY` | unset | PEM private key, readable by uid 1000 |
+
+### Long audio
+
+Parakeet's Conformer encoder computes self-attention over everything it is
+handed in one pass. That is O(n²) in the length, and past roughly seven minutes
+of speech it does not get slower, it **fails**:
+
+```
+{"error":{"message":"internal error: [ONNXRuntimeError] : 1 : FAIL :
+ Non-zero status code returned while running Add node.
+ Name:'/layers.0/self_attn/Add_2' ..."}}
+```
+
+Bisected against a deployed instance, one recording looped to different
+lengths, 16 kHz mono wav:
+
+| Speech | Result |
+|---|---|
+| 5.0 min | 200 in 45.2 s |
+| 6.0 min | 200 in 61.5 s |
+| 6.6 min | 200 in 71.2 s |
+| 7.7 min | **500 in 7.6 s** |
+
+The failure arrives faster than the successes, which is the tell: it is not a
+timeout and not a body-size limit. The encoder gives up in the first layer,
+before any decoding starts.
+
+So the pipeline cuts long speech into passes of at most
+`STT_MAX_WINDOW_SECONDS` and stitches the results. Cuts land on the pauses the
+VAD already found, because a cut through a word costs that word in both halves;
+a single run of speech longer than the ceiling has no pause inside it and is
+cut by length instead.
+
+Everything the response carries is unaffected. Word and segment times are in
+the original clip, `realtime_factor` describes the whole job, and a glossary
+reaches every pass. The one visible difference is that a glossary rule spanning
+a cut cannot fire — the same property segment boundaries already have.
+
+The default counts **speech**, not audio: the VAD runs first, so a recording
+with pauses in it goes further per pass than its running time suggests. 300 s
+is a length measured to succeed on the host above, at 0.65 of the shortest
+length measured to fail. Lower it on a smaller box; the attention matrix is
+`(n/0.08)²` floats per head per layer, so the cliff moves with whatever else is
+resident. `STT_MAX_WINDOW_SECONDS=0` switches windowing off and restores the
+single pass that produced the 500.
+
+### Glossary profiles
+
+A glossary is a **named profile**, selected per request. **Nothing is applied
+unless a request asks for it.**
+
+That default is measured, not tidy. Across 25 cells, a glossary whose
+terms do **not** occur in the audio raised WER by **28% on Whisper**, and by
+nothing measurable on Parakeet. On Whisper, irrelevant terms are not inert —
+they actively cost accuracy — which
+is why one always-on list is the worst available shape and why **selecting
+several profiles at once is discouraged**. Select the one that matches what is
+being said.
+
+Two profiles ship in the image, read-only:
+
+| Profile | Contents |
+|---|---|
+| `dictation` | Mishearings any dictating user hits: `ldr = TLDR`, `dts = STT`, `tex to speak = text-to-speech` |
+| `tech` | **General** technical vocabulary — Kubernetes, nginx, PostgreSQL, ONNX. Vendor and tool names anyone in the field would say |
+
+**Neither contains anyone's project names**, and that is the point of the split
+rather than a stylistic preference. A term in `tech` is paid for by every
+request that selects `tech`, so a name only one person ever says makes the
+profile worse for everybody else. Your own names go in a profile you supply;
+`examples/glossaries/example.txt` is a worked example.
+
+#### Selecting one
+
+```bash
+# native route
+curl -H "Authorization: Bearer $CALLIOPE_KEY" -F file=@clip.wav -F glossary=tech "$CALLIOPE_URL/transcribe"
+
+# OpenAI-compatible route
+curl -H "Authorization: Bearer $CALLIOPE_KEY" -F file=@clip.wav -F model=whisper-1 -F glossary=tech \
+     "$CALLIOPE_URL/v1/audio/transcriptions"
+```
+
+```python
+client.audio.transcriptions.create(
+    model="whisper-1", file=clip,
+    extra_body={"glossary": "tech"},          # named profiles, an extension
+    prompt="Harmonia, Lumenstack",            # one-off terms, the spec's own field
+)
+```
+
+`prompt` is the specification's own field, defined as text that guides the
+model, and it is what a one-off should use — it needs no extension. `glossary`
+is the extension, allowlisted beside `keywords[]` and `languages[]`. **A
+request naming a profile that does not exist is a 400 naming it**, never a
+silent no-op, and listing the names this caller could have used. **A request
+may select at most 16 profiles**, a repeated name counting once; more is a 400
+naming the limit.
+
+#### Managing them
+
+```text
+GET    /glossaries            every profile you can name: owner, source, term count
+GET    /glossaries/{name}     its terms, and the file text they came from
+PUT    /glossaries/{name}     create or replace a custom profile of yours
+DELETE /glossaries/{name}     remove one
+```
+
+```bash
+curl -H "Authorization: Bearer $CALLIOPE_KEY" -X PUT --data-binary @mine.txt "$CALLIOPE_URL/glossaries/mine"
+curl -H "Authorization: Bearer $CALLIOPE_KEY" "$CALLIOPE_URL/glossaries"
+```
+
+These are **native routes, not `/v1`**: OpenAI has no concept of a glossary
+profile, so there is nothing to be 1:1 with, and claiming `/v1/glossaries`
+would take specification territory that does not exist.
+
+**Writability follows the volume.** Built-ins live in the image and are
+read-only — a `PUT` or `DELETE` on `tech` or `dictation` is a **409**, not a
+silent shadow, because a profile whose contents depend on which directory won
+is a profile nobody can reason about. Custom profiles live in `/glossaries`,
+and if nothing is mounted there the write routes answer **503 naming the
+reason** while the built-ins carry on serving. A `PUT` that evaporated on the
+next restart would be worse than a refusal.
+
+No response names a path: not the volume's, and not a user's directory, which
+is named by their ID.
+
+#### Whose profile it is
+
+Every custom profile has an owner, and a request sees only some of them.
+
+| Namespace | On disk | Who names it |
+|---|---|---|
+| system | the top level of `/glossaries`, and `STT_GLOSSARY` | a service such as the satellite hub, and a holder of `glossaries:read:all` (an admin's session) |
+| a user's | `/glossaries/users/<user id>/` | that user |
+| built-in | the image | everyone, read-only |
+
+- A user names their own profiles and the built-ins; their `PUT` lands in their
+  own directory, created on their first one. **Another user's profile is
+  absent, not refused**: a 404 on the routes above, and the same "unknown
+  profile" as a typo on a transcription, listing only what the caller could
+  have named.
+- `?owner=me|system|<user id>` names another namespace, and needs the `:all`
+  form of the route's scope: `glossaries:read:all` to read,
+  `glossaries:write:all` to write. `GET /glossaries?owner=all` lists every
+  namespace at once, each entry naming its owner. Anything else in `?owner=`
+  is a 400 before it reaches a path.
+- **`home-assistant` is reserved.** It is always the system's, whatever
+  spelling a request uses, and is named only with `glossaries:ha` (the
+  `home-assistant` key preset and the satellite hub hold it) or a glossaries
+  `:all` scope. Being a service is not enough. The Home Assistant integration
+  and the hub transcribe with `glossary=home-assistant`; a `user` or
+  `user-jobs` account never sees it.
+- Existing profiles stay where they are and become the system's, so nothing
+  moves on upgrade.
+- Compiled rules are cached by owner and name, so two users' `mine` never mix.
+- A user keeps at most 50 profiles, because every profile is read into memory
+  and every user can write; a 51st is a 409. The system's have no ceiling.
+
+#### Turning the write routes on
+
+The four routes are complete in every image, and they refuse every write until
+something is mounted at `/glossaries`. That is the whole of the operator's job:
+
+```yaml
+services:
+  stt-stack:
+    volumes:
+      - stt-models:/models
+      - stt-glossaries:/glossaries   # writable profiles live here
+
+volumes:
+  stt-models:
+  stt-glossaries:
+```
+
+Or, for a plain `docker run`:
+
+```bash
+docker run -v stt-models:/models -v stt-glossaries:/glossaries \
+  -p 8000:8000 ghcr.io/gabrielbelli/calliope-stt
+```
+
+The repository's own `compose.yaml` carries that mount, so the deployed stack
+has writable profiles from the next `up`. Nothing else changes: no environment
+variable turns this on, `STT_GLOSSARY_DIR` already defaults to `/glossaries`,
+and `GET /glossaries` reports `writable: true` once the volume is there.
+
+**A named volume rather than a host directory**, because nothing on the host
+needs to read these files. They are written over the API, read by this
+container, and capped at 64 KB each. Use a bind mount if you would rather edit
+them with an editor over SMB; the entrypoint chowns `/glossaries` and
+`/glossaries/users` to uid 1000 on every start, which is what makes either kind writable by a process that
+never runs as root. If you set `user:` in compose instead, own the directory
+yourself: the 503 then names the uid it could not write as.
+
+A profile written over the API applies to the **next request**, with no
+restart. Editing a file in the mounted directory by hand works the same way:
+the registry stats the directory and its files and rescans only when one
+changes.
+
+> **A profile changes what other people's transcripts say**, and a rule added
+> by someone else is a silent rewrite discovered weeks later if at all. That is
+> why a user's profiles apply only to that user's requests, why only an `:all`
+> holder writes the system's, and why `home-assistant`, which every satellite
+> command uses, needs its own scope.
+
+#### Two line forms, because they are two different jobs
+
+```text
+luminstack = Lumenstack    a replacement AND a hotword
+Lumenstack                 a hotword only
+```
+
+Use the bare form when the likely mishearing is an ordinary word. "Fennell" is
+heard as "fennel", but a `fennel = Fennell` rule would corrupt any sentence that
+genuinely says fennel. Biasing the decoder is safe; rewriting is not.
+
+Decoder biasing is much the stronger of the two. Measured against real
+recordings, hotwords alone fixed every technical term — `commit` (heard as
+"comet"), `FreeBSD` ("free BSD"), a project name heard as an ordinary English
+word and a surname heard as another — and the post-decode replacement never had
+to fire. It can also recover a word
+string replacement never sees, because the wrong spelling was never in the
+list.
+
+This paragraph used to end **"Parakeet has no such mechanism"**, and a
+hotword-only line really did nothing on the default engine. Both are now false;
+see below.
+
+### Decode-time biasing on Parakeet
+
+Add `boost=true` to a request and its vocabulary — the profiles it selected,
+its own `prompt` and `keywords[]` — is compiled into a boosting automaton and
+fused into Parakeet's TDT decoding loop, one frame before the argmax. A
+hotword-only line finally does something on the engine this service actually
+deploys.
+
+```bash
+curl -s -H "Authorization: Bearer $CALLIOPE_KEY" "$CALLIOPE_URL/v1/audio/transcriptions" \
+  -F file=@clip.wav -F model=whisper-1 \
+  -F glossary=tech -F boost=true
+```
+
+**It is off unless you ask.** Not because it is expensive — it is not, see
+below — but because the thing it buys is small and the caller is the only one
+who knows whether they are about to say any of the words. `STT_BOOST=1` changes
+the default for a deployment that wants it on everything.
+
+#### What it costs and what it buys, measured
+
+`bench/boost_bench.py`, 145 clips and 942 s over CORAA, FLEURS pt-BR,
+LibriSpeech clean and Earnings-22, on Parakeet TDT 0.6B v3 at int8. Pooled
+relative WER against no boosting, 95% paired bootstrap over clips:
+
+| the list you send | WER | change | 95% CI |
+|---|---|---|---|
+| none (plain) | 0.1135 | — | — |
+| **the shipped `tech`+`dictation` profile, on audio containing none of it** | 0.1135 | **byte-identical** | zero false fires |
+| 200 unrelated phrases — `STT_BOOST_MAX_PHRASES` exactly | 0.1140 | +0.4% | [−0.8, +1.7] |
+| the words that ARE in the audio | 0.1077 | **−5.2%** | [−9.2, −1.3] |
+| those same words, padded to 200 phrases with another language's | 0.1077 | −5.2% | [−9.5, −1.4] |
+
+**Irrelevant vocabulary is inert in this decoder.** At
+`STT_BOOST_START_WEIGHT = 0` a phrase has to be entered on acoustics, and a word
+that is not in the audio never is, so carrying it changes nothing. The last two
+rows are the same number to four decimal places: padding a clip's handful of
+real terms out to the full 200-phrase ceiling with words from another language
+costs exactly nothing.
+
+That is **not** true of the other biasing paths this project has measured, and
+the difference is why the number below is worth stating separately. Whisper's
+hotwords cost **+28% WER** when the terms are absent (`baseline` 0.3208 against
+`whisper-nohotwords-nas` 0.2499), and FluidAudio's CoreML `--custom-vocab` on
+Parakeet cost **+12%** (`parakeet-plain` 0.1443 against `parakeet-vocab`
+0.1620). Both are real, both are other implementations, and neither describes
+this one. See ADR 0005.
+
+**And the win is real but small: −5.2% is fourteen words out of 2,378.** Term
+recall goes 0.908 → 0.922, about a sixth of what plain missed. Quote the
+fourteen words alongside the percentage or you are overselling it. Throughput is
+unaffected — 17.8x plain against 18.0x with a full 200-phrase automaton, inside
+a ±8% measurement spread.
+
+Two caveats that belong next to those numbers. **No jargon corpus exists**, so
+the terms-present column is a proxy — rare words from public corpora, not a
+user's own project names in the voice that says them. And **CORAA, the corpus
+closest to real dictation here, moved by nothing at any weight**: its clips are
+3.4 s and 10 words, and 14 of 40 hold no word distinctive enough to boost.
+
+Separately, on a synthetic probe — mechanism, not WER. The probe's sentence
+named a project and an app of the author's own, shown here as placeholders:
+
+| | transcript |
+|---|---|
+| unboosted | Anthropic released clode code, and the **‹project name, one vowel wrong›** dashboard uses ‹app name› for dictation. |
+| `boost=true` | Anthropic released clode code, and the **‹project name, spelt right›** dashboard uses ‹app name› for dictation. |
+| terms absent from the audio | byte-identical to unboosted |
+
+`clode code` was **not** recovered, and that is the same fact as the free absent
+axis seen from the other side: a phrase must be entered on acoustics, so
+boosting finishes words it cannot start. See `STT_BOOST_START_WEIGHT`.
+
+A response carries `x-boost-applied` naming the phrases that reached the
+decoder, and nothing when none did. A term can fail to get there three ways:
+
+| | what happens |
+|---|---|
+| a character the model has no piece for (`日本語`, `café ☕`) | **400** naming the phrase and the character |
+| shorter than `STT_BOOST_MIN_PHRASE_CHARS` (default 4) | dropped, absent from `x-boost-applied` |
+| over `STT_BOOST_MAX_PHRASES` (default 200) | dropped, absent from `x-boost-applied` |
+
+The knobs, all with measured defaults for **Parakeet TDT 0.6B v3 at int8**.
+They are calibrated against that model's raw logit scale and do not transfer to
+another model or quantisation:
+
+| variable | default | what it does |
+|---|---|---|
+| `STT_BOOST` | `0` | the default for requests that do not send `boost` |
+| `STT_BOOST_WEIGHT` | `3.0` | bonus per character for a token that CONTINUES a match. **The measured optimum**: the WER curve peaks here and decays either side, and 3.0 is the largest weight whose confidence interval still excludes zero (1.0 → −2.6%, 2.0 → −4.1%, 3.0 → −5.2%, 4.5 → −3.7%, 6.0 → −2.2%) |
+| `STT_BOOST_START_WEIGHT` | `0.0` | bonus on a phrase's FIRST token. At 0 a phrase must be entered on acoustics and is only helped to finish. **Raising it is now measured, and it is the one setting that ruins the transcript**: at 1.5 it lifts term recall 0.908 → 0.944, and on a realistic list — the right terms plus ninety wrong ones — WER goes **+81%** [+49, +122]. At 3.0 with the shipped profile, CORAA goes 0.2195 → 0.8005. The recall win is an oracle's; leave this at 0 |
+| `STT_BOOST_GATE` | `6.0` | a bonus applies only to a token already within this many logits of the winner. **This is the guard, not the weight ceiling** — clamping the weight and leaving the gate open still destroyed a transcript |
+| `STT_BOOST_MAX_WEIGHT` | `6.0` | hard ceiling, clamping all three above |
+| `STT_BOOST_MAX_PHRASES` | `200` | bounds the collateral-damage surface, not the runtime. A full 200-phrase automaton of words absent from the audio costs +0.4% WER [−0.8, +1.7] and no measurable throughput |
+| `STT_BOOST_MIN_PHRASE_CHARS` | `4` | short terms match constantly; `US` would rewrite "he told us" |
+
+`STT_HOTWORDS=0` switches the whole thing off on both engines, and `boost=true`
+is then refused by name rather than answered with an unbiased transcript.
+
+### A request's own vocabulary
+
+`prompt` and `keywords[]` are one-off terms for one request. They are the
+specification's own way to guide the model — `prompt` is defined as text that
+does exactly that — so they need no extension, and `keywords[]` is the same
+list already shaped as a list. Both are read as terms, split on commas and
+newlines.
+
+```bash
+curl -H "Authorization: Bearer $CALLIOPE_KEY" \
+  -F file=@clip.wav -F model=whisper-1 \
+  -F 'prompt=Harmonia, Blue Heron, Lumenstack' \
+  "$CALLIOPE_URL/v1/audio/transcriptions"
+```
+
+| | Parakeet | Whisper |
+|---|---|---|
+| joined into the decoder's `hotwords` | — | yes |
+| compiled into this request's repair | yes | yes |
+
+**What the repair half can and cannot do.** A bare term spells its own intended
+form and names no wrong one, so the only rule derivable from it is over its own
+letters: wherever the transcript already contains the term, spell it the way
+you wrote it. That fixes `harmonia` → `Harmonia` and `blue heron` → `Blue
+Heron`, which is what Parakeet actually gets wrong on a proper noun it heard
+correctly. It does **not** turn `entropic` into `Anthropic` — nothing here
+names `entropic`. Only a `heard = intended` rule in a profile does that.
+
+Two shapes are skipped, and the skips matter more than they look:
+
+- **A term that is already all lower case.** Its rule is a no-op at best and
+  harmful at worst — matching is case-insensitive, so `sync` as a term would
+  rewrite a correct sentence-initial `Sync` down to lower case. This is the
+  common case, not an exotic one: `commit`, `nginx` and `kubectl` are all
+  hotwords in the shipped profiles.
+- **A term under three characters.** `US` would turn "he told us" into "he told
+  US" on every request that named it.
+
+**A profile's own bare hotwords are still never turned into a rewrite**, and
+the asymmetry is deliberate. A profile's author can write `heard = intended`
+when they want one, and both shipped files promise in their headers that a bare
+term biases the decoder and never rewrites the text. A `prompt` cannot express
+a replacement at all, so its choice is between the weak repair and nothing —
+which is what it used to get, as a 400.
+
+**A profile and a prompt compose.** Send both and you get both, with the
+profiles' terms first and the request's own last in both halves, so a one-off
+term is never dropped in favour of a server-side profile. Whatever actually
+fired comes back in `x-glossary-repaired`.
+
+Up to 500 terms, the same ceiling a profile file is held to and for the same
+reason: every term is a compiled regex run against every word of the
+transcript. Over it is a 400 naming the count.
+
+#### What a `PUT` refuses, and why
+
+A bad rule corrupts silently, so writes are validated and **nothing is written
+if any line was rejected** — the response lists every rejected line with its
+number and its reason, and the file on disk is untouched. A `PUT` that
+half-succeeded is a failure this stack has already been bitten by three times
+in other forms, and a 200 carrying a `rejected` array is trivially ignored by a
+script.
+
+| Refused | Reason | Way out |
+|---|---|---|
+| single-word left-hand side | `fennel = Fennell` rewrites every innocent "fennel" | `?force=true`, or use the bare hotword form |
+| duplicate left-hand side | two rules for one heard term is a conflict, not last-one-wins | fix the file |
+| over 500 terms, or 64 KiB | every entry is a compiled regex run against every word of every transcript | split the profile |
+
+```json
+{"detail": {"message": "1 line(s) rejected; nothing was written. 1 term(s) would have been accepted.",
+            "accepted": 1,
+            "rejected": [{"line": 2, "text": "fennel = Fennell",
+                          "reason": "'fennel' is a single word, so this rule would rewrite any sentence that says it correctly. …"}]}}
+```
+
+The single-word check is deliberately blunt and says so in its own message: it
+is not a dictionary lookup, because there is no word list in a slim image and
+an embedded list of the commonest few thousand words would not contain "fennel"
+— an ordinary word, but far down any frequency list — and so would pass the one
+case the check exists for. It over-refuses instead (`luminstack` is not an
+English word and is refused anyway), and it under-refuses too: `my sequel = MySQL` is multi-word, is
+accepted, and would eat "my sequel to the book". Nothing local to a rule can
+see that.
+
+#### Migrating from `STT_GLOSSARY`
+
+`services/stt/glossary.txt` no longer exists, and `STT_GLOSSARY` is unset in
+the image. If you set it to a file, that file is loaded as a profile named
+after it — `/etc/mine.txt` becomes `mine` — and is **selected per request like
+any other**, not applied to everything.
+
+To restore the old always-on behaviour, name the profiles explicitly:
+
+```bash
+STT_GLOSSARY_DEFAULT=dictation,tech
+```
+
+That is opting in to the WER cost above on every request, including the ones
+whose audio contains none of those terms. Prefer selecting per request.
+
+For Brazilian Portuguese, load the fine-tune beside Parakeet with
+`STT_MODELS=parakeet,parakeet-pt-br` rather than in its place with
+`STT_MODEL_ID`: it cannot transcribe English
+([Which model](#which-model)).
+
+### Switching biasing off
+
+`STT_HOTWORDS=0` is absolute **about the decoder, on both engines**: no
+glossary hotwords from any profile, no boosting automaton on Parakeet, and the
+terms in a `prompt` or `keywords[]` are dropped rather than passed to either.
+A request that sends `boost=true` is refused by name. Half an off switch is
+worse than none — a benchmark run that sets `prompt` would get biasing back on
+exactly the requests that carried one, and measure something other than what it
+thinks. It covered Whisper only until Parakeet acquired a decoder to switch
+off, which would have made it exactly that half-open door on the DEFAULT
+engine.
+
+Text repair is unaffected either way, and that includes the repair a request's
+own terms compile into. The switch exists so a benchmark can separate what the
+vocabulary contributes from what the model does, and a rewrite applied to the
+model's finished output changes neither — dropping it too would make the switch
+mean something it has never claimed. `/health` reports the current setting as
+`hotwords`.
+
+## Language
+
+Leave `STT_LANGUAGE` unset unless every clip is in one language.
+
+Pinning the wrong language does not degrade the transcript — it **translates**
+it. English speech sent with `language=pt` comes back as fluent Portuguese
+that reads like a working transcript and silently is not one:
+
+```text
+spoken     Look, there is a big problem here. Small tasks and more operational...
+pinned pt  Veja, há um grande problema aqui, tarefas pequenas e mais operacionais...
+```
+
+Parakeet is unaffected — it detects on its own and takes no language argument
+— so this trap exists on the Whisper path only. Nothing in the response marks
+it: a translated transcript reads exactly like a working one, which is the
+whole problem.
+
+On `/v1` the same field is refused under Parakeet rather than accepted. It used
+to be echoed back in `verbose_json` as `"language"`, so `language=pt` on English
+audio returned the English transcript alongside a claim that Portuguese had
+steered it — a field the request set, reported as a property of the output.
+
+Override per request when you do know:
+
+```bash
+curl -H "Authorization: Bearer $CALLIOPE_KEY" -F file=@clip.wav -F language=en "$CALLIOPE_URL/transcribe"
+```
+
+## Volume ownership
+
+A bind mount arrives with the **host** directory's ownership, which overrides
+anything the image sets. On a NAS that usually means root, and the service
+runs as uid 1000.
+
+The container handles this itself: it starts as root, takes ownership of
+`/models` if it does not already have it, and drops to uid 1000 before running
+anything. Nothing in the service runs as root.
+
+To manage ownership on the host instead, chown the directory and pin the user
+— the entrypoint then skips the chown entirely:
+
+```bash
+chown -R 1000:1000 /mnt/pool/apps/calliope/stt-models
+```
+
+```yaml
+    user: "1000:1000"
+```
+
+Named volumes need none of this; Docker creates them with the right owner.
+
+## Limiting CPU use
+
+Set the container's CPU limit **and** `STT_THREADS` to the same number. A
+limit on its own does not help: CTranslate2 and ONNX Runtime both size their
+thread pools from the host's core count, not the cgroup, so on a 22-core box
+they still spawn 22 threads each and then fight for the slice they are
+allowed. More threads than allotted CPU is slower than fewer, not merely
+capped.
+
+```bash
+docker run -p 8000:8000 -v stt-models:/models \
+  --cpus 4 -e STT_THREADS=4 \
+  ghcr.io/gabrielbelli/calliope-stt:v0.2.0
+```
+
+Pin to specific cores when the host is shared, so the service cannot be
+scheduled onto whatever else is busy:
+
+```bash
+docker run -p 8000:8000 -v stt-models:/models \
+  --cpuset-cpus 0-3 -e STT_THREADS=4 \
+  ghcr.io/gabrielbelli/calliope-stt:v0.2.0
+```
+
+Compose:
+
+```yaml
+services:
+  stt:
+    image: ghcr.io/gabrielbelli/calliope-stt:v0.2.0
+    expose: ["8000"]   # no published port: clients go through the gateway
+    volumes: ["stt-models:/models"]
+    environment:
+      STT_THREADS: "4"
+    cpuset: "0-3"
+    mem_limit: 6g
+volumes:
+  stt-models:
+```
+
+Steady state is about 1.4 GB on Parakeet and 2.9 GB on Whisper; 6 GB leaves
+room for a long clip without letting a runaway request take the host down.
+
+Under `STT_MODELS` the engines add up, before any clip:
+
+| `STT_MODELS` | Resident, before a clip |
+|---|---|
+| `parakeet` | about 1.4 GB |
+| `parakeet,parakeet-pt-br` | about 4 GB, counting the fine-tune as its 2.4 GB of weights |
+| `parakeet,whisper` | about 4.3 GB |
+| `parakeet,parakeet-pt-br,whisper` | about 6.7 GB, more than the 6 GB above |
+
+The fine-tune's resident size has not been measured here, so treat its row as
+a floor. Raise `mem_limit` before adding an engine, or the container is
+killed when it passes the limit.
+
+Every response carries `realtime_factor`. If it drops when you raise
+`STT_THREADS`, you have crossed the point where coordination costs more than
+the extra cores return — around 8 on most hosts, earlier on older ones.
+
+## Performance
+
+Rough figures, `int8`, one 15-second clip on 4 modern cores: Parakeet returns
+in about 3 seconds. Whisper large-v3 runs at 0.5–0.9× realtime on the same CPU
+and dominates any wait it is part of, which is why the default engine is the
+other one. Choosing Whisper buys decode-time vocabulary and clean-read-speech
+accuracy, and costs an order of magnitude in latency.
+
+## Shared code
+
+The identity check and the 401, OpenAI's error envelope, the `/health` route,
+the log level switch and the container entrypoint all come from
+[packages/common](../../packages/common/README.md), which this service shares
+with `services/tts` and `services/tts-long`. Each of those used to be a
+hand-vendored copy in every repo; the three copies of `auth.py` alone differed
+by 170–197 lines and had drifted into three *different* defects, one per copy.
+
+It is a **path dependency** in `requirements.txt` — `./packages/common`, from
+the working tree. It used to be a tarball pinned by SHA, which meant a change
+there did not reach this service until it was pushed, tagged and re-pinned.
+One repository removes that gap: the commit is the pin. What keeps it honest is
+`tests/test_conformance.py`, which runs the suite the package ships against the
+app this service actually builds, so a bad change to the shared code fails in
+CI rather than in production.
+
+`app/errors.py` is gone, and it existed because of the old pin. The
+specification requires `param` on every error and an envelope on 404 and 405,
+`voice_common.errors` emitted neither, and a pin cannot name a commit that has
+not been published — so this service completed the envelope on its own. All of
+it is upstream now. Two things this service used to answer changed with the
+move, both under `/v1` and both because the three copies had disagreed: a 405
+now reads `Invalid URL (GET …)` rather than `Invalid method (GET …)`, which is
+the wording the other two chose and the one the real API sends, and it carries
+`code: "method_not_allowed"` where it used to carry null — a 404 and a 405 now
+share a message shape, so `code` is what tells them apart.
+`tests/test_parity.py` asserts the result, along with every other field on the
+compatible surface, against a recogniser that is not a model, so CI runs all of
+it without downloading 460 MB.
+
+Install from the repository root — pip resolves `./packages/common` against the
+working directory — and run pytest from here, because `import app.main` needs
+this directory as the rootdir:
+
+```bash
+pip install -r services/stt/requirements.txt './packages/common[conformance]'
+cd services/stt && python -m pytest tests -q
+```
+
+Everything particular to speech-to-text stays here: the recognisers, the VAD,
+the glossary, the 16 kHz input rule and both routes.
+
+## Licence
+
+BSD 2-Clause. See [LICENSE](LICENSE).

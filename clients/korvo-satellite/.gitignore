@@ -1,0 +1,8 @@
+.pio/
+.vscode/
+# Neither half of the firmware signing key belongs in the repository: a
+# public key committed here would be one person's, and every clone would build
+# satellites only that person can update. Both halves live outside it
+# (keys/README.md); a copy put here for one build stays untracked.
+keys/*
+!keys/README.md

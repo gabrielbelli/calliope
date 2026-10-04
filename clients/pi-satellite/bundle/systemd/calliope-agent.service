@@ -1,0 +1,18 @@
+[Unit]
+Description=Calliope satellite agent
+Wants=network-online.target user@@UID@.service
+After=network-online.target user@@UID@.service
+
+[Service]
+User=calliope
+# calliope's own PipeWire, kept running by linger.
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus
+# Resolved at each start, so a restart runs the release `current` points at.
+WorkingDirectory=/opt/calliope/current
+ExecStart=/usr/bin/python3 -m calliope_pi
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

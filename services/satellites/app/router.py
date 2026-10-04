@@ -1,0 +1,1208 @@
+"""Routing: what happens after a wake word.
+
+A WAKE WORD SAYS WHAT IT DOES. Each entry in wake_words.json carries, beside
+its model, threshold and satellites, a Behaviour: its mode, an optional
+language hint, and its action (a destination and where the reply is played).
+wakewords_config.py holds the entries; this module holds the models they are
+checked against, and the services a turn uses.
+
+    mode "command"       the words after the wake word go to the action, once
+    mode "conversation"  the same, then the satellite keeps listening for
+                         follow-ups without the wake word (dialogue.py, main.py)
+    mode "trigger"       the wake word is the whole command ("lumos"): the hub
+                         publishes that it was heard, and Home Assistant's own
+                         automations decide what it does. No action, no STT.
+
+A turn (dialogue.run_turn) is:
+  1. STT   the utterance as a WAV to SATELLITES_STT_URL/v1/audio/transcriptions
+  2. the language, from the transcript or the word's hint (language.py)
+  3. the destination (destinations.py), streamed where it can be
+  4. TTS   sentence by sentence to SATELLITES_TTS_URL/v1/audio/speech as 24 kHz
+           pcm, resampled to the 48 kHz the Korvo plays, in the voice of that
+           language
+
+handle() and handle_text() run one turn and collect the audio; they never play
+it, never light a ring and never touch a Session. That keeps the one promise
+about lights (a satellite with lights_enabled false is never sent "lights")
+out of this module entirely: whoever plays the audio owns that check.
+
+handle() NEVER RAISES. It runs on the audio path of a device someone is
+standing next to; an exception out of it would kill whatever task called it
+and leave the satellite deaf until a reconnect. Every failure, down to a bug
+in this file, becomes Outcome.error, and every external call has a timeout.
+
+rules.json, the routing of 2026-09-25 and before, is still read. Rules is a
+provider of Behaviours like the wake word entries are: the first rule, in file
+order, whose wake word and satellites match wins. main.py reads it once, to
+give each wake word that has no action yet the one its rule would have run
+(wakewords_config.migrate), and routes by the wake word entries from then on;
+PUT /satellites/routing answers 409 there, naming the route that replaced it.
+
+    GET  /satellites/routing       what each wake word does, which of the secrets
+                                   it names have a value (never the value), the
+                                   STT and TTS URLs and engine, warnings
+    PUT  /satellites/routing       409 behind the hub: see PUT /satellites/wake-words
+    POST /satellites/ha/pipelines  {"url","token_env"}: Home Assistant's Assist
+                                   pipelines, for the page's picker
+    POST /satellites/llm/models    {"base_url","api_key_env"}: the ids a language
+                                   model server lists, for the page's picker
+    (a picker and the Test ask the secret store afresh, and answer 403
+    host_not_allowed for an address the secret does not name, D41)
+    POST /satellites/llm/test      an llm destination, saved or not: one short
+                                   question, the reply and how long it took;
+                                   no TTS, nothing played
+    POST /satellites/routing/test  {"satellite","wake_word","text"}: skips STT,
+                                   runs the word's action and TTS, returns the
+                                   Outcome as JSON and plays nothing
+
+THESE ROUTES MUST BE INCLUDED BEFORE main.py's /satellites/{nid} routes:
+FastAPI matches in registration order and GET /satellites/{nid} would otherwise
+take "routing" for a satellite id and answer 404.
+
+Where the URLs in an action may point is not filtered; destinations.py explains
+why the boundary is who may write the configuration and where each secret may
+go, not what an address looks like.
+
+STT AND TTS ARE ASKED THROUGH THE GATEWAY (D6). SATELLITES_STT_URL and
+SATELLITES_TTS_URL name http://voice-gateway:8081, its internal listener, which
+takes the hub's service key and forwards the call to stt-stack or tts-stack as
+svc:satellites (gateway.py). Its /health answers in tiers, and the hub reads
+stt-stack's part of it (backends.stt.health) for the engines it runs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Annotated, Callable, Literal, Protocol
+
+import httpx
+from fastapi import APIRouter, Depends
+from pydantic import (AliasChoices, BaseModel, ConfigDict, Field, StringConstraints,
+                      field_validator, model_validator)
+from voice_common.errors import ApiError
+
+from . import audio, gateway, secret_client, telemetry
+from . import language as lang
+from .destinations import (MODELS_TIMEOUT_S, Destination, DestinationError, Echo, HaAssist,
+                           HostRefused, Llm, LlmUrl, SecretName, Url, _known, _secret,
+                           transport_error)
+from .destinations import Request as Asked
+
+log = logging.getLogger("voice-satellites.router")
+
+MIC_RATE = 16000       # what handle() is given: the front end's mono output
+TTS_RATE = 24000       # Kokoro's pcm (voice_common.audio.SAMPLE_RATE)
+SPEAKER_RATE = 48000   # what the Korvo plays; Session.spk_rate for others
+# tts-stack refuses input over its schema's 4096 characters with a 400, so a
+# long LLM answer is cut at a sentence end below that rather than lost whole.
+MAX_TTS_CHARS = 4096
+# How long to wait for stt-stack's /health, asked before the first
+# transcription of a start and again once its answer is stale
+# (Router._stt_health).
+ENGINE_PROBE_S = 3.0
+# How long an answer from that /health stands: a stack redeployed with other
+# STT_MODELS is seen within ENGINE_RECHECK_S. A probe that got no usable
+# answer is asked again after ENGINE_RETRY_S instead. stt-stack takes no
+# connection while it loads its models, and until it answers, every command
+# goes to its default engine, a fine-tune's words included.
+ENGINE_RECHECK_S = 600.0
+ENGINE_RETRY_S = 30.0
+# Home Assistant's own names (areas, exposed entities, their aliases), which
+# the Calliope integration keeps on stt-stack as this glossary profile
+# (clients/home-assistant/custom_components/calliope/vocabulary.py). Named to
+# an engine that boosts (Parakeet) while stt-stack lists it; when it refuses
+# the profile, the utterance is sent again without it and the name is left off
+# for this long, and when it refuses `boost`, the names go without the boost.
+HA_GLOSSARY = "home-assistant"
+GLOSSARY_RETRY_S = 600.0
+
+RULE_ID = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+WAKE_WORD = r"^(\*|[A-Za-z0-9][A-Za-z0-9 _.-]{0,63})$"
+# A wake word's ring colour, as the page's colour picker writes it.
+COLOUR = r"^#[0-9a-fA-F]{6}$"
+# BCP 47 as HA writes it ("en", "pt-BR"), or "auto".
+LANGUAGE = r"^([a-z]{2,3}(-[A-Za-z0-9]{2,8})*|auto)$"
+
+Mode = Literal["command", "conversation", "trigger"]
+
+# ref -> (satellite id, satellite name), or None when no single satellite
+# matches. main.py supplies one built on Hub.find; without it a ref is taken as
+# both.
+Lookup = Callable[[str], tuple[str, str] | None]
+
+
+# ---- what a wake word does ------------------------------------------------------
+
+
+def _wake_key(word: str) -> str:
+    """"Hey Jarvis", "hey_jarvis" and "hey-jarvis" are one wake word: model
+    files use underscores and people type spaces."""
+    import re
+    return re.sub(r"[\s_.-]+", "_", word.strip().casefold())
+
+
+def _mac_key(ref: str) -> str:
+    import re
+    return re.sub(r"[:-]", "", ref.strip().lower())
+
+
+def strip_wake_phrase(text: str, wake_word: str) -> str:
+    """"Jarvis, what time is it" -> "what time is it". The listener rewinds
+    by the detector's latency so the command is not lost, and the price is
+    that the tail of the wake word can lead the transcript -- and misheard:
+    Parakeet on the development server returned "Harvis, what time is it?" for the en_us fixture.
+    So a LEADING run of words that each resemble the wake word's own words, in
+    order, is removed (difflib ratio >= 0.6: "harvis" is 0.83 of "jarvis").
+    A command that merely mentions the name further in is left alone."""
+    import difflib
+    import re
+
+    from . import verify
+
+    words = [w for w in _wake_key(wake_word).split("_") if w]
+    if not words or wake_word == "ptt":
+        return text
+    # THE WORD AS IT IS SAID, NOT ONLY ITS MODEL'S NAME. A model named for its
+    # variant ("alexa_ptbr") is said "Alexa": matched on its name alone, the
+    # "ptbr" that nobody says kept "Alexandre, ligue as luzes" whole, so Home
+    # Assistant's own intents (which know the satellite's room) could not
+    # match it and a language model guessed the room instead. So the phrases
+    # are the name and, with the name's own "hey"/"ok" in front where it has
+    # one, every spelling the double-check knows (verify.spellings).
+    lead = [w for w in words[:1] if w in ("hey", "ok")]
+    phrases = [words] + [lead + s.split() for s in verify.spellings(wake_word)]
+    tokens = list(re.finditer(r"[\w']+", text))
+    like = lambda a, b: difflib.SequenceMatcher(None, verify.normalise(a), b).ratio() >= 0.6
+    for phrase in phrases:
+        for start in range(len(phrase)):  # the whole phrase, then shorter tails of it
+            tail = phrase[start:]
+            if len(tokens) >= len(tail) and all(like(t.group(), w) for t, w in zip(tokens, tail)):
+                # Nothing but the wake word: there is no command, and "Hey Jarvis."
+                # must not reach a destination as if it were one.
+                return text[tokens[len(tail)].start():] if len(tokens) > len(tail) else ""
+    return text
+
+
+EndPhrase = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+
+
+class ConversationSettings(BaseModel):
+    """How a conversation carries on after each reply."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # How long the satellite listens for the next turn, without the wake word,
+    # after a reply has finished playing. Silence for this long ends it.
+    follow_up_s: float = Field(default=8.0, ge=1, le=60)
+    # The pause that ends a follow-up turn. Shorter than the first command's:
+    # someone mid-conversation starts talking at once, and each turn waits it.
+    silence_ms: int = Field(default=600, ge=200, le=3000)
+    # Said on their own, these end the conversation. None: dialogue.END_PHRASES,
+    # the packs of English and of the languages the conversation may be in
+    # (dialogue.ending_languages); [] turns them off.
+    end_phrases: list[EndPhrase] | None = Field(default=None, max_length=64)
+
+
+class TriggerSettings(BaseModel):
+    """For a trigger word, which has no second step to catch a false
+    detection: what the satellite does to show it was heard, and how soon the
+    same word may fire again."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # "earcon": the satellite's own "done" and a flash of the ring, each only
+    # where the speaker or the lights are on; "none": nothing seen or heard.
+    feedback: Literal["none", "earcon"] = "earcon"
+    # One utterance can score over the threshold in several frames, and the
+    # detector's own refractory window is 1.5 s; this is the word's.
+    cooldown_s: float = Field(default=3.0, ge=0, le=600)
+    # Heard during a conversation, a trigger fires and the conversation goes
+    # on; true ends the conversation as well.
+    ends_conversation: bool = False
+
+
+Spelling = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]
+
+
+class VerifySettings(BaseModel):
+    """Whether a wake word is double-checked by speech-to-text before the
+    hub answers it (verify.py, main.Hub.on_wake). Push-to-talk has the block
+    too, and it is ignored there: a button is never a TV."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # "on": nothing is seen or heard until STT has heard the word, and a wake
+    # it did not hear is dropped. "log": the wake goes ahead as if "off", and
+    # what "on" would have done is recorded (Activity, telemetry): the
+    # evidence for turning it on. "off": the model's word alone.
+    mode: Literal["off", "log", "on"] = "log"
+    # What else counts as the word in a transcript, beyond the spellings
+    # verify.SPELLINGS knows: a custom model's name, or what STT was seen
+    # writing for it. STT is told to listen for them too, as they are
+    # written here (verify.vocabulary).
+    spellings: list[Spelling] = Field(default_factory=list, max_length=12)
+
+    @field_validator("spellings")
+    @classmethod
+    def _printable(cls, v: list[str]) -> list[str]:
+        for spelling in v:
+            if not spelling.isprintable():
+                raise ValueError(f"{spelling!r} is not a spelling: printable characters only")
+        return v
+
+
+class Action(BaseModel):
+    """Where a wake word's words go, and where the answer is played."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    destination: Destination = Field(default_factory=lambda: Echo(type="echo"))
+    # "same" (the satellite that heard), "none" (act, say nothing) or a
+    # satellite's id or name, for "ask in the bedroom, answer in the kitchen".
+    reply_to: str = Field(default="same", min_length=1, max_length=64)
+    # A Kokoro voice. Unset: the voice of the language spoken (language.py).
+    voice: str | None = Field(default=None, max_length=64)
+    # Command mode only: another wake word whose conversation takes the same
+    # transcript when this destination fails or does not understand.
+    fallback: str | None = Field(default=None, max_length=64)
+
+    @field_validator("reply_to")
+    @classmethod
+    def _keywords_in_one_case(cls, v: str) -> str:
+        return v.lower() if v.lower() in ("same", "none") else v
+
+
+class Behaviour(BaseModel):
+    """Everything a wake word does once it is heard: a wake word entry
+    without its name, threshold and satellites. Push-to-talk has one too."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Mode = "command"
+    # A hint: the language this wake word is spoken in. Unset (or "auto"), the
+    # language is read from each transcript.
+    language: str | None = Field(default=None, pattern=LANGUAGE)
+    # What a command or a conversation does with its words. A trigger has
+    # none: Home Assistant decides what it does.
+    action: Action | None = None
+    # The pause that ends the command after the wake word.
+    silence_ms: int = Field(default=800, ge=200, le=3000)
+    # The colour the ring shows for this word: listening, thinking, and a
+    # trigger's flash. Unset is the hub's listening blue.
+    colour: str | None = Field(default=None, pattern=COLOUR)
+    conversation: ConversationSettings = Field(default_factory=ConversationSettings)
+    trigger: TriggerSettings = Field(default_factory=TriggerSettings)
+    verify: VerifySettings = Field(default_factory=VerifySettings)
+
+    @field_validator("language")
+    @classmethod
+    def _auto_is_unset(cls, v: str | None) -> str | None:
+        return None if v in (None, "auto") else v
+
+    @model_validator(mode="after")
+    def _fits_the_mode(self) -> Behaviour:
+        if self.mode == "trigger":
+            if self.action is not None:
+                raise ValueError("a trigger word has no action: the hub publishes that it was "
+                                 "heard (a \"triggered\" event) and Home Assistant's automation "
+                                 "decides what it does; leave \"action\" out")
+        elif self.action is None:
+            raise ValueError(f"a {self.mode} needs an action: where its words go")
+        elif self.action.fallback and self.mode != "command":
+            raise ValueError("only a command hands over to a fallback; a conversation already "
+                             "is one")
+        return self
+
+    @property
+    def speaks(self) -> bool:
+        return self.action is not None and self.action.reply_to != "none"
+
+
+@dataclass(frozen=True)
+class Route:
+    """A Behaviour and the name it was found by: a wake word's, or a rule's
+    id. Events carry the name as rule_id."""
+
+    id: str
+    behaviour: Behaviour
+
+
+class Actions(Protocol):
+    """Where the Router finds what a wake word does: Rules (rules.json) or,
+    in the hub, wakewords_config.WordActions."""
+
+    editable: bool
+    load_error: str | None
+
+    def find(self, satellite_id: str, satellite_name: str, wake_word: str) -> Route | None: ...
+
+    def named(self, name: str) -> Route | None: ...
+
+    def warnings(self, lookup: Lookup | None = None) -> list[str]: ...
+
+    def env_vars(self) -> list[str]: ...
+
+    def listing(self) -> list[dict]: ...
+
+
+def secret_names(destinations) -> list[str]:
+    """Every secret the destinations name, sorted."""
+    return sorted({n for d in destinations for n in d.env_vars()})
+
+
+async def env_status(names) -> dict[str, bool]:
+    """Whether each named secret has a value the hub can use (secret_client).
+    Only ever a boolean: this goes out over GET, and a value, a prefix or
+    even a length would be a start on the secret. A value the action would
+    refuse to send (destinations._sendable) is still "set": it is, and the
+    turn's error names what is wrong with it."""
+    return await secret_client.current().status(names)
+
+
+# ---- rules.json: the routing before wake words said what they do ------------------
+
+
+class Rule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=RULE_ID)
+    wake_word: str = Field(default="*", pattern=WAKE_WORD)
+    # Satellite ids (MAC, colons optional) or names. Empty means every
+    # satellite. "nodes" is the same list under the feature's name until
+    # 2026-09-25: rules.json on a hub's volume may still say it, and a rule
+    # that stopped loading would switch routing off for the whole house.
+    satellites: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
+        default_factory=list, max_length=64,
+        validation_alias=AliasChoices("satellites", "nodes"))
+    destination: Destination
+    reply_to: str = Field(default="same", min_length=1, max_length=64)
+    language: str | None = Field(default=None, pattern=LANGUAGE)
+    voice: str | None = Field(default=None, max_length=64)  # unset: the language's voice
+
+    @field_validator("reply_to")
+    @classmethod
+    def _keywords_in_one_case(cls, v: str) -> str:
+        return v.lower() if v.lower() in ("same", "none") else v
+
+    def behaviour(self) -> Behaviour:
+        """What this rule does, as a command: rules had no other mode."""
+        return Behaviour(mode="command", language=self.language, action=Action(
+            destination=self.destination, reply_to=self.reply_to, voice=self.voice))
+
+    def matches(self, satellite_id: str, satellite_name: str, wake_word: str) -> bool:
+        if self.wake_word != "*" and _wake_key(self.wake_word) != _wake_key(wake_word):
+            return False
+        if not self.satellites:
+            return True
+        nid, name = _mac_key(satellite_id), satellite_name.casefold()
+        return any(_mac_key(n) == nid or (name and n.casefold() == name)
+                   for n in self.satellites)
+
+    def covers(self, other: Rule) -> bool:
+        """True when every utterance `other` would match, this matches too."""
+        if self.wake_word != "*" and _wake_key(self.wake_word) != _wake_key(other.wake_word):
+            return False
+        if not self.satellites:
+            return True
+        mine = ({n.casefold() for n in self.satellites}
+                | {_mac_key(n) for n in self.satellites})
+        return bool(other.satellites) and all(
+            n.casefold() in mine or _mac_key(n) in mine for n in other.satellites)
+
+
+class RuleSet(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    rules: list[Rule] = Field(max_length=256)
+
+    @model_validator(mode="after")
+    def _unique_ids(self) -> RuleSet:
+        seen: set[str] = set()
+        for r in self.rules:
+            if r.id in seen:
+                raise ValueError(f"two rules have the id {r.id!r}")
+            seen.add(r.id)
+        return self
+
+
+def default_ruleset() -> RuleSet:
+    """Any wake word on any satellite is echoed back to it: a fresh hub
+    proves the whole loop (microphone, STT, TTS, speaker) before Home
+    Assistant exists. No language: the echo answers in the one spoken."""
+    return RuleSet(rules=[Rule(id="default", wake_word="*", destination=Echo(type="echo"),
+                               reply_to="same")])
+
+
+class Rules:
+    """rules.json in the data directory. Absent, the default ruleset applies
+    and nothing is written until someone saves."""
+
+    FILE = "rules.json"
+    editable = True
+
+    def __init__(self, data_dir: Path | str):
+        self.path = Path(data_dir) / self.FILE
+        self.load_error: str | None = None
+        self.ruleset = self._load()
+
+    @property
+    def rules(self) -> list[Rule]:
+        return self.ruleset.rules
+
+    def _load(self) -> RuleSet:
+        if not self.path.exists():
+            return default_ruleset()
+        try:
+            return RuleSet.model_validate_json(self.path.read_text())
+        except (OSError, ValueError) as e:  # pydantic's ValidationError is a ValueError
+            # Routing goes OFF, not back to the echo default. A hand edit with
+            # a typo must not turn a house that was talking to Home Assistant
+            # into one that repeats every sentence aloud, at night included.
+            # The file is left as it is, for the operator to fix or replace.
+            self.load_error = (f"{self.path} could not be loaded, so no rule applies until "
+                               f"it is fixed or replaced: {str(e)[:500]}")
+            log.error("%s", self.load_error)
+            return RuleSet(rules=[])
+
+    def replace(self, ruleset: RuleSet) -> None:
+        self._write(ruleset)
+        self.ruleset = ruleset
+        self.load_error = None
+
+    def _write(self, ruleset: RuleSet) -> None:
+        # Every field, None included: dropping a None on the way out would
+        # bring a default back on the way in (api_key_env: null would reload
+        # as SATELLITES_LLM_API_KEY).
+        body = json.dumps(ruleset.model_dump(mode="json"), indent=2) + "\n"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # A unique temporary name, so two PUTs at once cannot write into the
+        # same half-finished file, and fsync before the rename, so a power cut
+        # leaves the old rules or the new ones and never an empty file.
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".rules.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(body)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+    def match(self, satellite_id: str, satellite_name: str, wake_word: str) -> Rule | None:
+        return next((r for r in self.rules
+                     if r.matches(satellite_id, satellite_name, wake_word)), None)
+
+    def find(self, satellite_id: str, satellite_name: str, wake_word: str) -> Route | None:
+        rule = self.match(satellite_id, satellite_name, wake_word)
+        return Route(rule.id, rule.behaviour()) if rule else None
+
+    def named(self, name: str) -> Route | None:
+        rule = next((r for r in self.rules if r.id == name), None)
+        return Route(rule.id, rule.behaviour()) if rule else None
+
+    def for_word(self, word: str) -> tuple[Rule | None, list[Rule]]:
+        """The rule a wake word heard on any satellite would take (the first
+        with no satellite list, else the first at all), and the other rules
+        for that word that name satellites: what a migration to per-word
+        actions cannot carry over."""
+        mine = [r for r in self.rules if r.wake_word == "*" or _wake_key(r.wake_word) == _wake_key(word)]
+        chosen = next((r for r in mine if not r.satellites), mine[0] if mine else None)
+        return chosen, [r for r in mine if r is not chosen and r.satellites]
+
+    def warnings(self, lookup: Lookup | None = None) -> list[str]:
+        out = []
+        for j, later in enumerate(self.rules):
+            for earlier in self.rules[:j]:
+                if earlier.covers(later):
+                    out.append(f"rule {later.id!r} can never match: rule {earlier.id!r} "
+                               "above it matches everything it would")
+                    break
+            if lookup and later.reply_to not in ("same", "none") and lookup(later.reply_to) is None:
+                out.append(f"rule {later.id!r} replies to {later.reply_to!r}, "
+                           "which is not a known satellite")
+        return out
+
+    def env_vars(self) -> list[str]:
+        return secret_names(r.destination for r in self.rules)
+
+    def listing(self) -> list[dict]:
+        return [r.model_dump(mode="json") for r in self.rules]
+
+
+# ---- the pipeline -------------------------------------------------------------
+
+
+@dataclass
+class Outcome:
+    rule_id: str | None = None
+    transcript: str | None = None
+    reply_text: str | None = None
+    reply_pcm48k: bytes | None = field(default=None, repr=False)
+    reply_to: str | None = None  # a satellite id when it could be resolved, else the ref as written
+    error: str | None = None
+    # Per stage, so "the assistant is slow" can be pinned on STT, the
+    # destination or TTS from one log line instead of a guess.
+    timings_ms: dict[str, float] = field(default_factory=dict)
+    # From the end of speech: stt_done, first_token, first_audio,
+    # answer_done, reply_done (dialogue.py).
+    timeline_ms: dict[str, float] = field(default_factory=dict)
+    mode: str = "command"
+    language: str | None = None          # what was spoken, BCP 47
+    reply_language: str | None = None    # what the answer is in
+    language_source: str | None = None   # "detected" or "hint"
+    voice: str | None = None
+    handed_over_to: str | None = None    # the fallback that answered instead
+    spoken_text: str | None = None       # as much of the reply as was played
+    interrupted: bool = False
+    ended: bool = False                  # an ending phrase: nothing was routed
+    audio_bytes: int = 0                 # reply audio handed to the player
+    # Each call the turn made, timed from the end of speech, when telemetry
+    # is on (telemetry.Trace); empty otherwise. Not in as_json: the event
+    # stream and the page do not carry it.
+    events: list[dict] = field(default_factory=list, repr=False)
+
+    def as_json(self) -> dict:
+        n = len(self.reply_pcm48k) if self.reply_pcm48k else self.audio_bytes
+        return {"rule_id": self.rule_id, "mode": self.mode, "transcript": self.transcript,
+                "language": self.language, "reply_language": self.reply_language,
+                "language_source": self.language_source, "voice": self.voice,
+                "reply_text": self.reply_text, "reply_to": self.reply_to,
+                "handed_over_to": self.handed_over_to, "error": self.error,
+                "timings_ms": self.timings_ms, "timeline_ms": self.timeline_ms,
+                "reply_audio_bytes": n,
+                "reply_audio_seconds": round(n / 2 / SPEAKER_RATE, 3)}
+
+
+class Failed(Exception):
+    """A stage failed; the message is already the sentence for Outcome.error."""
+
+
+def clip(text: str, limit: int = MAX_TTS_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "), cut.rfind("\n"))
+    return cut[:end + 1] if end > limit // 2 else cut
+
+
+def _stt_part(body: object) -> object:
+    """stt-stack's own /health body: as it is when SATELLITES_STT_URL names
+    stt-stack, or its part of the gateway's (backends.stt.health, the
+    health:read tier svc:satellites holds) when it names the gateway."""
+    if isinstance(body, dict) and isinstance(body.get("backends"), dict):
+        stt = body["backends"].get("stt")
+        return stt.get("health") if isinstance(stt, dict) else None
+    return body
+
+
+def _refuses_boost(r: httpx.Response) -> bool:
+    """Whether stt-stack's 400 is about `boost` (its envelope's param, or its
+    words): a term the model cannot spell, or biasing switched off."""
+    try:
+        err = r.json().get("error") or {}
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(err, dict) and (err.get("param") == "boost"
+                                      or "'boost'" in str(err.get("message") or ""))
+
+
+class Router:
+    def __init__(self, rules: Actions, *, stt_url: str | None = None, tts_url: str | None = None,
+                 voice: str | None = None, client: httpx.AsyncClient | None = None,
+                 lookup: Lookup | None = None, stt_timeout: float = 30.0,
+                 tts_timeout: float = 30.0, output_of: Callable[[str], str] | None = None):
+        self.rules = rules
+        # Which satellite plays what one satellite plays: itself, or the one
+        # its Output names (main.Hub.output_of). None: always itself.
+        self.output_of = output_of
+        env = os.environ.get
+        self.stt_url = (stt_url if stt_url is not None
+                        else env("SATELLITES_STT_URL", "")).rstrip("/")
+        self.tts_url = (tts_url if tts_url is not None
+                        else env("SATELLITES_TTS_URL", "")).rstrip("/")
+        self.voice = voice or env("SATELLITES_TTS_VOICE") or "bm_george"
+        self.lookup = lookup
+        self.stt_timeout, self.tts_timeout = stt_timeout, tts_timeout
+        # Which engine family stt-stack runs by default ("parakeet" or
+        # "whisper"), from its /health and the x-stt-engine header every /v1
+        # answer carries. A language hint reaches STT only under an engine
+        # that takes one: Parakeet refuses the field (400).
+        self.stt_engine: str | None = None
+        # stt-stack's /health, as far as transcribing needs it: its engines
+        # (id, family, languages, what each takes), whether decode-time
+        # biasing is on (`hotwords`), and the glossary profiles it has. None
+        # until asked; asked again after _stt_until, and when the vocabulary
+        # is looked for again.
+        self._stt: dict | None = None
+        self._stt_until = 0.0
+        # The probe under way, if one is: never more than one at a time.
+        self._stt_probe: asyncio.Task | None = None
+        # The vocabulary is being looked for again (_names_glossary): a
+        # command may wait for that one answer; a check never does.
+        self._stt_recheck = False
+        # When stt-stack last refused HA_GLOSSARY, or listed it as absent,
+        # when it last refused `boost`, and when it last could not boost a
+        # wake word's terms, by the `prompt` they went as.
+        self._glossary_missing: float | None = None
+        self._boost_refused: float | None = None
+        self._terms_refused: dict[str, float] = {}
+        self._own_client = client is None
+        # follow_redirects stays False (httpx's default, stated so it is not
+        # changed casually): a redirect would carry a destination's bearer
+        # token to a host the action never named.
+        self.client = client or httpx.AsyncClient(follow_redirects=False)
+
+    async def aclose(self) -> None:
+        if self._own_client:
+            await self.client.aclose()
+
+    # -- entry points ---------------------------------------------------------
+
+    def find(self, satellite_id: str, satellite_name: str, wake_word: str) -> Route | None:
+        return self.rules.find(satellite_id, satellite_name, wake_word)
+
+    async def handle(self, satellite_id: str, satellite_name: str, wake_word: str,
+                     utterance_pcm16k: bytes) -> Outcome:
+        """One command, from its audio, with the reply collected rather than
+        played: what a test or an injected clip without a satellite needs."""
+        from . import dialogue
+
+        route = self.find(satellite_id, satellite_name, wake_word)
+        out = await dialogue.run_turn(self, route, satellite_id=satellite_id,
+                                      satellite_name=satellite_name, wake_word=wake_word,
+                                      audio=utterance_pcm16k, sink=dialogue.Collect())
+        return out
+
+    async def handle_text(self, satellite: str, wake_word: str, text: str) -> Outcome:
+        """The pipeline from a typed sentence: no STT, and nothing is played.
+        Behind POST /satellites/routing/test."""
+        from . import dialogue
+
+        found = self.lookup(satellite) if self.lookup else None
+        satellite_id, satellite_name = found or (satellite, satellite)
+        route = self.find(satellite_id, satellite_name, wake_word)
+        return await dialogue.run_turn(self, route, satellite_id=satellite_id,
+                                       satellite_name=satellite_name, wake_word=wake_word,
+                                       text=text, sink=dialogue.Collect())
+
+    async def describe(self) -> dict:
+        return {"rules": self.rules.listing(),
+                "env": await env_status(self.rules.env_vars()),
+                "services": {"stt": self.stt_url or None, "tts": self.tts_url or None,
+                             "voice": self.voice, "stt_engine": self.stt_engine},
+                "editable": self.rules.editable,
+                "warnings": self.rules.warnings(self.lookup),
+                "load_error": self.rules.load_error}
+
+    # -- stages ---------------------------------------------------------------
+
+    def target(self, behaviour: Behaviour, satellite_id: str) -> str | None:
+        if behaviour.action is None:
+            return None
+        reply_to = behaviour.action.reply_to
+        if reply_to == "none":
+            return None
+        if reply_to == "same":
+            nid = satellite_id
+        else:
+            found = self.lookup(reply_to) if self.lookup else None
+            nid = found[0] if found else reply_to
+        return self.output_of(nid) if self.output_of is not None else nid
+
+    def voice_for(self, behaviour: Behaviour, reply_language: str | None) -> str:
+        explicit = behaviour.action.voice if behaviour.action else None
+        return explicit or lang.voice_for(reply_language or lang.main(), self.voice)
+
+    async def stage(self, out: Outcome, name: str, timeout: float, work) -> object:
+        """Run one external call under a hard ceiling. httpx's own timeout is
+        per read, so a server that trickles a byte a second never trips it;
+        asyncio.timeout bounds the whole call."""
+        t = time.monotonic()
+        try:
+            async with asyncio.timeout(timeout):
+                return await work
+        except (TimeoutError, httpx.TimeoutException):
+            raise Failed(f"{name}: no answer within {timeout:g} s") from None
+        except DestinationError as e:
+            raise Failed(f"{name}: {e}") from None
+        except httpx.HTTPError as e:
+            # Never str(e) as it is: h11 quotes a header it refuses, and
+            # Home Assistant's text-to-speech sends its token in one.
+            raise Failed(f"{name}: {transport_error(e)}") from None
+        finally:
+            out.timings_ms[name] = round(out.timings_ms.get(name, 0.0)
+                                         + (time.monotonic() - t) * 1000, 1)
+
+    def warm(self) -> None:
+        """Ask stt-stack for its engines now, in the background, so the first
+        transcription of a start (often a wake word's double-check) has them
+        and waits for nothing. Called once the hub's loop is running."""
+        if self._stt_probe is None or self._stt_probe.done():
+            self._stt_probe = asyncio.get_running_loop().create_task(
+                self._probe_stt(), name="stt-engines")
+
+    async def _stt_health(self, *, wait: bool = False) -> dict:
+        """What stt-stack's /health said, as far as transcribing needs it.
+
+        A TRANSCRIPTION NEVER WAITS FOR THE PROBE. It answers from what was
+        last learnt, and a stale answer (older than ENGINE_RECHECK_S, or
+        ENGINE_RETRY_S after a probe got nothing) starts a probe in the
+        background for the next one. It used to probe first, and since the
+        sign-in release /health is the gateway's, which waits on every
+        backend and the GPU runner: measured 0.7-3.0 s against STT's own
+        15 ms. That spent a wake word's whole double-check budget
+        (verify.VERIFY_TIMEOUT_S) and let the wake through unchecked; on
+        2 Oct 2026 a video's hey_claude reached a language model that way,
+        and a Lumos turned the lights on.
+
+        `wait`: only for a transcription with no deadline of its own (a
+        command, never a check), and only when nothing has ever been learnt
+        or the vocabulary is being looked for again, is the probe awaited, so
+        a command neither misses a fine-tune (STT_MODELS=parakeet,
+        parakeet-pt-br) for want of the list nor leaves the vocabulary off
+        after the integration wrote it."""
+        if self._stt is not None and time.monotonic() < self._stt_until:
+            return self._stt
+        self.warm()
+        if wait and (self._stt is None or self._stt_recheck) and self._stt_probe is not None:
+            await asyncio.shield(self._stt_probe)
+        return self._stt if self._stt is not None else {"engines": [], "hotwords": None,
+                                                          "glossaries": None}
+
+    async def _probe_stt(self) -> None:
+        """One ask of stt-stack's /health, remembered for ENGINE_RECHECK_S (and
+        asked again when the vocabulary is looked for again, _names_glossary).
+        A stack that does not answer, or answers without a `models` list,
+        keeps what was last learnt (or nothing, the engine then learnt from
+        the first answer's x-stt-engine) and is asked again after
+        ENGINE_RETRY_S: remembered as "no engines" until the hub restarted, a
+        hub whose first command came while stt-stack was still loading its
+        models sent no word to a fine-tune for the rest of its life."""
+        self._stt_until = time.monotonic() + ENGINE_RETRY_S
+        try:
+            await self._ask_stt()
+        finally:
+            self._stt_recheck = False
+
+    async def _ask_stt(self) -> None:
+        if not self.stt_url:
+            self._stt = self._stt or {"engines": [], "hotwords": None, "glossaries": None}
+            return
+        try:
+            r = await gateway.request(self.client, "GET", f"{self.stt_url}/health",
+                                      timeout=ENGINE_PROBE_S)
+            body = _stt_part(r.json()) if r.status_code == 200 else None
+        except (httpx.HTTPError, ValueError, gateway.NotReady) as e:
+            log.info("routing: could not ask stt-stack which engines it runs (%s); what was "
+                     "last learnt stands until it is asked again in %.0f s",
+                     type(e).__name__, ENGINE_RETRY_S)
+            self._stt = self._stt or {"engines": [], "hotwords": None, "glossaries": None}
+            return
+        if not isinstance(body, dict):
+            log.info("routing: stt-stack's /health answered %s, not its engines; what was last "
+                     "learnt stands until it is asked again in %.0f s",
+                     r.status_code, ENGINE_RETRY_S)
+            self._stt = self._stt or {"engines": [], "hotwords": None, "glossaries": None}
+            return
+        models = body.get("models")
+        engines = [m for m in (models if isinstance(models, list) else [])
+                   if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
+        model = body.get("model")
+        if not engines and isinstance(model, str) and model:
+            # A stack from before the list: its one engine, by family.
+            family = "whisper" if model.lower().startswith("whisper") else model.lower()
+            engines = [{"id": None, "family": family, "default": True, "languages": [],
+                        "accepts_language": family == "whisper",
+                        "accepts_boost": family == "parakeet"}]
+        glossaries = body.get("glossaries")
+        self._stt = {"engines": engines,
+                     "hotwords": body.get("hotwords") if isinstance(body.get("hotwords"), bool)
+                     else None,
+                     "glossaries": glossaries if isinstance(glossaries, list) else None}
+        self._stt_until = time.monotonic() + ENGINE_RECHECK_S
+        default = next((e for e in engines if e.get("default")), engines[0] if engines else None)
+        if default is not None and isinstance(default.get("family"), str):
+            self.stt_engine = default["family"].lower()
+
+    def _engine_for(self, hint: str | None) -> dict | None:
+        """The engine a command goes to. An engine the stack loaded for the
+        word's language alone (STT_MODELS=parakeet,parakeet-pt-br: the pt-BR
+        fine-tune, for a word whose hint is pt) is asked for by its id;
+        anything else goes to the default. None when the stack has not said."""
+        engines = (self._stt or {}).get("engines") or []
+        if hint:
+            primary = lang.primary(hint)
+            own = next((e for e in engines if not e.get("default") and e.get("id")
+                        and e.get("languages") == [primary]), None)
+            if own is not None:
+                return own
+        return next((e for e in engines if e.get("default")), engines[0] if engines else None)
+
+    def _names_glossary(self) -> bool:
+        """Whether to name HA_GLOSSARY: unless stt-stack refused it, or listed
+        it as absent, within GLOSSARY_RETRY_S. Once that has passed, /health
+        is asked again: the integration may have written it since."""
+        if self._glossary_missing is None:
+            return True
+        if time.monotonic() - self._glossary_missing < GLOSSARY_RETRY_S:
+            return False
+        self._glossary_missing = None
+        self._stt_until = 0.0   # asked again; the engines stand meanwhile
+        self._stt_recheck = True
+        return True
+
+    async def transcribe(self, pcm: bytes, hint: str | None = None, *,
+                         timeout: float | None = None,
+                         boost: list[str] | tuple[str, ...] = ()) -> str:
+        """The transcript. `hint` (a wake word's language) is sent only to an
+        engine that takes one: Whisper does, and Parakeet refuses the field
+        with a 400 and detects the language itself. A word whose language an
+        engine was loaded for alone goes to that engine (_engine_for).
+
+        HOME ASSISTANT'S NAMES go with it as HA_GLOSSARY to an engine that
+        boosts (Parakeet), boosted into its decoder unless the stack has
+        decode-time biasing off (/health's `hotwords`). Not to Whisper, which
+        cannot boost and takes them as hotwords: stt-stack measured terms
+        absent from the audio raising Whisper's WER by 28%, and a list of
+        every room is mostly absent terms. Not where the stack does not list
+        the profile (a hub without the integration). The vocabulary must
+        never cost a transcription: a refused `boost` is sent again with the
+        names and without it, and any other 400 on a request that named them
+        (no such profile) is sent again without them.
+
+        `boost` is vocabulary for this transcription alone: a wake word's
+        double-check gives the word's own name (verify.vocabulary), so that
+        "Jarv..." comes back "Jarvis" and not "Jarves". The terms go as the
+        request's `prompt`, the field stt-stack takes one-off terms in, and
+        only where the names would be boosted: to an engine that boosts,
+        unless the stack has biasing off or refused the boost within
+        GLOSSARY_RETRY_S. Parakeet's boost only finishes a word the audio
+        began (stt-stack's boosting.START_WEIGHT is 0 unless a deployment
+        changes it) and only where the model was already close
+        (boosting.GATE), so a TV's "Obrigado." stays "Obrigado.". Whisper
+        takes terms as hotwords, whatever the audio, and the audio a check
+        exists for is the audio the word is not in, so it is not sent them.
+        Without the boost they would reach only the stack's case repair,
+        which the match does not see.
+
+        A term the model cannot spell (a character it has no piece for) has
+        the boost refused. That is the word's spelling and not the stack, so
+        the transcription goes again without this call's terms and with the
+        boost still asked for: a stack that refuses the boost itself refuses
+        it again, and is heard as above, and one that does not keeps boosting
+        the names for the commands. Terms it could not boost are not sent
+        again for GLOSSARY_RETRY_S, so that a spelling the model cannot spell
+        does not cost every check of its word a second request inside
+        verify.VERIFY_TIMEOUT_S.
+
+        `timeout` bounds each request instead of stt_timeout: a wake word's
+        double-check stops waiting after verify.VERIFY_TIMEOUT_S, and a
+        transcription nobody waits for must not run on for 30 s on an STT
+        that is already slow, where the commands would queue behind it."""
+        if not self.stt_url:
+            raise DestinationError("SATELLITES_STT_URL is not set, so nothing can be transcribed")
+        pcm = pcm[:len(pcm) & ~1]  # whole samples only
+        names = self._names_glossary()
+        health = await self._stt_health(wait=timeout is None)
+        engine = self._engine_for(hint)
+        family = (engine or {}).get("family") or self.stt_engine
+        takes_language = engine.get("accepts_language") if engine else family == "whisper"
+        boosts = engine.get("accepts_boost") if engine else family == "parakeet"
+        data = {"model": engine["id"] if engine and engine.get("id") and not engine.get("default")
+                else "whisper-1", "response_format": "json"}
+        if hint and takes_language:
+            data["language"] = lang.primary(hint)  # Whisper takes ISO 639-1
+        plain = dict(data)
+        listed = health.get("glossaries")
+        if names and boosts and listed is not None and HA_GLOSSARY not in listed:
+            log.info("routing: stt-stack has no %s vocabulary (the Home Assistant integration "
+                     "writes it); looked for again in %.0f min", HA_GLOSSARY, GLOSSARY_RETRY_S / 60)
+            self._glossary_missing = time.monotonic()
+            names = False
+        boosting = boosts and health.get("hotwords") is not False and (
+            self._boost_refused is None or time.monotonic() - self._boost_refused >= GLOSSARY_RETRY_S)
+        if names and boosts:
+            data["glossary"] = HA_GLOSSARY
+        prompt = ", ".join(boost)
+        refused = self._terms_refused.get(prompt)
+        if boosting and prompt and (refused is None or time.monotonic() - refused >= GLOSSARY_RETRY_S):
+            data["prompt"] = prompt
+        if boosting and (names or "prompt" in data):
+            data["boost"] = "true"
+        wav = audio.wav(pcm, MIC_RATE, 1)
+        r = await self._post_stt(data, wav, hint=hint, timeout=timeout)
+        if "prompt" in data and r.status_code == 400 and _refuses_boost(r):
+            refusal = r.text[:300].strip()
+            del data["prompt"]
+            r = await self._post_stt(data, wav, retry="terms_refused", timeout=timeout)
+            if not (r.status_code == 400 and _refuses_boost(r)):
+                log.info("routing: stt-stack cannot boost %s, so a wake word's check goes without "
+                         "them for %.0f min: %s", prompt, GLOSSARY_RETRY_S / 60, refusal)
+                now = time.monotonic()
+                self._terms_refused = {p: t for p, t in self._terms_refused.items()
+                                       if now - t < GLOSSARY_RETRY_S} | {prompt: now}
+        if "boost" in data and r.status_code == 400 and _refuses_boost(r):
+            log.warning("routing: stt-stack refused to boost the %s vocabulary, so its names go "
+                        "without the boost for %.0f min: %s", HA_GLOSSARY, GLOSSARY_RETRY_S / 60,
+                        r.text[:300].strip())
+            self._boost_refused = time.monotonic()
+            del data["boost"]
+            r = await self._post_stt(data, wav, retry="boost_refused", timeout=timeout)
+        if "glossary" in data and r.status_code == 400:
+            log.warning("routing: stt-stack refused the %s vocabulary, transcribing without it "
+                        "for %.0f min: %s", HA_GLOSSARY, GLOSSARY_RETRY_S / 60, r.text[:300].strip())
+            self._glossary_missing = time.monotonic()
+            r = await self._post_stt(plain, wav, retry="glossary_refused", timeout=timeout)
+        answered = r.headers.get("x-stt-engine")
+        if answered and (engine is None or engine.get("default")):
+            self.stt_engine = answered.lower()
+        if r.status_code != 200:
+            raise DestinationError(f"STT answered {r.status_code}: {r.text[:200].strip()}")
+        try:
+            text = r.json()["text"]
+        except (ValueError, KeyError, TypeError):
+            raise DestinationError("STT answered without a \"text\" field") from None
+        if not isinstance(text, str):
+            raise DestinationError("STT answered a \"text\" that is not a string")
+        return text.strip()
+
+    async def _post_stt(self, data: dict, wav: bytes, *, retry: str | None = None,
+                        hint: str | None = None, timeout: float | None = None) -> httpx.Response:
+        t0 = time.monotonic()
+        try:
+            r = await gateway.request(
+                self.client, "POST", f"{self.stt_url}/v1/audio/transcriptions", data=data,
+                timeout=self.stt_timeout if timeout is None else timeout,
+                files={"file": ("utterance.wav", wav, "audio/wav")})
+        except gateway.NotReady as e:
+            raise DestinationError(f"STT: {e}") from None
+        telemetry.note("stt", "request", engine=(r.headers.get("x-stt-engine") or "").lower()
+                       or data.get("model"), model=data.get("model"), glossary=data.get("glossary"),
+                       boost=bool(data.get("boost")), language=data.get("language"), hint=hint,
+                       status=r.status_code, ms=telemetry.since(t0),
+                       audio_s=round(max(0, len(wav) - 44) / 2 / MIC_RATE, 2), retry=retry)
+        return r
+
+    async def synthesise(self, text: str, voice: str) -> bytes:
+        if not self.tts_url:
+            raise DestinationError("SATELLITES_TTS_URL is not set, so the reply cannot be spoken")
+        t0 = time.monotonic()
+        try:
+            r = await gateway.request(self.client, "POST", f"{self.tts_url}/v1/audio/speech",
+                                      timeout=self.tts_timeout,
+                                      json={"model": "kokoro", "voice": voice,
+                                            "input": clip(text), "response_format": "pcm"})
+        except gateway.NotReady as e:
+            raise DestinationError(f"TTS: {e}") from None
+        pcm = r.content[:len(r.content) & ~1] if r.status_code == 200 else b""
+        telemetry.note("tts", "synth", engine="kokoro", voice=voice, chars=len(clip(text)),
+                       status=r.status_code, ms=telemetry.since(t0),
+                       audio_s=round(len(pcm) / 2 / TTS_RATE, 2) if pcm else None)
+        if r.status_code != 200:
+            raise DestinationError(f"TTS answered {r.status_code}: {r.text[:200].strip()}")
+        return audio.resample(pcm, TTS_RATE, SPEAKER_RATE)
+
+    def log_outcome(self, satellite_id: str, wake_word: str, out: Outcome) -> None:
+        if out.rule_id is None:
+            return  # no action: already said
+        if out.error:
+            result = out.error
+        elif out.audio_bytes or out.reply_pcm48k:
+            result = f"reply for {out.reply_to}"
+        else:
+            result = "no reply"
+        stages = ", ".join(f"{k} {v:.0f}" for k, v in out.timings_ms.items() if k != "total")
+        log.info("routing: satellite %s wake %r rule %s (%s, %s): %s, %.0f ms (%s)", satellite_id,
+                 wake_word, out.rule_id, out.mode, out.language, result,
+                 out.timings_ms.get("total", 0), stages)
+        # What was said stays at DEBUG: INFO logs are kept and shipped, and a
+        # household's sentences do not belong in them by default.
+        log.debug("routing: satellite %s heard %r, replied %r", satellite_id, out.transcript,
+                  out.reply_text)
+
+
+# ---- API ----------------------------------------------------------------------
+
+_current: Router | None = None
+
+
+def configure(router: Router) -> Router:
+    """Set the Router the routes use. main.py's lifespan should call this, so
+    each app start (and each test's TestClient) gets its own data dir."""
+    global _current
+    _current = router
+    return router
+
+
+def current() -> Router:
+    """The configured Router, or one built from the environment on first use."""
+    global _current
+    if _current is None:
+        _current = Router(Rules(Path(os.environ.get("SATELLITES_DATA_DIR", "/data"))))
+    return _current
+
+
+class TryBody(BaseModel):
+    satellite: str = Field(min_length=1, max_length=64)
+    wake_word: str = Field(min_length=1, max_length=64)
+    text: str = Field(min_length=1, max_length=2000)
+
+
+routes = APIRouter()
+# A dependency rather than the global read directly, so a test can hand the
+# routes its own Router with app.dependency_overrides[current].
+CurrentRouter = Annotated[Router, Depends(current)]
+
+
+def _host_refused(e: HostRefused) -> ApiError:
+    """403 host_not_allowed, naming the host and the secret (D41), so the
+    page can link to the secret's row in Admin › Secrets."""
+    return ApiError(403, str(e), code="host_not_allowed", extra={"secret": e.name, "host": e.origin})
+
+
+@routes.get("/satellites/routing")
+async def get_routing(router: CurrentRouter) -> dict:
+    return await router.describe()
+
+
+@routes.put("/satellites/routing")
+async def put_routing(body: RuleSet, router: CurrentRouter) -> dict:
+    if not router.rules.editable:
+        raise ApiError(409, "routing is set on each wake word now: its mode, language and "
+                            "action are part of the entry in PUT /satellites/wake-words",
+                       code="routing_per_wake_word")
+    try:
+        router.rules.replace(body)
+    except OSError as e:
+        raise ApiError(500, f"could not write {router.rules.path.name}: {e}",
+                       type_="server_error") from None
+    log.info("routing: %d rules saved", len(body.rules))
+    return await router.describe()
+
+
+class PipelinesBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: Url
+    token_env: SecretName = "SATELLITES_HA_TOKEN"
+
+
+@routes.post("/satellites/ha/pipelines")
+async def ha_pipelines(body: PipelinesBody) -> dict:
+    """Home Assistant's Assist pipelines and its preferred one, asked with
+    the token in `token_env`: what an ha_assist word's picker offers. The
+    token is asked of the store afresh and goes only to a host it names
+    (D41), so this sends nothing a saved word could not."""
+    secret_client.current().invalidate(body.token_env)
+    try:
+        if await _secret(body.token_env, body.url) is None:
+            raise ApiError(409, f"{body.token_env} is not set in the secret store, so Home "
+                                "Assistant cannot be asked", code="token_missing", param="token_env")
+        return await HaAssist(type="ha_assist", url=body.url, token_env=body.token_env).pipelines()
+    except HostRefused as e:
+        raise _host_refused(e) from None
+    except DestinationError as e:
+        raise ApiError(502, str(e), type_="server_error", code="home_assistant") from None
+
+
+@routes.post("/satellites/routing/test")
+async def try_routing(body: TryBody, router: CurrentRouter) -> dict:
+    return (await router.handle_text(body.satellite, body.wake_word, body.text)).as_json()
+
+
+# ---- a language model word's picker and its Test ------------------------------------
+
+
+class LlmModelsBody(BaseModel):
+    """What the model picker asks with: the address and the NAME of the key,
+    as an llm action holds them, with Llm's own patterns and default. So an
+    address the picker can ask is one a Save takes, and a pasted
+    /chat/completions is trimmed here as it is there."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: LlmUrl
+    api_key_env: SecretName | None = "SATELLITES_LLM_API_KEY"
+
+
+def _llm_failed(e: Exception, key_env: str | None, what: str, ceiling: float) -> ApiError:
+    """A picker's or a Test's failure as the answer the page shows: a
+    timeout is 504, anything else 502, in the provider's words (already
+    scrubbed by destinations.py) or the transport's (transport_error, with
+    the key as found scrubbed from it too)."""
+    if isinstance(e, (TimeoutError, httpx.TimeoutException)):
+        return ApiError(504, f"{what} within {ceiling:g} s", type_="server_error",
+                        code="llm_timeout")
+    if isinstance(e, HostRefused):
+        return _host_refused(e)
+    if isinstance(e, DestinationError):
+        return ApiError(502, str(e), type_="server_error", code="llm")
+    return ApiError(502, transport_error(e, *_known([key_env]))[:300], type_="server_error",
+                    code="llm")
+
+
+@routes.post("/satellites/llm/models")
+async def llm_models(body: LlmModelsBody, router: CurrentRouter) -> dict:
+    """The ids a language model server lists at GET {base_url}/models, asked
+    with the key the action names, for the picker on an llm word: {"models":
+    [...]}. The page asks once the address is committed, never while it is
+    being typed, so a key is not sent to a half-typed host that happens to
+    resolve. The key goes where a saved word would send it, so this is no
+    more than saving one allows (destinations.py). The key is asked of the
+    store afresh."""
+    secret_client.current().invalidate(body.api_key_env)
+    try:
+        async with asyncio.timeout(MODELS_TIMEOUT_S):
+            models = await Llm.list_models(router.client, body.base_url, body.api_key_env)
+    except (TimeoutError, DestinationError, httpx.HTTPError) as e:
+        raise _llm_failed(e, body.api_key_env, "the server did not list its models",
+                          MODELS_TIMEOUT_S) from None
+    return {"models": models}
+
+
+# The question a Test asks: short, so the answer's time is mostly the time to
+# the first word, which is what a satellite waits for.
+LLM_TEST_TEXT = "Say hello in five words or fewer."
+# Well under the gateway's read timeout for the hub (GATEWAY_SATELLITES_TIMEOUT),
+# so the hub's own sentence reaches the page before the gateway gives up with a
+# bare 504, and short enough that a Test never holds the page for long.
+LLM_TEST_CEILING_S = 25.0
+
+
+@routes.post("/satellites/llm/test")
+async def llm_test(body: Llm, router: CurrentRouter) -> dict:
+    """One question to a language model destination as the form holds it,
+    saved or not: the same request path a turn takes (the key found by name,
+    the token limit's retry, streaming) and no TTS. Answers {model, reply,
+    first_token_ms, total_ms, token_limit}: how long the hub waited for the
+    first words and for all of them, which is the latency a satellite adds
+    on top of speech-to-text and speech. Nothing is saved, and nothing is
+    sent that saving the action and pressing Try a word would not send. The
+    key is asked of the store afresh."""
+    secret_client.current().invalidate(body.api_key_env)
+    ceiling = min(body.timeout, LLM_TEST_CEILING_S)
+    asked = Asked(satellite_id="test", satellite_name="test", wake_word="test",
+                  text=LLM_TEST_TEXT, audio_seconds=0.0)
+    pieces: list[str] = []
+    start = time.monotonic()
+    first: float | None = None
+    try:
+        async with asyncio.timeout(ceiling):
+            async for piece in body.answer(router.client, asked):
+                first = first or time.monotonic()
+                pieces.append(piece)
+    except (TimeoutError, DestinationError, httpx.HTTPError) as e:
+        raise _llm_failed(e, body.api_key_env, "the model did not answer", ceiling) from None
+    done = time.monotonic()
+    return {"model": body.model, "reply": " ".join("".join(pieces).split())[:300],
+            "first_token_ms": round((first - start) * 1000) if first else None,
+            "total_ms": round((done - start) * 1000), "token_limit": body.limit()}

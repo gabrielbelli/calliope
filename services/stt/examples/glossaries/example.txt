@@ -1,0 +1,54 @@
+# EXAMPLE ONLY — DEPLOYMENT-SUPPLIED, NOT LOADED BY DEFAULT.
+#
+# This file is not copied into the image and no request can select it until a
+# deployment installs it. It is here as a worked example of the one thing the
+# shipped profiles must never contain: one person's project names, colleagues
+# and internal systems. The names below are invented stand-ins of that shape.
+#
+# Why the split exists. `calliope-stt` is published to a public registry, and
+# rules like these used to live in services/stt/glossary.txt, which the image
+# copied in and applied to EVERY request. Anyone who pulled the image got one
+# person's project names rewritten into their audio — rewrites naming projects
+# they had never heard of, that they could not discover without reading the
+# image, and that they did not ask for. It was not free either: measured across
+# 25 cells, a glossary whose terms do NOT occur in the audio raised WER
+# by 28% on Whisper, and nothing measurable on Parakeet.
+#
+# Install it, on a deployment with /glossaries mounted:
+#
+#   curl -X PUT --data-binary @examples/glossaries/example.txt \
+#        http://localhost:8000/glossaries/mine
+#
+# or drop it in the mounted directory as /glossaries/mine.txt. Then select
+# it per request:
+#
+#   curl -F file=@clip.wav -F glossary=mine http://localhost:8000/transcribe
+#
+# `PUT` refuses a single-word left-hand side unless you send `force`, because
+# that is the shape that corrupts sentences the glossary was never meant to
+# touch. `comet` below is exactly that case and needs `?force=true`; read the
+# note beside it before you send it.
+
+# --- replacements
+luminstack = Lumenstack
+lumenstak = Lumenstack
+harmony dashboard = Harmonia dashboard
+blue herring = Blue Heron
+blue heron = Blue Heron
+# An ordinary English word on the left. Kept here because this deployment's
+# speech is dictated software talk, where "comet" is a mishearing of "commit"
+# essentially every time — and refused by PUT without `force` for the same
+# reason it is a hotword rather than a replacement in the shipped `dictation`
+# profile.
+comet = commit
+
+# --- hotwords only: bias the decoder, never rewrite the text
+#
+# "Fennell" is heard as "fennel", but a `fennel = Fennell` rule would corrupt
+# any sentence that genuinely says fennel. Biasing the decoder is safe;
+# rewriting is not.
+Lumenstack
+Harmonia
+Blue Heron
+Fennell
+Parakeet

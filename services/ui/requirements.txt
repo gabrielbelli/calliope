@@ -1,0 +1,32 @@
+# Four dependencies and one binary, and no model, no torch, no numpy.
+#
+# This process serves one HTML file, forwards bytes to the gateway, and spawns
+# the downloader child. Nothing in it decodes audio: the browser does that with
+# OfflineAudioContext, which is why there is no PyAV here and no ffmpeg in the
+# image. That is a deliberate difference from services/tts and services/stt,
+# and it is what keeps this image in the same weight class as the gateway.
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+httpx==0.28.1
+
+# UploadFile on the reference-clip route. FastAPI does not vendor it, and a
+# missing python-multipart is a RuntimeError raised at the first upload rather
+# than at import, so it is pinned here alongside the rest.
+python-multipart==0.0.20
+
+# A LIBRARY, USED BY app/fetcher.py ONLY, in a child process that checks every
+# connection it makes against app/guard.py's rules. Installed bare: the
+# curl_cffi extra would resolve and connect in C and bypass that check, and the
+# Containerfile fails the build if it arrives. `websockets` comes in through
+# uvicorn[standard] and yt-dlp uses it; it is pure Python, so the check covers
+# it too.
+#
+# The pin is in yt-dlp/requirements.txt, where .github/dependabot.yml can keep
+# it current; that file says why it is on its own. A nested -r is read relative
+# to this file, so every install of this one installs it.
+-r yt-dlp/requirements.txt
+
+# The OpenAI error envelope, shared with the four siblings rather than
+# hand-copied into a fifth file. Resolved relative to the process's CWD, which
+# is the repository root for every install here and in the Containerfile.
+./packages/common

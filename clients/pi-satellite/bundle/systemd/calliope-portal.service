@@ -1,0 +1,9 @@
+[Unit]
+Description=Calliope satellite Wi-Fi setup network
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/calliope/current
+ExecStart=/usr/bin/python3 -m calliope_pi.portal

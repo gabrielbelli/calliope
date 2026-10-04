@@ -1,0 +1,786 @@
+"""What `compose.yaml` promises, checked against what the code can deliver.
+
+Two failures this repository has already shipped are what these tests are for.
+
+The first: `compose.yaml` documented `TTS_RUNNER_CPU_MIN_PCT` and
+`TTS_RUNNER_CPU_WHEN_BACKLOG_S` as live knobs and recommended an order naming a
+lane the code did not have, so **an operator following this repository's own
+advice configured a lane that silently did no work.**
+
+The second is the shape this file mostly guards: two halves of one feature, one
+of them silent. A `model` string the gateway routes and tts-long has not enabled;
+an engine advertised on the API that only this deployment's runner can render; a
+per-engine knob for a control the engine does not have. Every one of those is
+audible here and inaudible in production until somebody reads a waveform.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import re
+
+import pytest
+import yaml
+
+from conftest import KEY, PREFIXES, keys_read_by_code
+from voice_common.auth import REMOVED_VARIABLES
+from voice_common.scopes import SERVICE_PRINCIPALS
+
+TTS_LONG = "tts-long"
+GATEWAY = "voice-gateway"
+
+
+def _csv(value: str) -> list[str]:
+    return [x.strip().lower() for x in value.split(",") if x.strip()]
+
+
+# -- the engine set ---------------------------------------------------------
+
+def test_compose_never_advertises_an_engine_the_code_has_no_catalogue_for(
+        env_of, catalogue):
+    """TTS_ENGINES is checked against the one table, not against a memory.
+
+    A name here that the catalogue does not know is a deployment offering a
+    checkpoint nothing can load. tts-long refuses to start on it; this says so
+    before anybody deploys.
+    """
+    named = set(_csv(env_of(TTS_LONG).get("TTS_ENGINES", "chatterbox")))
+    unknown = named - set(catalogue.CATALOGUE_IDS)
+    assert not unknown, (
+        f"compose.yaml offers {sorted(unknown)} in TTS_ENGINES, and "
+        f"voice_common.engines.CATALOGUE knows only "
+        f"{sorted(catalogue.CATALOGUE_IDS)}.")
+
+
+def test_the_gateway_and_tts_long_agree_on_the_engine_set(env_of):
+    """THE ONE PLACE TWO SERVICES' MODEL TABLES CAN DRIFT.
+
+    GATEWAY_LONG_MODELS decides what the gateway routes to tts-long AND what
+    `GET /v1/models` advertises. TTS_ENGINES decides what tts-long will actually
+    accept. A name in the first and not the second is a 400 from a model the
+    gateway told the client it had; a name in the second and not the first
+    reaches Kokoro or a 404 instead of the engine it names.
+    """
+    long_models = set(_csv(env_of(GATEWAY).get("GATEWAY_LONG_MODELS",
+                                               "chatterbox,tts-long")))
+    engines = set(_csv(env_of(TTS_LONG).get("TTS_ENGINES", "chatterbox")))
+    assert long_models - {"tts-long"} == engines, (
+        f"GATEWAY_LONG_MODELS is {sorted(long_models)} and TTS_ENGINES is "
+        f"{sorted(engines)}; they must match once the `tts-long` alias is "
+        f"removed.")
+
+
+def test_the_default_engine_is_one_this_deployment_offers(env_of):
+    """TTS_DEFAULT_ENGINE is what `tts-1` and an absent `model` resolve to.
+
+    Pointing it at an engine TTS_ENGINES does not name would 400 every
+    unmodified OpenAI client on the stack at once.
+    """
+    env = env_of(TTS_LONG)
+    engines = _csv(env.get("TTS_ENGINES", "chatterbox"))
+    default = (env.get("TTS_DEFAULT_ENGINE") or engines[0]).strip().lower()
+    assert default in engines, (
+        f"TTS_DEFAULT_ENGINE is {default!r} and TTS_ENGINES offers "
+        f"{engines}.")
+
+
+def _opted_out(env: dict) -> bool:
+    value = (env.get("TTS_ALLOW_RUNNER_ONLY_ENGINES") or "0").strip().lower()
+    return value not in {"0", "", "false", "no"}
+
+
+def test_every_advertised_engine_can_run_with_the_runner_switched_off(
+        env_of, catalogue):
+    """THE DESKTOP IS SPEED, NEVER AVAILABILITY.
+
+    An engine that only exists while somebody's gaming PC is switched on is a
+    desktop-shaped hole in the API, and the first Friday evening that hole eats
+    a job. tts-long refuses to start in this state; this catches it in the file
+    that creates it, which is where it is cheap.
+
+    THIS USED TO SKIP ENTIRELY THE MOMENT THE OPT-OUT WAS SET, and setting it is
+    exactly what shipping `voxtral` did. A test that answers "not checking" as
+    soon as the risky configuration is the live one is the shape of dead test
+    this directory exists to prevent, so the opt-out now NARROWS the assertion
+    instead of switching it off: an orphan is allowed only where the catalogue
+    itself says the checkpoint has no local class. A typo in TTS_LOCAL_ENGINES
+    is still caught, and so is an engine that could have run here and was left
+    out by accident.
+    """
+    env = env_of(TTS_LONG)
+    engines = set(_csv(env.get("TTS_ENGINES", "chatterbox")))
+    local = set(_csv(env.get("TTS_LOCAL_ENGINES", env.get("TTS_ENGINES",
+                                                          "chatterbox"))))
+    orphans = engines - local
+    if not _opted_out(env):
+        assert not orphans, (
+            f"TTS_ENGINES offers {sorted(orphans)} but TTS_LOCAL_ENGINES "
+            f"cannot run it, so it would exist only while the runner is up.")
+        return
+    avoidable = sorted(
+        e for e in orphans
+        if getattr(catalogue.CATALOGUE.get(e), "local_class", None) is not None)
+    assert not avoidable, (
+        f"TTS_ALLOW_RUNNER_ONLY_ENGINES is set, but {avoidable} could run on "
+        f"this container -- the catalogue gives each of them a local_class. "
+        f"The opt-out is for engines with NO local path at all; using it to "
+        f"cover an engine that has one hides a missing name in "
+        f"TTS_LOCAL_ENGINES.")
+
+
+def test_the_default_engine_can_run_with_the_runner_switched_off(
+        env_of, catalogue):
+    """THE NARROWED INVARIANT, AND THE ONE THE OPT-OUT MAY NEVER TOUCH.
+
+    ADR 0008 said every advertised engine runs locally. ADR 0009 narrows that to
+    the default engine, because `voxtral` cannot satisfy the old rule. What must
+    survive is this: a caller that does not TYPE a runner-only engine's name
+    cannot be failed by somebody switching a gaming PC off. `tts-long`, an
+    absent `model` and OpenAI's three names all resolve to TTS_DEFAULT_ENGINE,
+    so if that one has no local lane the whole API goes away with the runner --
+    which is the failure the opt-out looks like it permits and must not.
+    """
+    env = env_of(TTS_LONG)
+    engines = _csv(env.get("TTS_ENGINES", "chatterbox"))
+    local = set(_csv(env.get("TTS_LOCAL_ENGINES", ",".join(engines))))
+    default = (env.get("TTS_DEFAULT_ENGINE") or engines[0]).strip().lower()
+    assert default in local, (
+        f"TTS_DEFAULT_ENGINE is {default!r} and TTS_LOCAL_ENGINES is "
+        f"{sorted(local)}. Every alias resolves to the default engine, so a "
+        f"default without a local lane makes every unmodified OpenAI client "
+        f"fail whenever the runner is away.")
+    facts = catalogue.CATALOGUE.get(default)
+    assert getattr(facts, "local_class", "unset") is not None, (
+        f"TTS_DEFAULT_ENGINE is {default!r} and the catalogue gives it no "
+        f"local_class, so naming it in TTS_LOCAL_ENGINES cannot make it run "
+        f"here.")
+
+
+def test_no_engine_is_promised_a_local_lane_the_catalogue_cannot_give_it(
+        env_of, catalogue):
+    """THE `chatterbox-cpu` TRAP, IN THE OTHER DIRECTION.
+
+    That rung was a lane named in configuration that no code could route work
+    to. This is the same mistake made from the deployment side: adding
+    `voxtral` to TTS_LOCAL_ENGINES because it looks like the other two. There is
+    no processor path through an int4 tile-packed checkpoint -- torchao calls
+    torch.cuda.get_device_capability() before any device dispatch -- so the lane
+    would be configured, published on /health, and unable to do work.
+    """
+    env = env_of(TTS_LONG)
+    local = _csv(env.get("TTS_LOCAL_ENGINES", env.get("TTS_ENGINES",
+                                                      "chatterbox")))
+    impossible = sorted(
+        e for e in local
+        if e in catalogue.CATALOGUE
+        and getattr(catalogue.CATALOGUE[e], "local_class", "unset") is None)
+    assert not impossible, (
+        f"TTS_LOCAL_ENGINES names {impossible}, and the catalogue says each of "
+        f"them has no local class at all. That is a lane configured and unable "
+        f"to run anything, which is what the deleted `chatterbox-cpu` rung was.")
+
+
+def test_no_per_engine_key_names_a_control_that_engine_lacks(env_of, catalogue):
+    """A knob that does nothing is the house rule broken with a longer fuse.
+
+    `TTS_CHATTERBOX_TURBO_EXAGGERATION` would be read by nothing, because
+    chatterbox-turbo has no exaggeration control at all — hp.emotion_adv is
+    False, so the conditioning layer is never built. tts-long makes that fatal
+    at boot; this makes it fatal before the deploy.
+    """
+    # LONGEST SLUG FIRST. `CHATTERBOX` is a prefix of `CHATTERBOX_TURBO`, so
+    # matching in catalogue order would read TTS_CHATTERBOX_TURBO_TEMPERATURE as
+    # a `chatterbox` key for a control called `turbo_temperature` and report a
+    # fault that is not there.
+    slugs = sorted(((catalogue.slug(e), e) for e in catalogue.CATALOGUE_IDS),
+                   key=lambda pair: -len(pair[0]))
+    offenders = []
+    for key in env_of(TTS_LONG):
+        if not key.startswith("TTS_"):
+            continue
+        rest = key[len("TTS_"):]
+        for slug, engine in slugs:
+            if not rest.startswith(slug + "_"):
+                continue
+            field = rest[len(slug) + 1:].lower()
+            controls = catalogue.CATALOGUE[engine].controls
+            if field not in controls:
+                offenders.append((key, engine, sorted(controls)))
+            break
+    assert not offenders, (
+        "per-engine keys naming a control that engine does not have: "
+        + "; ".join(f"{k} ({e} has {c})" for k, e, c in offenders))
+
+
+# -- nothing is advertised that no longer exists ----------------------------
+
+# Phrases that claim a NAMED key is dead. "a knob that is read by no code is
+# worse than no knob" is deliberately not here: it is an aphorism about knobs in
+# general, and matching it would flag every key that happens to share a
+# paragraph with it.
+DEAD_CLAIM = re.compile(
+    r"read by nothing|gone from the code|are gone from it",
+    re.IGNORECASE)
+
+DOCS = ("compose.yaml",
+        "services/satellites/README.md",
+        "services/tts-long/README.md",
+        "services/gateway/README.md",
+        "services/ui/README.md",
+        "services/tts/README.md",
+        "services/stt/README.md",
+        "docs/adr/0007-two-lanes-not-three-rungs.md",
+        "docs/adr/0008-two-engines-and-both-stay-jobs.md")
+
+
+def _sentences(text: str) -> list[str]:
+    flat = " ".join(line.lstrip().lstrip("#").strip() for line in text.splitlines())
+    flat = re.sub(r"\s+", " ", flat)
+    return flat.split(". ")
+
+
+@pytest.mark.parametrize("doc", DOCS)
+def test_a_document_never_lists_a_live_key_among_the_dead_ones(doc, root, source):
+    """Rounding a deletion up is the same falsehood as the dead knob was.
+
+    `compose.yaml` and the tts-long README both said `TTS_RUNNER_CPU_MAX_WAIT`
+    and `TTS_REALTIME_FACTOR_RUNNER_CPU` were "read by nothing" while
+    app/remote.py and app/main.py were still parsing both of them. A reader who
+    trusts that sentence stops looking, and the second RunnerClient those keys
+    still build goes on being constructed at every startup.
+    """
+    path = root / doc
+    if not path.exists():
+        pytest.skip(f"{doc} is not in this tree")
+    for sentence in _sentences(path.read_text(encoding="utf-8")):
+        if not DEAD_CLAIM.search(sentence):
+            continue
+        alive = keys_read_by_code(sentence, source)
+        assert not alive, (
+            f"{doc} says of {sorted(alive)}: {sentence.strip()!r} — but the "
+            f"code still reads every one of them.")
+
+
+def test_no_commented_out_knob_in_compose_is_read_by_nothing(compose_text, source):
+    """A recommendation is advice, and advice for a key nothing reads is a trap.
+
+    Every `# KEY: "value"` line in this file reads as a supported setting
+    somebody can uncomment. That is exactly how `TTS_RUNNER_CPU_MIN_PCT` and
+    `TTS_RUNNER_CPU_WHEN_BACKLOG_S` were configured into a lane that did no
+    work: they were presented here, at their documented defaults, for months.
+    """
+    suggested = set()
+    for line in compose_text.splitlines():
+        m = re.match(r'^\s*#\s*((?:' + "|".join(PREFIXES) + r')_[A-Z0-9_]+):\s*"',
+                     line)
+        if m:
+            suggested.add(m.group(1))
+    dead = {k for k in suggested
+            if f'"{k}"' not in source and f"'{k}'" not in source}
+    assert not dead, (
+        f"compose.yaml presents {sorted(dead)} as commented-out settings and "
+        f"no code reads them.")
+
+
+def test_every_environment_key_this_deployment_sets_is_read_by_its_service(
+        compose, source, catalogue):
+    """A key that is set and read by nothing is a belief with no effect.
+
+    Per-engine keys (`TTS_<ENGINE>_<FIELD>`) are built from the catalogue at
+    runtime and never spelled literally in the source, which is the point of the
+    slug: no key spells `turbo` by hand. They are checked by the test above
+    instead.
+    """
+    slugs = tuple(catalogue.slug(e) for e in catalogue.CATALOGUE_IDS)
+    templated = re.compile(
+        r"^TTS_(?:RUNNER_SERVICE|COLD_LOAD_SECONDS|REALTIME_FACTOR_(?:LOCAL|RUNNER))_(?:"
+        + "|".join(re.escape(s) for s in slugs) + r")$|^TTS_(?:"
+        + "|".join(re.escape(s) for s in slugs) + r")_[A-Z0-9_]+$")
+    dead: list[str] = []
+    for name, svc in compose["services"].items():
+        for key in (svc.get("environment") or {}):
+            if not KEY.fullmatch(key) or templated.match(key):
+                continue
+            if f'"{key}"' in source or f"'{key}'" in source:
+                continue
+            # ASSEMBLED FROM A PREFIX AT RUNTIME, so no source file spells it.
+            # voice-entrypoint.sh reads ${VOICE_TLS_PREFIX}_TLS_CERT, which is
+            # how GATEWAY_TLS_CERT reaches uvicorn without ever appearing as a
+            # literal anywhere.
+            if f"_{key.split('_', 1)[1]}" in source:
+                continue
+            dead.append(f"{name}:{key}")
+    assert not dead, (
+        f"set in compose.yaml and read by no code: {sorted(dead)}")
+
+
+def test_the_runner_only_opt_out_is_set_only_while_an_engine_needs_it(env_of):
+    """A SAFETY CATCH LEFT OFF AFTER THE THING IT EXCUSED HAS GONE.
+
+    TTS_ALLOW_RUNNER_ONLY_ENGINES=1 turns the boot refusal above into a 503 at
+    submit. That trade is right for a deployment that deliberately offers an
+    engine with no local lane, and it was right while `voxtral` was enabled
+    here. Left set after the engine is retired it protects nothing and disarms
+    everything: the next engine added to TTS_ENGINES without a local lane boots
+    cleanly, is advertised on GET /v1/models, and disappears the first evening
+    somebody switches a gaming PC on.
+
+    Nothing at runtime can catch that, and that is the point. The service sees
+    a flag set and no orphan to excuse, which is a legal state and a quiet one.
+    Only this file knows it is also a pointless one.
+    """
+    env = env_of(TTS_LONG)
+    engines = set(_csv(env.get("TTS_ENGINES", "chatterbox")))
+    local = set(_csv(env.get("TTS_LOCAL_ENGINES", ",".join(sorted(engines)))))
+    if not _opted_out(env):
+        return
+    assert engines - local, (
+        "TTS_ALLOW_RUNNER_ONLY_ENGINES is set and every engine in TTS_ENGINES "
+        "is named in TTS_LOCAL_ENGINES, so it excuses nothing and silently "
+        "removes the refusal that stops the next runner-only engine being "
+        "advertised. Unset it, or name the engine that needs it.")
+
+
+def test_no_per_engine_key_is_set_for_an_engine_this_deployment_does_not_offer(
+        env_of, catalogue):
+    """A KEY THAT LOOKS LIVE, PARSES FOR NOBODY, AND CHANGES NO SOUND.
+
+    Every per-engine key -- TTS_<ENGINE>_<FIELD>, TTS_RUNNER_SERVICE_<ENGINE>,
+    TTS_COLD_LOAD_SECONDS_<ENGINE>, TTS_REALTIME_FACTOR_<LANE>_<ENGINE> -- is
+    read by walking the ENABLED engines and building the key name from each
+    one's slug. So a key for an engine TTS_ENGINES does not name is never
+    looked up at all: it sits in this file at a carefully chosen value, reads
+    like configuration, and does nothing. That is `TTS_RUNNER_CPU_MIN_PCT`
+    again, arriving the other way round -- not a lane documented after the code
+    went, but a key left behind after the engine went.
+
+    NOTHING ELSE IN THIS DIRECTORY CATCHES IT. The test that asks whether every
+    key is read by some code exempts the templated per-engine forms on purpose,
+    because no source file spells them; the one that checks a key names a real
+    control reads the CATALOGUE, which still carries the retired engine's row.
+    Both stay green while this file configures an engine nobody can reach.
+    """
+    env = env_of(TTS_LONG)
+    enabled = set(_csv(env.get("TTS_ENGINES", "chatterbox")))
+    # LONGEST SLUG FIRST, for the same reason as the control test above:
+    # CHATTERBOX is a prefix of CHATTERBOX_TURBO.
+    slugs = sorted(((catalogue.slug(e), e) for e in catalogue.CATALOGUE_IDS),
+                   key=lambda pair: -len(pair[0]))
+    orphaned = []
+    for key in env:
+        if not key.startswith("TTS_"):
+            continue
+        for slug, engine in slugs:
+            if engine in enabled:
+                continue
+            if key == f"TTS_{slug}" or key.startswith(f"TTS_{slug}_") \
+                    or key.endswith(f"_{slug}"):
+                orphaned.append(f"{key} ({engine})")
+                break
+    assert not orphaned, (
+        f"compose.yaml sets {sorted(orphaned)} on tts-long, and TTS_ENGINES "
+        f"offers {sorted(enabled)}. A per-engine key is built from an enabled "
+        f"engine's slug, so these are never read. Remove them, or enable the "
+        f"engine they belong to.")
+
+
+# -- the satellite hub -------------------------------------------------------
+
+SATELLITES = "voice-satellites"
+SATELLITES_DIR = "services/satellites"
+SATELLITES_KEY = re.compile(r"""["'](SATELLITES_[A-Z0-9_]+)["']""")
+
+
+def test_every_setting_the_satellite_hub_reads_is_in_its_readme(root, compose_text):
+    """A setting that is only in the code is found by reading the code.
+
+    The hub grew nine settings in one change (wake words, the model directory,
+    the front-end, STT, three for MQTT, two secret names), each read by a
+    different module. The README's table is where an operator looks, so every
+    SATELLITES_ key the service's own code reads has to be in it, and so does
+    every one compose.yaml sets or suggests for it.
+    """
+    readme = (root / SATELLITES_DIR / "README.md").read_text(encoding="utf-8")
+    code = "\n".join(p.read_text(encoding="utf-8")
+                     for p in sorted((root / SATELLITES_DIR / "app").glob("*.py")))
+    read = set(SATELLITES_KEY.findall(code))
+    assert {"SATELLITES_WAKE_WORDS", "SATELLITES_STT_URL", "SATELLITES_MQTT_URL"} <= read, \
+        "the reader found none of the keys it was written for"
+    block = compose_text[compose_text.index(f"  {SATELLITES}:"):]
+    block = block[:block.index("\n\n\n")]
+    in_compose = set(re.findall(r"\b(SATELLITES_[A-Z0-9_]+)\b", block))
+    missing = sorted(k for k in read | in_compose if f"`{k}`" not in readme)
+    assert not missing, (
+        f"{SATELLITES_DIR}/README.md does not document {missing}, which the hub reads "
+        "or compose.yaml sets")
+
+
+def _pins(path) -> dict[str, str]:
+    pins = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?==([^\s#]+)", line.strip())
+        if m:
+            pins[m.group(1).lower()] = m.group(2)
+    return pins
+
+
+def test_every_package_the_satellite_image_pins_is_in_the_notices_with_its_version(root):
+    """Ten packages arrived with the listening path, one of them installed in a
+    second step with --no-deps, and each with its own licence: one is MPL-2.0,
+    one EPL-2.0 or BSD-3-Clause, and one's models are non-commercial. The
+    notices are where that is recorded, so a pin that is not there, or is there
+    at another version, is a licence nobody read."""
+    notices = (root / "THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    pins = {}
+    for name in ("requirements.txt", "requirements-nodeps.txt"):
+        pins |= _pins(root / SATELLITES_DIR / name)
+    assert "openwakeword" in pins and "onnxruntime" in pins, "the reader found no pins"
+    rows = {m.group(1).lower(): m.group(2) for m in
+            re.finditer(r"^\| *([A-Za-z0-9_.\[\]-]+) *\| *([0-9][^ |]*) *\|", notices, re.M)}
+    rows = {re.sub(r"\[.*\]", "", k): v for k, v in rows.items()}
+    wrong = sorted(f"{p}=={v} (notices: {rows.get(p)})" for p, v in pins.items()
+                   if rows.get(p) != v)
+    assert not wrong, f"THIRD-PARTY-NOTICES.md does not list these as pinned: {wrong}"
+
+
+def test_the_satellite_image_tells_onnx_runtime_not_to_report_to_microsoft(root, env_of):
+    """onnxruntime 1.30's Linux wheel posts usage to Microsoft and keeps a
+    device id unless ORT_DISABLE_TELEMETRY is set. Measured in the image: two
+    connections to its collector within 15 s of a session without it, none with
+    it. The image sets it for every process; the deployment must not undo it."""
+    containerfile = (root / SATELLITES_DIR / "Containerfile").read_text(encoding="utf-8")
+    env_block = containerfile[containerfile.rindex("\nENV "):]
+    env_block = env_block[:env_block.index("\n\n")]
+    assert "ORT_DISABLE_TELEMETRY=1" in env_block
+    assert env_of(SATELLITES).get("ORT_DISABLE_TELEMETRY", "1") in ("1", "true", "yes", "on", "y")
+
+
+def test_the_satellite_image_carries_the_models_attribution_beside_them(root):
+    """The wake word models are CC BY-NC-SA 4.0: sharing an image that carries
+    them is allowed non-commercially and with attribution, and the attribution
+    is a file that has to travel into the image with them."""
+    containerfile = (root / SATELLITES_DIR / "Containerfile").read_text(encoding="utf-8")
+    notice = (root / SATELLITES_DIR / "MODELS-NOTICE.md").read_text(encoding="utf-8")
+    assert re.search(r"^COPY services/satellites/MODELS-NOTICE\.md ", containerfile, re.M), \
+        "the attribution is not copied into the image"
+    assert re.search(r"cp \S*MODELS-NOTICE\.md /srv/models/NOTICE\.md", containerfile), \
+        "the attribution does not land beside the models"
+    assert "CC BY-NC-SA 4.0" in notice and "NonCommercial" in notice
+
+
+# -- sign-in: the identity contract, as deployed ------------------------------
+#
+# Every check below is a line of compose.yaml that the code depends on and
+# cannot see: a volume mounted in the wrong place, a URL that points round the
+# gateway, a variable a release removed. Each fails quietly at run time, which
+# is why it is caught here instead.
+
+# Compose's service names are DNS names and were never renamed to match the
+# directories (the top of compose.yaml says why), so which principal each one
+# runs as is written down here, once.
+PRINCIPAL_SERVICE = {"satellites": "voice-satellites", "ui": "voice-ui",
+                     "stt": "stt-stack", "tts": "tts-stack", "tts-long": "tts-long"}
+RUN_DIR = "/run/calliope"
+GATEWAY_ONLY_VOLUMES = ("gateway-data", "calliope-keys")
+
+
+def _mounts(compose, service: str) -> list[tuple[str, str, str]]:
+    """(source, target, mode) for each short-form volume entry."""
+    mounts = []
+    for entry in compose["services"][service].get("volumes") or []:
+        source, target, *mode = entry.split(":")
+        mounts.append((source, target, mode[0] if mode else "rw"))
+    return mounts
+
+
+def _gateway_internal(root) -> str:
+    """identity.GATEWAY_INTERNAL, read from the source.
+
+    Not imported: voice_common.identity needs fastapi and cryptography, and
+    this directory runs with neither (voice_common/__init__.py says so).
+    """
+    tree = ast.parse((root / "packages/common/voice_common/identity.py")
+                     .read_text(encoding="utf-8"))
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and getattr(node.targets[0], "id", None) == "GATEWAY_INTERNAL"):
+            return ast.literal_eval(node.value)
+    raise AssertionError("voice_common/identity.py no longer defines GATEWAY_INTERNAL")
+
+
+def _image_chown_dirs(root, service: str = "gateway") -> list[str]:
+    text = (root / f"services/{service}/Containerfile").read_text(encoding="utf-8")
+    m = re.search(r'VOICE_CHOWN_DIRS="([^"]*)"', text)
+    return m.group(1).split() if m else []
+
+
+def test_no_variable_the_sign_in_release_removed_is_in_compose(compose_text):
+    """H5: A LEFTOVER KEY VARIABLE LOCKS THE GATEWAY.
+
+    GATEWAY_API_KEYS and the five others are not ignored by the gateway: one
+    still set puts it in locked mode, and a backend logs an ERROR every
+    minute. Not even a commented-out line may name one, because a comment that
+    shows a key variable is a suggestion to set it.
+    """
+    named = sorted(name for name in REMOVED_VARIABLES if name in compose_text)
+    assert not named, (
+        f"compose.yaml names {named}, which this release removed "
+        f"(voice_common/auth.py, REMOVED_VARIABLES). Delete every mention.")
+
+
+def test_every_sign_in_variable_compose_names_is_read_by_the_code(compose_text, source):
+    """Every new variable is read by something.
+
+    The two tests above this section check keys that are set or suggested.
+    This one also covers a CALLIOPE_ key named only in prose, because the
+    prose is where an operator is told what to set before the first start.
+    """
+    named = {k for k in KEY.findall(compose_text) if k.startswith("CALLIOPE_")}
+    assert named, "the reader found no CALLIOPE_ key in compose.yaml"
+    dead = sorted(named - keys_read_by_code(compose_text, source))
+    assert not dead, f"compose.yaml names {dead} and no code reads them"
+
+
+def test_every_service_mounts_its_own_key_volume_read_only_and_no_other(compose):
+    """D7: the gateway writes each service's key; the service only reads it.
+
+    A service that mounted its volume read-write could replace identity.pub
+    and accept assertions it signed itself; one that mounted another
+    service's volume would hold that service's key.
+    """
+    assert set(PRINCIPAL_SERVICE) == set(SERVICE_PRINCIPALS), (
+        "voice_common.scopes.SERVICE_PRINCIPALS and this test's map disagree: "
+        f"{sorted(set(PRINCIPAL_SERVICE) ^ set(SERVICE_PRINCIPALS))}")
+    faults = []
+    for name, service in PRINCIPAL_SERVICE.items():
+        own = [m for m in _mounts(compose, service) if m[0].startswith("calliope-svc-")]
+        if own != [(f"calliope-svc-{name}", RUN_DIR, "ro")]:
+            faults.append(f"{service} mounts {own}, not calliope-svc-{name} "
+                          f"read-only at {RUN_DIR}")
+    gateway = {m[0]: m for m in _mounts(compose, GATEWAY)}
+    for name in PRINCIPAL_SERVICE:
+        volume = f"calliope-svc-{name}"
+        if gateway.get(volume, (None, None, None))[1:] != (f"/svc/{name}", "rw"):
+            faults.append(f"{GATEWAY} does not mount {volume} read-write at /svc/{name}")
+    for service in compose["services"]:
+        if service == GATEWAY:
+            continue
+        for source, _, _ in _mounts(compose, service):
+            if source in GATEWAY_ONLY_VOLUMES:
+                faults.append(f"{service} mounts {source}, which only the gateway may")
+            elif (source.startswith("calliope-svc-")
+                  and PRINCIPAL_SERVICE.get(source[len("calliope-svc-"):]) != service):
+                faults.append(f"{service} mounts {source}, another service's key")
+    declared = set(compose.get("volumes") or {})
+    for volume in [*GATEWAY_ONLY_VOLUMES, *(f"calliope-svc-{n}" for n in PRINCIPAL_SERVICE)]:
+        if volume not in declared:
+            faults.append(f"{volume} is not declared under the top-level volumes")
+    assert not faults, "; ".join(faults)
+
+
+def test_the_gateway_takes_ownership_of_every_key_volume_it_writes(compose, env_of, root):
+    """A volume mounted where the image has no directory arrives owned by root.
+
+    The gateway runs as uid 1000, and the entrypoint takes ownership only of
+    the paths VOICE_CHOWN_DIRS names, looking at the top of each and nothing
+    below it. /svc is the image's own and already uid 1000's, so naming /svc
+    alone leaves every calliope-svc-* volume root-owned, and minting the first
+    service key fails at start.
+    """
+    chown = (env_of(GATEWAY).get("VOICE_CHOWN_DIRS") or "").split() or _image_chown_dirs(root)
+    targets = [target for source, target, _ in _mounts(compose, GATEWAY)
+               if not source.startswith("/") and target != "/certs"]
+    missing = sorted(t for t in targets if t not in chown)
+    assert not missing, (
+        f"{GATEWAY} mounts {missing} and VOICE_CHOWN_DIRS ({' '.join(chown)}) does not "
+        f"name them, so they stay owned by root and the gateway cannot write to them")
+
+
+def test_the_hub_starts_only_after_the_gateway_is_healthy(compose):
+    """H5: the hub reaches stt, tts and its secrets only through :8081.
+
+    `service_healthy` is safe only because a gateway in locked mode is still
+    healthy; the gateway's healthcheck is what makes the condition mean
+    anything at all.
+    """
+    hub = compose["services"]["voice-satellites"]
+    assert (hub.get("depends_on") or {}).get(GATEWAY) == {"condition": "service_healthy"}, (
+        "voice-satellites must depend on voice-gateway with condition service_healthy")
+    assert compose["services"][GATEWAY].get("healthcheck"), (
+        "voice-gateway has no healthcheck, so service_healthy never comes true")
+
+
+def test_only_the_gateway_publishes_a_port_and_never_the_internal_listener(compose):
+    """D6: :8081 takes service keys over plain HTTP. Published, every service's
+    key would be one captured request away, and a backend port published is a
+    way round the only process that checks who is asking."""
+    faults = []
+    for name, svc in compose["services"].items():
+        for entry in svc.get("ports") or []:
+            container = str(entry).rsplit(":", 1)[-1].split("/")[0]
+            if name != GATEWAY or container != "8080":
+                faults.append(f"{name} publishes {entry}")
+    assert not faults, "; ".join(faults)
+
+
+def test_service_to_service_calls_go_through_the_internal_listener(env_of, root):
+    """The run log and the hub's speech calls carry a service key.
+
+    voice_common.runlog sends its key to the internal listener and nowhere
+    else: any other RUNLOG_URL turns the log off with one ERROR, so a stale
+    `http://tts-long:8002` here loses every run record and fails no request.
+    The hub's STT and TTS calls are refused by the backends unless the gateway
+    signed them.
+    """
+    internal = _gateway_internal(root)
+    wanted = {("stt-stack", "RUNLOG_URL"), ("tts-stack", "RUNLOG_URL"),
+              ("voice-satellites", "SATELLITES_STT_URL"),
+              ("voice-satellites", "SATELLITES_TTS_URL")}
+    wrong = sorted(f"{service}:{key}={env_of(service).get(key)}"
+                   for service, key in wanted
+                   if env_of(service).get(key, "").rstrip("/") != internal)
+    assert not wrong, f"these must be {internal}: {wrong}"
+
+
+def test_voice_ui_shares_no_network_with_a_backend(compose):
+    """voice-ui runs yt-dlp on addresses people paste.
+
+    On `edge` alone, the gateway is the only Calliope service it can reach,
+    so a process tricked into fetching an internal address meets nothing but
+    a gateway that wants an identity. No network may be internal: the hub,
+    tts-long, voice-ui and SearXNG all call out of the stack.
+    """
+    services = compose["services"]
+
+    def networks(name: str) -> set[str]:
+        return set(services[name].get("networks") or ["default"])
+
+    backends = [s for s in services if s not in (GATEWAY, "voice-ui")]
+    shared = {b: sorted(networks("voice-ui") & networks(b)) for b in backends}
+    assert not any(shared.values()), f"voice-ui shares a network with {shared}"
+    # SearXNG is no Calliope service and the gateway never calls it: only the
+    # hub may reach it (the tests below).
+    unreachable = sorted(s for s in services
+                         if s not in (GATEWAY, SEARXNG)
+                         and not networks(s) & networks(GATEWAY))
+    assert not unreachable, f"the gateway shares no network with {unreachable}"
+    internal = sorted(name for name, net in (compose.get("networks") or {}).items()
+                      if (net or {}).get("internal"))
+    assert not internal, f"{internal} are internal, and every service needs a way out"
+
+
+def test_voice_ui_takes_ownership_of_every_volume_it_writes(compose, env_of, root):
+    """voice-ui runs as uid 1000 and writes /voices and /cache.
+
+    A named volume mounted where the image has a directory takes that
+    directory's owner, but a bind mount or a dataset arrives owned by whoever
+    made it, and the entrypoint takes ownership only of what VOICE_CHOWN_DIRS
+    names. A /cache it cannot write switches link ingestion off.
+    """
+    chown = (env_of("voice-ui").get("VOICE_CHOWN_DIRS") or "").split() \
+        or _image_chown_dirs(root, "ui")
+    targets = [target for source, target, _ in _mounts(compose, "voice-ui")
+               if not target.startswith("/run/calliope")]
+    missing = sorted(t for t in targets if t not in chown)
+    assert targets and not missing, (
+        f"voice-ui mounts {missing} and VOICE_CHOWN_DIRS ({' '.join(chown)}) does "
+        f"not name them")
+
+
+def test_voice_ui_is_hardened_for_its_downloader(compose):
+    """The container that runs yt-dlp on pasted links gains no privilege by
+    exec, and cannot be made to fork without bound."""
+    ui = compose["services"]["voice-ui"]
+    assert "no-new-privileges:true" in (ui.get("security_opt") or [])
+    assert isinstance(ui.get("pids_limit"), int) and ui["pids_limit"] > 0
+
+
+def test_voice_ui_writes_no_access_log(root, compose):
+    """Every access line would carry the link a person pasted: the page polls
+    /ui/progress?token=<the link> once a second while it downloads. The image's
+    command turns uvicorn's access log off, and compose must not replace that
+    command with one that turns it back on."""
+    containerfile = (root / "services/ui/Containerfile").read_text(encoding="utf-8")
+    cmd = re.search(r"^CMD (\[.*\])$", containerfile, re.M)
+    assert cmd, "the voice-ui Containerfile has no CMD in exec form"
+    assert "--no-access-log" in json.loads(cmd.group(1))
+    command = compose["services"]["voice-ui"].get("command")
+    if command is not None:
+        words = command if isinstance(command, list) else command.split()
+        assert "--no-access-log" in words, "compose replaces the command and logs every link"
+
+
+def test_dependabot_watches_requirements_that_name_no_local_path(root):
+    """Dependabot reads every requirements file in the directory it watches,
+    and a path it cannot fetch from there fails the whole run, with no pull
+    request. ./packages/common is relative to the repository root, so the
+    yt-dlp pin lives where no such path is, and voice-ui's requirements
+    install it from there."""
+    config = yaml.safe_load((root / ".github/dependabot.yml").read_text(encoding="utf-8"))
+    pip = [u for u in config["updates"] if u["package-ecosystem"] == "pip"]
+    assert pip, "Dependabot no longer watches yt-dlp"
+    for update in pip:
+        directory = root / update["directory"].strip("/")
+        files = sorted(directory.rglob("*.txt")) + sorted(directory.rglob("*.in"))
+        assert files, f"{update['directory']} has no requirements file"
+        for path in files:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.split("#", 1)[0].strip()
+                assert not re.match(r"(-e\s+)?['\"]?(\.|/|file:)", line), (
+                    f"{path.relative_to(root)} names a local path: {line}")
+    requirements = (root / "services/ui/requirements.txt").read_text(encoding="utf-8")
+    assert re.search(r"^-r yt-dlp/requirements\.txt$", requirements, re.M)
+    containerfile = (root / "services/ui/Containerfile").read_text(encoding="utf-8")
+    assert re.search(r"^COPY services/ui/yt-dlp/requirements\.txt ./yt-dlp/requirements\.txt$",
+                     containerfile, re.M), "the image would not find the pin"
+
+
+# -- the bundled SearXNG -----------------------------------------------------
+#
+# Optional three ways: bundled (what compose.yaml ships), another instance by
+# SATELLITES_SEARXNG_URL, or none. These check the shipped one, and that
+# deleting its block breaks nothing else.
+
+SEARXNG = "searxng"
+
+
+def test_only_the_hub_reaches_searxng_and_nothing_waits_for_it(compose, env_of):
+    """SearXNG checks no credential and fetches from the internet for whoever
+    asks. On `core` it would be one hop from every backend, and on `edge` one
+    from the container that runs yt-dlp, so it has a network of its own with
+    the hub. And a `depends_on` naming it would turn "delete the block to
+    switch search off" into a file that no longer comes up."""
+    services = compose["services"]
+
+    def networks(name: str) -> set[str]:
+        return set(services[name].get("networks") or ["default"])
+
+    reach = sorted(s for s in services if s != SEARXNG and networks(s) & networks(SEARXNG))
+    assert reach == [SATELLITES], f"SearXNG shares a network with {reach}, not the hub alone"
+    url = env_of(SATELLITES).get("SATELLITES_SEARXNG_URL", "").rstrip("/")
+    expose = [str(p) for p in services[SEARXNG].get("expose") or []]
+    assert expose and url == f"http://{SEARXNG}:{expose[0]}", (
+        f"the hub asks {url!r} for search, not the bundled SearXNG on {expose}")
+    waits = sorted(s for s, svc in services.items() if SEARXNG in (svc.get("depends_on") or {}))
+    assert not waits, f"{waits} depend on {SEARXNG}, so deleting its block breaks them"
+
+
+def test_searxng_serves_json_with_a_secret_it_makes_itself(compose):
+    """Stock SearXNG answers `format=json` with 403, and JSON is all the hub
+    reads; it also refuses to start on the default secret_key. No environment
+    variable sets either, so an entrypoint writes settings.yml before handing
+    over. The key must come from the shell at each start, never from this
+    published file, and land on a tmpfs rather than a volume."""
+    svc = compose["services"][SEARXNG]
+    script = svc["entrypoint"][-1]
+    settings = yaml.safe_load(script.split("<<EOF\n", 1)[1].split("\nEOF", 1)[0])
+    assert "json" in settings["search"]["formats"], "SearXNG would answer the hub 403"
+    secret = settings["server"]["secret_key"]
+    assert secret.startswith("$$(") and "/dev/urandom" in secret, (
+        f"secret_key is {secret!r}: written in compose.yaml rather than made at start")
+    assert script.rstrip().endswith("exec /usr/local/searxng/entrypoint.sh")
+    assert any(t.split(":")[0] == "/etc/searxng" for t in svc.get("tmpfs") or []), (
+        "settings.yml, and the key in it, would outlive the container")
+    assert str(svc.get("user", "")).split(":")[0] not in ("", "0", "root"), \
+        "SearXNG runs as root"

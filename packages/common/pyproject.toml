@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-common"
+version = "2.0.0"
+description = "Shared wire contract for the calliope speech services."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "BSD-2-Clause"
+license-files = ["LICENSE"]
+authors = [{ name = "Gabriel Belli" }]
+
+# fastapi is deliberately a floor and not a pin. Each consumer pins its own
+# fastapi in its requirements.txt — all four are on 0.121.2 today — and a pin
+# here would either duplicate that decision or fight it during a resolve.
+#
+# cryptography is pinned, and here rather than in each service, because it is
+# the identity contract itself: every backend verifies the gateway's Ed25519
+# assertions with it and the gateway signs them and hashes passwords with it
+# (Argon2id needs this release's API). One version in every image is the point,
+# and services/satellites already pins the same one.
+#
+# idna is a floor: voice_common.origins encodes host names with IDNA 2008, as
+# httpx does, and every consumer already has it through httpx or requests.
+dependencies = ["fastapi>=0.115", "cryptography==50.0.1", "idna>=3.7"]
+
+[project.optional-dependencies]
+# numpy is an extra so services/stt, which needs none of voice_common.audio,
+# does not take it. It is also the one pin that genuinely conflicts across the
+# three: services/tts is on 2.3.4, and services/tts-long must leave it unpinned
+# because chatterbox-tts requires numpy<2 on Python 3.12. Unbounded here for
+# that reason; the consumer's own requirements.txt decides.
+audio = ["numpy"]
+# Needed only to RUN voice_common.conformance, in a consumer's CI or here.
+conformance = ["pytest>=8", "httpx>=0.27"]
+
+[project.urls]
+Homepage = "https://github.com/gabrielbelli/calliope"
+
+[tool.setuptools]
+packages = ["voice_common"]
+# `scripts`, not `project.scripts`: this is a shell script, not a Python entry
+# point. It lands in /usr/local/bin next to the interpreter, so a Containerfile
+# drops its own entrypoint.sh and its COPY line and points ENTRYPOINT at
+# voice-entrypoint.sh. The TLS logic then rides the same pin as the auth logic
+# and the two can never be at different versions inside one image.
+script-files = ["voice-entrypoint.sh"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    # NOT OUR WARNING, and not one we can act on. anyio deprecated
+    # `anyio.abc.BlockingPortal` in favour of `anyio.from_thread.BlockingPortal`,
+    # and starlette.testclient still imports the old name at module scope
+    # (testclient.py:51). With warnings as errors that is a COLLECTION failure:
+    # every test file importing TestClient errors before a single assertion
+    # runs, and the suite reports four errors rather than a warning.
+    #
+    # Ignored narrowly -- this exact message, this exact category -- rather than
+    # by pinning anyio back, which would hold a transitive dependency of both
+    # starlette and httpx below where fastapi wants it, to silence a line in
+    # somebody else's file. Delete this entry once starlette moves to the new
+    # import; the suite failing again is how we will know it did.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]

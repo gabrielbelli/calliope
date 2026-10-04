@@ -1,0 +1,10 @@
+# Installed with --no-deps, after requirements.txt:
+#
+#   pip install -r requirements.txt
+#   pip install --no-deps -r requirements-nodeps.txt
+#
+# openwakeword 0.6.0 declares tflite-runtime as a dependency on Linux, and
+# tflite-runtime has never published a wheel newer than CPython 3.11, so a
+# plain install fails on this image's Python 3.13. The hub runs the ONNX models
+# only; what the package really imports is pinned in requirements.txt.
+openwakeword==0.6.0

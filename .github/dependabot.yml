@@ -1,0 +1,18 @@
+# yt-dlp, and nothing else, kept current by pull request.
+#
+# voice-ui fetches pasted links with it (services/ui/app/fetcher.py), and
+# YouTube breaks yt-dlp every few weeks; a link that fails with an extractor
+# error is usually fixed by the next release. The pin stays a pin, so every
+# build of one commit is the same image, and this is how it moves.
+#
+# The directory holds that one pin and no path: Dependabot reads every
+# requirements file in it, and services/ui/requirements.txt names
+# ./packages/common, which it cannot find from services/ui.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /services/ui/yt-dlp
+    schedule:
+      interval: weekly
+    allow:
+      - dependency-name: yt-dlp

@@ -1,0 +1,40 @@
+# NO WHEEL INDEX HERE, and that is what lets two images share these pins. The
+# CPU image (Containerfile) adds PyTorch's CPU index on its pip line; the GPU
+# runner (Containerfile.runner) adds none, and on linux/amd64 PyPI's torch 2.6.0
+# IS the CUDA 12.4 build. Both images then install the same versions from this
+# one file, and CI asserts the wheel each one got, so the wrong torch is a red
+# build in either direction rather than a slow service or a huge one.
+
+# The shared wire contract: the identity assertion's verifier (which brings
+# cryptography), the OpenAI error envelope, the health route, Segment and
+# OpenAISpeechRequest, the PCM byte cast, and the entrypoint that setuptools
+# installs to /usr/local/bin. [audio] pulls numpy, which this image needs
+# anyway.
+#
+# A PATH into this repository, not a tarball pinned by SHA. The pin was right
+# while voice-common was its own repository: a change there reached this
+# service only after a push, a tag and a re-pin, and the SHA is what made the
+# build reproducible. In one repository the same pin becomes a liability — it
+# lets packages/common and the services that embed it sit at different
+# revisions inside a single commit, which is the one state a monorepo exists to
+# make unrepresentable. The commit is the pin now, and `git log` is the only
+# place either version is recorded.
+#
+# The path is relative to the CURRENT WORKING DIRECTORY, not to this file: pip
+# resolves a path requirement against the process's cwd. Checked rather than
+# assumed — reading this file from its own directory fails with "Expected
+# package name at the start of dependency specifier", which reads like a syntax
+# error in the file and is not one. So every install runs from the repository
+# root, which is what the Containerfile's WORKDIR and every CI job do.
+./packages/common[audio]
+
+chatterbox-tts==0.1.7
+resemble-perth==1.0.1
+# perth imports pkg_resources, removed from Python 3.14. setuptools puts it
+# back; the image also pins 3.12 so this stays belt and braces.
+setuptools>=75
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+soundfile==0.13.1
+# numpy is deliberately unpinned. chatterbox-tts requires numpy<2 on Python
+# 3.12, and pinning a 2.x here makes the resolve impossible. Let it choose.

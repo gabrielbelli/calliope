@@ -1,0 +1,40 @@
+# Top-level pins for the training image (Python 3.10, Ubuntu 22.04).
+# requirements.lock.txt holds every transitive package at the version the
+# image was built and tested with; the Dockerfile installs from the lock.
+#
+# torch 2.4.1+cu121: CUDA 12.1 runtime (driver 535 supports up to 12.2),
+#   cuDNN 9.1, sm_60 kernels that run on the GTX 1050 Ti (sm_61), and
+#   torch.load() still defaults to weights_only=False, which the pickled
+#   piper-sample-generator v2.0.0 generator needs.
+# onnxruntime-gpu 1.19.2: CUDA 12 + cuDNN 9, the same libraries torch ships,
+#   so openWakeWord's feature extraction runs on the GPU as upstream intends.
+# openwakeword 0.6.0 is installed with --no-deps (its Linux dependency
+#   tflite-runtime is not needed and pulls in nothing useful for ONNX).
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.4.1+cu121
+torchaudio==2.4.1+cu121
+onnxruntime-gpu==1.19.2
+numpy==1.26.4
+scipy==1.11.4
+scikit-learn==1.5.2
+tqdm==4.66.5
+requests==2.32.3
+pyyaml==6.0.2
+# torch.onnx.export needs it; upstream never lists it (Colab ships it)
+onnx==1.17.0
+# piper-sample-generator v2.0.0
+piper-phonemize==1.1.0
+webrtcvad-wheels==2.0.14
+# openWakeWord training extras, at the versions its notebook pins
+mutagen==1.47.0
+torchinfo==1.8.0
+torchmetrics==1.2.0
+speechbrain==0.5.14
+audiomentations==0.33.0
+torch-audiomentations==0.11.0
+acoustics==0.2.6
+pronouncing==0.2.0
+# data preparation
+huggingface_hub==0.25.2
+pyarrow==17.0.0
+soundfile==0.12.1

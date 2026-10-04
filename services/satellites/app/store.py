@@ -1,0 +1,439 @@
+"""What survives a restart: adopted satellites and uploaded firmware images.
+
+One JSON file and one directory under SATELLITES_DATA_DIR. A satellite's
+adoption token is kept only as a SHA-256; the satellite holds the token itself,
+so a copy of this file cannot impersonate a satellite to the hub.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import re
+import hmac
+import json
+import os
+import secrets
+import tempfile
+import time
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+DEFAULT_CONFIG = {
+    "volume": 60,
+    "mic_gain_db": 30.0,
+    "mic_enabled": True,
+    "speaker_enabled": True,
+    # Read by firmware from before button actions (2026-09-27), which keeps
+    # VOL+/- to itself while this is on; current firmware takes
+    # "button_actions" instead (DEVICE_ACTIONS).
+    "local_volume_buttons": True,
+    "lights_enabled": True,
+    "brightness": 100,
+    # How the ring is mounted: the LED at 12 o'clock (0-11), where a bar on
+    # the ring starts, and whether the LEDs run anticlockwise as seen (upside
+    # down), so that the bar still fills clockwise.
+    "ring_top": 0,
+    "ring_upside_down": False,
+    # What each button does, on press and on release. The actions the
+    # satellite runs itself (DEVICE_ACTIONS) go to it as "button_actions"; the
+    # rest the hub runs when it hears of the press. Rec mutes, the volume pair
+    # sets the volume, Play talks and Set stops, as before there was a choice.
+    "buttons": {"rec": {"press": "mute"}, "vol_up": {"press": "volume_up"},
+                "vol_down": {"press": "volume_down"}, "play": {"press": "ptt"},
+                "set": {"press": "stop"}},
+}
+# Button actions the satellite runs itself: they work with the hub down, and
+# only a button, never the hub, can undo the privacy mute.
+DEVICE_ACTIONS = frozenset({"mute", "volume_up", "volume_down", "lights", "dimmer", "brighter"})
+# Buttons whose mute does not count as the way out of one. KEY1, on the main
+# board's edge, is not wired on a stock board (the korvo README, "Buttons"),
+# and the mute holds through a restart, so a table whose only mute is KEY1
+# could leave a muted satellite muted for good. The firmware does not count
+# it (hub.cpp, apply_button_actions) and makes Rec's press the mute instead,
+# whatever the table says Rec does; the hub applies the same rule, so that
+# what it saves and shows is what the satellite does.
+MUTE_DOES_NOT_COUNT = frozenset({"key1"})
+# Config the hub acts on itself and never sends to the satellite: the firmware
+# would ignore it, and it would cost a JSON document on a board with 300 KB of
+# heap.
+# "output_satellite": another satellite that plays what this one plays
+# (main.Hub.output_of). The hub's routing, so never sent to the satellite.
+HUB_ONLY = frozenset({"buttons", "output_satellite"})
+
+
+def _flag(v: object) -> bool:
+    return isinstance(v, bool)
+
+
+def _device_name(v: object) -> bool:
+    """A PipeWire node name (a satellite with audio_devices), or None for
+    PipeWire's own default."""
+    return v is None or (isinstance(v, str) and len(v) <= 256 and DEVICE_NAME.fullmatch(v) is not None)
+
+
+def _between(low: float, high: float, *, whole: bool = False):
+    def ok(v: object) -> bool:
+        # bool is an int to Python, and true is not a volume.
+        kinds = int if whole else (int, float)
+        return isinstance(v, kinds) and not isinstance(v, bool) and low <= v <= high
+    return ok
+
+
+# The settings a satellite reports about itself, in "status" and, on firmware
+# from 2026-09-25, in "hello", with what a value must be to be believed. The
+# ranges are PATCH's (main.ConfigBody). Anything else a satellite says --
+# "buttons" above all, which is the hub's own -- is never taken into the
+# config: anyone can open the socket and say anything before adoption.
+REPORTED = {
+    "volume": _between(0, 100, whole=True),
+    "mic_gain_db": _between(0, 37.5),
+    "mic_enabled": _flag,
+    "speaker_enabled": _flag,
+    "lights_enabled": _flag,
+    "brightness": _between(1, 100, whole=True),
+    "ring_top": _between(0, 11, whole=True),
+    "ring_upside_down": _flag,
+    # A Linux satellite's (caps "audio_devices"): which output and microphone
+    # it uses, and whether it sends what the output plays as the echo
+    # reference. A satellite that never reports them is never sent them.
+    "audio_sink": _device_name,
+    "audio_source": _device_name,
+    "echo_reference": _flag,
+    # A satellite that is an AirPlay receiver (caps "airplay"): whether it
+    # is one, and the name phones list it as (None: the satellite's name).
+    "airplay_enabled": _flag,
+    "airplay_name": lambda v: v is None or (isinstance(v, str) and len(v) <= 64 and v.isprintable()),
+}
+AUDIO_SETTINGS = ("audio_sink", "audio_source", "echo_reference")
+AIRPLAY_SETTINGS = ("airplay_enabled", "airplay_name")
+# What the hub's record says for a switch the satellite has not reported yet:
+# off. Nothing is sent to a satellite, or heard from it, on a setting the hub
+# made up; the satellite's first status puts in the real value.
+DEVICE_NAME = re.compile(r"[\w.:@+-]*")
+UNREPORTED = {"mic_enabled": False, "speaker_enabled": False, "lights_enabled": False}
+
+
+def reported_config(msg: dict | None) -> dict:
+    """The settings in a satellite's hello or status that the hub believes."""
+    return {k: v for k, v in (msg or {}).items() if k in REPORTED and REPORTED[k](v)}
+
+
+def default_config() -> dict:
+    """A deep copy: "buttons" is a dict of dicts, and a shallow copy would let
+    one satellite's mapping be edited through another's."""
+    return copy.deepcopy(DEFAULT_CONFIG)
+
+
+def device_actions(buttons: dict | None) -> dict:
+    """The part of a button mapping the satellite runs itself."""
+    out: dict = {}
+    for button, edges in (buttons or {}).items():
+        for edge, act in (edges or {}).items():
+            if act in DEVICE_ACTIONS:
+                out.setdefault(button, {})[edge] = act
+    return out
+
+
+def keeps_a_mute(buttons: dict | None) -> bool:
+    """Whether a button the satellite counts is the privacy mute: any but
+    those in MUTE_DOES_NOT_COUNT, the firmware's own rule."""
+    return any(act == "mute" for button, edges in (buttons or {}).items()
+               if button not in MUTE_DOES_NOT_COUNT for act in (edges or {}).values())
+
+
+def with_button_defaults(config: dict) -> dict:
+    """A mapping saved before button actions had no Rec (the firmware kept
+    it) and no volume pair while the firmware kept those too: given them, so
+    that the buttons do what they did. One saved before the hub stopped
+    counting a mute on KEY1 gets Rec's press as the mute, as the firmware
+    has done since 2026-09-28."""
+    buttons = {k: dict(v) for k, v in (config.get("buttons") or {}).items()}
+    if not keeps_a_mute(buttons):
+        buttons.setdefault("rec", {})["press"] = "mute"
+    if config.get("local_volume_buttons", True):
+        for key, act in (("vol_up", "volume_up"), ("vol_down", "volume_down")):
+            if key not in buttons:
+                buttons[key] = {"press": act}
+    return buttons
+
+
+def satellite_config(config: dict, unreported: list[str] | tuple = ()) -> dict:
+    """What the satellite itself is told: the config without the hub's own
+    keys, and without any the satellite has not reported yet, which it keeps
+    as it has them."""
+    return {k: v for k, v in config.items() if k not in HUB_ONLY and k not in unreported}
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+@dataclass
+class Satellite:
+    id: str
+    name: str
+    model: str
+    token_sha256: str
+    adopted_at: float
+    config: dict = field(default_factory=default_config)
+    # REPORTED keys this satellite has not told the hub yet. Until it does,
+    # the record holds UNREPORTED for them and the welcome leaves them out, so
+    # the satellite keeps its own. Empty in a file from before this existed.
+    unreported: list[str] = field(default_factory=list)
+    # The caps of the last hello that proved the adoption. GET /satellites
+    # shows them while the satellite is offline, so a Pi that is off is not
+    # taken for a board with a ring and seven buttons by Home Assistant or
+    # the page after a restart of either. Empty until the hub has seen it
+    # since this existed: not known, which is not the same as having nothing.
+    caps: dict = field(default_factory=dict)
+
+    def accepts(self, token: str | None) -> bool:
+        return bool(token) and hmac.compare_digest(token_hash(token), self.token_sha256)
+
+
+@dataclass
+class Firmware:
+    sha256: str
+    size: int
+    model: str
+    version: str
+    uploaded_at: float
+    # Standard base64 DER ECDSA over the image, from the upload's ?signature=,
+    # or None for an unsigned image. Carried in the "ota" message; the
+    # satellite does the checking (signing.py). Absent from an index.json
+    # written before signatures existed, hence the default.
+    signature: str | None = None
+
+
+# A version as the firmware builds stamp it: a release tag, or git describe's
+# commits since it and hash, and -dirty for a build from a tree with changes.
+# The same expression as satVersionKey in services/ui/app/static/ui.html, so the
+# update the hub offers (main.Hub.available_update) is the one the page would.
+FIRMWARE_VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-(\d+)-g[0-9a-f]+)?(?:-dirty)?$")
+
+
+def firmware_version_key(v: object) -> tuple[int, int, int, int] | None:
+    """(major, minor, patch, commits since the tag) for a stamped version, or
+    None for anything else, which cannot be ordered."""
+    m = FIRMWARE_VERSION.fullmatch(str(v or ""))
+    return (int(m[1]), int(m[2]), int(m[3]), int(m[4] or 0)) if m else None
+
+
+def firmware_older(a: object, b: object) -> bool:
+    """Whether version `a` is older than `b`: never, unless both are stamped
+    versions (satOlder in ui.html)."""
+    x, y = firmware_version_key(a), firmware_version_key(b)
+    return x is not None and y is not None and x < y
+
+
+def write_atomic(path: Path, data: str) -> None:
+    """Replace `path` with `data`, so that a reader, a crash or a power cut
+    finds the old file or the new one and never half of either.
+
+    A unique temporary name, so two requests saving at once cannot write into
+    the same half-finished file, and fsync before the rename, because a
+    rename can reach the disk before the data it points at: after a power cut
+    that is an empty satellites.json, which un-adopts every satellite."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+FILE = "satellites.json"
+# What the hub wrote before the feature was renamed (2026-09-25). A volume from
+# then holds this and not FILE, and ignoring it would un-adopt every board.
+LEGACY_FILE = "nodes.json"
+
+
+class Store:
+    def __init__(self, root: Path):
+        self.root = root
+        self.fw_dir = root / "firmware"
+        self.fw_dir.mkdir(parents=True, exist_ok=True)
+        self.satellites: dict[str, Satellite] = {}
+        self.firmware: dict[str, Firmware] = {}
+        self._load()
+
+    # -- satellites ---------------------------------------------------------
+
+    def _load(self) -> None:
+        f = self.root / FILE
+        legacy = self.root / LEGACY_FILE
+        caps: dict = {}
+        if f.exists():
+            saved = json.loads(f.read_text())
+            records, caps = saved.get("satellites", []), saved.get("caps") or {}
+        elif legacy.exists():
+            # Migrated once, on the first start after the rename: read and
+            # written again under the new name. The old file is left where it
+            # is, so the previous image still starts with what it had.
+            records = json.loads(legacy.read_text()).get("nodes", [])
+        else:
+            records = None
+        for n in records or ():
+            cfg = default_config() | n.get("config", {})
+            cfg["buttons"] = with_button_defaults(cfg)
+            # ring_bottom was the setting for an hour on 27 Sep 2026, and
+            # named the LED opposite the top.
+            if "ring_bottom" in cfg:
+                bottom = cfg.pop("ring_bottom")
+                if "ring_top" not in n.get("config", {}) and isinstance(bottom, int):
+                    cfg["ring_top"] = (bottom + 6) % 12
+            # airplay_volume, a starting volume for AirPlay, was a setting for
+            # a day on 29 Sep 2026: a phone kept its own.
+            cfg.pop("airplay_volume", None)
+            known = caps.get(n["id"])
+            self.satellites[n["id"]] = Satellite(**(n | {"config": cfg,
+                                                           "caps": known if isinstance(known, dict) else {}}))
+        if records is not None and not f.exists():
+            self.save_satellites()
+        idx = self.fw_dir / "index.json"
+        if idx.exists():
+            for fw in json.loads(idx.read_text()):
+                if (self.fw_dir / f"{fw['sha256']}.bin").exists():
+                    self.firmware[fw["sha256"]] = Firmware(**fw)
+
+    def save_satellites(self) -> None:
+        # The caps beside the records, not in them. A hub from before caps were
+        # kept builds each record from every key it holds and will not start
+        # on one it does not know, which would make going back to it take
+        # every satellite with it. Beside them, it reads past them. Taken out
+        # of every record, empty or not: one adopted and not greeted since has
+        # {} and would stop the older hub as surely as one with caps.
+        records = [asdict(n) for n in self.satellites.values()]
+        caps = {r["id"]: c for r in records if (c := r.pop("caps", None))}
+        body = {"satellites": records, "caps": caps}
+        write_atomic(self.root / FILE, json.dumps(body, indent=2))
+
+    def adopt(self, satellite_id: str, name: str, model: str,
+              reported: dict | None = None) -> str:
+        """`reported` is what the connected satellite has said it is set to
+        (its hello and status), and it wins over both the defaults and an old
+        record: the satellite is the thing in the room. The case this exists
+        for is a bedroom satellite with its lights off, moved to a new hub,
+        whose default lights_enabled is true -- adopting it must not light it.
+
+        A setting it has not reported is not guessed. Firmware before
+        2026-09-25 reports only in "status", every 10 s, so a satellite
+        adopted in its first seconds has said nothing: taking the defaults
+        then would switch on the ring and speaker of a satellite that was dark
+        and silent. Such a setting is left out of the welcome and held as
+        UNREPORTED until take_report() has it.
+
+        None is not a satellite that said nothing: it is a caller with no
+        satellite to ask (a script, a test), which gets the defaults."""
+        token = secrets.token_urlsafe(32)
+        prev = self.satellites.get(satellite_id)
+        given = reported_config(reported)
+        if prev:
+            config, unreported = dict(prev.config), list(prev.unreported)
+        else:
+            config = default_config()
+            unreported = [] if reported is None else list(REPORTED)
+        unreported = [k for k in unreported if k not in given]
+        config.update({k: UNREPORTED[k] for k in unreported if k in UNREPORTED})
+        config.update(given)
+        self.satellites[satellite_id] = Satellite(
+            id=satellite_id, name=name, model=model, token_sha256=token_hash(token),
+            adopted_at=time.time(), config=config, unreported=unreported,
+        )
+        self.save_satellites()
+        return token
+
+    def take_report(self, satellite_id: str, reported: dict) -> bool:
+        """Fill the settings an adopted satellite had not reported from what it
+        reports now. Only those: a setting the hub holds is the hub's, and the
+        satellite is told it rather than asked. True when the record changed."""
+        rec = self.satellites.get(satellite_id)
+        if rec is None or not rec.unreported:
+            return False
+        given = {k: v for k, v in reported_config(reported).items() if k in rec.unreported}
+        if not given:
+            return False
+        rec.config.update(given)
+        rec.unreported = [k for k in rec.unreported if k not in given]
+        self.save_satellites()
+        return True
+
+    def take_own(self, satellite_id: str, settings: dict) -> bool:
+        """Settings an adopted satellite changed itself, with its own buttons:
+        what it has now, so the record takes them whatever it held. True when
+        the record changed."""
+        rec = self.satellites.get(satellite_id)
+        if rec is None:
+            return False
+        given = {k: v for k, v in reported_config(settings).items() if rec.config.get(k) != v}
+        if not given:
+            return False
+        rec.config.update(given)
+        rec.unreported = [k for k in rec.unreported if k not in given]
+        self.save_satellites()
+        return True
+
+    def remember_caps(self, satellite_id: str, caps: object) -> bool:
+        """Keep an adopted satellite's caps from a hello that proved its
+        adoption. Written only when they changed, which is at an update or a
+        plug-in microphone, not at every reconnect. True when they did."""
+        rec = self.satellites.get(satellite_id)
+        if rec is None or not isinstance(caps, dict) or rec.caps == caps:
+            return False
+        rec.caps = copy.deepcopy(caps)
+        self.save_satellites()
+        return True
+
+    def forget(self, satellite_id: str) -> bool:
+        gone = self.satellites.pop(satellite_id, None) is not None
+        self.save_satellites()
+        return gone
+
+    # -- firmware -----------------------------------------------------------
+
+    def add_firmware(self, image: bytes, model: str, version: str,
+                     signature: str | None = None) -> Firmware:
+        sha = hashlib.sha256(image).hexdigest()
+        (self.fw_dir / f"{sha}.bin").write_bytes(image)
+        fw = Firmware(sha, len(image), model, version, time.time(), signature)
+        self.firmware[sha] = fw
+        self._save_index()
+        return fw
+
+    def newest_firmware(self, model: str, usable: Callable[[Firmware], bool]) -> Firmware | None:
+        """The newest usable image for `model`, by the page's own rule
+        (satNewest in ui.html): the highest version, and the last uploaded
+        among versions that cannot be ordered. Read in the order the page
+        reads GET /satellites/firmware, newest upload first, because with
+        versions that cannot be ordered the rule depends on it. By upload
+        alone, an older build uploaded again after a newer one would be the
+        "update" of every satellite running the newer one."""
+        best = None
+        for f in sorted(self.firmware.values(), key=lambda f: -f.uploaded_at):
+            if f.model != model or not usable(f):
+                continue
+            if best is None or firmware_older(best.version, f.version) or (
+                    not firmware_older(f.version, best.version) and f.uploaded_at > best.uploaded_at):
+                best = f
+        return best
+
+    def firmware_bytes(self, sha: str) -> bytes:
+        return (self.fw_dir / f"{sha}.bin").read_bytes()
+
+    def delete_firmware(self, sha: str) -> bool:
+        if self.firmware.pop(sha, None) is None:
+            return False
+        (self.fw_dir / f"{sha}.bin").unlink(missing_ok=True)
+        self._save_index()
+        return True
+
+    def _save_index(self) -> None:
+        write_atomic(self.fw_dir / "index.json",
+                      json.dumps([asdict(f) for f in self.firmware.values()], indent=2))

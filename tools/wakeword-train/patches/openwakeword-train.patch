@@ -1,0 +1,50 @@
+diff --git a/openwakeword/train.py b/openwakeword/train.py
+index 708cdb2..c521ce6 100755
+--- a/openwakeword/train.py
++++ b/openwakeword/train.py
+@@ -288,7 +288,9 @@ class Model(nn.Module):
+         steps = steps/10
+ 
+         # Adjust weights as needed based on false positive per hour performance from first sequence
+-        if self.best_val_fp > target_fp_per_hour:
++        # wakeword-train patch: best_val_fp is set to 1000 and never updated, so this
++        # always doubled the weight; use the rate measured at the end of the last sequence.
++        if self.history["val_fp_per_hr"][-1] > target_fp_per_hour:
+             max_negative_weight = max_negative_weight*2
+             logging.info("Increasing weight on negative examples to reduce false positives...")
+ 
+@@ -308,7 +310,9 @@ class Model(nn.Module):
+         lr = lr/10
+ 
+         # Adjust weights as needed based on false positive per hour performance from second sequence
+-        if self.best_val_fp > target_fp_per_hour:
++        # wakeword-train patch: best_val_fp is set to 1000 and never updated, so this
++        # always doubled the weight; use the rate measured at the end of the last sequence.
++        if self.history["val_fp_per_hr"][-1] > target_fp_per_hour:
+             max_negative_weight = max_negative_weight*2
+             logging.info("Increasing weight on negative examples to reduce false positives...")
+ 
+@@ -874,10 +878,11 @@ if __name__ == '__main__':
+         X_val_fp = np.load(config["false_positive_validation_data_path"])
+         X_val_fp = np.array([X_val_fp[i:i+input_shape[0]] for i in range(0, X_val_fp.shape[0]-input_shape[0], 1)])  # reshape to match model
+         X_val_fp_labels = np.zeros(X_val_fp.shape[0]).astype(np.float32)
+-        X_val_fp = torch.utils.data.DataLoader(
+-            torch.utils.data.TensorDataset(torch.from_numpy(X_val_fp), torch.from_numpy(X_val_fp_labels)),
+-            batch_size=len(X_val_fp_labels)
+-        )
++        # wakeword-train patch: feed the ~11 h false-positive set in chunks. As one
++        # batch it is 481k windows x input_shape floats, 3-5 GB, and does not fit
++        # on a 4 GB GPU. Every consumer sums over batches, so the result is the same.
++        X_val_fp = [(torch.from_numpy(X_val_fp[i:i + 50000]), torch.from_numpy(X_val_fp_labels[i:i + 50000]))
++                    for i in range(0, len(X_val_fp_labels), 50000)]
+ 
+         X_val_pos = np.load(os.path.join(feature_save_dir, "positive_features_test.npy"))
+         X_val_neg = np.load(os.path.join(feature_save_dir, "negative_features_test.npy"))
+@@ -905,6 +910,6 @@ if __name__ == '__main__':
+         oww.export_model(model=best_model, model_name=config["model_name"], output_dir=config["output_dir"])
+ 
+         # Convert the model from onnx to tflite format
+-        if args.convert_to_tflite:
++        if args.convert_to_tflite is True:  # wakeword-train patch: the default is the string "False", which is truthy
+             convert_onnx_to_tflite(os.path.join(config["output_dir"], config["model_name"] + ".onnx"),
+                                    os.path.join(config["output_dir"], config["model_name"] + ".tflite"))

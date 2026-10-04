@@ -1,0 +1,39 @@
+diff --git a/generate_samples.py b/generate_samples.py
+index 349ebde..c791e14 100755
+--- a/generate_samples.py
++++ b/generate_samples.py
+@@ -5,6 +5,7 @@ import itertools as it
+ import json
+ import logging
+ import os
++import random
+ import wave
+ from pathlib import Path
+ from typing import List, Union
+@@ -89,6 +90,11 @@ def generate_samples(
+     voice = config["espeak"]["voice"]
+     sample_rate = config["audio"]["sample_rate"]
+     num_speakers = config["num_speakers"]
++    # wakeword-train patch: openWakeWord's train.py passes no max_speakers, so
++    # take it from the environment; the late LibriTTS-R speakers have little
++    # data behind them and are kept out of training (and used for testing).
++    if max_speakers is None and os.environ.get("PSG_MAX_SPEAKERS"):
++        max_speakers = int(os.environ["PSG_MAX_SPEAKERS"])
+     if max_speakers is not None:
+         num_speakers = min(num_speakers, max_speakers)
+ 
+@@ -117,7 +123,13 @@ def generate_samples(
+         beta=14.769656459379492,
+     )
+ 
+-    speakers_iter = it.cycle(it.product(range(num_speakers), range(num_speakers)))
++    # wakeword-train patch: pairs in random order, not (0,0), (0,1), ... In
++    # order, 50,000 clips only ever blend from the first 56 speakers, and a
++    # 2,000-clip run from the first 3. Seeded by the output directory, so a
++    # rerun is repeatable and the training and test sets get different voices.
++    pairs = list(it.product(range(num_speakers), range(num_speakers)))
++    random.Random(str(output_dir)).shuffle(pairs)
++    speakers_iter = it.cycle(pairs)
+     speakers_batch = list(it.islice(speakers_iter, 0, batch_size))
+     if isinstance(text, str) and os.path.exists(text):
+         texts = it.cycle(

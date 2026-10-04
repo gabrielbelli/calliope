@@ -1,0 +1,46 @@
+# CPU only. No torch, no CUDA, no NeMo.
+#
+# Two inference runtimes on purpose: CTranslate2 carries Whisper because it is
+# the only one of the two that accepts a vocabulary at decode time, and ONNX
+# Runtime carries Parakeet and Silero. Together they are still a fraction of
+# what a single torch wheel would cost.
+faster-whisper==1.2.1
+onnx-asr[cpu,hub]==0.12.0
+huggingface-hub==0.36.0
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+python-multipart==0.0.20
+
+# libav, for decoding. The specification lists nine input formats and
+# libsndfile read four of them: m4a, mp4 and webm — what an iOS client and a
+# browser MediaRecorder actually produce — were all rejected 400. PyAV bundles
+# ffmpeg in its wheel, so this replaces both soundfile and the libsndfile1 apt
+# package, and it resamples and downmixes on the way through.
+#
+# It is already here either way: faster-whisper requires av>=11 for its own
+# decoding. Pinned rather than inherited, because this service now imports it.
+av==18.1.0
+
+# The wire contract shared with services/tts and services/tts-long: the
+# gateway's identity assertion and the 401 without one, OpenAI's error
+# envelope, the /health route, the log level switch, and the entrypoint that
+# installs to /usr/local/bin. No `[audio]`
+# extra here — that one pulls numpy for the two TTS services, and nothing in
+# this image imports voice_common.audio.
+#
+# A PATH into this repository, not a tarball pinned by SHA. The pin was right
+# while voice-common was its own repository: a change there reached this
+# service only after a push, a tag and a re-pin, and the SHA is what made the
+# build reproducible. In one repository the same pin becomes a liability — it
+# lets packages/common and the services that embed it sit at different
+# revisions inside a single commit, which is the one state a monorepo exists to
+# make unrepresentable. The commit is the pin now, and `git log` is the only
+# place either version is recorded.
+#
+# The path is relative to the CURRENT WORKING DIRECTORY, not to this file: pip
+# resolves a path requirement against the process's cwd. Checked rather than
+# assumed — reading this file from its own directory fails with "Expected
+# package name at the start of dependency specifier", which reads like a syntax
+# error in the file and is not one. So every install runs from the repository
+# root, which is what the Containerfile's WORKDIR and every CI job do.
+./packages/common

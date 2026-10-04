@@ -1,0 +1,20 @@
+#!/bin/sh
+# Shairport Sync runs this whenever the phone's AirPlay volume changes:
+#   calliope-airplay-volume RANGE_DB AIRPLAY_DB
+# AIRPLAY_DB is the phone's slider, -30.0 (bottom) to 0.0 (top), or -144.0
+# for mute (calliope_pi/airplay.py). Shairport Sync leaves the samples
+# untouched (ignore_volume_control), so this sets the output's own volume:
+# the slider's 30 dB spread over RANGE_DB (60: the first step is quiet), in
+# the DAC's hardware where it has a control. pactl is given a linear factor:
+# the one on Raspberry Pi OS refuses every dB form.
+range="${1:-60}"
+db=""
+for a in "$@"; do db="$a"; done
+case "$db" in
+  ""|"$range") exit 0 ;;
+  -144*) exec pactl set-sink-mute @DEFAULT_SINK@ 1 ;;
+esac
+factor=$(awk -v v="$db" -v r="$range" 'BEGIN { if (v > 0) v = 0; if (v < -30) v = -30;
+  printf "%.6f", exp(log(10) * (v * r / 30) / 20) }')
+pactl set-sink-mute @DEFAULT_SINK@ 0
+exec pactl set-sink-volume @DEFAULT_SINK@ "$factor"

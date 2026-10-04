@@ -1,0 +1,290 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Calliope",
+        "description": "The address of the Calliope gateway, which serves both the API and the page, and an API key made in Calliope for Home Assistant.",
+        "data": {
+          "url": "URL",
+          "api_key": "API key",
+          "verify_ssl": "Verify the TLS certificate"
+        },
+        "data_description": {
+          "url": "For example {example_url}",
+          "api_key": "Make it in Calliope: Account › API keys › New key, with the preset home-assistant. Only an admin account is offered that preset, and Calliope shows the key once.",
+          "verify_ssl": "Turn off only for a self-signed certificate."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Calliope needs a new API key",
+        "description": "Calliope refused the key: it was revoked or has expired, or its account was disabled. An entry made before version 0.3 has no key at all, and Calliope now requires one. In Calliope open Account › API keys › New key, choose the preset home-assistant (only an admin account is offered it), create the key and paste it here.",
+        "data": {
+          "api_key": "API key"
+        },
+        "data_description": {
+          "api_key": "The new key. It starts with calliope_, and Calliope shows it once."
+        }
+      },
+      "reconfigure": {
+        "title": "Calliope connection",
+        "description": "Change the gateway's address, the API key or TLS checking. The integration reloads with them.",
+        "data": {
+          "url": "URL",
+          "api_key": "API key",
+          "verify_ssl": "Verify the TLS certificate"
+        },
+        "data_description": {
+          "url": "For example {example_url}",
+          "api_key": "Make it in Calliope: Account › API keys › New key, with the preset home-assistant. Only an admin account is offered that preset, and Calliope shows the key once.",
+          "verify_ssl": "Turn off only for a self-signed certificate."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Calliope did not answer at that address.",
+      "invalid_auth": "Calliope refused the API key: it is unknown, revoked or expired.",
+      "invalid_url": "Enter a URL that starts with http:// or https://.",
+      "malformed_key": "That is not a Calliope API key. A key starts with calliope_ and is 45 characters long: paste all of it.",
+      "missing_scopes": "Calliope accepted the key, but it lacks {scopes}. A key's scopes cannot be changed: make a new key with the preset home-assistant, which holds every scope this integration uses.",
+      "not_calliope": "Something answered, but it is not a Calliope gateway.",
+      "unknown": "Something unexpected went wrong. Home Assistant's log has the details."
+    },
+    "abort": {
+      "already_configured": "This Calliope gateway is already set up.",
+      "already_in_progress": "This Calliope gateway is already being set up.",
+      "reauth_successful": "The new key works.",
+      "reconfigure_successful": "The connection is updated.",
+      "reauth_without_satellites": "The new key works, but it cannot reach the satellites: it lacks satellites:read. Speech works. For the satellites, make a key with the home-assistant preset.",
+      "reconfigure_without_satellites": "The connection is updated, but this key cannot reach the satellites: it lacks satellites:read. Speech works. For the satellites, make a key with the home-assistant preset."
+    },
+    "create_entry": {
+      "no_satellites": "Calliope is set up, but this key cannot reach the satellites: it lacks {scopes}. Speech works. For the satellites, make a key with the home-assistant preset and enter it with Reconfigure."
+    }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "wake_word": "Wake word {subtype} heard",
+      "trigger_word": "Trigger word {subtype} heard",
+      "command": "Command transcribed",
+      "button_press": "{subtype} pressed",
+      "button_release": "{subtype} released",
+      "conversation_started": "Conversation started",
+      "conversation_ended": "Conversation ended"
+    },
+    "trigger_subtype": {
+      "play": "PLAY button",
+      "set": "SET button",
+      "mode": "MODE button",
+      "rec": "REC button",
+      "vol_up": "VOL+ button",
+      "vol_down": "VOL- button",
+      "key1": "KEY1 button",
+      "hey_jarvis": "Hey Jarvis",
+      "hey_mycroft": "Hey Mycroft",
+      "hey_rhasspy": "Hey Rhasspy",
+      "alexa": "Alexa",
+      "weather": "Weather"
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "online": {
+        "name": "Online"
+      },
+      "privacy_mute": {
+        "name": "Privacy mute"
+      },
+      "under_voltage": {
+        "name": "Under-voltage"
+      }
+    },
+    "event": {
+      "voice": {
+        "name": "Voice",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "wake_word": "Wake word",
+              "trigger_word": "Trigger word",
+              "command": "Command",
+              "conversation_started": "Conversation started",
+              "conversation_ended": "Conversation ended"
+            }
+          }
+        }
+      },
+      "button": {
+        "name": "{button} button",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "press": "Pressed",
+              "release": "Released"
+            }
+          }
+        }
+      }
+    },
+    "number": {
+      "mic_gain": {
+        "name": "Microphone gain"
+      },
+      "brightness": {
+        "name": "Ring brightness"
+      }
+    },
+    "select": {
+      "output_satellite": {
+        "name": "Plays through",
+        "state": {
+          "own": "Its own speaker"
+        }
+      },
+      "output_device": {
+        "name": "Output",
+        "state": {
+          "default": "System default"
+        }
+      },
+      "input_device": {
+        "name": "Microphone input",
+        "state": {
+          "default": "System default"
+        }
+      }
+    },
+    "sensor": {
+      "wifi_signal": {
+        "name": "Wi-Fi signal"
+      },
+      "uptime": {
+        "name": "Uptime"
+      },
+      "cpu_temperature": {
+        "name": "CPU temperature"
+      },
+      "last_command": {
+        "name": "Last command"
+      },
+      "last_wake_word": {
+        "name": "Last wake word"
+      }
+    },
+    "stt": {
+      "parakeet": {
+        "name": "Parakeet"
+      },
+      "whisper": {
+        "name": "Whisper"
+      }
+    },
+    "switch": {
+      "microphone": {
+        "name": "Microphone"
+      },
+      "speaker": {
+        "name": "Speaker"
+      },
+      "lights": {
+        "name": "Lights"
+      },
+      "echo_reference": {
+        "name": "Echo reference"
+      },
+      "airplay": {
+        "name": "AirPlay"
+      }
+    },
+    "text": {
+      "airplay_name": {
+        "name": "AirPlay name"
+      }
+    },
+    "tts": {
+      "kokoro": {
+        "name": "Kokoro"
+      }
+    }
+  },
+  "exceptions": {
+    "hub_refused": {
+      "message": "The Calliope hub refused the change: {error}"
+    },
+    "satellite_refused": {
+      "message": "Calliope could not do that on {satellite}: {error}"
+    },
+    "no_satellites": {
+      "message": "The target contains no Calliope satellite."
+    },
+    "tts_failed": {
+      "message": "Calliope could not synthesise the speech: {error}"
+    },
+    "no_voice": {
+      "message": "Calliope has no voice for {language}."
+    },
+    "speaker_off": {
+      "message": "{satellite} has its speaker turned off."
+    },
+    "unsupported_url": {
+      "message": "Calliope plays Home Assistant's media and http or https URLs only."
+    },
+    "hub_cannot_play": {
+      "message": "This Calliope hub cannot play media: update it."
+    },
+    "play_failed": {
+      "message": "Calliope could not play that on {satellite}: {error}"
+    },
+    "no_update": {
+      "message": "There is no firmware for {satellite} to update to."
+    },
+    "update_skipped": {
+      "message": "The hub did not start the update: {reason}"
+    }
+  },
+  "issues": {
+    "missing_scope": {
+      "title": "The Calliope API key lacks a scope",
+      "description": "Calliope at {entry} refused a request because the integration's API key lacks {scopes}. A key's scopes cannot be changed, so make a new key: in Calliope open Account › API keys › New key, choose the preset home-assistant, which holds every scope this integration uses (only an admin account is offered it), and create the key. Then open Settings › Devices & services › Calliope, choose Reconfigure on the entry's menu and paste the new key."
+    }
+  },
+  "services": {
+    "say": {
+      "name": "Say",
+      "description": "Speaks text on satellites, with Kokoro through the hub.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "What to say. At most 2000 characters."
+        },
+        "voice": {
+          "name": "Voice",
+          "description": "A Kokoro voice, for example bm_george or pf_dora. Empty uses the hub's default voice."
+        }
+      }
+    },
+    "tone": {
+      "name": "Tone",
+      "description": "Plays a sine tone on satellites.",
+      "fields": {
+        "frequency": {
+          "name": "Frequency",
+          "description": "In hertz, 50 to 8000."
+        },
+        "seconds": {
+          "name": "Duration",
+          "description": "In seconds, up to 10."
+        }
+      }
+    },
+    "push_to_talk": {
+      "name": "Push to talk",
+      "description": "Starts listening on satellites, as their push-to-talk button does.",
+      "fields": {
+        "wake_word": {
+          "name": "Wake word",
+          "description": "Listen as if this wake word had been heard, so its mode and action apply. Empty uses push-to-talk's own."
+        }
+      }
+    }
+  }
+}

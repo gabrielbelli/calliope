@@ -1,0 +1,101 @@
+{
+  "entity": {
+    "binary_sensor": {
+      "privacy_mute": {
+        "default": "mdi:microphone",
+        "state": {
+          "on": "mdi:microphone-off"
+        }
+      },
+      "under_voltage": {
+        "default": "mdi:flash-triangle-outline"
+      }
+    },
+    "event": {
+      "voice": {
+        "default": "mdi:account-voice"
+      },
+      "button": {
+        "default": "mdi:gesture-tap-button"
+      }
+    },
+    "number": {
+      "mic_gain": {
+        "default": "mdi:microphone-plus"
+      },
+      "brightness": {
+        "default": "mdi:brightness-6"
+      }
+    },
+    "select": {
+      "output_satellite": {
+        "default": "mdi:speaker-multiple"
+      },
+      "output_device": {
+        "default": "mdi:speaker"
+      },
+      "input_device": {
+        "default": "mdi:microphone"
+      }
+    },
+    "sensor": {
+      "uptime": {
+        "default": "mdi:timer-outline"
+      },
+      "cpu_temperature": {
+        "default": "mdi:thermometer"
+      },
+      "last_command": {
+        "default": "mdi:text-to-speech"
+      },
+      "last_wake_word": {
+        "default": "mdi:account-voice"
+      }
+    },
+    "switch": {
+      "microphone": {
+        "default": "mdi:microphone",
+        "state": {
+          "off": "mdi:microphone-off"
+        }
+      },
+      "speaker": {
+        "default": "mdi:speaker",
+        "state": {
+          "off": "mdi:speaker-off"
+        }
+      },
+      "lights": {
+        "default": "mdi:led-on",
+        "state": {
+          "off": "mdi:led-off"
+        }
+      },
+      "echo_reference": {
+        "default": "mdi:waveform"
+      },
+      "airplay": {
+        "default": "mdi:cast-audio",
+        "state": {
+          "off": "mdi:cast-off"
+        }
+      }
+    },
+    "text": {
+      "airplay_name": {
+        "default": "mdi:rename"
+      }
+    }
+  },
+  "services": {
+    "say": {
+      "service": "mdi:account-voice"
+    },
+    "tone": {
+      "service": "mdi:sine-wave"
+    },
+    "push_to_talk": {
+      "service": "mdi:microphone-message"
+    }
+  }
+}

@@ -1,0 +1,1088 @@
+"""Self-hosted text-to-speech. Kokoro, CPU only.
+
+    text or segments -> phonemise -> Kokoro -> wav, opus, mp3, aac, flac, pcm
+
+There is one model and it stays resident: at 330 MB and 4x realtime on CPU it
+is too cheap to unload. Chatterbox, the long-form alternative, is deliberately
+not here — it needs 5.3 GB and runs below realtime, so it belongs behind a
+separate service that can be started on demand.
+
+Two request shapes reach the same synthesiser. `/speak` is the native one and
+the one to prefer: it takes segments with explicit pauses and a voice each,
+and returns the realtime factor in headers. `/v1/audio/speech` is OpenAI's
+shape, kept alongside so existing clients need only a base URL change; it can
+express none of those things.
+
+`/v1/audio/speech` answers `stream_format: "sse"` with real server-sent events.
+The synthesiser produces a chunk at a time, so a delta leaves as soon as the
+first chunk is encoded rather than when the last one is: measured on the
+schema's own 4096-character maximum, the first frame goes out after 5.49 s of a
+55.06 s generation, against 58.98 s before a buffered response sends anything at
+all. That parameter used to be accepted and dropped — a caller that asked for a
+stream got a single buffered mp3, HTTP 200, no error, and no way to tell.
+
+THIS SERVICE IS NEVER DISPATCHED TO ANOTHER MACHINE, and the reason is written
+here so it is not re-litigated from the dispatcher's side. tts-long chooses
+between this box and the GPU on the desktop because Chatterbox runs at 0.23x
+realtime here and one job takes twenty minutes. Kokoro runs at 2.79x on the NAS
+at 8 threads — buffered, faster than the speech it produces, with somebody
+watching the page — so any dispatch decision could only ADD a round trip to a
+request that is already quick, and there is no Kokoro on the desktop to add it
+to. What DOES leave this container is the finished run's record; see `runlog`.
+"""
+
+from __future__ import annotations
+
+import base64
+import functools
+import json
+import os
+import subprocess
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Literal
+
+import numpy as np
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from voice_common import identity, logging as voice_logging
+from voice_common.errors import error_response, install_errors
+from voice_common.health import install_health
+from voice_common.models import OpenAISpeechRequest, Segment as BaseSegment
+from voice_common.runlog import RunLog
+
+from .audio_out import CONTENT_TYPE, FORMATS, encode, encode_stream
+from .openai_api import (VOICE_ALIASES, custom_voice_id, language_for_voice,
+                         resolve_voice, unmapped_aliases)
+from .synth import FRAME_SAMPLES, MAX_CHUNK_PHONEMES, SAMPLE_RATE, Synth
+
+MODEL_DIR = Path(os.getenv("TTS_MODEL_DIR", "/models"))
+MODEL_URL = os.getenv(
+    "TTS_MODEL_URL",
+    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx")
+VOICES_URL = os.getenv(
+    "TTS_VOICES_URL",
+    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin")
+DEFAULT_VOICE = os.getenv("TTS_VOICE", "bm_george")
+DEFAULT_LANG = os.getenv("TTS_LANGUAGE", "en-us")
+THREADS = int(os.getenv("TTS_THREADS", "4"))
+
+# How much of the utterance goes into one model pass, in phonemes, and so how
+# often an SSE delta leaves. The default is the model's own context window less
+# the one row that cannot be indexed, which is also the batching upstream would
+# have chosen on any text it handled correctly, so the audio is what this
+# service returned before streaming existed.
+#
+# Lowering it buys latency and costs length. Measured on a 4096-character input:
+# 509 gives 7 chunks, 154.5 s of audio and 6.21 s to the first; 200 gives 17
+# chunks, 174.5 s and 2.25 s; 100 gives 39 chunks, 180.8 s and 1.29 s. The 17%
+# growth is the duration predictor seeing less context, not silence at the
+# seams, so it is a real change to the speech and not a packaging one.
+CHUNK_PHONEMES = min(max(int(os.getenv("TTS_CHUNK_PHONEMES",
+                                       str(MAX_CHUNK_PHONEMES))), 1),
+                     MAX_CHUNK_PHONEMES)
+
+# ------------------------------------------------------- the latency ramp --
+#
+# THE FIRST CHUNK IS THE ONLY ONE WHOSE SIZE A LISTENER EXPERIENCES AS WAITING.
+# Every later one is generated while they are still hearing the one before it.
+# Packing the first to the window as well is right for throughput and ruinous
+# for the one thing a stream is for: measured against this service, 528
+# characters came back as two deltas and the first arrived after 10.24 s
+# carrying 24.7 s of audio. The stream was working exactly as designed and
+# nobody could hear anything for ten seconds.
+#
+# 60 phonemes is where the wait and the tempo cross. Kokoro's duration
+# predictor sees less context in a short input and slows down, so a very small
+# first chunk buys a fast start and pays in speed. Measured on the NAS, seconds
+# of audio per phoneme against the full window's 0.0447: 0.079 at 28 phonemes,
+# 0.067 at 52, 0.053 at 86, 0.053 at 195. At 60 the first delta leaves in
+# about 1.5 s and its four seconds of speech run a little under normal. 93 is
+# the value to try first if the tempo step at the first seam is audible; it
+# costs 0.6 s of that wait. Set this to CHUNK_PHONEMES or above to turn the
+# ramp off.
+FIRST_CHUNK_PHONEMES = min(max(int(os.getenv("TTS_FIRST_CHUNK_PHONEMES", "60")),
+                               1),
+                           CHUNK_PHONEMES)
+
+# BELOW THIS THE WHOLE REQUEST IS UNDER THREE SECONDS, so a ramp would move it
+# from one point inside the 1-to-10 s band to another and buy nothing, while
+# costing an extra seam and an extra model call. Short requests therefore stay
+# byte-identical to what this service returned before the ramp existed,
+# streamed and buffered alike.
+RAMP_MIN_PHONEMES = 2 * FIRST_CHUNK_PHONEMES
+
+# THE PAGE'S OWN MARGIN, NAMED AFTER IT. services/ui/app/static/ui.html holds
+# STREAM.safety = 1.15 and applies it to this same arithmetic from the other
+# end. The schedule below has to survive the rule that page enforces, so it
+# uses the page's number rather than inventing a second one.
+RAMP_SAFETY = 1.15
+
+# THE SHAPE OF ONE MODEL CALL, as two ratios rather than four seconds, so that
+# nothing here depends on how long a full window happens to take on a given
+# machine.
+#
+# Measured on the NAS at TTS_THREADS=8, eight sizes, three runs each, the
+# phoneme counts taken from the tokeniser this service uses:
+#
+#     phonemes      28     52     86    130    195    294    395    499
+#     generate    0.99   1.39   1.80   2.82   4.08   5.48   8.52   9.23  s
+#     audio       2.22   3.48   4.59   7.42  10.39  14.66  19.01  22.29  s
+#
+#     gen(p)   = 0.399 + 0.01853 p        audio(p) = 1.360 + 0.04358 p
+#
+# CALL_SHARE is that generation intercept over a full window's generation,
+# 0.399 / 9.83: the part of a call that is paid whatever is in it.
+#
+# AUDIO_FIXED_SHARE is the audio intercept over a full window's audio,
+# 1.360 / 23.54: the silence at a chunk's edges plus the drawl. It is why a
+# ramp works at all, because every chunk banks about a second more audio than
+# its phoneme count alone would buy.
+CALL_SHARE = 0.041
+AUDIO_FIXED_SHARE = 0.058
+
+# THE RATE THE SCHEDULE IS PLANNED AGAINST, as a multiple of realtime, and
+# DELIBERATELY BELOW THE ONE MEASURED. The NAS at 8 threads generates a full
+# window at 2.4x, and planning at that leaves no room at all: the same
+# schedule on a machine a sixth slower is one the page pauses. 2.0 is that
+# figure with a fifth held back, and it survives a machine a sixth slower with
+# half a second to spare. Below about 1.85x no schedule survives, and none is
+# planned. See ramp_schedule.
+#
+# NOT `rate.value`, and that is a decision rather than an oversight. The
+# published figure is an EMA over whatever sizes have been asked for lately,
+# and a short request measures well below the marginal rate: this deployment
+# answered a 1.2 s clip at 1.8x and a 22 s one at 2.4x within a minute of each
+# other. A schedule that read it would switch itself on and off between
+# requests, and the ramp's own small first chunks would drag it down and then
+# switch the ramp off. `rate.value` is still consulted, but only as a guard.
+RAMP_RATE = max(float(os.getenv("TTS_RAMP_RATE", "2.0")), 1.0)
+
+# HOW MANY TIMES OVER A CHUNK'S GENERATION MUST FIT INSIDE THE AUDIO BANKED.
+#
+# TWICE is the rule ui.html enforces today, and it enforces it because it
+# cannot do better: with no idea how big the next chunk is, the only honest
+# reading of "the next delta is late" is that nothing has arrived for longer
+# than the audio still in hand. Half the bank is therefore spent proving the
+# stream is alive rather than keeping it playing.
+#
+# ONCE is the rule that is left when the client reads X-Chunk-Phonemes and can
+# tell a late delta from an expected one. It reaches the full window in four
+# chunks instead of seven, which matters because every chunk under about 300
+# phonemes is spoken slowly: measured on the NAS, 0.064 s per phoneme at 52,
+# 0.055 at 120, 0.053 at 155, against 0.045 for a whole 495-phoneme utterance.
+# Fewer small chunks is less of that.
+#
+# A CLIENT ASKS FOR IT BY NAME, with X-Chunk-Plan, and gets the careful
+# schedule otherwise. This service has to be safe deployed on its own: a page
+# that has not learned to read the plan must not be handed a stream it will
+# report as having fallen behind.
+RAMP_LEAD = 2
+RAMP_LEAD_WITH_PLAN = 1
+RAMP_PLAN_HEADER = "X-Chunk-Plan"
+
+# HOW MANY CHUNKS THE RAMP MAY SPEND REACHING THE FULL WINDOW. A schedule
+# longer than this is a stream of small chunks rather than a ramp: it pays a
+# model call and a little duration on every one of them for a latency that was
+# already bought on the first. At the planned rate the ramp takes seven.
+RAMP_MAX_CHUNKS = 12
+
+
+# OpenAI's own maximum for `input`, and the schema's. It was not enforced, so a
+# single synchronous request had no upper bound on how long it could run.
+MAX_INPUT_CHARS = 4096
+
+# What actually synthesises, and so the one `model` value that is not a
+# deviation. There is one model in this image; see _deviations for why any
+# other name is answered rather than rejected.
+MODEL_NAME = "kokoro"
+
+# Same one line of configuration this always had, plus the TTS_LOG_LEVEL switch
+# it never had: getting DEBUG out of a running container used to mean editing
+# the source and rebuilding the image, which is exactly the moment that is
+# impossible. Unset still means INFO, so nothing changes for anyone who has not
+# asked for it.
+log = voice_logging.setup("tts-stack", "TTS")
+
+state: dict[str, object] = {}
+
+
+class _Rate:
+    """The observed realtime factor of THIS container, as an EMA.
+
+    Reported in /health so a client does not have to write the number down.
+    It is a property of a machine and of its configuration, not of Kokoro: the
+    same model on the same NAS measured 1.83x realtime at TTS_THREADS=4 and
+    2.79x at 8, so any constant a caller keeps is a claim about a deployment
+    that a rebuild can make false without telling anyone.
+
+    UNSEEDED, AND THAT IS THE POINT. tts-long seeds its EMA from a constant so
+    that its queue arithmetic always has a number, which means its
+    realtime_factor is never absent and a seed is indistinguishable from a
+    measurement. A client deciding whether audio can be played as it arrives
+    must be able to tell those apart, so this one reports nothing at all until
+    something has actually been synthesised, and `value` stays None until then.
+
+    The first observation is taken whole rather than blended into a seed that
+    was never measured. Later ones move it by 0.3, the same weight tts-long
+    uses, so one unusually short request cannot swing the figure a client is
+    about to plan a playback buffer against.
+    """
+
+    def __init__(self) -> None:
+        self.value: float | None = None
+        self.samples = 0
+        self._lock = threading.Lock()
+
+    def observe(self, audio_seconds: float, compute_seconds: float) -> None:
+        if audio_seconds <= 0 or compute_seconds <= 0:
+            return
+        measured = audio_seconds / compute_seconds
+        with self._lock:
+            self.samples += 1
+            self.value = (measured if self.value is None
+                          else self.value + 0.3 * (measured - self.value))
+
+
+rate = _Rate()
+
+# WHAT THIS CONTAINER SAID, AFTER IT HAS FINISHED SAYING IT.
+#
+# Instant speech keeps no file: the audio goes into the response and there is
+# nothing left of the run afterwards, so a question as ordinary as "how many
+# times did I use this today, and how fast was it" had no answer anywhere in
+# the stack. tts-long has kept a record of every clone job all along; this is
+# the same record, posted to the same store, for the engine that produces
+# nothing to keep.
+#
+# RUNLOG_URL IS UNSET BY DEFAULT AND THEN THIS IS A NO-OP. The one hard rule
+# of this deployment is that it works completely with the other machines
+# stopped, and a service that needed tts-long up in order to speak would break
+# it. See voice_common/runlog.py for why nothing here is on the request's
+# clock. Replaced wholesale in tests; every call site reads this global at call
+# time, which is what makes that work.
+runlog = RunLog.from_env("tts", MODEL_NAME)
+
+
+def ramp_schedule(total: int, *, reads_plan: bool = False) -> list[int] | None:
+    """Sizes for the leading chunks of a streamed request, or None for today's.
+
+    THE RULE IS THE PAGE'S, READ FROM THE OTHER END. ui.html plays a delta as
+    it lands and pauses when the audio still in hand has fallen below the time
+    since the last delta arrived, which is the honest reading of "the next
+    delta is already late". So a chunk may be as large as its generation fits
+    TWICE inside the audio banked when the delta before it landed. Once over
+    would only keep the sound going; the second is what stops the page saying
+    it fell behind. Written out, each size is the largest that satisfies
+
+        2 x RAMP_SAFETY x generate(next) <= banked audio
+
+    with the bank carried forward: it grows by the audio a chunk makes and
+    shrinks by the time the next one takes to make. Nothing is geometric. At
+    the planned rate the sizes that fall out are 60, 60, 98, 157, 240, 358 and
+    then the full window, steep after the first step because the bank grows
+    faster than the chunks do.
+
+    THIS HAS TO BE SAFE DEPLOYED ON ITS OWN. A page that cannot read the
+    schedule keeps the rule above and nothing tells it a ramp is running, so a
+    schedule this service cannot defend would show a reader "The voice fell
+    behind" where today they hear one clean run. `reads_plan` is a client
+    saying it has read X-Chunk-Phonemes and can tell a late delta from an
+    expected one; it halves the requirement and reaches the window in four
+    chunks. See RAMP_LEAD.
+    """
+    if total < RAMP_MIN_PHONEMES or FIRST_CHUNK_PHONEMES >= CHUNK_PHONEMES:
+        return None
+
+    # BELOW REALTIME NOTHING HELPS. A machine that generates slower than it
+    # speaks cannot keep any schedule ahead of playback, so the request is
+    # planned as it always was. Only a measurement counts here: an unseeded
+    # rate is None and means nothing has been synthesised yet.
+    measured = rate.value
+    if measured is not None and measured < RAMP_SAFETY:
+        return None
+
+    # One full window of audio is the unit, so the seconds cancel and the two
+    # ratios above are the whole model.
+    def audio(phonemes: int) -> float:
+        return (AUDIO_FIXED_SHARE
+                + (1 - AUDIO_FIXED_SHARE) * phonemes / MAX_CHUNK_PHONEMES)
+
+    def generate(phonemes: int) -> float:
+        return (CALL_SHARE
+                + (1 - CALL_SHARE) * phonemes / MAX_CHUNK_PHONEMES) / RAMP_RATE
+
+    lead = RAMP_LEAD_WITH_PLAN if reads_plan else RAMP_LEAD
+    sizes = [FIRST_CHUNK_PHONEMES]
+    bank = audio(sizes[0])
+    while sizes[-1] < CHUNK_PHONEMES:
+        room = RAMP_RATE * bank / (lead * RAMP_SAFETY) - CALL_SHARE
+        allowed = int(MAX_CHUNK_PHONEMES * room / (1 - CALL_SHARE))
+        # NEVER SMALLER THAN THE FIRST, so the ramp may hold its size for a
+        # step while the bank catches up. The first two chunks are equal at
+        # every rate this ships at, and that step is the tightest one in the
+        # whole schedule: after it the bank grows faster than the chunks do.
+        size = min(CHUNK_PHONEMES, max(FIRST_CHUNK_PHONEMES, allowed))
+        if len(sizes) >= RAMP_MAX_CHUNKS and size < CHUNK_PHONEMES:
+            return None
+        bank += audio(size) - generate(size)
+        sizes.append(size)
+    return sizes
+
+
+
+def _fetch(url: str, dest: Path) -> None:
+    if dest.is_file():
+        return
+    log.info("downloading %s", dest.name)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    subprocess.run(["curl", "-sSfL", "-o", str(tmp), url], check=True)
+    tmp.rename(dest)  # rename last, so a killed download never looks complete
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    os.environ.setdefault("OMP_NUM_THREADS", str(THREADS))
+    started = time.monotonic()
+    model = MODEL_DIR / "kokoro.onnx"
+    voices = MODEL_DIR / "voices.bin"
+    _fetch(MODEL_URL, model)
+    _fetch(VOICES_URL, voices)
+    synth = Synth(str(model), str(voices))
+    state["synth"] = synth
+
+    # The alias table names Kokoro voices from outside the model file, so a
+    # different voices.bin could leave one of the thirteen OpenAI names
+    # pointing at nothing. Complain at load rather than at the first request
+    # that uses it — the same failure the espeak wiring exists to avoid.
+    missing = unmapped_aliases(synth.voices)
+    if missing:
+        log.warning("OpenAI voice names absent from this voices file: %s; "
+                    "requests using them will be rejected", ", ".join(missing))
+
+    log.info("ready in %.1fs, %d threads", time.monotonic() - started, THREADS)
+    yield
+    state.clear()
+
+
+app = FastAPI(title="tts-stack",
+              description="Kokoro text-to-speech, CPU only.",
+              lifespan=lifespan)
+
+# Every request but /health needs the gateway's signed assertion for this
+# service (D52). Installed on the app rather than route by route, so a route
+# added later is covered without anyone having to remember to ask for it, and
+# placed outermost whatever is added after it. /docs, /redoc and /openapi.json
+# are removed rather than guarded: a schema dump is a free map of the service.
+identity.install(app, "tts")
+
+# The /v1 error envelope — all four fields, and the 404, 405 and 500 handlers
+# that used to escape it. This repo carried app/errors.py to add `param` and
+# those handlers on top of a shared package it could not change; both now live
+# upstream, so there is nothing to register second. The native routes keep
+# FastAPI's own `{"detail": ...}`: clients are already written against that
+# shape and /v1 is the only compatibility boundary here.
+install_errors(app)
+
+
+class Segment(BaseSegment):
+    """A native-API segment: shared text and pause, plus this service's voice.
+
+    `text` and the 0.0–10.0 second `pause_after` come from
+    voice_common.models.Segment, where the bounds are a published part of two
+    services' APIs and no longer free to drift in one of them.
+    """
+
+    # A voice is a 510 KB embedding against 310 MB of shared weights, so
+    # changing it between segments costs nothing once the model is loaded.
+    # Absent means the request's voice. The phonemiser language is not
+    # inferred from it: `language` stays a property of the request, as it has
+    # always been on this route. Kokoro-specific, so it stays here.
+    voice: str | None = None
+
+
+class SpeakRequest(BaseModel):
+    # Unknown fields are rejected rather than dropped. A per-segment `voice`
+    # was documented for as long as it was silently ignored, and the caller
+    # got the default voice back with nothing to read that said why. A typo
+    # belongs in a 422, not in the audio.
+    model_config = ConfigDict(extra="forbid")
+
+    text: str | None = None
+    segments: list[Segment] | None = None
+    voice: str | None = None
+    language: str | None = None
+    speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    format: str = Field(default="wav", pattern="^(wav|opus|mp3|aac|flac|pcm)$")
+
+
+class SpeechRequest(OpenAISpeechRequest):
+    """OpenAI's /v1/audio/speech body, with the parts that are Kokoro's.
+
+    `model`, `input`, `voice` and the `extra="allow"` rule come from
+    voice_common.models.OpenAISpeechRequest. That last one is the reason the
+    base class exists: OpenAI keeps adding fields, and a service whose whole
+    purpose is to answer OpenAI's clients must not reject one for speaking a
+    newer version of the dialect it claims to speak.
+
+    `extra="allow"` is not licence to drop what arrives, though, and it used to
+    be. `stream: true` — a field the speech schema forbids, and the classic
+    confusion with the transcription one — came back 200 with an ordinary
+    buffered mp3 and no signal of any kind. Anything unrecognised is now named
+    in `X-Ignored-Parameters` on the response, so the answer to "did that do
+    anything?" is on the wire rather than in this file.
+
+    Everything else here is a property of this image rather than of the shape:
+    the encoder list is what ffmpeg can produce in this image, the speed range
+    is OpenAI's published one, and the two enums are the schema's own.
+    """
+
+    # "kokoro" rather than the base's "default", because that is what this
+    # service answers with and something may well be reading it back. Any other
+    # name is accepted and named in X-Ignored-Parameters: see _deviations.
+    model: str = MODEL_NAME
+
+    # maxLength 4096 is in the schema and was not enforced here: bodies well
+    # past it were accepted and attempted, which left no upper bound at all on
+    # how long one synchronous request could run.
+    input: str = Field(max_length=MAX_INPUT_CHARS)
+
+    # Accepted, never honoured, and now said so out loud. Kokoro-82M has no
+    # style, prosody or emotion conditioning — a voice is a 510 KB embedding
+    # selected by name, and the ONNX graph takes tokens, style and speed and
+    # nothing else — so there is no input to route a sentence of direction
+    # into. Proved rather than assumed: two requests differing only by
+    # instructions="Speak in an extremely angry shouting voice, very fast"
+    # returned byte-identical audio, SHA-1 b477f15864f99dc5.
+    #
+    # Ignored rather than rejected, and the README says so in a row of its own.
+    # OpenAI documents that `instructions` does not work with tts-1 or
+    # tts-1-hd either, so a client that sends it already tolerates no effect;
+    # a 400 would break clients for a field the upstream API also ignores.
+    # The response names it in X-Ignored-Parameters, so the silence is gone
+    # even though the behaviour has not changed.
+    instructions: str | None = Field(default=None, max_length=MAX_INPUT_CHARS)
+
+    voice: str | None = None
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    response_format: Literal[FORMATS] = "mp3"  # type: ignore[valid-type]
+
+    # Validated against its enum, which it was not: `stream_format:
+    # "nonsense_value"` returned 200 with the same mp3 as `"audio"`, so a
+    # client that misspelled "sse" got exactly the same silence as one that
+    # spelled it right.
+    stream_format: Literal["audio", "sse"] = "audio"
+
+    @field_validator("voice", mode="before")
+    @classmethod
+    def _unwrap_custom_voice(cls, value: object) -> object:
+        """`{"id": "voice_1234"}` is the schema's other form of `voice`."""
+        return custom_voice_id(value)
+
+
+def _health() -> dict[str, object]:
+    """The body, unchanged. The route and its exemption are shared.
+
+    install_health registers `/health` at the one path voice_common.identity
+    leaves open, so a rename cannot lock a container healthcheck out — the two
+    used to be independent literals in two modules. It also makes the route
+    a coroutine: a sync one shares AnyIO's forty-thread pool with /speak, and
+    enough concurrent synthesis requests took the pool and stopped /health
+    answering while the service was merely busy. Nothing here blocks.
+    """
+    s = state.get("synth")
+    out: dict[str, object] = {"status": "ok" if s else "loading",
+                              "voices": len(getattr(s, "voices", [])),
+                              "default_voice": DEFAULT_VOICE,
+                              "threads": THREADS,
+                              # WHICH MACHINE ANSWERED. Every record carries
+                              # it; a reader looking at a listing full of them
+                              # needs somewhere to check what the label means.
+                              "host_label": runlog.host,
+                              # A DROPPED RECORD IS INVISIBLE AS AN ABSENCE.
+                              # The queue is bounded and drops rather than
+                              # blocking a reply, which is the right trade only
+                              # while somebody can see it happening. `dropped`
+                              # going up, or `last_error` holding a status, is
+                              # the difference between "nothing ran" and "the
+                              # log could not keep up".
+                              "runlog": runlog.stats()}
+    # HOW FAST THIS CONTAINER SPEAKS, measured, and ABSENT UNTIL IT IS.
+    #
+    # A client that plays audio as it arrives has to know whether generation
+    # outruns playback before it starts, and the only alternative to this field
+    # is a constant written into the client -- which is a claim about a machine
+    # and a thread count that the client cannot check. tts-long has reported
+    # its own factor all along; this service reported none, so the fast engine
+    # was the one being guessed about.
+    #
+    # Missing means "not measured on this process yet", which is a real state
+    # and not a zero. A client that treats an absent field as a number is
+    # exactly the failure this shape exists to prevent.
+    if rate.value is not None:
+        out["realtime_factor"] = round(rate.value, 2)
+        # How many requests are behind it, because one observation is a
+        # warm-up and a caller may reasonably want more before it commits.
+        out["realtime_factor_samples"] = rate.samples
+    return out
+
+
+install_health(app, _health)
+
+
+@app.get("/voices")
+def voices() -> dict[str, object]:
+    s = state.get("synth")
+    if not s:
+        raise HTTPException(503, "model still loading")
+    all_voices = s.voices  # type: ignore[attr-defined]
+    # Kokoro encodes locale in the prefix: p = Portuguese, a/b = US/UK English.
+    return {"voices": all_voices,
+            "pt_br": [v for v in all_voices if v.startswith(("pf_", "pm_"))],
+            "en_us": [v for v in all_voices if v.startswith(("af_", "am_"))],
+            "en_gb": [v for v in all_voices if v.startswith(("bf_", "bm_"))],
+            "openai_aliases": VOICE_ALIASES}
+
+
+def _headers(duration: float, compute: float) -> dict[str, str]:
+    return {"X-Audio-Seconds": f"{duration:.2f}",
+            "X-Compute-Seconds": f"{compute:.2f}",
+            "X-Realtime-Factor": f"{duration / compute:.1f}" if compute else "0"}
+
+
+def _record(*, route: str, client: str | None, owner: str, credential: str,
+            status: str, text: str,
+            voice: str, language: str, fmt: str, duration: float,
+            compute: float, at: float, speed: float | None = None,
+            model_requested: str | None = None,
+            offsets: list[float] | None = None,
+            usage: dict[str, int] | None = None,
+            error: str | None = None) -> None:
+    """One finished run, in the shape tts-long stores.
+
+    ONE OF THESE PER LOG LINE, NEVER FEWER. Every route that reports its own
+    numbers to the log reports them here too, so "was this run recorded" and
+    "is there a line in the log for it" have the same answer and grep can
+    settle it. The three call sites are /speak, the buffered
+    /v1/audio/speech, and the event stream's finally.
+
+    The field names are the contract's and not this service's — audio_seconds,
+    not X-Audio-Seconds — because the same names have to mean the same thing
+    for a clone job on a GPU across the LAN. packages/common/tests/fixtures/
+    run_records.json is the authority; if this disagrees with it, this is
+    wrong.
+
+    `owner` and `credential` are REQUIRED, not defaulted: they come from the
+    assertion the request carried (D31), and a call site that forgot them
+    would file a person's speech as a system record, out of their own list.
+    """
+    runlog.record(
+        kind="speech",
+        route=route,
+        client=client,
+        owner=owner,
+        credential=credential,
+        status=status,
+        error=error,
+        # Started and created are the same instant on a route that runs the
+        # moment it is called. tts-long's clone jobs queue, so the contract
+        # keeps the two apart; here there is nothing between them to measure.
+        created_at=at,
+        started_at=at,
+        finished_at=at + compute,
+        # ABSENT WHEN THERE IS NO AUDIO, rather than zero. A synthesis that
+        # failed before the first chunk made none, and a zero would average
+        # into any rate a reader computes over the listing as if it had.
+        audio_seconds=round(duration, 2) if duration > 0 else None,
+        compute_seconds=round(compute, 2) if compute > 0 else None,
+        realtime_factor=(round(duration / compute, 2)
+                         if duration > 0 and compute > 0 else None),
+        chars=len(text),
+        text=text,
+        voice=voice,
+        language=language,
+        format=fmt,
+        speed=speed,
+        model_requested=model_requested,
+        offsets=offsets or None,
+        usage=usage,
+        # ALWAYS LOCAL, AND SENT ANYWAY. There is one machine that runs Kokoro
+        # and the field looks redundant from here; it is not, because the
+        # reader is a listing that also holds clone jobs which ran somewhere
+        # else. A row with no backend reads as a row whose backend is unknown.
+        backend="local",
+    )
+
+
+def _deviations(req: SpeechRequest, speed: float) -> dict[str, str]:
+    """Headers naming every part of the request that did not reach the audio.
+
+    Nothing here changes what the service does. It changes what it admits to,
+    which is the entire complaint: `speed: 4` was clamped to 2.0 and answered
+    with byte-identical audio to `speed: 2` and no hint on the wire, and
+    `instructions` was absorbed the same way. A client had no way to
+    distinguish a parameter that worked from one that was dropped.
+
+    A header rather than a field in the body because the body is audio, and
+    rather than a 400 because every one of these is either a model limit the
+    caller cannot act on or a field OpenAI itself ignores.
+
+    `model` is in the list for the same reason `instructions` is. There is one
+    model in this image and `tts-1` cannot be rejected — every OpenAI client
+    sends a name, and refusing them is refusing the compatibility this route
+    exists for — but a request that asked for `gpt-4o-mini-tts` and got Kokoro
+    was told nothing at all. Named only when it differs from what actually
+    synthesised, so a caller that asks for `kokoro` gets no noise for having
+    been right.
+    """
+    headers: dict[str, str] = {}
+    ignored = set(req.model_extra or ())
+    if req.instructions is not None:
+        ignored.add("instructions")
+    if req.model != MODEL_NAME:
+        ignored.add("model")
+    if ignored:
+        # Sorted as a whole. It used to sort the unknown fields and then append
+        # the known ones, so `stream` came out before `instructions` and the
+        # order depended on which kind of field it was.
+        headers["X-Ignored-Parameters"] = ", ".join(sorted(ignored))
+    if speed != req.speed:
+        headers["X-Speed-Clamped"] = f"{req.speed:g} to {speed:g}"
+    return headers
+
+
+def _frame(event: dict[str, object]) -> bytes:
+    """One SSE event: a bare `data:` line and the blank line that ends it.
+
+    **The blank line is not optional and its absence is silent.** Fed a stream
+    whose last event ended in a single newline, openai-python's SSEDecoder
+    dropped that event with no error and no warning — so a `speech.audio.done`
+    written without it simply never happens as far as the client is concerned.
+
+    No `event:` name line. The schema models the JSON payload only and gives no
+    `event` field, unlike `ErrorEvent` in the same file which models one
+    explicitly, and the only verbatim OpenAI audio SSE transcript in the spec —
+    the transcription example — uses bare `data:` lines. openai-python ignores
+    the name for these types and dispatches on the JSON `type` anyway, so
+    emitting one would be harmless and would still be a guess about what
+    OpenAI sends. Consumers dispatch on `type`.
+
+    No trailing `data: [DONE]` either. Both SDK decoders tolerate one, nothing
+    authoritative says OpenAI emits one for this endpoint, and the terminal
+    event is already `speech.audio.done`.
+    """
+    return b"data: " + json.dumps(event, separators=(",", ":")).encode() + b"\n\n"
+
+
+class ClosingStreamingResponse(StreamingResponse):
+    """A StreamingResponse that closes its generator when the response ends.
+
+    **This exists because otherwise a client that hangs up leaks an ffmpeg
+    process, and leaks it for good.** Measured: abandon an SSE request after
+    the first delta and the encoder is still running 200 s later, on a stream
+    that would have finished in 29 s — blocked on a pipe read, holding its
+    memory, waiting for a stdin that will never close.
+
+    Starlette stops iterating the generator on disconnect, correctly. What it
+    does not do is close it, so `encode_stream`'s `except GeneratorExit` — the
+    branch that kills the encoder — runs only when the suspended generator is
+    finally collected. Proved with an instrumented generator under uvicorn:
+    after the client closed the socket, iteration stopped immediately, and
+    `GeneratorExit` did not arrive until a `gc.collect()` was forced by hand.
+    It is a reference cycle, so refcounting never frees it, and on a service
+    that is not allocating hard the cyclic collector may not run for minutes.
+
+    Closing it here makes that deterministic and owes nothing to the garbage
+    collector: whichever way the response ended — finished, disconnected, or
+    raised — `close()` throws GeneratorExit in at the yield, and the encoder
+    is killed before this coroutine returns.
+
+    Safe to call at this point, and only at this point: starlette awaits each
+    chunk before sending it, and anyio waits for an in-flight worker thread
+    before propagating a cancellation, so by the time `__call__` returns the
+    generator is suspended at a yield rather than mid-`next()` — which would
+    raise "generator already executing" instead of cleaning anything up.
+    """
+
+    def __init__(self, content: Iterator[bytes], *args: object,
+                 **kwargs: object) -> None:
+        # Kept because `self.body_iterator` is the async wrapper starlette
+        # builds around this, and closing that is GC-dependent all over again.
+        self._source = content
+        super().__init__(content, *args, **kwargs)  # type: ignore[arg-type]
+
+    async def __call__(self, scope, receive, send) -> None:  # type: ignore[no-untyped-def]
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # In the threadpool because closing kills a process and joins its
+            # reader threads, and the event loop should not wait on either.
+            # A generator that already finished ignores this.
+            await run_in_threadpool(self._source.close)
+
+
+# Deliberately `def`, not `async def`: synthesis is blocking CPU work, and on
+# the event loop it would starve /health during any sustained load.
+@app.post("/speak")
+def speak(req: SpeakRequest, request: Request) -> Response:
+    claims = identity.claims_of(request)
+    synth = state.get("synth")
+    if not synth:
+        raise HTTPException(503, "model still loading")
+    if not req.text and not req.segments:
+        raise HTTPException(400, "provide either text or segments")
+
+    # Accepts the thirteen OpenAI names as well, so a caller that learned them
+    # from /v1/audio/speech does not have to unlearn them to use segments.
+    voice = resolve_voice(req.voice, synth.voices, DEFAULT_VOICE)  # type: ignore[attr-defined]
+    if voice is None:
+        raise HTTPException(
+            400, f"unknown voice {(req.voice or DEFAULT_VOICE)!r}; see GET /voices")
+    language = req.language or DEFAULT_LANG
+
+    # Each segment may name its own voice, resolved the same way and falling
+    # back to the request's. Resolved here rather than in the synthesiser so
+    # that an unknown name is a 400 naming the segment, not a failure part way
+    # through a long synthesis.
+    segments: list[tuple[str, float, str]] = []
+    for index, segment in enumerate(req.segments or ()):
+        seg_voice = resolve_voice(segment.voice, synth.voices, voice)  # type: ignore[attr-defined]
+        if seg_voice is None:
+            raise HTTPException(
+                400,
+                f"unknown voice {segment.voice!r} in segment {index}; "
+                "see GET /voices")
+        segments.append((segment.text, segment.pause_after, seg_voice))
+
+    started = time.monotonic()
+    # The wall clock beside the monotonic one, and both are needed. The
+    # monotonic clock measures the run and cannot be compared between
+    # processes; the record is read next to jobs from another service on
+    # another machine, and only a wall clock can put them in one order.
+    at = time.time()
+    offsets: list[float] = []
+    try:
+        if segments:
+            audio, offsets = synth.speak_segments(segments, language, req.speed)  # type: ignore[attr-defined]
+        else:
+            audio = synth.speak(req.text or "", voice, language, req.speed)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 - the client needs the reason
+        raise HTTPException(500, f"synthesis failed: {exc}") from exc
+
+    compute = time.monotonic() - started
+    duration = audio.size / SAMPLE_RATE
+    # Handled for the same reason synthesis is: ffmpeg can be missing or can
+    # fail, and outside the handler that reached the caller as a 500 with
+    # nothing in it to act on.
+    try:
+        data = encode([audio], req.format)
+    except Exception as exc:  # noqa: BLE001 - the client needs the reason
+        raise HTTPException(500, f"encoding to {req.format} failed: {exc}") from exc
+    mime = CONTENT_TYPE[req.format]
+    log.info("%.1fs audio in %.2fs (%.1fx) voice=%s",
+             duration, compute, duration / compute if compute else 0.0, voice)
+
+    # The same two numbers the header carries, so /health and
+    # X-Realtime-Factor can never disagree about how fast this machine is.
+    rate.observe(duration, compute)
+    _record(route="/speak",
+            # Nothing on this route says who called it. The page, a script and
+            # a shell all send the same body, and guessing from a user agent
+            # would put a guess in a store that is read as a fact. `client` is
+            # nullable for exactly this.
+            client=None,
+            owner=claims.sub, credential=claims.cred,
+            status="done",
+            text=req.text or " ".join(s.text for s in req.segments or ()),
+            voice=voice, language=language, fmt=req.format,
+            duration=duration, compute=compute, at=at,
+            speed=req.speed, offsets=offsets or None)
+    headers = _headers(duration, compute)
+    if offsets:
+        # WHERE EACH SEGMENT STARTS, so a client can follow the text as it
+        # plays. In a header because the body is audio and there is nowhere
+        # else to put it without inventing a second response shape for a
+        # route that has clients.
+        #
+        # Offsets only, not the text: the caller sent the segments and knows
+        # them in order, so repeating them would be the request echoed back.
+        # Three decimals is a millisecond, and ~7 bytes a segment keeps a
+        # hundred-segment reading well inside any header limit.
+        headers["X-Segment-Offsets"] = ",".join(f"{o:.3f}" for o in offsets)
+    return Response(content=data, media_type=mime, headers=headers)
+
+
+def _usage(input_tokens: int, samples: int) -> dict[str, int]:
+    """The `usage` object `speech.audio.done` is required to carry.
+
+    The schema makes it required with three required integers, and Kokoro has
+    no notion of an OpenAI token in either direction. It has espeak phonemes
+    and it has audio samples, so any number here is a mapping this service
+    chose. The two chosen are the least arbitrary available, and both are the
+    model's own units rather than invented ones:
+
+      input_tokens   phonemes as the model's 114-symbol vocabulary counts
+                     them, which is literally the tensor it is fed
+      output_tokens  25 ms frames. Measured, not assumed: the greatest common
+                     divisor of five untrimmed outputs of different lengths is
+                     exactly 600 samples at 24 kHz, so 600 is the model's own
+                     output granularity
+
+    The event cannot be omitted — a done event without usage violates the
+    schema — so the rule is written down here and in the README instead, and
+    `X-Audio-Seconds` remains the number to trust for anything that matters.
+    """
+    output_tokens = round(samples / FRAME_SAMPLES)
+    return {"input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens}
+
+
+def _sse_body(synth: Synth, chunks: list[str], voice: str, language: str,
+              speed: float, fmt: str, input_tokens: int, *,
+              owner: str, credential: str,
+              text: str = "", model_requested: str | None = None,
+              ) -> Iterator[bytes]:
+    """The event stream: a delta per encoded piece, then done.
+
+    Genuinely incremental, and that is the whole point: the loop synthesises
+    one chunk, encodes it and yields it before touching the next, so the first
+    frame leaves after the first chunk rather than after the last. Chunking a
+    finished buffer into deltas would produce an identical-looking stream and a
+    lie a client would build timing assumptions on.
+
+    Concatenating the base64 of every delta reproduces the buffered body for
+    the same request byte for byte — same encoder, same chunks, see
+    app/audio_out.py — for every format but wav, where it differs in the two
+    length fields a stream cannot know.
+
+    THAT HOLDS WHILE BOTH ROUTES PLAN THE SAME CHUNKS, and a ramped request is
+    the one case where they do not: `stream_format: "sse"` on an input of at
+    least RAMP_MIN_PHONEMES asks for small leading chunks, and a chunk
+    boundary is what the duration predictor sees, so the samples differ and so
+    does `input_tokens`. The two bodies are the same audio, spoken slightly
+    differently; they are not the same bytes. Every buffered request and every
+    input below RAMP_MIN_PHONEMES is unaffected.
+    """
+    samples = 0
+    compute = 0.0
+    at = time.time()
+
+    def audio() -> Iterator[np.ndarray]:
+        nonlocal samples, compute
+        for phonemes in chunks:
+            started = time.monotonic()
+            piece = synth.speak_chunk(phonemes, voice, language, speed)
+            # THE MODEL'S TIME AND NOTHING ELSE. Timing the whole generator
+            # instead would include however long starlette waited for the
+            # client to take the last frame, so one reader on a slow link
+            # would teach every other client that this machine is slow.
+            compute += time.monotonic() - started
+            samples += piece.size
+            yield piece
+
+    # NO KEEPALIVE COMMENT, AND NO OPENING ONE EITHER, AND BOTH ARE CHOICES.
+    #
+    # The headers are already on their way before this generator is first
+    # pulled -- starlette sends http.response.start and only then iterates --
+    # so an opening `: comment` would tell a client nothing it does not have.
+    #
+    # A periodic one is a different question and the answer is the same for a
+    # different reason: this is a synchronous generator, blocked inside the
+    # model for the whole of speak_chunk, so it cannot emit anything between
+    # chunks without a second thread. What that would buy is a stream that
+    # survives a proxy read timeout on one very slow chunk, and the timeout in
+    # front of this service is 300 s (GATEWAY_TTS_TIMEOUT) against a chunk of
+    # at most CHUNK_PHONEMES phonemes, measured on the NAS at 9.23 s for 499
+    # phonemes, and a ramped request's chunks are smaller still. tts-long
+    # keepalives because it queues for minutes before it starts; this service
+    # starts at once.
+    # WHAT WENT WRONG, IF ANYTHING, CARRIED OUT OF THE TRY AND INTO THE
+    # FINALLY. A stream has three endings and only one of them comes back
+    # through this function's caller: it finishes, synthesis raises, or the
+    # client hangs up. The third arrives as GeneratorExit at a yield, which is
+    # a BaseException and so passes straight through the `except Exception`
+    # below — which is exactly why a successful-looking stream that somebody
+    # closed halfway used to leave nothing behind at all.
+    finished = False
+    failure: str | None = None
+    try:
+        for data in encode_stream(audio(), fmt):
+            yield _frame({"type": "speech.audio.delta",
+                          "audio": base64.b64encode(data).decode("ascii")})
+        rate.observe(samples / SAMPLE_RATE, compute)
+        # Set BEFORE the done frame is yielded, not after. A client that closes
+        # the connection on the last frame closes it at this yield, and the
+        # audio was made either way; calling that run failed would report a
+        # synthesis problem this service did not have.
+        finished = True
+        yield _frame({"type": "speech.audio.done",
+                      "usage": _usage(input_tokens, samples)})
+    except Exception as exc:  # noqa: BLE001 - the client needs the reason
+        # The in-band error channel, and the only one left: 200 and the headers
+        # are long gone by the time synthesis fails. openai-python raises
+        # APIError(message=data["error"]["message"]) on any frame whose JSON
+        # has a top-level `error` key and stops reading, which is exactly the
+        # behaviour wanted here.
+        failure = f"synthesis failed: {exc}"
+        log.exception("sse synthesis failed")
+        yield _frame({"error": {"message": f"synthesis failed: {exc}",
+                                "type": "server_error",
+                                "param": None,
+                                "code": "synthesis_failed"}})
+    finally:
+        # THE ONLY PLACE THIS RUN'S NUMBERS EXIST. `samples` and `compute` are
+        # locals of this generator and starlette sent http.response.start
+        # before it was first pulled, so no header can carry them and the
+        # buffered route's log line has no counterpart here. A streamed request
+        # was the one shape of run this service could not account for.
+        #
+        # The partial values are the honest ones for a stream somebody walked
+        # away from: that audio was generated and that time was spent, and
+        # rounding them away to nothing would say the run never happened.
+        duration = samples / SAMPLE_RATE
+        _record(route="/v1/audio/speech", client="openai",
+                owner=owner, credential=credential,
+                status="done" if finished else "failed",
+                error=failure or (None if finished else
+                                  "the client closed the stream before it "
+                                  "finished"),
+                text=text, voice=voice, language=language, fmt=fmt,
+                duration=duration, compute=compute, at=at, speed=speed,
+                model_requested=model_requested,
+                usage=_usage(input_tokens, samples) if finished else None)
+
+
+# Same reasoning as /speak: blocking work, so a worker thread rather than the
+# event loop. A StreamingResponse handed a sync generator is iterated in that
+# same pool, so the SSE path does not put synthesis on the loop either.
+@app.post("/v1/audio/speech")
+def openai_speech(req: SpeechRequest, request: Request) -> Response:
+    claims = identity.claims_of(request)
+    synth = state.get("synth")
+    if not synth:
+        return error_response(503, "model still loading",
+                              type_="server_error", code="model_loading")
+
+    voice = resolve_voice(req.voice, synth.voices, DEFAULT_VOICE)  # type: ignore[attr-defined]
+    if voice is None:
+        # Rejected rather than accepted as a custom voice id. The schema allows
+        # an arbitrary string because OpenAI has custom voices; this service
+        # has 54 fixed ones and nothing to map an unknown id onto, so saying so
+        # beats synthesising in a voice nobody asked for. All thirteen of the
+        # published names are accepted first, which is the part that was
+        # missing: seven of them used to be a 400.
+        return error_response(
+            400,
+            f"Unknown voice {(req.voice or DEFAULT_VOICE)!r}. Accepted: "
+            f"{', '.join(sorted(VOICE_ALIASES))}, or any Kokoro voice from "
+            "GET /voices.",
+            code="invalid_value", param="voice")
+
+    # OpenAI's schema allows 0.25 to 4.0. kokoro_onnx.Kokoro.create carries a
+    # hard `assert speed >= 0.5 and speed <= 2.0` before it will run, so the
+    # clamp is what stops that assertion becoming a 500; the full range is only
+    # reachable by time-stretching afterwards, which without a phase vocoder
+    # shifts pitch and sounds worse than the clamp. Clamped rather than
+    # rejected because an OpenAI client cannot be told to send something else.
+    #
+    # What has changed is that it no longer happens in silence: X-Speed-Clamped
+    # names the value asked for and the value used. `speed: 4` and `speed: 2`
+    # returned byte-identical audio and nothing to tell them apart.
+    speed = min(max(req.speed, 0.5), 2.0)
+    language = language_for_voice(voice, DEFAULT_LANG)
+    headers = _deviations(req, speed)
+    if headers:
+        log.info("ignored or adjusted: %s", "; ".join(
+            f"{k}={v}" for k, v in sorted(headers.items())))
+
+    try:
+        # THE FIRST CHUNK IS SMALL ONLY WHEN SOMEBODY IS LISTENING TO IT. A
+        # buffered request is judged on when the whole file arrives, and
+        # cutting its first chunk short would cost throughput for nothing.
+        reads_plan = (request.headers.get(RAMP_PLAN_HEADER, "").strip().lower()
+                      in {"1", "true", "yes", "on"})
+        chunks = synth.plan(  # type: ignore[attr-defined]
+            req.input, language, CHUNK_PHONEMES,
+            ramp=(functools.partial(ramp_schedule, reads_plan=reads_plan)
+                  if req.stream_format == "sse" else None))
+        input_tokens = synth.token_count(chunks)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 - the client needs the reason
+        return error_response(500, f"phonemisation failed: {exc}",
+                              type_="server_error", code="synthesis_failed")
+
+    if req.stream_format == "sse":
+        # No Content-Length, so uvicorn frames it chunked, which is what the
+        # schema declares on this endpoint. X-Accel-Buffering is for a reverse
+        # proxy in front: nginx buffers a proxied response by default and would
+        # hold every delta until the last, undoing the entire feature without
+        # changing a byte of it.
+        return ClosingStreamingResponse(
+            _sse_body(synth, chunks, voice, language, speed,  # type: ignore[arg-type]
+                      req.response_format, input_tokens,
+                      owner=claims.sub, credential=claims.cred,
+                      text=req.input, model_requested=req.model),
+            media_type="text/event-stream",
+            headers={**headers,
+                     "Cache-Control": "no-cache",
+                     "X-Accel-Buffering": "no",
+                     # WHAT THIS STREAM IS ABOUT TO DO, before it does any of
+                     # it. plan() has already run, so the sizes are known and
+                     # the header costs nothing: measured time to first byte on
+                     # this route is 10 to 15 ms from 4 characters to 1495. A
+                     # client that reads it knows how long the first delta will
+                     # take and when the next one is due, which is the only way
+                     # to draw a bar that moves before any audio exists. A
+                     # client that ignores it loses nothing.
+                     "X-Chunk-Phonemes": ",".join(
+                         str(len(chunk)) for chunk in chunks)})
+
+    started = time.monotonic()
+    at = time.time()
+    try:
+        pieces = [synth.speak_chunk(phonemes, voice, language, speed)  # type: ignore[attr-defined]
+                  for phonemes in chunks]
+    except Exception as exc:  # noqa: BLE001 - the client needs the reason
+        return error_response(500, f"synthesis failed: {exc}",
+                              type_="server_error", code="synthesis_failed")
+
+    # Handled, not left to FastAPI: an ffmpeg that is missing or fails used to
+    # return the plain "Internal Server Error" body, which openai-python shows
+    # as a bare status code. Every other error on this route is an envelope
+    # and this one has to be as well.
+    try:
+        data = encode(pieces, req.response_format)
+    except Exception as exc:  # noqa: BLE001 - the client needs the reason
+        return error_response(
+            500, f"encoding to {req.response_format} failed: {exc}",
+            type_="server_error", code="encoding_failed")
+
+    compute = time.monotonic() - started
+    duration = sum(piece.size for piece in pieces) / SAMPLE_RATE
+    log.info("%.1fs audio in %.2fs (%.1fx) voice=%s openai",
+             duration, compute, duration / compute if compute else 0.0, voice)
+    rate.observe(duration, compute)
+    # A SECOND CALL SITE, because this route has a second log line. The build
+    # order says one record per service beside "the" log line; this service has
+    # three of them — /speak, this, and the stream — and recording only the
+    # first would leave every OpenAI client's run out of the listing while a
+    # log line above says it happened.
+    _record(route="/v1/audio/speech", client="openai",
+            owner=claims.sub, credential=claims.cred, status="done",
+            text=req.input, voice=voice, language=language,
+            fmt=req.response_format, duration=duration, compute=compute,
+            at=at, speed=speed, model_requested=req.model)
+
+    # The buffered body keeps its Content-Length and its realtime factor. Both
+    # are more use to a client than chunked framing would be — voice-gateway
+    # logs X-Realtime-Factor per request and reads it from the header — and a
+    # caller that wants bytes as they are made has `stream_format: "sse"` to
+    # ask for them by name.
+    return Response(content=data, media_type=CONTENT_TYPE[req.response_format],
+                    headers={**_headers(duration, compute), **headers})

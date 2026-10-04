@@ -1,0 +1,15 @@
+[Unit]
+Description=Calliope satellite first boot (network, packages, agent)
+After=NetworkManager.service cloud-final.service
+Wants=NetworkManager.service
+ConditionPathExists=!/var/lib/calliope/firstboot.done
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/calliope/current
+ExecStart=/usr/bin/python3 -m calliope_pi.firstboot
+TimeoutStartSec=infinity
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target
