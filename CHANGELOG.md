@@ -6,6 +6,14 @@ What changed in each release, for people running Calliope. The format follows
 `main`; its images are published to `ghcr.io/gabrielbelli/calliope-*` under the
 same version.
 
+## [Unreleased]
+
+### Fixed
+
+- Admin warned about every secret ever imported from a service's environment,
+  for good, even after the variable was removed. A service now reports the
+  copies it still has set, and the warning lasts exactly as long as they do.
+
 ## [0.2.0] — 2026-10-04
 
 The release that makes Calliope something to leave running: it needs a sign-in,
@@ -112,7 +120,5 @@ a GPU.
 The first release: speech to text, speech, long-form cloned speech and an
 OpenAI-compatible gateway, with a web page and a Mac player.
 
-[0.2.0]: https://github.com/gabrielbelli/calliope/compare/v0.1.2...v0.2.0
-[0.1.2]: https://github.com/gabrielbelli/calliope/compare/v0.1.1...v0.1.2
-[0.1.1]: https://github.com/gabrielbelli/calliope/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/gabrielbelli/calliope/releases/tag/v0.1.0
+[Unreleased]: https://github.com/gabrielbelli/calliope/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/gabrielbelli/calliope/releases/tag/v0.2.0

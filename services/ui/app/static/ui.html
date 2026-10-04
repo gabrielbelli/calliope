@@ -17633,13 +17633,20 @@ function adminBanners() {
     if (counts.undecryptable) said.push(["bad", `${counts.undecryptable} secret${counts.undecryptable === 1 ? "" : "s"} could not be decrypted. Store ${counts.undecryptable === 1 ? "it" : "them"} again in Secrets.`]);
     if (secrets.keyring && secrets.keyring.source === "generated")
       said.push(["warn", "The secret keyring was generated on the calliope-keys volume. Back that volume up separately from the database: one without the other cannot be decrypted."]);
-    for (const row of secrets.secrets || []) {
-      const env = /^env ([A-Z][A-Z0-9_]*) @ ([a-z][a-z0-9-]*)$/.exec(row.imported_from || "");
-      if (env) said.push(["warn", `${row.name} was imported from the environment of ${env[2]}. Remove ${env[1]} from that service's configuration.`]);
-    }
   }
-  for (const { name, variable } of ADMIN.ignored)
-    said.push(["bad", `The ${name.replace(/_/g, "-")} service ignores the removed variable ${variable}. Remove it from that service's configuration.`]);
+  /* ONLY WHILE THE VARIABLE IS STILL SET. This used to warn about every secret
+     ever imported from an environment, for ever: the variable could be gone
+     and the page still asked for it to be removed. A service now names the
+     copies it ignores in its health, so a warning lasts exactly as long as the
+     variable does, and an imported one says where its value lives now. */
+  const imported = new Set((ADMIN.secrets && ADMIN.secrets.secrets || []).map(row =>
+    (/^env ([A-Z][A-Z0-9_]*) @ /.exec(row.imported_from || "") || [])[1]).filter(Boolean));
+  for (const { name, variable } of ADMIN.ignored) {
+    const service = name.replace(/_/g, "-");
+    said.push(imported.has(variable)
+      ? ["warn", `${variable} now lives in Secrets, and ${service} ignores its copy in the environment. Remove ${variable} from that service's configuration.`]
+      : ["bad", `The ${service} service ignores the removed variable ${variable}. Remove it from that service's configuration.`]);
+  }
   if (ADMIN.overflow) said.push(["bad", "The audit has reached its ceiling of security events. New events go to the gateway's log only until the yearly sweep makes room."]);
   $("adminbanners").replaceChildren(...said.map(([kind, text]) => make("div", { class: "note " + kind, text })));
 }

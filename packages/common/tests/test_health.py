@@ -98,3 +98,22 @@ def test_a_removed_variable_is_named_in_the_health_body(
     install_health(app)
     body = TestClient(app).get("/health").json()
     assert body == {"status": "ok", "ignored_variables": ["TTS_API_KEYS"]}
+
+
+def test_a_services_own_ignored_variables_are_merged_with_the_removed_ones(monkeypatch) -> None:
+    """A service may name variables it ignores (the hub's copies of credentials
+    the secret store now holds); the removed settings are added, not swapped in."""
+    removed = sorted(auth.REMOVED_VARIABLES)[0]
+    monkeypatch.setenv(removed, "x")
+    app = FastAPI()
+    install_health(app, details=lambda: {"ignored_variables": ["SATELLITES_HA_TOKEN"]})
+    body = TestClient(app).get(PATH).json()
+    assert body["ignored_variables"] == sorted({removed, "SATELLITES_HA_TOKEN"})
+
+
+def test_an_empty_list_from_a_service_leaves_no_field(monkeypatch) -> None:
+    for name in auth.REMOVED_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    app = FastAPI()
+    install_health(app, details=lambda: {"ignored_variables": []})
+    assert "ignored_variables" not in TestClient(app).get(PATH).json()

@@ -314,3 +314,22 @@ def test_a_raw_webhook_is_imported_at_start_and_rewritten_only_once_the_store_ho
     assert after["satellites"][0]["config"]["buttons"]["mode"] == {"press": f"webhook:secret:{BUTTON}"}
     assert store.values[BUTTON] == {"value": HOOK, "version": 1, "kind": "secret_url",
                                     "allowed_hosts": ["https://ha.lan:8123"]}
+
+
+def test_a_done_import_names_the_environment_copies_still_set(tmp_path, store):
+    """WHAT ADMIN ASKS TO BE REMOVED, AND ONLY WHILE IT IS THERE. The page used
+    to warn about every secret ever imported from the environment, for ever,
+    so the warning outlived the variable. Once the import is done the hub
+    names, in /health, exactly the copies its environment still holds."""
+    (tmp_path / "secret-import.done").write_text("")
+    still_set = start(tmp_path, {"SATELLITES_HA_TOKEN": "a-stand-in-token-of-some-length"})
+    assert still_set.leftover_variables() == ["SATELLITES_HA_TOKEN"]
+    removed = start(tmp_path, {})
+    assert removed.leftover_variables() == []
+
+
+def test_before_the_gateway_answers_the_hubs_own_copies_are_not_leftovers(tmp_path, store):
+    """Until the import is answered the environment's values stand in for the
+    store, so they are in use, not ignored, and Admin must not ask for them."""
+    job = start(tmp_path, {"SATELLITES_HA_TOKEN": "a-stand-in-token-of-some-length"})
+    assert job.leftover_variables() == []
