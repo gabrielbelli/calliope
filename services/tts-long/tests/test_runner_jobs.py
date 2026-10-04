@@ -306,7 +306,12 @@ def test_finished_jobs_are_swept_with_their_files(runner, monkeypatch):
     settle(lambda: runner.client.get(f"/v1/services/chatterbox/jobs/{job}")
            .status_code == 404, timeout=5,
            why="a job past its retention was still answered")
-    assert not directory.exists()
+    # WAITED FOR, NOT CHECKED ONCE. sweep() forgets the record under the lock
+    # and removes the files after it, so for a moment the job is already 404
+    # while its directory is still there. A single check after the 404 lost
+    # that race on CI, once, on the same code that had passed an hour before.
+    settle(lambda: not directory.exists(), timeout=5,
+           why="a swept job's files outlived its record")
 
 
 def test_only_the_newest_finished_jobs_are_kept(runner, monkeypatch):
