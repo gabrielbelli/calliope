@@ -833,24 +833,37 @@ final class ProxyPane: Pane {
 
 // MARK: - Integrations
 
-/// The command line and the agent skill: how other programs reach Calliope.
+/// The command line, the agent skill and OpenClip: how other programs reach Calliope.
 ///
-/// NOTHING HERE INSTALLS ITSELF. The skill goes into somebody's agent setup and
-/// the command onto their PATH only when they press the button, because both
-/// change how other programs behave and that is theirs to decide.
+/// THE SKILL IS A FILE, NOT AN INSTALLATION. It is a SKILL.md for whoever wants
+/// it, to use with whichever agent they like, in whatever way they keep their
+/// own setup -- so this shows where it is and installs nothing. The command
+/// goes onto the PATH only when somebody presses the button.
 final class IntegrationsPane: Pane {
-    private let cliState = NSTextField(labelWithString: "")
+    private let cliState: NSTextField = {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.preferredMaxLayoutWidth = fieldWidth
+        return field
+    }()
     private let installCLI = NSButton()
     private let skillState = NSTextField(labelWithString: "")
-    private let installSkill = NSButton()
-    private let revealSkill = NSButton()
-    private let openClipState = NSTextField(labelWithString: "")
+    private let showSkill = NSButton()
+    private let openClipState: NSTextField = {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.preferredMaxLayoutWidth = fieldWidth
+        return field
+    }()
+    private let reinstallOpenClip = NSButton()
 
     private let home = FileManager.default.homeDirectoryForCurrentUser
     private var cliLink: URL { home.appendingPathComponent(".local/bin/calliope") }
     private var bundledCLI: URL { appURL.appendingPathComponent("Contents/Resources/cli/calliope") }
-    private var skillTarget: URL { home.appendingPathComponent(".claude/skills/calliope-voice") }
-    private var bundledSkill: URL { appURL.appendingPathComponent("Contents/Resources/skill/calliope-voice") }
+    private var bundledSkill: URL {
+        appURL.appendingPathComponent("Contents/Resources/skill/calliope-voice/SKILL.md")
+    }
+    private var openClip: URL { home.appendingPathComponent(".openclip") }
+    private var extensionDir: URL { openClip.appendingPathComponent("extensions/calliope.openclipext") }
+    private var bundledExtension: URL { appURL.appendingPathComponent("Contents/Resources/openclip") }
     static let example = "calliope speak --reader -f explanation.md"
 
     override func build() {
@@ -869,19 +882,22 @@ final class IntegrationsPane: Pane {
         stack.addArrangedSubview(separator())
 
         stack.addArrangedSubview(sectionTitle("Agent skill"))
-        stack.addArrangedSubview(note("calliope-voice teaches an AI agent such as Claude Code to write an "
-            + "explanation as Markdown and read it to you when you ask to hear it. It is copied into "
-            + "~/.claude/skills only when you install it."))
-        configure(installSkill, "Install Skill", #selector(installTheSkill))
-        configure(revealSkill, "Show in Finder", #selector(showSkill))
+        stack.addArrangedSubview(note("calliope-voice is a SKILL.md that teaches an AI agent to write "
+            + "an explanation for the ear and read it to you with the calliope command. Use it with any "
+            + "agent, however you keep your own setup."))
+        configure(showSkill, "Show Skill File", #selector(revealSkill))
         stack.addArrangedSubview(form([
-            [label("Status:"), skillState],
-            [NSGridCell.emptyContentView, row([installSkill, revealSkill])],
+            [label("File:"), skillState],
+            [NSGridCell.emptyContentView, showSkill],
         ]))
         stack.addArrangedSubview(separator())
 
         stack.addArrangedSubview(sectionTitle("OpenClip"))
-        stack.addArrangedSubview(form([[label("Status:"), openClipState]]))
+        configure(reinstallOpenClip, "Reinstall Speak Action", #selector(installOpenClip))
+        stack.addArrangedSubview(form([
+            [label("Status:"), openClipState],
+            [NSGridCell.emptyContentView, reinstallOpenClip],
+        ]))
     }
 
     private func configure(_ button: NSButton, _ title: String, _ action: Selector) {
@@ -905,18 +921,27 @@ final class IntegrationsPane: Pane {
         installCLI.isHidden = files.fileExists(atPath: cliLink.path) || brewed != nil
         installCLI.isEnabled = files.fileExists(atPath: bundledCLI.path)
 
-        let installed = files.fileExists(atPath: skillTarget.appendingPathComponent("SKILL.md").path)
-        skillState.stringValue = installed ? "Installed in ~/.claude/skills/calliope-voice" : "Not installed"
-        installSkill.title = installed ? "Update Skill" : "Install Skill"
-        installSkill.isEnabled = files.fileExists(atPath: bundledSkill.appendingPathComponent("SKILL.md").path)
-        revealSkill.isHidden = !installed
+        let skill = files.fileExists(atPath: bundledSkill.path)
+        skillState.stringValue = skill ? "calliope-voice/SKILL.md, inside Calliope.app" : "Not in this build"
+        showSkill.isEnabled = skill
 
-        let action = home.appendingPathComponent(".openclip/extensions/calliope.openclipext")
-        openClipState.stringValue = files.fileExists(atPath: action.path)
-            ? "The Speak action is installed."
-            : (files.fileExists(atPath: home.appendingPathComponent(".openclip").path)
-                ? "OpenClip is here; re-run the installer to add Speak."
-                : "OpenClip is not installed. It is optional.")
+        // REINSTALL, NOT ONLY INSTALL. An extension that is there can still be
+        // wrong -- an older copy, a file edited by hand, an icon OpenClip could
+        // not load -- and putting the bundled one back is the repair for all of
+        // them. OpenClip trusts an extension by a hash of its files, so it asks
+        // once more after this, which is the price of the files having changed.
+        let present = files.fileExists(atPath: extensionDir.appendingPathComponent("openclip.json").path)
+        if !files.fileExists(atPath: openClip.path) {
+            openClipState.stringValue = "OpenClip is not installed. It is optional."
+            reinstallOpenClip.isHidden = true
+        } else {
+            openClipState.stringValue = present
+                ? "The Speak action is installed."
+                : "OpenClip is here, without the Speak action."
+            reinstallOpenClip.title = present ? "Reinstall Speak Action" : "Install Speak Action"
+            reinstallOpenClip.isHidden = false
+            reinstallOpenClip.isEnabled = files.fileExists(atPath: bundledExtension.path)
+        }
         fit()
     }
 
@@ -940,22 +965,36 @@ final class IntegrationsPane: Pane {
         NSPasteboard.general.setString(Self.example, forType: .string)
     }
 
-    @objc private func installTheSkill() {
+    @objc private func revealSkill() {
+        NSWorkspace.shared.activateFileViewerSelecting([bundledSkill])
+    }
+
+    /// The same three files install.sh writes, from the copies inside this app,
+    /// with the app's own location written into the script -- so an extension
+    /// put back from here launches this Calliope, wherever it was installed.
+    @objc private func installOpenClip() {
         let files = FileManager.default
         do {
-            try files.createDirectory(at: skillTarget.deletingLastPathComponent(),
-                                      withIntermediateDirectories: true)
-            if files.fileExists(atPath: skillTarget.path) { try files.removeItem(at: skillTarget) }
-            try files.copyItem(at: bundledSkill, to: skillTarget)
+            try files.createDirectory(at: extensionDir, withIntermediateDirectories: true)
+            for name in ["openclip.json", "icon.svg"] {
+                let target = extensionDir.appendingPathComponent(name)
+                try? files.removeItem(at: target)
+                try files.copyItem(at: bundledExtension.appendingPathComponent(name), to: target)
+            }
+            let script = try String(contentsOf: bundledExtension.appendingPathComponent("calliope.py"),
+                                    encoding: .utf8)
+                .replacingOccurrences(of: "__APP__", with: appURL.path)
+            let target = extensionDir.appendingPathComponent("calliope.py")
+            try script.write(to: target, atomically: true, encoding: .utf8)
+            try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
         } catch {
-            skillState.stringValue = "Could not install: \(error.localizedDescription)"
+            openClipState.stringValue = "Could not install: \(error.localizedDescription)"
             return
         }
         refresh()
-    }
-
-    @objc private func showSkill() {
-        NSWorkspace.shared.activateFileViewerSelecting([skillTarget.appendingPathComponent("SKILL.md")])
+        openClipState.stringValue = "Reinstalled. OpenClip asks you to trust it again, because its "
+            + "files changed."
+        fit()
     }
 }
 

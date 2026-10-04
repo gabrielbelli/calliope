@@ -118,13 +118,18 @@ swiftc -O -swift-version 5 -target "$target" "$here/shared/mark.swift" \
 
 # THE COMMAND AND THE SKILL TRAVEL INSIDE THE APP, so the `calliope` on the PATH
 # always matches this player and this proxy: ~/.local/bin/calliope is only a
-# link to it. The skill is carried, not installed -- writing into somebody's
-# agent configuration is theirs to ask for, from Settings.
+# link to it. The skill is carried, never installed: it is a SKILL.md for
+# whoever wants it, to use with whichever agent they like, and Settings only
+# shows where it is. The OpenClip extension is carried too, so Settings can
+# put it back when it is missing or broken without this script.
 echo "==> Command line"
 mkdir -p "$contents/Resources/cli"
 install -m 0755 "$here/cli/calliope" "$contents/Resources/cli/calliope"
 install -m 0755 "$here/cli/calliope.py" "$contents/Resources/cli/calliope.py"
 cp -R "$here/skill" "$contents/Resources/skill"
+mkdir -p "$contents/Resources/openclip"
+install -m 0644 "$here/openclip/openclip.json" "$here/openclip/icon.svg" \
+    "$here/openclip/calliope.py" "$contents/Resources/openclip/"
 
 echo "==> Bundle"
 sed "s/__VERSION__/$version/g" "$here/bundle/Calliope-Info.plist" > "$contents/Info.plist"

@@ -46,7 +46,8 @@ Calliope.app/Contents/
   Helpers/CalliopePlayer.app/…/calliope-player           one process per passage
   Resources/server.py                                    the proxy, and the engine it starts
   Resources/cli/calliope                                 the command, linked to ~/.local/bin
-  Resources/skill/calliope-voice/                        installed only from Settings
+  Resources/skill/calliope-voice/SKILL.md                a skill file, never installed
+  Resources/openclip/                                    what Settings reinstalls OpenClip's Speak from
 ```
 
 Everything that changes stays outside it, in `~/.local/share/calliope`: the Python 3.12 venv,
@@ -183,8 +184,13 @@ Settings › Integrations can do the same for an app installed another way.
 **For agents.** `skill/calliope-voice` is a small skill for Claude Code and similar agents:
 asked to say something out loud, the agent writes the explanation for the ear as Markdown,
 saves it where you asked (or in the temporary directory) and plays it with `calliope speak`.
-It is copied into `~/.claude/skills` only when you press **Install Skill** in Settings ›
-Integrations.
+It is a `SKILL.md` and nothing installs it: use it with whichever agent you like, however you
+keep your own setup. Settings › Integrations › **Show Skill File** shows where it is.
+
+**OpenClip.** Settings › Integrations › **Reinstall Speak Action** puts the extension back from
+the copy inside the app, with the app's own location written into it -- the repair for a
+missing, stale or hand-edited one. OpenClip trusts an extension by a hash of its files, so it
+asks once more afterwards.
 
 ## The Calliope server (optional)
 

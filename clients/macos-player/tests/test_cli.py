@@ -832,10 +832,12 @@ def test_install_leaves_somebody_elses_calliope_alone(tmp_path):
     assert "left alone" in result.stdout
 
 
-def test_install_never_installs_the_skill_for_anybody():
-    """Opt-in only: the Settings window offers it. An installer that writes into ~/.claude
-    changes how somebody's agent behaves without asking."""
+def test_nothing_installs_the_skill_for_anybody():
+    """THE SKILL IS A FILE. The user: "just provide the skill, and the person uses the
+    SKILL.md as they want." Neither the installer nor the app writes it into an agent's
+    configuration -- Settings only shows where it is."""
     assert ".claude" not in (ROOT / "install.sh").read_text()
+    assert ".claude" not in (ROOT / "daemon/settings.swift").read_text()
 
 
 def test_the_skill_is_generic():

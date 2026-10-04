@@ -112,3 +112,35 @@ def test_the_old_install_is_named_where_it_is_retired():
     assert shell("old_runtime") == "~/.local/share/kokoro-tts"
     assert shell("old_extension") == "~/.openclip/extensions/kokoro.openclipext"
     assert re.search(r'legacyDefaultsSuiteName = "([\w.-]+)"', DEFAULTS).group(1) == "com.gabrielbelli.kokoro-player"
+
+
+def test_the_extension_icon_is_an_svg_macos_can_load():
+    """A REAL DEFECT: SPEAK HAD NO ICON IN OPENCLIP. The file opened with a note
+    that used two hyphens as a dash, XML forbids "--" inside a comment, and
+    macOS's SVG loader -- which OpenClip draws its icons with -- refused the
+    whole file: NSImage(data:) returned nil. The drawing itself was fine.
+
+    So the icon must be well-formed XML whose root is <svg>, which is what that
+    loader needs and what a strict parser checks."""
+    import xml.etree.ElementTree as ElementTree
+
+    icon = ROOT / "openclip/icon.svg"
+    root = ElementTree.parse(icon).getroot()        # raises on "--" in a comment
+    assert root.tag == "{http://www.w3.org/2000/svg}svg"
+    assert icon.read_text().lstrip().startswith("<svg"), "something precedes the <svg> element"
+    manifest = json.loads((ROOT / "openclip/openclip.json").read_text())
+    assert manifest["actions"][0]["icon"] == "icon.svg"
+
+
+def test_settings_reinstalls_the_extension_the_app_carries():
+    """Settings' Reinstall puts back the three files install.sh writes, from the
+    copies inside the app -- so the installer and the release both have to carry
+    them, and the app has to substitute its own location as install.sh does."""
+    for script in ("install.sh", "release.sh"):
+        text = (ROOT / script).read_text()
+        assert '"$contents/Resources/openclip/"' in text, f"{script} does not carry the extension"
+        for name in ("openclip.json", "icon.svg", "calliope.py"):
+            assert f'"$here/openclip/{name}"' in text, f"{script} leaves {name} out"
+    settings = (ROOT / "daemon/settings.swift").read_text()
+    assert 'replacingOccurrences(of: "__APP__", with: appURL.path)' in settings
+    assert "extensions/calliope.openclipext" in settings and "extensions/calliope.openclipext" in INSTALL

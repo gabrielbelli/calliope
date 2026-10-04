@@ -43,13 +43,17 @@ swiftc -O -swift-version 5 -target "$target" "$here/shared/mark.swift" \
 sed "s/__VERSION__/$version/g" "$here/bundle/Calliope-Info.plist" > "$contents/Info.plist"
 sed "s/__VERSION__/$version/g" "$here/bundle/CalliopePlayer-Info.plist" > "$helper/Info.plist"
 
-# The command and the skill, exactly as install.sh carries them: a cask
-# installs the .app and nothing else, so they are inside it or nowhere.
+# The command, the skill and the OpenClip extension, exactly as install.sh
+# carries them: a cask installs the .app and nothing else, so they are inside it
+# or nowhere -- and the extension is what Settings reinstalls from.
 echo "==> Command line"
 mkdir -p "$contents/Resources/cli"
 install -m 0755 "$here/cli/calliope" "$contents/Resources/cli/calliope"
 install -m 0755 "$here/cli/calliope.py" "$contents/Resources/cli/calliope.py"
 cp -R "$here/skill" "$contents/Resources/skill"
+mkdir -p "$contents/Resources/openclip"
+install -m 0644 "$here/openclip/openclip.json" "$here/openclip/icon.svg" \
+    "$here/openclip/calliope.py" "$contents/Resources/openclip/"
 
 # SEALED IN, NEVER WRITTEN TO. A cask installs the .app and nothing else, so
 # anything the app needs at runtime has to be inside it: an interpreter it does
