@@ -67,7 +67,12 @@ def install_health(app: FastAPI, details: Details | None = None) -> None:
         guard = getattr(app.state, IDENTITY_STATE, None)
         if guard is not None and not guard.credentials.ready and payload["status"] == "ok":
             payload["status"] = "not_ready"
-        ignored = ignored_variables()
+        # MERGED, NOT REPLACED. A service may name variables of its own that it
+        # now ignores -- the hub's credentials once they live in the secret
+        # store -- and the removed settings of this release are added to them.
+        ignored = sorted(set(payload.get("ignored_variables") or ()) | set(ignored_variables()))
         if ignored:
             payload["ignored_variables"] = ignored
+        else:
+            payload.pop("ignored_variables", None)
         return payload

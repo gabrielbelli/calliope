@@ -335,6 +335,22 @@ class Import:
             c.name: secrets.Held(c.value, secrets.origins(c.hosts), c.kind)
             for c in self.found.candidates.values()})
 
+    def leftover_variables(self) -> list[str]:
+        """Environment variables the store now holds, still set in the hub's environment.
+
+        ONCE THE IMPORT IS ANSWERED THE HUB READS THESE FROM THE STORE ALONE, so a
+        copy left in the environment is ignored -- and is one more place a
+        credential sits for nothing. They go into /health as ignored_variables,
+        where Admin asks for them to be removed; removed, they leave the page.
+        The page used to say so for every secret ever imported from the
+        environment, whether or not the variable was still there, so the
+        warning outlived the fix for good.
+        """
+        if not self.done and self.answered is None:
+            return []           # still the hub's own copies until the gateway answers
+        return sorted(c.source[len("env "):] for c in self.found.candidates.values()
+                      if c.source.startswith("env "))
+
     async def attempt(self) -> bool:
         """One try at what is left. True when the import is done."""
         if self.done:

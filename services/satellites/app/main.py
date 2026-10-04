@@ -2869,6 +2869,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         satellites={nid: rec.config for nid, rec in hub.store.satellites.items()},
         on_buttons=hub.imported_buttons)
     hub.spawn(importing.run(), name="secret-import")
+    hub.importing = importing
     hub.bridge = MqttBridge.from_env(password=mqtt_password)
     await hub.bridge.start(hub, on_command=mqtt_command)
     hub.spawn(hub.voice.reconcile(), name="wake-words")
@@ -2908,6 +2909,10 @@ def _health() -> dict:
         # public key's short id, or None with no SATELLITES_FIRMWARE_PUBKEY.
         # A public name, never key material; without it the page said "unknown".
         "firmware_key_id": signing.key_id(FIRMWARE_KEY) if FIRMWARE_KEY is not None else None,
+        # Credentials the secret store now holds, still set in this
+        # environment: Admin asks for each to be removed (secret_import).
+        "ignored_variables": (h.importing.leftover_variables()
+                              if getattr(h, "importing", None) else []),
     }
 
 
