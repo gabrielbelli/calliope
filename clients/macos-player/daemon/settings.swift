@@ -992,8 +992,12 @@ final class IntegrationsPane: Pane {
             return
         }
         refresh()
-        openClipState.stringValue = "Reinstalled. OpenClip asks you to trust it again, because its "
-            + "files changed."
+        // OPENCLIP REMEMBERS AN ICON IT COULD NOT READ for as long as it runs:
+        // its LocalIconCache stores the failure by path, so a fixed file at the
+        // same path still shows "?" until OpenClip restarts. Seen, then read in
+        // its source; the restart is the only way to clear it from outside.
+        openClipState.stringValue = "Reinstalled. Quit and reopen OpenClip to see the new icon "
+            + "(it keeps icons it has read until it restarts); it asks you to trust the extension again."
         fit()
     }
 }
