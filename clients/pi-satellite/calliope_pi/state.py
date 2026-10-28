@@ -20,6 +20,8 @@ DEFAULT_CONFIG = {
     "echo_reference": True,    # send what the output plays as channel 0
     "airplay_enabled": True,   # an AirPlay receiver (airplay.py), where shairport-sync is installed
     "airplay_name": None,      # what phones list it as; None is the satellite's own name
+    "optical_enabled": True,   # a CM6206 card's optical input, mixed to the output (optical.py)
+    "optical_volume": 50,      # 0-100, that card's own volume: the TV's, and the ceiling for the rest
 }
 CONFIG_KEYS = frozenset(DEFAULT_CONFIG)
 

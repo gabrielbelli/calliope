@@ -220,7 +220,7 @@ in three places only:
 |---|---|
 | `config.buttons` in `GET /satellites`, `GET /satellites/{id}` and every answer that describes a satellite | left out. A button's webhook names a secret. |
 | The wake words (`GET /satellites/wake-words`, the `wake_words` event) | each word's `name`, `threshold`, `satellites`, `mode` and `state`, and its action as `{"type": ...}` alone |
-| `PATCH /satellites/{id}` | only the controls: `volume`, `mic_gain_db`, `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness`, `audio_sink`, `audio_source`, `echo_reference`, `output_satellite`, `airplay_enabled` and `airplay_name`. Anything else, the name and the button mapping among them, is 403 `insufficient_scope` naming `satellites:admin`, and nothing in that PATCH is saved |
+| `PATCH /satellites/{id}` | only the controls: `volume`, `mic_gain_db`, `mic_enabled`, `speaker_enabled`, `lights_enabled`, `brightness`, `audio_sink`, `audio_source`, `echo_reference`, `output_satellite`, `airplay_enabled`, `airplay_name`, `optical_enabled` and `optical_volume`. Anything else, the name and the button mapping among them, is 403 `insufficient_scope` naming `satellites:admin`, and nothing in that PATCH is saved |
 
 MQTT carries no button mapping either.
 
@@ -403,6 +403,7 @@ offline, across a restart of the hub. `{}` means it has not been seen since.
 | `audio_devices` | A Linux satellite ([pi-satellite](../../clients/pi-satellite/README.md)): it lists PipeWire's outputs and inputs as `audio` in its hello and status, and takes `audio_sink`, `audio_source` and `echo_reference` in `welcome` and `config` |
 | `bundle` | `"tar.gz"`: its updates are signed release bundles, not ESP32 images |
 | `airplay` | `{"version": 1}`: an AirPlay receiver. It takes `airplay_enabled` and `airplay_name` in `welcome` and `config`, and its status has `airplay` (`enabled`, `name`, `running`, `error`). `{"version": 2, "controls": true}`: it also takes `airplay_command`, and its `airplay` has `remote` ([AirPlay](#airplay)) |
+| `optical` | `{"version": 1}`: its sound card mixes an optical input into its output itself ([pi-satellite](../../clients/pi-satellite/README.md#optical-in)). It takes `optical_enabled` and `optical_volume` (0-100, the card's own volume) in `welcome` and `config`; a satellite without it is refused them with 409 `no_optical` |
 
 A satellite whose caps name no `mic` is a speaker only: it is adopted and
 plays, and the hub does not listen to it (`listening` says it has no

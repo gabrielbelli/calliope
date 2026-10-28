@@ -105,9 +105,15 @@ REPORTED = {
     # is one, and the name phones list it as (None: the satellite's name).
     "airplay_enabled": _flag,
     "airplay_name": lambda v: v is None or (isinstance(v, str) and len(v) <= 64 and v.isprintable()),
+    # A satellite whose sound card mixes an optical input into its output
+    # (caps "optical"): whether it does, and that card's own volume, which
+    # is the optical input's and the ceiling for the rest.
+    "optical_enabled": _flag,
+    "optical_volume": _between(0, 100, whole=True),
 }
 AUDIO_SETTINGS = ("audio_sink", "audio_source", "echo_reference")
 AIRPLAY_SETTINGS = ("airplay_enabled", "airplay_name")
+OPTICAL_SETTINGS = ("optical_enabled", "optical_volume")
 # What the hub's record says for a switch the satellite has not reported yet:
 # off. Nothing is sent to a satellite, or heard from it, on a setting the hub
 # made up; the satellite's first status puts in the real value.

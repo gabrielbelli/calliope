@@ -131,6 +131,9 @@
       },
       "brightness": {
         "name": "Brilho do anel"
+      },
+      "optical_volume": {
+        "name": "Volume da entrada óptica"
       }
     },
     "select": {
@@ -193,6 +196,9 @@
       },
       "airplay": {
         "name": "AirPlay"
+      },
+      "optical": {
+        "name": "Entrada óptica"
       }
     },
     "text": {

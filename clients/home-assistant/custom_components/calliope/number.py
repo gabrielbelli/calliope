@@ -1,7 +1,9 @@
-"""A satellite's microphone gain and ring brightness.
+"""A satellite's microphone gain, ring brightness and optical in volume.
 
-There is no volume slider here: the media player is the one volume control,
-and it sets the volume of the satellite that actually plays.
+There is no volume slider for the satellite's own sound here: the media
+player is that control, and it sets the volume of the satellite that
+actually plays. The optical in volume is another one: the sound card's own,
+which turns the TV (or whatever feeds the optical input) up and down.
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ async def async_setup_entry(
     def build(coordinator: CalliopeCoordinator, sid: str, key: str) -> CalliopeNumber:
         if key == "mic_gain":
             return CalliopeMicGain(coordinator, sid, key)
+        if key == "optical_volume":
+            return CalliopeOpticalVolume(coordinator, sid, key)
         return CalliopeBrightness(coordinator, sid, key)
 
     add_for_caps(entry, async_add_entities, Platform.NUMBER, build)
@@ -90,6 +94,24 @@ class CalliopeBrightness(CalliopeNumber):
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_mode = NumberMode.SLIDER
     field = "brightness"
+
+    def _to_hub(self, value: float) -> float | int:
+        return round(value)  # the hub takes an integer
+
+
+class CalliopeOpticalVolume(CalliopeNumber):
+    """The optical input's volume, 0 to 100 %: the sound card's own output
+    volume, which is also the loudest the satellite's own sound can be. A
+    control, not configuration: it is the TV's volume."""
+
+    _attr_translation_key = "optical_volume"
+    _attr_entity_category = None
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_mode = NumberMode.SLIDER
+    field = "optical_volume"
 
     def _to_hub(self, value: float) -> float | int:
         return round(value)  # the hub takes an integer

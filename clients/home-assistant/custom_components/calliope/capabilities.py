@@ -113,6 +113,9 @@ def wanted(sat: dict[str, Any] | None) -> dict[str, Platform]:
     if has(caps, "airplay"):
         want["airplay"] = Platform.SWITCH
         want["airplay_name"] = Platform.TEXT
+    if has(caps, "optical"):
+        want["optical"] = Platform.SWITCH
+        want["optical_volume"] = Platform.NUMBER
     health = _listed(caps, "health")
     if "temp_c" in health:
         want["cpu_temperature"] = Platform.SENSOR

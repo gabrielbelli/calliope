@@ -217,6 +217,28 @@ async def test_airplay_switch_and_name(
         )
 
 
+async def test_optical_in_switch_and_volume(
+    hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
+) -> None:
+    """The card's optical mix on and off, and its volume: the TV's."""
+    volume = hass.states.get("number.lounge_optical_in_volume")
+    assert (volume.attributes["min"], volume.attributes["max"]) == (0, 100)
+    await _call(
+        hass,
+        "number",
+        "set_value",
+        entity_id="number.lounge_optical_in_volume",
+        value=35,
+    )
+    await _call(hass, "switch", "turn_off", entity_id="switch.lounge_optical_in")
+    assert fake.calls("PATCH", f"/satellites/{LOUNGE_ID}") == [
+        {"optical_volume": 35},
+        {"optical_enabled": False},
+    ]
+    assert _state(hass, "number.lounge_optical_in_volume") == "35.0"
+    assert _state(hass, "switch.lounge_optical_in") == "off"
+
+
 async def test_a_switch_the_hub_has_no_config_for_shows_the_satellites_status(
     hass: HomeAssistant, fake: FakeCalliope, loaded: MockConfigEntry
 ) -> None:

@@ -1,5 +1,5 @@
-"""A satellite's speaker, microphone, lights, echo reference and AirPlay
-receiver, switched through the hub."""
+"""A satellite's speaker, microphone, lights, echo reference, AirPlay
+receiver and optical input, switched through the hub."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ SWITCHES: dict[str, tuple[str, EntityCategory | None, bool]] = {
     "lights": ("lights_enabled", None, True),
     "echo_reference": ("echo_reference", EntityCategory.CONFIG, False),
     "airplay": ("airplay_enabled", EntityCategory.CONFIG, True),
+    "optical": ("optical_enabled", None, True),
 }
 
 

@@ -25,6 +25,9 @@
       },
       "brightness": {
         "default": "mdi:brightness-6"
+      },
+      "optical_volume": {
+        "default": "mdi:television-speaker"
       }
     },
     "select": {
@@ -78,6 +81,12 @@
         "default": "mdi:cast-audio",
         "state": {
           "off": "mdi:cast-off"
+        }
+      },
+      "optical": {
+        "default": "mdi:television-speaker",
+        "state": {
+          "off": "mdi:television-speaker-off"
         }
       }
     },

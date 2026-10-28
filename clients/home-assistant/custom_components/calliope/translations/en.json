@@ -131,6 +131,9 @@
       },
       "brightness": {
         "name": "Ring brightness"
+      },
+      "optical_volume": {
+        "name": "Optical in volume"
       }
     },
     "select": {
@@ -193,6 +196,9 @@
       },
       "airplay": {
         "name": "AirPlay"
+      },
+      "optical": {
+        "name": "Optical in"
       }
     },
     "text": {

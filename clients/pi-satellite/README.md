@@ -16,6 +16,7 @@ Tested target: Raspberry Pi 3 Model B+ on Raspberry Pi OS Lite 64-bit
 | Wi-Fi | On first boot, or after three minutes without a network, an open network `calliope-sat-XXXX` with a setup page, as on the ESP32 |
 | AirPlay | An AirPlay receiver under the satellite's name (or one you give it), on the same output, turned down while the satellite speaks or someone talks to it. Play, pause, skip and disconnect from the Satellites tab and Home Assistant |
 | Music | Home Assistant's media player, in stereo, on a stream of its own that goes down under the voice ([Music from the hub](#music-from-the-hub)) |
+| Optical in | On a C-Media CM6206 card (StarTech ICUSBAUDIO7D): a TV's optical out, mixed to the speakers by the card with no delay, with a volume of its own, and ducked under the voice ([Optical in](#optical-in)) |
 
 ## Audio quality
 
@@ -189,6 +190,28 @@ duck (someone is speaking to it, or to a satellite that plays through it),
 every other stream goes down to 20% of its own volume, and back afterwards.
 The agent does it with `pactl` on each stream (`airplay.Ducker`), and never
 touches its own (`media.role` Assistant).
+
+## Optical in
+
+A C-Media CM6206 card (USB id `0d8c:0102`; the StarTech ICUSBAUDIO7D is
+one) has an optical input. A TV's optical out cannot be **recorded** from it:
+the TV marks its stream copy-prohibited (SCMS) and the chip then records
+only zeros. The chip's own **mix** of that input into its outputs is not
+muted, so that is what the satellite uses (`calliope_pi/optical.py`). It
+adds no delay, and it never passes through PipeWire.
+
+| | |
+|---|---|
+| **Optical in** (`optical_enabled`) | The card's mix on or off: REG1 bit 0, written over its HID interface (`bundle/udev` lets the audio group open it). Set again whenever the card comes back, as it resets when plugged in |
+| **Optical in volume** (`optical_volume`, 0-100) | The card's own output volume (ALSA `Speaker`, on ALSA's mapped scale): the only way to turn the TV up or down |
+| The satellite's **Volume** | A software volume for this card (`bundle/wireplumber/calliope-optical.conf`), so it and the phone's slider move only PipeWire's own audio. That audio goes through the card's volume too, so it is never louder than the optical in volume |
+
+**Ducking with the card.** With the mix on, the card ducks everything: its
+volume goes down by the duck (20%, -14 dB), and the agent's own streams go
+up by as much as the output's software volume leaves room for without
+clipping. A reply keeps its level when the satellite's volume is at most
+the duck below the optical in volume; above that, it goes down with the TV,
+to the TV's ducked level.
 
 ## Set up a card, once
 
