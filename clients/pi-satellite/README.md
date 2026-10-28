@@ -204,7 +204,14 @@ adds no delay, and it never passes through PipeWire.
 |---|---|
 | **Optical in** (`optical_enabled`) | The card's mix on or off: REG1 bit 0, written over its HID interface (`bundle/udev` lets the audio group open it). Set again whenever the card comes back, as it resets when plugged in |
 | **Optical in volume** (`optical_volume`, 0-100) | The card's own output volume (ALSA `Speaker`, on ALSA's mapped scale): the only way to turn the TV up or down |
-| The satellite's **Volume** | A software volume for this card (`bundle/wireplumber/calliope-optical.conf`), so it and the phone's slider move only PipeWire's own audio. That audio goes through the card's volume too, so it is never louder than the optical in volume |
+| The satellite's **Volume** | A software volume for this card (`bundle/wireplumber/calliope-zz-optical.conf`), so it and the phone's slider move only PipeWire's own audio. That audio goes through the card's volume too, so it is never louder than the optical in volume |
+
+**Ticks while the satellite plays.** The chip mixes the optical input on its
+own clock with no rate conversion, so while PipeWire streams to the card the
+two drift apart and the TV ticks faintly. The card runs at the optical
+input's 48 kHz and sleeps 3 s after the satellite's own audio stops, so the
+TV alone is clean; a reply or AirPlay over it can tick. A microphone or echo
+reference that keeps the card's monitor recorded keeps it awake, and ticking.
 
 **Ducking with the card.** With the mix on, the card ducks everything: its
 volume goes down by the duck (20%, -14 dB), and the agent's own streams go

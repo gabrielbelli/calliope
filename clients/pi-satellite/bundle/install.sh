@@ -48,6 +48,7 @@ for d in pipewire.conf.d client.conf.d pipewire-pulse.conf.d; do
   install -m 644 "$R/pipewire/calliope-quality.conf" "/etc/pipewire/$d/calliope-quality.conf"
 done
 install -d /etc/wireplumber/wireplumber.conf.d
+rm -f /etc/wireplumber/wireplumber.conf.d/calliope-optical.conf   # renamed calliope-zz-optical.conf
 for f in "$R"/wireplumber/*.conf; do
   install -m 644 "$f" "/etc/wireplumber/wireplumber.conf.d/$(basename "$f")"
 done

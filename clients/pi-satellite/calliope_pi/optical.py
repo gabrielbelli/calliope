@@ -10,7 +10,7 @@ through PipeWire, so the only thing that changes its level is the card's
 own output volume (the ALSA "Speaker" control), which the voice and AirPlay
 go through as well.
 
-TWO VOLUMES. bundle/wireplumber/calliope-optical.conf gives this card a
+TWO VOLUMES. bundle/wireplumber/calliope-zz-optical.conf gives this card a
 software mixer, so the satellite's `volume` (and the phone's slider) moves
 only PipeWire's own audio, and `optical_volume` here is the card's: the
 TV's, and the ceiling for everything else.
