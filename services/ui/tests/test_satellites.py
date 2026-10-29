@@ -474,6 +474,7 @@ def test_a_failed_setting_is_reported_beside_the_control():
     assert landed == {"volume": "row", "mic_gain_db": "row", "brightness": "row", "audio_source": "row",
                       "speaker_enabled": "row", "mic_enabled": "row", "lights_enabled": "row",
                       "airplay_enabled": "row", "airplay_name": "row",
+                      "optical_volume": "row", "optical_enabled": "row",
                       "ring_top": "sat-device", "ring_upside_down": "sat-device"}, landed
 
 

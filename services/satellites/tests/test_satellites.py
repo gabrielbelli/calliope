@@ -829,6 +829,28 @@ def test_a_pi_that_is_an_airplay_receiver_is_turned_on_off_and_named_from_the_pa
         assert r.status_code == 409 and r.json()["error"]["code"] == "no_airplay"
 
 
+def test_a_pi_with_an_optical_input_has_it_turned_on_and_its_volume_set(client):
+    with client.websocket_connect("/satellites/ws") as ws:
+        hello = pi_hello() | {"optical_enabled": True, "optical_volume": 50}
+        hello["caps"] = hello["caps"] | {"optical": {"version": 1}}
+        ws.send_json(hello)
+        ws.receive_json()
+        client.post(f"/satellites/{PI_MAC}/adopt", json={"name": "Lounge"})
+        ws.send_json(hello | {"token": ws.receive_json()["token"]})
+        welcome = ws.receive_json()
+        assert welcome["config"]["optical_enabled"] is True and welcome["config"]["optical_volume"] == 50
+        assert client.patch(f"/satellites/{PI_MAC}", json={"optical_volume": 30}).status_code == 200
+        msg = ws.receive_json()
+        while msg["type"] != "config":
+            msg = ws.receive_json()
+        assert msg == {"type": "config", "optical_volume": 30}
+        assert client.patch(f"/satellites/{PI_MAC}", json={"optical_volume": 101}).status_code == 422
+    with client.websocket_connect("/satellites/ws") as korvo:
+        adopt(client, korvo)
+        r = client.patch(f"/satellites/{NID}", json={"optical_volume": 40})
+        assert r.status_code == 409 and r.json()["error"]["code"] == "no_optical"
+
+
 def test_a_plug_going_in_or_out_on_a_satellites_card_is_an_event():
     from app.main import jack_changes
     def status(jack):

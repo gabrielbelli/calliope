@@ -153,7 +153,7 @@ from . import router as routing
 from . import tools as tooling
 from .destinations import DestinationError, not_an_address, secret_url
 from .mqtt import MqttBridge
-from .store import (AIRPLAY_SETTINGS, AUDIO_SETTINGS, DEFAULT_CONFIG, DEVICE_ACTIONS, Store, device_actions,
+from .store import (AIRPLAY_SETTINGS, AUDIO_SETTINGS, DEFAULT_CONFIG, OPTICAL_SETTINGS, DEVICE_ACTIONS, Store, device_actions,
                     firmware_older, keeps_a_mute, reported_config, satellite_config)
 
 log = voice_logging.setup("voice-satellites", "SATELLITES")
@@ -284,7 +284,7 @@ CLOSE_TRY_LATER = 1013
 CONTROL_FIELDS = frozenset({
     "volume", "mic_gain_db", "mic_enabled", "speaker_enabled", "lights_enabled", "brightness",
     "audio_sink", "audio_source", "echo_reference", "output_satellite", "airplay_enabled",
-    "airplay_name"})
+    "airplay_name", "optical_enabled", "optical_volume"})
 
 FIRMWARE_KEY: Any | None = None
 EXECUTOR: ThreadPoolExecutor | None = None
@@ -3181,6 +3181,10 @@ class ConfigBody(BaseModel):
     # the name phones list it as ("" for the satellite's own name).
     airplay_enabled: bool | None = None
     airplay_name: str | None = Field(default=None, max_length=64, pattern=r"^[^\x00-\x1f\x7f]*$")
+    # A satellite with caps "optical": its card's optical input mixed into
+    # the output, and that card's own volume (the TV's).
+    optical_enabled: bool | None = None
+    optical_volume: int | None = Field(default=None, ge=0, le=100)
     # Replaces the whole mapping; the default is in store.py.
     buttons: dict[ButtonName, dict[Literal["press", "release"], ButtonAction]] | None = Field(
         default=None, max_length=16)
@@ -3709,6 +3713,9 @@ async def update_satellite(nid: str, body: ConfigBody, *, admin: bool) -> str:
     if air and known and not caps.get("airplay"):
         raise ApiError(409, f"satellite {nid} is not an AirPlay receiver", code="no_airplay",
                        param=air[0])
+    optic = [k for k in change if k in OPTICAL_SETTINGS]
+    if optic and known and not caps.get("optical"):
+        raise ApiError(409, f"satellite {nid} has no optical input", code="no_optical", param=optic[0])
     if change.get("airplay_name") == "":
         change["airplay_name"] = None
     if "output_satellite" in change:
@@ -3716,7 +3723,8 @@ async def update_satellite(nid: str, body: ConfigBody, *, admin: bool) -> str:
     if "name" in change:
         rec.name = change["name"]
     cfg = {k: v for k, v in change.items()
-           if k in DEFAULT_CONFIG or k in AUDIO_SETTINGS or k in AIRPLAY_SETTINGS or k == "output_satellite"}
+           if k in DEFAULT_CONFIG or k in AUDIO_SETTINGS or k in AIRPLAY_SETTINGS or k in OPTICAL_SETTINGS
+           or k == "output_satellite"}
     was_dark = not rec.config.get("lights_enabled", True)
     rec.config.update(cfg)
     # Set here, so the hub has it now: sent to the satellite below, and not

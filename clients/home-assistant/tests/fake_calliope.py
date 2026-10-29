@@ -64,6 +64,7 @@ PI_CAPS: dict[str, Any] = {
     "bundle": "tar.gz",
     "ota_key": "k1",
     "airplay": {"version": 2, "controls": True},
+    "optical": {"version": 1},
     "health": ["temp_c", "throttled", "under_voltage", "load"],
 }
 PI_SINKS = [
@@ -168,6 +169,8 @@ CONTROL_FIELDS = frozenset(
         "output_satellite",
         "airplay_enabled",
         "airplay_name",
+        "optical_enabled",
+        "optical_volume",
     }
 )
 

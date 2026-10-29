@@ -21,6 +21,8 @@ What it does, in the protocol's terms (services/satellites/README.md):
              microphone and it is enabled (pipewire.Recorder)
   earcons    keeps them under /var/lib/calliope/earcons and plays them
   ota        receives a signed bundle and has calliope-root install it
+  optical    a CM6206 card's optical input, mixed to the speakers by the card
+             (optical.py): on or off, and its volume, the card's own
   status     every 10 s: uptime, Wi-Fi, free memory, temperature, throttling,
              dropped audio, the devices, AirPlay; with cause "local" when the
              output's volume was moved here (the phone's slider), which the
@@ -44,7 +46,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from . import airplay, bundle, frames, paths, pipewire, system, version
+from . import airplay, bundle, frames, optical, paths, pipewire, system, version
 from .state import State, load, save
 
 log = logging.getLogger("calliope.agent")
@@ -196,6 +198,8 @@ class Agent:
         self.welcomed = False
         self.airplay = airplay.AirPlay()
         self.ducker = airplay.Ducker()
+        self.optical = optical.Optical()
+        self.optical_caps = False    # what the last hello said about the optical input
         self.metadata = airplay.Metadata(on_change=self._airplay_changed)
         self.loop: asyncio.AbstractEventLoop | None = None
         self._pushing: asyncio.Task | None = None        # a status for AirPlay's sake
@@ -247,13 +251,16 @@ class Agent:
             caps["ota_key"] = key
         if airplay.available():
             caps["airplay"] = {"version": 2, "controls": True}
+        if optical.present():
+            caps["optical"] = {"version": 1}
         return caps
 
     def settings(self) -> dict:
         c = self.st.config
         return {k: c.get(k) for k in ("volume", "mic_gain_db", "mic_enabled", "speaker_enabled",
                                       "audio_sink", "audio_source", "echo_reference",
-                                      "airplay_enabled", "airplay_name")}
+                                      "airplay_enabled", "airplay_name",
+                                      "optical_enabled", "optical_volume")}
 
     def airplay_name(self) -> str:
         return self.st.config.get("airplay_name") or self.st.name or f"calliope-sat-{self.id[-4:]}"
@@ -308,6 +315,7 @@ class Agent:
             await pipewire.set_source_volume(source, 10 ** (float(c.get("mic_gain_db") or 0) / 20))
         self.player.target = self.media.target = target
         await self.airplay.apply(bool(c.get("airplay_enabled", True)), self.airplay_name())
+        await self.optical.apply(bool(c.get("optical_enabled", True)), c.get("optical_volume") or 0)
         await self.refresh_recording()
 
     # -- ducking: other streams go down while the satellite speaks, or while the hub asks --
@@ -317,8 +325,17 @@ class Agent:
         await self._duck_now()
 
     async def _duck_now(self) -> None:
+        """With the card's optical mix on, the card ducks everything (the TV
+        cannot be lowered any other way) and the agent's own streams go back
+        up: optical.py. Otherwise the other streams go down, one by one."""
         level = SPEAK_DUCK if self.speaking else (self.duck / 100 if self.duck is not None else None)
-        await self.ducker.set(level)
+        if self.optical.enabled:
+            await self.ducker.set(None)
+            sink = self.devices.sink(self.st.config.get("audio_sink"))
+            await self.optical.duck(level, await pipewire.get_volume(sink) if level is not None else None)
+        else:
+            await self.optical.duck(None, None)
+            await self.ducker.set(level)
 
     async def refresh_recording(self) -> None:
         c = self.st.config
@@ -537,6 +554,7 @@ class Agent:
         self.devices = await pipewire.devices()
         ch = self.mic_channels()
         self.mic_caps = (ch,) if ch else None
+        self.optical_caps = optical.present()
         self.ws = await _connect(url)
         log.info("connected to %s", url)
         ticker = asyncio.create_task(self._ticker())
@@ -570,6 +588,12 @@ class Agent:
             ch = self.mic_channels()
             if ((ch,) if ch else None) != self.mic_caps:
                 log.info("the microphone %s: saying hello again", "appeared" if ch else "went away")
+                with contextlib.suppress(Exception):
+                    await self.ws.close()
+                return
+            if optical.present() != self.optical_caps:
+                log.info("the optical input %s: saying hello again",
+                         "went away" if self.optical_caps else "appeared")
                 with contextlib.suppress(Exception):
                     await self.ws.close()
                 return
@@ -784,6 +808,11 @@ class Agent:
             self.devices = await pipewire.devices()
             after = {d["name"]: d.get("jack") for d in self.devices.view()["sinks"] + self.devices.view()["sources"]}
             local = await self._check_volume()
+            if after != before and self.welcomed:
+                # A card plugged back in has its registers reset: the
+                # optical mix is off again until it is set.
+                await self.optical.apply(bool(self.st.config.get("optical_enabled", True)),
+                                         self.st.config.get("optical_volume") or 0)
             if after != before or local:
                 if after != before:
                     self.playing_at = pipewire.output_format(await pipewire.sinks(), self.devices.default_sink)

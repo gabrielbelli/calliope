@@ -6823,6 +6823,13 @@ function satAdoptedMarkup(u) {
         <div data-hw="lights"><label for="${u}-bright">Light brightness</label>
           <div class="slider"><input type="range" id="${u}-bright" min="10" max="100" step="5" data-cfg="brightness">
             <output for="${u}-bright"></output></div></div>
+        <!-- OPTICAL IN, on a card that mixes it into the output itself (caps
+             "optical"; clients/pi-satellite, optical.py): the card's own
+             volume, which is the only way to turn the TV down, and the
+             loudest the satellite's own sound can be. -->
+        <div data-hw="optical"><label for="${u}-optical">Optical in volume</label>
+          <div class="slider"><input type="range" id="${u}-optical" min="0" max="100" step="1" data-cfg="optical_volume">
+            <output for="${u}-optical"></output></div></div>
       </div>
       <!-- WHERE IT PLAYS: one of its own outputs (a Linux satellite lists
            PipeWire's; the Korvo has its speaker), or another satellite,
@@ -6843,6 +6850,7 @@ function satAdoptedMarkup(u) {
         <label class="checkline tight"><input type="checkbox" data-cfg="speaker_enabled"> Speaker</label>
         <label class="checkline tight" data-hw="mic"><input type="checkbox" data-cfg="mic_enabled"> Microphone</label>
         <label class="checkline tight" data-hw="lights"><input type="checkbox" data-cfg="lights_enabled"> Lights</label>
+        <label class="checkline tight" data-hw="optical"><input type="checkbox" data-cfg="optical_enabled"> Optical in</label>
       </div>
       <div class="sat-note" aria-live="polite"></div>
       <p class="sat-listens" data-hw="mic"><button class="link" type="button" data-act="wakewords">Change wake words</button></p>
@@ -7436,7 +7444,8 @@ function satelliteUpdate(li, n) {
   satLevel(q('[data-cfg="volume"]'), cfg.volume);
   satLevel(q('[data-cfg="mic_gain_db"]'), cfg.mic_gain_db);
   satLevel(q('[data-cfg="brightness"]'), cfg.brightness);
-  for (const key of ["speaker_enabled", "mic_enabled", "lights_enabled"]) {
+  satLevel(q('[data-cfg="optical_volume"]'), cfg.optical_volume);
+  for (const key of ["speaker_enabled", "mic_enabled", "lights_enabled", "optical_enabled"]) {
     const box = q(`[data-cfg="${key}"]`);
     if (!box.dataset.held) box.checked = cfg[key] !== false;
   }

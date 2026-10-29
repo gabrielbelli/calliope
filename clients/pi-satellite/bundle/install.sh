@@ -42,16 +42,27 @@ done
 # Audio at the best the hardware takes (bundle/pipewire, bundle/wireplumber):
 # installed for every PipeWire client and the PulseAudio server, and PipeWire
 # restarted once in calliope's session when they changed, not on every update.
-before=$(cat /etc/pipewire/*.conf.d/calliope-quality.conf /etc/wireplumber/wireplumber.conf.d/calliope-quality.conf 2>/dev/null | sha256sum)
+before=$(cat /etc/pipewire/*.conf.d/calliope-quality.conf /etc/wireplumber/wireplumber.conf.d/calliope-*.conf 2>/dev/null | sha256sum)
 for d in pipewire.conf.d client.conf.d pipewire-pulse.conf.d; do
   install -d "/etc/pipewire/$d"
   install -m 644 "$R/pipewire/calliope-quality.conf" "/etc/pipewire/$d/calliope-quality.conf"
 done
 install -d /etc/wireplumber/wireplumber.conf.d
-install -m 644 "$R/wireplumber/calliope-quality.conf" /etc/wireplumber/wireplumber.conf.d/calliope-quality.conf
-after=$(cat /etc/pipewire/*.conf.d/calliope-quality.conf /etc/wireplumber/wireplumber.conf.d/calliope-quality.conf | sha256sum)
+rm -f /etc/wireplumber/wireplumber.conf.d/calliope-optical.conf   # renamed calliope-zz-optical.conf
+for f in "$R"/wireplumber/*.conf; do
+  install -m 644 "$f" "/etc/wireplumber/wireplumber.conf.d/$(basename "$f")"
+done
+after=$(cat /etc/pipewire/*.conf.d/calliope-quality.conf /etc/wireplumber/wireplumber.conf.d/calliope-*.conf | sha256sum)
 AUDIO_CHANGED=0
 [ "$before" = "$after" ] || AUDIO_CHANGED=1
+
+# A CM6206 card's registers, for its optical input (bundle/udev), applied
+# to a card already plugged in as well.
+for f in "$R"/udev/*.rules; do
+  install -m 644 "$f" "/etc/udev/rules.d/$(basename "$f")"
+done
+udevadm control --reload-rules || true
+udevadm trigger --subsystem-match=hidraw --action=change || true
 
 # The units calliope's own session runs (AirPlay).
 install -d /etc/systemd/user

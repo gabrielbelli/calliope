@@ -136,6 +136,8 @@ async def test_a_pi_gets_no_ring_no_buttons_and_its_airplay(
             "switch.lounge_echo_reference",
             "switch.lounge_airplay",
             "text.lounge_airplay_name",
+            "switch.lounge_optical_in",
+            "number.lounge_optical_in_volume",
             "sensor.lounge_cpu_temperature",
             "binary_sensor.lounge_under_voltage",
         }
